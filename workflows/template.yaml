@@ -34,6 +34,7 @@ spec:
         dependencies: [register]
 
   - name: convert-geozarr
+    activeDeadlineSeconds: 3600  # 1 hour timeout
     script:
       # Use data-pipeline image with scripts and latest eopf-geozarr
       image: ghcr.io/eopf-explorer/data-pipeline:v15-refactored
@@ -66,6 +67,8 @@ spec:
           --tile-width 512 \
           --verbose
       env:
+      - name: PYTHONUNBUFFERED
+        value: "1"
       - name: AWS_ACCESS_KEY_ID
         valueFrom:
           secretKeyRef:
@@ -87,6 +90,7 @@ spec:
           cpu: "2"
 
   - name: register-stac
+    activeDeadlineSeconds: 300  # 5 min timeout
     container:
       # Use data-pipeline image for Python scripts (register, augment)
       image: ghcr.io/eopf-explorer/data-pipeline:v15-refactored
@@ -108,8 +112,12 @@ spec:
       - "https://s3.de.io.cloud.ovh.net"
       - --mode
       - "update"
+      env:
+      - name: PYTHONUNBUFFERED
+        value: "1"
 
   - name: augment-stac
+    activeDeadlineSeconds: 300  # 5 min timeout
     container:
       # Use data-pipeline image for Python scripts (register, augment)
       image: ghcr.io/eopf-explorer/data-pipeline:v15-refactored
@@ -126,6 +134,9 @@ spec:
       - --item-id
       - "{{workflow.parameters.item_id}}"
       - --verbose
+      env:
+      - name: PYTHONUNBUFFERED
+        value: "1"
 
   # Workflow-level metadata to ensure UI visibility
   workflowMetadata:
