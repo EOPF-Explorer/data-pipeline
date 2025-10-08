@@ -1,0 +1,31 @@
+FROM --platform=linux/amd64 python:3.11-slim
+
+# System dependencies
+RUN apt-get update && apt-get install -y \
+    git \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install uv for fast dependency resolution
+RUN pip install -U pip uv
+
+# Install eopf-geozarr from TEST BRANCH + dependencies
+# uv handles GDAL and geospatial deps better than pip (installs from binary wheels when available)
+RUN uv pip install --system --no-cache \
+    git+https://github.com/EOPF-Explorer/data-model.git@test/spatial-ref-fix \
+    pystac>=1.10.0 \
+    httpx>=0.27.0 \
+    boto3>=1.34.0
+
+# Copy scripts
+COPY scripts/ /app/scripts/
+RUN chmod +x /app/scripts/*.py
+
+# ARG for invalidating cache - update this timestamp to force rebuild
+# 2025-10-05T21:30:00Z - Add projection metadata extraction to STAC assets (TiTiler fix)
+ARG CACHEBUST=20251005213000
+
+CMD ["/bin/bash"]
