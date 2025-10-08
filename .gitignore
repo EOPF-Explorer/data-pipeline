@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Linting
+.ruff_cache/
+
+# Environment
+.env
+.env.local
+.env.*.local
+.venv
+env/
+venv/
+ENV/
+*.local.yaml
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Kubernetes
+.work/
+kubeconfig*
+.kube/
+
+# Temporary files
+*.tmp
+*.log
+runs/
+generated/
+.archive/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project-specific
+*.zarr
+out/

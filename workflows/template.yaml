@@ -1,0 +1,133 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: geozarr-pipeline
+  namespace: devseed
+spec:
+    # Service account with S3 and STAC API permissions
+  serviceAccountName: operate-workflow-sa
+  entrypoint: main
+  # Clean up completed workflows after 24 hours
+  ttlStrategy:
+    secondsAfterCompletion: 86400  # 24 hours
+  # Also clean up pods
+  podGC:
+    strategy: OnWorkflowCompletion
+  arguments:
+    parameters:
+    - name: source_url
+    - name: item_id
+    - name: register_collection
+      value: "sentinel-2-l2a-dp-test"
+
+  templates:
+  - name: main
+    dag:
+      tasks:
+      - name: convert
+        template: convert-geozarr
+      - name: register
+        template: register-stac
+        dependencies: [convert]
+      - name: augment
+        template: augment-stac
+        dependencies: [register]
+
+  - name: convert-geozarr
+    script:
+      # Use data-pipeline image with scripts and latest eopf-geozarr
+      image: ghcr.io/eopf-explorer/data-pipeline:v15-refactored
+      imagePullPolicy: Always
+      command: [bash]
+      source: |
+        set -euo pipefail
+
+        SOURCE_URL="{{workflow.parameters.source_url}}"
+        OUTPUT_PATH="s3://esa-zarr-sentinel-explorer-fra/tests-output/{{workflow.parameters.register_collection}}/{{workflow.parameters.item_id}}.zarr"
+
+        echo "🔍 Resolving source..."
+        # Check if source is STAC item or direct zarr
+        if [[ "$SOURCE_URL" == *"/items/"* ]]; then
+          echo "📡 Extracting Zarr URL from STAC item..."
+          ZARR_URL=$(python3 /app/scripts/get_zarr_url.py "$SOURCE_URL")
+          echo "✅ Zarr URL: $ZARR_URL"
+        else
+          ZARR_URL="$SOURCE_URL"
+          echo "✅ Direct Zarr URL: $ZARR_URL"
+        fi
+
+        echo "🚀 Starting conversion..."
+        eopf-geozarr convert \
+          "$ZARR_URL" \
+          "$OUTPUT_PATH" \
+          --groups /quality/l2a_quicklook/r10m \
+          --crs-groups /quality/l2a_quicklook/r10m \
+          --spatial-chunk 4096 \
+          --tile-width 512 \
+          --verbose
+      env:
+      - name: AWS_ACCESS_KEY_ID
+        valueFrom:
+          secretKeyRef:
+            name: geozarr-s3-credentials
+            key: AWS_ACCESS_KEY_ID
+      - name: AWS_SECRET_ACCESS_KEY
+        valueFrom:
+          secretKeyRef:
+            name: geozarr-s3-credentials
+            key: AWS_SECRET_ACCESS_KEY
+      - name: AWS_ENDPOINT_URL
+        value: "https://s3.de.io.cloud.ovh.net"
+      resources:
+        requests:
+          memory: "2Gi"
+          cpu: "500m"
+        limits:
+          memory: "4Gi"
+          cpu: "2"
+
+  - name: register-stac
+    container:
+      # Use data-pipeline image for Python scripts (register, augment)
+      image: ghcr.io/eopf-explorer/data-pipeline:v15-refactored
+      imagePullPolicy: Always
+      command: [python]
+      args:
+      - /app/scripts/register_stac.py
+      - --stac
+      - "https://api.explorer.eopf.copernicus.eu/stac"
+      - --collection
+      - "{{workflow.parameters.register_collection}}"
+      - --item-id
+      - "{{workflow.parameters.item_id}}"
+      - --output
+      - "s3://esa-zarr-sentinel-explorer-fra/tests-output/{{workflow.parameters.register_collection}}/{{workflow.parameters.item_id}}.zarr"
+      - --src-item
+      - "{{workflow.parameters.source_url}}"
+      - --s3-endpoint
+      - "https://s3.de.io.cloud.ovh.net"
+      - --mode
+      - "update"
+
+  - name: augment-stac
+    container:
+      # Use data-pipeline image for Python scripts (register, augment)
+      image: ghcr.io/eopf-explorer/data-pipeline:v15-refactored
+      imagePullPolicy: Always
+      command: [python]
+      args:
+      - /app/scripts/augment_stac_item.py
+      - --stac
+      - "https://api.explorer.eopf.copernicus.eu/stac"
+      - --raster-base
+      - "https://api.explorer.eopf.copernicus.eu/raster"
+      - --collection
+      - "{{workflow.parameters.register_collection}}"
+      - --item-id
+      - "{{workflow.parameters.item_id}}"
+      - --verbose
+
+  # Workflow-level metadata to ensure UI visibility
+  workflowMetadata:
+    labels:
+      workflows.argoproj.io/workflow-template: geozarr-pipeline
