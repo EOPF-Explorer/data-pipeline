@@ -2,13 +2,13 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: argo-workflow
-  namespace: devseed
+  namespace: devseed-staging
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: argo-executor
-  namespace: devseed
+  namespace: devseed-staging
 rules:
   - apiGroups:
       - argoproj.io
@@ -21,7 +21,7 @@ rules:
 kind: RoleBinding
 apiVersion: rbac.authorization.k8s.io/v1
 metadata:
-  namespace: devseed
+  namespace: devseed-staging
   name: argo-workflow-executor
 subjects:
 - kind: ServiceAccount

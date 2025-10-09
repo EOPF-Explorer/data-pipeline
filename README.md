@@ -23,17 +23,23 @@ kubectl get wf -n devseed -w
 [![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![Tests](https://github.com/EOPF-Explorer/data-pipeline/workflows/Tests/badge.svg)](https://github.com/EOPF-Explorer/data-pipeline/actions)
 
+- **Multi-sensor support**: Sentinel-1 GRD and Sentinel-2 L2A
 - STAC item registration with retry logic
-- GeoZarr format conversion
-- Cloud-native workflows
+- GeoZarr format conversion with cloud-optimized overviews
+- Cloud-native workflows with Argo
+- Interactive visualization with TiTiler
 
 ## What It Does
 
-Transforms Sentinel-2 satellite data into web-ready visualizations:
+Transforms Sentinel satellite data into web-ready visualizations:
 
 **Input:** STAC item URL → **Output:** Interactive web map (~5-10 min)
 
 **Pipeline:** Convert (5 min) → Register (30 sec) → Augment (10 sec)
+
+**Supported sensors:**
+- **Sentinel-1** L1 GRD: SAR backscatter (VH/VV polarizations)
+- **Sentinel-2** L2A: Multispectral reflectance (10m/20m/60m)
 
 ## Quick Start
 
@@ -262,9 +268,11 @@ pytest -v -k e2e   # End-to-end tests only
 1. **Edit workflow:** `workflows/template.yaml`
 2. **Update scripts:** `scripts/*.py`
 3. **Test locally:** `pytest tests/ -v`
-4. **Build image:** `docker build -t ghcr.io/eopf-explorer/data-pipeline:dev -f docker/Dockerfile .`
+4. **Build image:** `docker buildx build --platform linux/amd64 -t ghcr.io/eopf-explorer/data-pipeline:dev -f docker/Dockerfile . --push`
 5. **Deploy:** `kubectl apply -f workflows/template.yaml -n devseed`
 6. **Monitor:** `kubectl get wf -n devseed -w`
+
+⚠️ **Important:** Always use `--platform linux/amd64` when building images for Kubernetes clusters.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for coding standards and development workflow.
 

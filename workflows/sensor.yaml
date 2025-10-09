@@ -2,14 +2,14 @@ apiVersion: argoproj.io/v1alpha1
 kind: Sensor
 metadata:
   name: geozarr-sensor
-  namespace: devseed
+  namespace: devseed-staging
 spec:
   template:
     serviceAccountName: operate-workflow-sa
   dependencies:
   - name: geozarr-event
-    eventSourceName: rabbitmq-geozarr
-    eventName: geozarr-events
+    eventSourceName: amqp
+    eventName: eopf-items-convert
 
   triggers:
   - template:
@@ -22,10 +22,10 @@ spec:
             kind: Workflow
             metadata:
               generateName: geozarr-
-              namespace: devseed
+              namespace: devseed-staging
               labels:
                 app: geozarr-pipeline
-                owner: devseed
+                owner: devseed-staging
             spec:
               workflowTemplateRef:
                 name: geozarr-pipeline
@@ -34,7 +34,6 @@ spec:
                 - name: source_url
                 - name: item_id
                 - name: register_collection
-                  value: "sentinel-2-l2a"
         parameters:
         - src:
             dependencyName: geozarr-event
