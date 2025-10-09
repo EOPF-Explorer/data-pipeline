@@ -21,7 +21,7 @@ import logging
 import random
 import sys
 import time
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlencode
 
 import requests  # type: ignore[import-untyped]
@@ -193,9 +193,10 @@ def benchmark_zoom_level(
         "results": results,
     }
 
+    latency_stats = cast(dict[str, float], stats["latency_ms"])
     logger.info(
-        f"  Zoom {zoom}: {stats['latency_ms']['mean']:.1f}ms avg, "  # type: ignore[index]
-        f"{stats['latency_ms']['p95']:.1f}ms p95, "
+        f"  Zoom {zoom}: {latency_stats['mean']:.1f}ms avg, "
+        f"{latency_stats['p95']:.1f}ms p95, "
         f"{stats['success_rate']:.1%} success"
     )
 
