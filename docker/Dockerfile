@@ -17,9 +17,9 @@ WORKDIR /app
 RUN pip install -U pip uv
 
 # Cachebust for data-model installation (change timestamp to force fresh install)
-ARG CACHEBUST=2025-10-06T11:00:00Z
+ARG CACHEBUST=2025-10-09T00:00:00Z
 
-# Install eopf-geozarr from fix/s1-encoding-conflict branch (temporary until merged)
+# Install eopf-geozarr from fix/s1-encoding-conflict branch (includes dask[distributed])
 RUN uv pip install --system --no-cache \
     git+https://github.com/EOPF-Explorer/data-model.git@fix/s1-encoding-conflict \
     pystac>=1.10.0 \
@@ -28,7 +28,7 @@ RUN uv pip install --system --no-cache \
     tenacity>=8.0.0
 
 # Force fresh copy of scripts (invalidate cache)
-ARG SCRIPTS_VERSION=2025-10-06T02:05:00Z
+ARG SCRIPTS_VERSION=2025-10-09T00:00:00Z
 
 # Copy scripts
 COPY scripts/ /app/scripts/
