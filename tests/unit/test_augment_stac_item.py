@@ -300,3 +300,92 @@ def test_normalize_asset_alternate_schemes_combined_transformations():
     alternates = asset.extra_fields.get("alternate", {})
     # Should be normalized from HTTPS AND resolved from preview
     assert alternates["s3"]["href"] == "s3://bucket/sentinel-2-l2a/data.zarr"
+
+
+def test_get_s1_polarization_vh():
+    """Test S1 polarization extraction when VH asset exists."""
+    from datetime import datetime
+
+    from pystac import Asset, Item
+
+    from scripts.augment_stac_item import _get_s1_polarization
+
+    item = Item(
+        id="test-s1",
+        geometry=None,
+        bbox=None,
+        datetime=datetime(2025, 10, 8),
+        properties={},
+    )
+    item.add_asset("vh", Asset(href="s3://bucket/data.zarr"))
+    item.add_asset("calibration", Asset(href="s3://bucket/cal.zarr"))
+
+    result = _get_s1_polarization(item)
+    assert result == "VH"
+
+
+def test_get_s1_polarization_vv():
+    """Test S1 polarization extraction when only VV asset exists."""
+    from datetime import datetime
+
+    from pystac import Asset, Item
+
+    from scripts.augment_stac_item import _get_s1_polarization
+
+    item = Item(
+        id="test-s1",
+        geometry=None,
+        bbox=None,
+        datetime=datetime(2025, 10, 8),
+        properties={},
+    )
+    item.add_asset("vv", Asset(href="s3://bucket/data.zarr"))
+
+    result = _get_s1_polarization(item)
+    assert result == "VV"
+
+
+def test_get_s1_polarization_default():
+    """Test S1 polarization defaults to VH when no polarization assets exist."""
+    from datetime import datetime
+
+    from pystac import Asset, Item
+
+    from scripts.augment_stac_item import _get_s1_polarization
+
+    item = Item(
+        id="test-s1",
+        geometry=None,
+        bbox=None,
+        datetime=datetime(2025, 10, 8),
+        properties={},
+    )
+    item.add_asset("calibration", Asset(href="s3://bucket/cal.zarr"))
+
+    result = _get_s1_polarization(item)
+    assert result == "VH"
+
+
+def test_encode_s1_preview_query():
+    """Test S1 GRD preview query encoding."""
+    from datetime import datetime
+
+    from pystac import Asset, Item
+
+    from scripts.augment_stac_item import _encode_s1_preview_query
+
+    item = Item(
+        id="test-s1",
+        geometry=None,
+        bbox=None,
+        datetime=datetime(2025, 10, 8),
+        properties={},
+    )
+    item.add_asset("vh", Asset(href="s3://bucket/data.zarr"))
+
+    result = _encode_s1_preview_query(item)
+
+    # Should include GRD measurement group (simple fallback without .zarr/ in href)
+    assert "variables=%2Fmeasurements%3Agrd" in result
+    assert "bidx=1" in result
+    assert "rescale=0%2C219" in result

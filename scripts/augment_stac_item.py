@@ -47,6 +47,69 @@ def _encode_quicklook_query() -> str:
 
 DEFAULT_QUICKLOOK_QUERY = _encode_quicklook_query()
 
+
+def _get_s1_polarization(item: Item) -> str:
+    """Extract first available polarization from S1 item assets.
+
+    Args:
+        item: PySTAC Item with S1 assets
+
+    Returns:
+        Uppercase polarization code (VH, VV, HH, or HV). Defaults to VH.
+    """
+    for pol in _S1_POLARIZATIONS:
+        if pol in item.assets:
+            return pol.upper()
+    return "VH"
+
+
+def _encode_s1_preview_query(item: Item) -> str:
+    """Generate S1 GRD preview query for TiTiler.
+
+    S1 GRD structure in converted GeoZarr:
+    /S01SIWGRD_{timestamp}_{id}_VH/measurements with grd variable
+
+    TiTiler needs the full path to the measurements group with the grd variable.
+
+    Args:
+        item: PySTAC Item with S1 GRD data
+
+    Returns:
+        Query string for TiTiler (variables, bidx, rescale)
+    """
+    pol = _get_s1_polarization(item)
+    asset = item.assets.get(pol.lower())
+
+    if not asset or not asset.href:
+        # Fallback to simple path
+        pairs = [
+            ("variables", "/measurements:grd"),
+            ("bidx", "1"),
+            ("rescale", "0,219"),
+        ]
+        return "&".join(f"{key}={urllib.parse.quote_plus(value)}" for key, value in pairs)
+
+    # Extract group path from asset href
+    # Example: s3://.../S01SIWGRD_..._VH/measurements -> /S01SIWGRD_..._VH/measurements:grd
+    href = asset.href
+    if ".zarr/" in href:
+        # Extract path after .zarr/
+        zarr_path = href.split(".zarr/")[1]
+        # zarr_path is like: S01SIWGRD_..._VH/measurements
+        # Build variable reference: /S01SIWGRD_..._VH/measurements:grd
+        variable_path = f"/{zarr_path}:grd"
+    else:
+        # Fallback
+        variable_path = "/measurements:grd"
+
+    pairs = [
+        ("variables", variable_path),
+        ("bidx", "1"),
+        ("rescale", "0,219"),  # Typical S1 GRD range
+    ]
+    return "&".join(f"{key}={urllib.parse.quote_plus(value)}" for key, value in pairs)
+
+
 _ALLOWED_SCHEMES = {"http", "https"}
 _USER_AGENT = "augment-stac-item/1.0"
 _DEFAULT_TIMEOUT = float(os.getenv("HTTP_TIMEOUT", "30"))
@@ -64,6 +127,14 @@ _ITEM_PROJECTION_FIELDS = frozenset({"code", "bbox", "shape", "transform"})
 _S2_COLLECTION_ID = "sentinel-2-l2a"
 _S2_DATASET_KEYS = ("SR_10m", "SR_20m", "SR_60m")
 _S2_QUICKLOOK_KEYS = ("TCI_10m", "TCI", "TCI_20m")
+
+_S1_COLLECTION_ID = "sentinel-1-l1-grd"
+_S1_POLARIZATIONS = ("vh", "vv", "hh", "hv")
+
+
+def _is_s1_collection(collection_id: str) -> bool:
+    """Check if collection is Sentinel-1 GRD."""
+    return collection_id.startswith("sentinel-1-l1-grd")
 
 
 def _coerce_epsg(value: Any) -> int | None:
@@ -462,16 +533,26 @@ def add_visualization_links(
     item.links = [link for link in item.links if link.rel not in filtered_rels]
     item_id = item.id
     viewer_href = f"{base_raster_url}/collections/{coll}/items/{item_id}/viewer"
-    asset_key = _select_preview_asset(item)
-    preview_asset = item.assets.get(asset_key) if asset_key else None
-    is_quicklook = _is_quicklook_asset(preview_asset)
-    default_query = DEFAULT_QUICKLOOK_QUERY if is_quicklook else DEFAULT_TRUE_COLOR_QUERY
+
+    # Determine preview query based on collection type
+    asset_key: str | None
+    if _is_s1_collection(coll):
+        # Sentinel-1: Use GRD polarization preview
+        default_query = _encode_s1_preview_query(item)
+        xyz_title = os.getenv("PREVIEW_XYZ_TITLE", f"GRD {_get_s1_polarization(item)}")
+        asset_key = _get_s1_polarization(item).lower()  # vh or vv
+    else:
+        # Sentinel-2: Use quicklook or true color
+        asset_key = _select_preview_asset(item)
+        preview_asset = item.assets.get(asset_key) if asset_key else None
+        is_quicklook = _is_quicklook_asset(preview_asset)
+        default_query = DEFAULT_QUICKLOOK_QUERY if is_quicklook else DEFAULT_TRUE_COLOR_QUERY
+        xyz_title = os.getenv("PREVIEW_XYZ_TITLE", "True Color Image (10m)")
+
     xyz_query = _resolve_preview_query(
         os.getenv("PREVIEW_XYZ_QUERY"),
         default_query=default_query,
     )
-
-    xyz_title = os.getenv("PREVIEW_XYZ_TITLE", "True Color Image (10m)")
 
     def _add_link(rel: str, target: str, media_type: str, title: str | None = None) -> None:
         item.add_link(
