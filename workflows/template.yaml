@@ -19,6 +19,18 @@ spec:
     - name: item_id
     - name: register_collection
       value: "sentinel-2-l2a-dp-test"
+    - name: stac_api_url
+      value: "https://api.explorer.eopf.copernicus.eu/stac"
+    - name: raster_api_url
+      value: "https://api.explorer.eopf.copernicus.eu/raster"
+    - name: s3_endpoint
+      value: "https://s3.de.io.cloud.ovh.net"
+    - name: s3_output_bucket
+      value: "esa-zarr-sentinel-explorer-fra"
+    - name: s3_output_prefix
+      value: "tests-output"
+    - name: pipeline_image_version
+      value: "v26"  # v26 includes Dask parallel processing
 
   templates:
   - name: main
@@ -39,8 +51,7 @@ spec:
   - name: convert-geozarr
     activeDeadlineSeconds: 3600  # 1 hour timeout
     script:
-      # Use data-pipeline image with scripts and latest eopf-geozarr (v26 includes Dask)
-      image: ghcr.io/eopf-explorer/data-pipeline:v26
+      image: ghcr.io/eopf-explorer/data-pipeline:{{workflow.parameters.pipeline_image_version}}
       imagePullPolicy: Always
       command: [bash]
       source: |
@@ -48,7 +59,7 @@ spec:
 
         SOURCE_URL="{{workflow.parameters.source_url}}"
         COLLECTION="{{workflow.parameters.register_collection}}"
-        OUTPUT_PATH="s3://esa-zarr-sentinel-explorer-fra/tests-output/$COLLECTION/{{workflow.parameters.item_id}}.zarr"
+        OUTPUT_PATH="s3://{{workflow.parameters.s3_output_bucket}}/{{workflow.parameters.s3_output_prefix}}/$COLLECTION/{{workflow.parameters.item_id}}.zarr"
 
         echo "🔍 Resolving source..."
         # Check if source is STAC item or direct zarr
@@ -106,7 +117,7 @@ spec:
             name: geozarr-s3-credentials
             key: AWS_SECRET_ACCESS_KEY
       - name: AWS_ENDPOINT_URL
-        value: "https://s3.de.io.cloud.ovh.net"
+        value: "{{workflow.parameters.s3_endpoint}}"
       resources:
         requests:
           memory: "8Gi"
@@ -118,12 +129,12 @@ spec:
   - name: validate
     activeDeadlineSeconds: 300  # 5 min timeout
     container:
-      image: ghcr.io/eopf-explorer/data-pipeline:v24
+      image: ghcr.io/eopf-explorer/data-pipeline:{{workflow.parameters.pipeline_image_version}}
       imagePullPolicy: Always
       command: [python]
       args:
       - /app/scripts/validate_geozarr.py
-      - "s3://esa-zarr-sentinel-explorer-fra/tests-output/{{workflow.parameters.register_collection}}/{{workflow.parameters.item_id}}.zarr"
+      - "s3://{{workflow.parameters.s3_output_bucket}}/{{workflow.parameters.s3_output_prefix}}/{{workflow.parameters.register_collection}}/{{workflow.parameters.item_id}}.zarr"
       - --item-id
       - "{{workflow.parameters.item_id}}"
       - --verbose
@@ -141,7 +152,7 @@ spec:
             name: geozarr-s3-credentials
             key: AWS_SECRET_ACCESS_KEY
       - name: AWS_ENDPOINT_URL
-        value: "https://s3.de.cloud.ovh.net"
+        value: "{{workflow.parameters.s3_endpoint}}"
       - name: ZARR_V3_EXPERIMENTAL_API
         value: "1"
       resources:
@@ -154,23 +165,23 @@ spec:
     activeDeadlineSeconds: 300  # 5 min timeout
     container:
       # Use data-pipeline image for Python scripts (register, augment)
-      image: ghcr.io/eopf-explorer/data-pipeline:v23
+      image: ghcr.io/eopf-explorer/data-pipeline:{{workflow.parameters.pipeline_image_version}}
       imagePullPolicy: Always
       command: [python]
       args:
       - /app/scripts/register_stac.py
       - --stac
-      - "https://api.explorer.eopf.copernicus.eu/stac"
+      - "{{workflow.parameters.stac_api_url}}"
       - --collection
       - "{{workflow.parameters.register_collection}}"
       - --item-id
       - "{{workflow.parameters.item_id}}"
       - --output
-      - "s3://esa-zarr-sentinel-explorer-fra/tests-output/{{workflow.parameters.register_collection}}/{{workflow.parameters.item_id}}.zarr"
+      - "s3://{{workflow.parameters.s3_output_bucket}}/{{workflow.parameters.s3_output_prefix}}/{{workflow.parameters.register_collection}}/{{workflow.parameters.item_id}}.zarr"
       - --src-item
       - "{{workflow.parameters.source_url}}"
       - --s3-endpoint
-      - "https://s3.de.io.cloud.ovh.net"
+      - "{{workflow.parameters.s3_endpoint}}"
       - --mode
       - "update"
       env:
@@ -181,15 +192,15 @@ spec:
     activeDeadlineSeconds: 300  # 5 min timeout
     container:
       # Use data-pipeline image for Python scripts (register, augment)
-      image: ghcr.io/eopf-explorer/data-pipeline:v23
+      image: ghcr.io/eopf-explorer/data-pipeline:{{workflow.parameters.pipeline_image_version}}
       imagePullPolicy: Always
       command: [python]
       args:
       - /app/scripts/augment_stac_item.py
       - --stac
-      - "https://api.explorer.eopf.copernicus.eu/stac"
+      - "{{workflow.parameters.stac_api_url}}"
       - --raster-base
-      - "https://api.explorer.eopf.copernicus.eu/raster"
+      - "{{workflow.parameters.raster_api_url}}"
       - --collection
       - "{{workflow.parameters.register_collection}}"
       - --item-id
