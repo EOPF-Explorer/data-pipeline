@@ -26,9 +26,12 @@ spec:
       tasks:
       - name: convert
         template: convert-geozarr
+      - name: validate
+        template: validate
+        dependencies: [convert]
       - name: register
         template: register-stac
-        dependencies: [convert]
+        dependencies: [validate]
       - name: augment
         template: augment-stac
         dependencies: [register]
@@ -36,8 +39,8 @@ spec:
   - name: convert-geozarr
     activeDeadlineSeconds: 3600  # 1 hour timeout
     script:
-      # Use data-pipeline image with scripts and latest eopf-geozarr
-      image: ghcr.io/eopf-explorer/data-pipeline:v21
+      # Use data-pipeline image with scripts and latest eopf-geozarr (v26 includes Dask)
+      image: ghcr.io/eopf-explorer/data-pipeline:v26
       imagePullPolicy: Always
       command: [bash]
       source: |
@@ -63,29 +66,31 @@ spec:
         echo "Destination: $OUTPUT_PATH"
         echo "Collection: $COLLECTION"
 
-        # Clean up any partial output from previous failed runs
-        echo "🧹 Cleaning up any existing output..."
-        python3 /app/scripts/cleanup_s3_path.py "$OUTPUT_PATH"
-
-        # S1 requires different parameters (both prod and test collections)
-        if [[ "$COLLECTION" == sentinel-1-l1-grd* ]]; then
-          ZARR_GROUPS="/measurements"
-          EXTRA_FLAGS="--gcp-group /conditions/gcp"
-          CHUNK=2048
-          echo "📡 S1 GRD mode: groups=$ZARR_GROUPS, chunk=$CHUNK"
+        # Clean up any partial output from previous failed runs (optional)
+        if [ -f /app/scripts/cleanup_s3_path.py ]; then
+          echo "🧹 Cleaning up any existing output..."
+          python3 /app/scripts/cleanup_s3_path.py "$OUTPUT_PATH" || echo "⚠️  Cleanup failed, continuing anyway"
         else
-          ZARR_GROUPS="/quality/l2a_quicklook/r10m"
-          EXTRA_FLAGS="--crs-groups /quality/l2a_quicklook/r10m"
-          CHUNK=4096
-          echo "🗺️ S2 L2A mode: groups=$ZARR_GROUPS, chunk=$CHUNK"
+          echo "ℹ️  Skipping cleanup (script not available)"
         fi
 
-        # Build conversion command
+        # Get collection-specific conversion parameters from registry
+        echo "📋 Getting conversion parameters for $COLLECTION..."
+        eval $(python3 /app/scripts/get_conversion_params.py --collection "$COLLECTION")
+
+        echo "📡 Conversion mode:"
+        echo "  Groups: $ZARR_GROUPS"
+        echo "  Chunk: $CHUNK"
+        echo "  Tile width: $TILE_WIDTH"
+        echo "  Extra flags: $EXTRA_FLAGS"
+
+        # Build conversion command with Dask for parallel processing
         eopf-geozarr convert "$ZARR_URL" "$OUTPUT_PATH" \
           --groups "$ZARR_GROUPS" \
           $EXTRA_FLAGS \
           --spatial-chunk $CHUNK \
-          --tile-width 512 \
+          --tile-width $TILE_WIDTH \
+          --dask-cluster \
           --verbose
       env:
       - name: PYTHONUNBUFFERED
@@ -110,11 +115,46 @@ spec:
           memory: "16Gi"
           cpu: "4"
 
+  - name: validate
+    activeDeadlineSeconds: 300  # 5 min timeout
+    container:
+      image: ghcr.io/eopf-explorer/data-pipeline:v24
+      imagePullPolicy: Always
+      command: [python]
+      args:
+      - /app/scripts/validate_geozarr.py
+      - "s3://esa-zarr-sentinel-explorer-fra/tests-output/{{workflow.parameters.register_collection}}/{{workflow.parameters.item_id}}.zarr"
+      - --item-id
+      - "{{workflow.parameters.item_id}}"
+      - --verbose
+      env:
+      - name: PYTHONUNBUFFERED
+        value: "1"
+      - name: AWS_ACCESS_KEY_ID
+        valueFrom:
+          secretKeyRef:
+            name: geozarr-s3-credentials
+            key: AWS_ACCESS_KEY_ID
+      - name: AWS_SECRET_ACCESS_KEY
+        valueFrom:
+          secretKeyRef:
+            name: geozarr-s3-credentials
+            key: AWS_SECRET_ACCESS_KEY
+      - name: AWS_ENDPOINT_URL
+        value: "https://s3.de.cloud.ovh.net"
+      - name: ZARR_V3_EXPERIMENTAL_API
+        value: "1"
+      resources:
+        requests:
+          memory: "2Gi"
+        limits:
+          memory: "4Gi"
+
   - name: register-stac
     activeDeadlineSeconds: 300  # 5 min timeout
     container:
       # Use data-pipeline image for Python scripts (register, augment)
-      image: ghcr.io/eopf-explorer/data-pipeline:v21
+      image: ghcr.io/eopf-explorer/data-pipeline:v23
       imagePullPolicy: Always
       command: [python]
       args:
@@ -137,11 +177,57 @@ spec:
       - name: PYTHONUNBUFFERED
         value: "1"
 
+  - name: benchmark
+    activeDeadlineSeconds: 600  # 10 min timeout
+    container:
+      image: ghcr.io/eopf-explorer/data-pipeline:v23
+      imagePullPolicy: Always
+      command: [python]
+      args:
+      - /app/scripts/benchmark_comparison.py
+      - --geozarr-url
+      - "s3://esa-zarr-sentinel-explorer-fra/tests-output/{{workflow.parameters.register_collection}}/{{workflow.parameters.item_id}}.zarr"
+      - --eopf-url
+      - "{{workflow.parameters.source_url}}"
+      # - --groups  # Removed: zarr_groups not available as workflow parameter
+      # - "{{workflow.parameters.zarr_groups}}"
+      - --item-id
+      - "{{workflow.parameters.item_id}}"
+      - --s3-bucket
+      - "esa-zarr-sentinel-explorer-fra"
+      - --windows
+      - "5"
+      - --verbose
+      env:
+      - name: PYTHONUNBUFFERED
+        value: "1"
+      - name: AWS_ACCESS_KEY_ID
+        valueFrom:
+          secretKeyRef:
+            name: geozarr-s3-credentials
+            key: AWS_ACCESS_KEY_ID
+      - name: AWS_SECRET_ACCESS_KEY
+        valueFrom:
+          secretKeyRef:
+            name: geozarr-s3-credentials
+            key: AWS_SECRET_ACCESS_KEY
+      - name: AWS_ENDPOINT_URL
+        value: "https://s3.de.io.cloud.ovh.net"
+      - name: ZARR_V3_EXPERIMENTAL_API
+        value: "1"
+      resources:
+        requests:
+          memory: "4Gi"
+          cpu: "1"
+        limits:
+          memory: "8Gi"
+          cpu: "2"
+
   - name: augment-stac
     activeDeadlineSeconds: 300  # 5 min timeout
     container:
       # Use data-pipeline image for Python scripts (register, augment)
-      image: ghcr.io/eopf-explorer/data-pipeline:v21
+      image: ghcr.io/eopf-explorer/data-pipeline:v23
       imagePullPolicy: Always
       command: [python]
       args:
