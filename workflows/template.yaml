@@ -4,7 +4,7 @@ metadata:
   name: geozarr-pipeline
   namespace: devseed-staging
 spec:
-    # Service account with S3 and STAC API permissions
+  # Service account with S3 and STAC API permissions
   serviceAccountName: operate-workflow-sa
   entrypoint: main
   # Clean up completed workflows after 24 hours
@@ -13,6 +13,12 @@ spec:
   # Keep pods on failure for debugging
   podGC:
     strategy: OnWorkflowSuccess
+  # Add workflow metadata labels for easier filtering in UI
+  workflowMetadata:
+    labels:
+      workflows.argoproj.io/workflow-template: geozarr-pipeline
+      pipeline.eopf/collection: "{{workflow.parameters.register_collection}}"
+      pipeline.eopf/item-id: "{{workflow.parameters.item_id}}"
   arguments:
     parameters:
     - name: source_url
@@ -36,8 +42,11 @@ spec:
   - name: main
     dag:
       tasks:
+      - name: show-parameters
+        template: show-parameters
       - name: convert
         template: convert-geozarr
+        dependencies: [show-parameters]
       - name: validate
         template: validate
         dependencies: [convert]
@@ -48,6 +57,49 @@ spec:
         template: augment-stac
         dependencies: [register]
 
+  - name: show-parameters
+    activeDeadlineSeconds: 60
+    script:
+      image: ghcr.io/eopf-explorer/data-pipeline:{{workflow.parameters.pipeline_image_version}}
+      imagePullPolicy: Always
+      command: [bash]
+      source: |
+        cat <<'EOF'
+        ╔════════════════════════════════════════════════════════════════════════════╗
+        ║                         GEOZARR PIPELINE EXECUTION                         ║
+        ╚════════════════════════════════════════════════════════════════════════════╝
+
+        📋 WORKFLOW PARAMETERS:
+        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+        🎯 ITEM DETAILS:
+          • Item ID:          {{workflow.parameters.item_id}}
+          • Source URL:       {{workflow.parameters.source_url}}
+          • Collection:       {{workflow.parameters.register_collection}}
+
+        🌐 API ENDPOINTS:
+          • STAC API:         {{workflow.parameters.stac_api_url}}
+          • Raster API:       {{workflow.parameters.raster_api_url}}
+
+        ☁️  S3 CONFIGURATION:
+          • Endpoint:         {{workflow.parameters.s3_endpoint}}
+          • Bucket:           {{workflow.parameters.s3_output_bucket}}
+          • Prefix:           {{workflow.parameters.s3_output_prefix}}
+
+        🐳 IMAGE VERSION:
+          • Pipeline:         {{workflow.parameters.pipeline_image_version}}
+
+        📦 OUTPUT PATH:
+          s3://{{workflow.parameters.s3_output_bucket}}/{{workflow.parameters.s3_output_prefix}}/{{workflow.parameters.register_collection}}/{{workflow.parameters.item_id}}.zarr
+
+        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        ⏱️  Started: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+        ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+        EOF
+      env:
+      - name: PYTHONUNBUFFERED
+        value: "1"
+
   - name: convert-geozarr
     activeDeadlineSeconds: 3600  # 1 hour timeout
     script:
@@ -57,11 +109,16 @@ spec:
       source: |
         set -euo pipefail
 
+        echo "════════════════════════════════════════════════════════════════════════════"
+        echo "  STEP 1/4: GEOZARR CONVERSION"
+        echo "════════════════════════════════════════════════════════════════════════════"
+        echo ""
+
         SOURCE_URL="{{workflow.parameters.source_url}}"
         COLLECTION="{{workflow.parameters.register_collection}}"
         OUTPUT_PATH="s3://{{workflow.parameters.s3_output_bucket}}/{{workflow.parameters.s3_output_prefix}}/$COLLECTION/{{workflow.parameters.item_id}}.zarr"
 
-        echo "🔍 Resolving source..."
+        echo "🔍 [1/6] Resolving source..."
         # Check if source is STAC item or direct zarr
         if [[ "$SOURCE_URL" == *"/items/"* ]]; then
           echo "📡 Extracting Zarr URL from STAC item..."
@@ -71,29 +128,33 @@ spec:
           ZARR_URL="$SOURCE_URL"
           echo "✅ Direct Zarr URL: $ZARR_URL"
         fi
+        echo ""
 
-        echo "🚀 Starting GeoZarr conversion"
-        echo "Source: $ZARR_URL"
-        echo "Destination: $OUTPUT_PATH"
-        echo "Collection: $COLLECTION"
+        echo "� [2/6] Getting conversion parameters for $COLLECTION..."
+        eval $(python3 /app/scripts/get_conversion_params.py --collection "$COLLECTION")
+        echo "   Groups:      $ZARR_GROUPS"
+        echo "   Chunk:       $CHUNK"
+        echo "   Tile width:  $TILE_WIDTH"
+        echo "   Extra flags: $EXTRA_FLAGS"
+        echo ""
 
-        # Clean up any partial output from previous failed runs (optional)
+        echo "🧹 [3/6] Cleaning up existing output..."
         if [ -f /app/scripts/cleanup_s3_path.py ]; then
-          echo "🧹 Cleaning up any existing output..."
-          python3 /app/scripts/cleanup_s3_path.py "$OUTPUT_PATH" || echo "⚠️  Cleanup failed, continuing anyway"
+          python3 /app/scripts/cleanup_s3_path.py "$OUTPUT_PATH" || echo "⚠️  Cleanup failed (may not exist yet)"
         else
           echo "ℹ️  Skipping cleanup (script not available)"
         fi
+        echo ""
 
-        # Get collection-specific conversion parameters from registry
-        echo "📋 Getting conversion parameters for $COLLECTION..."
-        eval $(python3 /app/scripts/get_conversion_params.py --collection "$COLLECTION")
-
-        echo "📡 Conversion mode:"
-        echo "  Groups: $ZARR_GROUPS"
-        echo "  Chunk: $CHUNK"
-        echo "  Tile width: $TILE_WIDTH"
-        echo "  Extra flags: $EXTRA_FLAGS"
+        echo "🚀 [4/6] Starting GeoZarr conversion..."
+        echo "   Source:      $ZARR_URL"
+        echo "   Destination: $OUTPUT_PATH"
+        echo "   Collection:  $COLLECTION"
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "  CONVERSION LOGS (this may take 10-30 minutes for large datasets)"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo ""
 
         # Build conversion command with Dask for parallel processing
         eopf-geozarr convert "$ZARR_URL" "$OUTPUT_PATH" \
@@ -103,6 +164,11 @@ spec:
           --tile-width $TILE_WIDTH \
           --dask-cluster \
           --verbose
+
+        echo ""
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo "✅ [6/6] Conversion completed successfully!"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
       env:
       - name: PYTHONUNBUFFERED
         value: "1"
@@ -128,16 +194,27 @@ spec:
 
   - name: validate
     activeDeadlineSeconds: 300  # 5 min timeout
-    container:
+    script:
       image: ghcr.io/eopf-explorer/data-pipeline:{{workflow.parameters.pipeline_image_version}}
       imagePullPolicy: Always
-      command: [python]
-      args:
-      - /app/scripts/validate_geozarr.py
-      - "s3://{{workflow.parameters.s3_output_bucket}}/{{workflow.parameters.s3_output_prefix}}/{{workflow.parameters.register_collection}}/{{workflow.parameters.item_id}}.zarr"
-      - --item-id
-      - "{{workflow.parameters.item_id}}"
-      - --verbose
+      command: [bash]
+      source: |
+        set -euo pipefail
+
+        echo "════════════════════════════════════════════════════════════════════════════"
+        echo "  STEP 2/4: GEOZARR VALIDATION"
+        echo "════════════════════════════════════════════════════════════════════════════"
+        echo ""
+        echo "🔍 Validating GeoZarr structure and compliance..."
+        echo ""
+
+        python /app/scripts/validate_geozarr.py \
+          "s3://{{workflow.parameters.s3_output_bucket}}/{{workflow.parameters.s3_output_prefix}}/{{workflow.parameters.register_collection}}/{{workflow.parameters.item_id}}.zarr" \
+          --item-id "{{workflow.parameters.item_id}}" \
+          --verbose
+
+        echo ""
+        echo "✅ Validation completed successfully!"
       env:
       - name: PYTHONUNBUFFERED
         value: "1"
@@ -163,49 +240,77 @@ spec:
 
   - name: register-stac
     activeDeadlineSeconds: 300  # 5 min timeout
-    container:
-      # Use data-pipeline image for Python scripts (register, augment)
+    script:
       image: ghcr.io/eopf-explorer/data-pipeline:{{workflow.parameters.pipeline_image_version}}
       imagePullPolicy: Always
-      command: [python]
-      args:
-      - /app/scripts/register_stac.py
-      - --stac
-      - "{{workflow.parameters.stac_api_url}}"
-      - --collection
-      - "{{workflow.parameters.register_collection}}"
-      - --item-id
-      - "{{workflow.parameters.item_id}}"
-      - --output
-      - "s3://{{workflow.parameters.s3_output_bucket}}/{{workflow.parameters.s3_output_prefix}}/{{workflow.parameters.register_collection}}/{{workflow.parameters.item_id}}.zarr"
-      - --src-item
-      - "{{workflow.parameters.source_url}}"
-      - --s3-endpoint
-      - "{{workflow.parameters.s3_endpoint}}"
-      - --mode
-      - "update"
+      command: [bash]
+      source: |
+        set -euo pipefail
+
+        echo "════════════════════════════════════════════════════════════════════════════"
+        echo "  STEP 3/4: STAC REGISTRATION"
+        echo "════════════════════════════════════════════════════════════════════════════"
+        echo ""
+        echo "📝 Registering item in STAC API..."
+        echo "   Collection: {{workflow.parameters.register_collection}}"
+        echo "   Item ID:    {{workflow.parameters.item_id}}"
+        echo "   STAC API:   {{workflow.parameters.stac_api_url}}"
+        echo ""
+
+        python /app/scripts/register_stac.py \
+          --stac "{{workflow.parameters.stac_api_url}}" \
+          --collection "{{workflow.parameters.register_collection}}" \
+          --item-id "{{workflow.parameters.item_id}}" \
+          --output "s3://{{workflow.parameters.s3_output_bucket}}/{{workflow.parameters.s3_output_prefix}}/{{workflow.parameters.register_collection}}/{{workflow.parameters.item_id}}.zarr" \
+          --src-item "{{workflow.parameters.source_url}}" \
+          --s3-endpoint "{{workflow.parameters.s3_endpoint}}" \
+          --mode "update"
+
+        echo ""
+        echo "✅ Registration completed successfully!"
       env:
       - name: PYTHONUNBUFFERED
         value: "1"
 
   - name: augment-stac
     activeDeadlineSeconds: 300  # 5 min timeout
-    container:
-      # Use data-pipeline image for Python scripts (register, augment)
+    script:
       image: ghcr.io/eopf-explorer/data-pipeline:{{workflow.parameters.pipeline_image_version}}
       imagePullPolicy: Always
-      command: [python]
-      args:
-      - /app/scripts/augment_stac_item.py
-      - --stac
-      - "{{workflow.parameters.stac_api_url}}"
-      - --raster-base
-      - "{{workflow.parameters.raster_api_url}}"
-      - --collection
-      - "{{workflow.parameters.register_collection}}"
-      - --item-id
-      - "{{workflow.parameters.item_id}}"
-      - --verbose
+      command: [bash]
+      source: |
+        set -euo pipefail
+
+        echo "════════════════════════════════════════════════════════════════════════════"
+        echo "  STEP 4/4: STAC AUGMENTATION"
+        echo "════════════════════════════════════════════════════════════════════════════"
+        echo ""
+        echo "🎨 Adding preview links and metadata to STAC item..."
+        echo "   Collection:  {{workflow.parameters.register_collection}}"
+        echo "   Item ID:     {{workflow.parameters.item_id}}"
+        echo "   Raster API:  {{workflow.parameters.raster_api_url}}"
+        echo ""
+
+        python /app/scripts/augment_stac_item.py \
+          --stac "{{workflow.parameters.stac_api_url}}" \
+          --raster-base "{{workflow.parameters.raster_api_url}}" \
+          --collection "{{workflow.parameters.register_collection}}" \
+          --item-id "{{workflow.parameters.item_id}}" \
+          --verbose
+
+        echo ""
+        echo "✅ Augmentation completed successfully!"
+        echo ""
+        echo "════════════════════════════════════════════════════════════════════════════"
+        echo "  🎉 PIPELINE COMPLETED SUCCESSFULLY!"
+        echo "════════════════════════════════════════════════════════════════════════════"
+        echo ""
+        echo "📍 View item in STAC API:"
+        echo "   {{workflow.parameters.stac_api_url}}/collections/{{workflow.parameters.register_collection}}/items/{{workflow.parameters.item_id}}"
+        echo ""
+        echo "📦 GeoZarr output location:"
+        echo "   s3://{{workflow.parameters.s3_output_bucket}}/{{workflow.parameters.s3_output_prefix}}/{{workflow.parameters.register_collection}}/{{workflow.parameters.item_id}}.zarr"
+        echo ""
       env:
       - name: PYTHONUNBUFFERED
         value: "1"
