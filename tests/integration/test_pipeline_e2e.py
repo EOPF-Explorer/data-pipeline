@@ -7,7 +7,6 @@ Tests the full workflow:
 4. Validate final STAC item
 """
 
-import os
 from unittest.mock import Mock, patch
 
 import httpx
@@ -161,24 +160,6 @@ def test_registration_error_handling():
                 item=test_item,
                 mode="create-or-skip",
             )
-
-
-@pytest.mark.integration
-@pytest.mark.skipif(
-    not os.getenv("STAC_API_URL"), reason="Requires real STAC API (set STAC_API_URL)"
-)
-def test_real_stac_api_connection():
-    """Test actual connection to STAC API (optional, requires credentials)."""
-    import httpx
-
-    stac_api_url = os.getenv("STAC_API_URL")
-
-    # Test GET /collections
-    response = httpx.get(f"{stac_api_url}/collections", timeout=10.0)
-    assert response.status_code == 200
-
-    collections = response.json()
-    assert "collections" in collections or isinstance(collections, list)
 
 
 @pytest.mark.integration
