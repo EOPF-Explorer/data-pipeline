@@ -7,16 +7,19 @@ metadata:
 data:
   body.json: |
     {
-      "source_url": "https://stac.core.eopf.eodc.eu/collections/sentinel-1-l1-grd/items/S1A_IW_GRDH_1SDV_20251007T052723_20251007T052748_061315_07A653_A991",
-      "item_id": "S1A_IW_GRDH_20251007T052723_e2e_test",
+      "source_url": "https://stac.core.eopf.eodc.eu/collections/sentinel-1-l1-grd/items/S1A_IW_GRDH_1SDV_20251003T055837_20251003T055902_061257_07A400_1BF0",
+      "item_id": "S1A_IW_GRDH_20251003T055837_optimized_test",
       "collection": "sentinel-1-l1-grd-dp-test"
     }
 ---
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: amqp-publish-s1-e2e
+  name: amqp-publish-s1-e2e-optimized
   namespace: devseed-staging
+  labels:
+    app: amqp-publisher
+    test: s1-e2e-optimized
 spec:
   ttlSecondsAfterFinished: 300
   template:
