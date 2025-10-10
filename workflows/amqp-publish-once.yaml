@@ -19,53 +19,25 @@ spec:
       restartPolicy: Never
       containers:
         - name: publish
-          image: python:3.11-slim
+          image: ghcr.io/eopf-explorer/data-pipeline:v26
           command:
-            - /bin/bash
-            - -c
-            - |
-              set -e
-              pip install -q pika
-              cat <<'PUBLISH_SCRIPT' > /tmp/publish.py
-              import json
-              import os
-              import pika
-
-              with open('/payload/body.json') as f:
-                  payload = json.load(f)
-
-              credentials = pika.PlainCredentials(
-                  os.environ['RABBITMQ_USERNAME'],
-                  os.environ['RABBITMQ_PASSWORD']
-              )
-              parameters = pika.ConnectionParameters(
-                  host='rabbitmq.core.svc.cluster.local',
-                  port=5672,
-                  credentials=credentials
-              )
-
-              connection = pika.BlockingConnection(parameters)
-              channel = connection.channel()
-
-              routing_key = f"eopf.item.found.{payload['collection']}"
-
-              channel.basic_publish(
-                  exchange='eopf_items',
-                  routing_key=routing_key,
-                  body=json.dumps(payload),
-                  properties=pika.BasicProperties(
-                      content_type='application/json',
-                      delivery_mode=2  # persistent
-                  )
-              )
-
-              print(f"✅ Published to exchange=eopf_items, routing_key={routing_key}")
-              print(f"📦 Payload: {json.dumps(payload, indent=2)}")
-
-              connection.close()
-              PUBLISH_SCRIPT
-
-              python /tmp/publish.py
+            - python
+            - /app/scripts/publish_amqp.py
+          args:
+            - --host
+            - rabbitmq.core.svc.cluster.local
+            - --port
+            - "5672"
+            - --user
+            - $(RABBITMQ_USERNAME)
+            - --password
+            - $(RABBITMQ_PASSWORD)
+            - --exchange
+            - eopf_items
+            - --routing-key-template
+            - eopf.item.found.{collection}
+            - --payload-file
+            - /payload/body.json
           env:
             - name: RABBITMQ_USERNAME
               valueFrom:
