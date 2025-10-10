@@ -34,4 +34,7 @@ ARG SCRIPTS_VERSION=2025-10-09T00:00:00Z
 COPY scripts/ /app/scripts/
 RUN chmod +x /app/scripts/*.py
 
+# Copy workflows (example payloads and templates)
+COPY workflows/ /app/workflows/
+
 CMD ["/bin/bash"]
