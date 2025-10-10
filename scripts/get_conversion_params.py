@@ -26,7 +26,7 @@ _COLLECTION_CONFIGS: dict[str, dict[str, Any]] = {
         "conversion": {
             "groups": "/measurements",
             "extra_flags": "--gcp-group /conditions/gcp",
-            "spatial_chunk": 2048,
+            "spatial_chunk": 4096,  # Increased from 2048 for faster I/O
             "tile_width": 512,
         },
     },
