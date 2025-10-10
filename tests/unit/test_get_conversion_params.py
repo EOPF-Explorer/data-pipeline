@@ -66,7 +66,7 @@ class TestGetConversionParams:
         params = get_conversion_params("sentinel-1-l1-grd")
         assert params["groups"] == "/measurements"
         assert params["extra_flags"] == "--gcp-group /conditions/gcp"
-        assert params["spatial_chunk"] == 2048
+        assert params["spatial_chunk"] == 4096
         assert params["tile_width"] == 512
 
     def test_s2_with_suffix_uses_same_config(self):
@@ -109,7 +109,7 @@ class TestMainCLI:
         captured = capsys.readouterr()
         assert "ZARR_GROUPS='/measurements'" in captured.out
         assert "EXTRA_FLAGS='--gcp-group /conditions/gcp'" in captured.out
-        assert "CHUNK=2048" in captured.out
+        assert "CHUNK=4096" in captured.out
 
     def test_json_format(self, capsys):
         """JSON output format."""
