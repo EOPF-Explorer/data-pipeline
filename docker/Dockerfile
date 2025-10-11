@@ -16,19 +16,20 @@ WORKDIR /app
 # Install uv for fast dependency resolution
 RUN pip install -U pip uv
 
-# Cachebust for data-model installation (change timestamp to force fresh install)
-ARG CACHEBUST=2025-10-09T00:00:00Z
+# Use git commit SHA for precise cache control
+# Update via: docker build --build-arg DATA_MODEL_COMMIT=$(git ls-remote https://github.com/EOPF-Explorer/data-model.git refs/heads/fix/s1-encoding-conflict | cut -f1)
+ARG DATA_MODEL_COMMIT=fix/s1-encoding-conflict
 
-# Install eopf-geozarr from fix/s1-encoding-conflict branch (includes dask[distributed])
+# Install eopf-geozarr from data-model (includes dask[distributed])
 RUN uv pip install --system --no-cache \
-    git+https://github.com/EOPF-Explorer/data-model.git@fix/s1-encoding-conflict \
+    git+https://github.com/EOPF-Explorer/data-model.git@${DATA_MODEL_COMMIT} \
     pystac>=1.10.0 \
     httpx>=0.27.0 \
     boto3>=1.34.0 \
     tenacity>=8.0.0
 
-# Force fresh copy of scripts (invalidate cache)
-ARG SCRIPTS_VERSION=2025-10-09T00:00:00Z
+# Copy scripts (cache invalidated by content changes, not manual ARG)
+ARG SCRIPTS_VERSION=auto
 
 # Copy scripts
 COPY scripts/ /app/scripts/

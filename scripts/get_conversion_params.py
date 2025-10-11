@@ -105,8 +105,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         params = get_conversion_params(args.collection)
     except ValueError as exc:
+        # Use print for CLI output, not logging
         print(f"Error: {exc}", file=sys.stderr)
-        return 1
+        sys.exit(1)
 
     if args.param:
         # Output single parameter (for shell variable assignment)
