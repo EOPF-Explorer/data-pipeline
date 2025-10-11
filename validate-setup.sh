@@ -4,6 +4,9 @@
 
 set -euo pipefail
 
+# Error trap for better debugging
+trap 'echo "❌ Validation failed at line $LINENO with exit code $?"' ERR
+
 NAMESPACE="${NAMESPACE:-devseed}"
 PASS=0
 FAIL=0
