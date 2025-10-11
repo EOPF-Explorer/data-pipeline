@@ -1,6 +1,7 @@
 """Tests for get_conversion_params.py - Collection registry logic."""
 
 import json
+import os
 
 import pytest
 
@@ -160,3 +161,66 @@ class TestMainCLI:
         captured = capsys.readouterr()
         # Should fall back to S2 default
         assert "ZARR_GROUPS='/quality/l2a_quicklook/r10m'" in captured.out
+
+
+class TestEnvironmentVariableOverrides:
+    """Test environment variable override functionality."""
+
+    def test_override_groups(self, monkeypatch):
+        """OVERRIDE_GROUPS overrides default groups."""
+        monkeypatch.setenv("OVERRIDE_GROUPS", "/custom/groups")
+        params = get_conversion_params("sentinel-2-l2a")
+        assert params["groups"] == "/custom/groups"
+        assert params["spatial_chunk"] == 4096  # Other params unchanged
+
+    def test_override_extra_flags(self, monkeypatch):
+        """OVERRIDE_EXTRA_FLAGS overrides default flags."""
+        monkeypatch.setenv("OVERRIDE_EXTRA_FLAGS", "--custom-flag")
+        params = get_conversion_params("sentinel-1-l1-grd")
+        assert params["extra_flags"] == "--custom-flag"
+
+    def test_override_spatial_chunk(self, monkeypatch):
+        """OVERRIDE_SPATIAL_CHUNK overrides default chunk size."""
+        monkeypatch.setenv("OVERRIDE_SPATIAL_CHUNK", "8192")
+        params = get_conversion_params("sentinel-2-l2a")
+        assert params["spatial_chunk"] == 8192
+        assert isinstance(params["spatial_chunk"], int)
+
+    def test_override_tile_width(self, monkeypatch):
+        """OVERRIDE_TILE_WIDTH overrides default tile width."""
+        monkeypatch.setenv("OVERRIDE_TILE_WIDTH", "1024")
+        params = get_conversion_params("sentinel-1-l1-grd")
+        assert params["tile_width"] == 1024
+        assert isinstance(params["tile_width"], int)
+
+    def test_multiple_overrides(self, monkeypatch):
+        """Multiple overrides work together."""
+        monkeypatch.setenv("OVERRIDE_GROUPS", "/test/path")
+        monkeypatch.setenv("OVERRIDE_SPATIAL_CHUNK", "2048")
+        params = get_conversion_params("sentinel-2-l2a")
+        assert params["groups"] == "/test/path"
+        assert params["spatial_chunk"] == 2048
+        # Non-overridden values remain default
+        assert params["extra_flags"] == "--crs-groups /quality/l2a_quicklook/r10m"
+
+    def test_override_empty_string(self, monkeypatch):
+        """Empty string override is allowed."""
+        monkeypatch.setenv("OVERRIDE_EXTRA_FLAGS", "")
+        params = get_conversion_params("sentinel-1-l1-grd")
+        assert params["extra_flags"] == ""
+
+    def test_no_override_uses_default(self):
+        """Without env vars, uses configuration defaults."""
+        # Ensure no env vars are set
+        for var in [
+            "OVERRIDE_GROUPS",
+            "OVERRIDE_EXTRA_FLAGS",
+            "OVERRIDE_SPATIAL_CHUNK",
+            "OVERRIDE_TILE_WIDTH",
+        ]:
+            if var in os.environ:
+                del os.environ[var]
+
+        params = get_conversion_params("sentinel-2-l2a")
+        assert params["groups"] == "/quality/l2a_quicklook/r10m"
+        assert params["spatial_chunk"] == 4096

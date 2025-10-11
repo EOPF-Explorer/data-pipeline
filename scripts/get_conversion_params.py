@@ -5,16 +5,24 @@ This script exports conversion parameters (groups, flags, chunks) for
 different satellite collections, enabling the workflow template to use
 data-driven configuration instead of hard-coded bash conditionals.
 
+Environment Variable Overrides (for testing/debugging):
+    OVERRIDE_GROUPS: Override groups parameter
+    OVERRIDE_EXTRA_FLAGS: Override extra_flags parameter
+    OVERRIDE_SPATIAL_CHUNK: Override spatial_chunk parameter
+    OVERRIDE_TILE_WIDTH: Override tile_width parameter
+
 Usage:
     python3 get_conversion_params.py --collection sentinel-1-l1-grd
     python3 get_conversion_params.py --collection sentinel-2-l2a --format json
     python3 get_conversion_params.py --collection sentinel-2-l2a --param groups
+    OVERRIDE_GROUPS="/custom/path" python3 get_conversion_params.py --collection sentinel-2-l2a
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from typing import Any, cast
 
@@ -58,6 +66,12 @@ def _match_collection_config(collection_id: str) -> dict[str, Any] | None:
 def get_conversion_params(collection_id: str) -> dict[str, Any]:
     """Get conversion parameters for collection.
 
+    Environment variables can override configuration values:
+    - OVERRIDE_GROUPS: Override groups parameter
+    - OVERRIDE_EXTRA_FLAGS: Override extra_flags parameter
+    - OVERRIDE_SPATIAL_CHUNK: Override spatial_chunk parameter (integer)
+    - OVERRIDE_TILE_WIDTH: Override tile_width parameter (integer)
+
     Args:
         collection_id: Collection identifier (e.g., sentinel-1-l1-grd-dp-test)
 
@@ -75,7 +89,19 @@ def get_conversion_params(collection_id: str) -> dict[str, Any]:
             raise ValueError(f"No config for collection {collection_id}")
         config = default_config
 
-    return cast(dict[str, Any], config.get("conversion", {}))
+    conversion_params = cast(dict[str, Any], config.get("conversion", {}))
+
+    # Apply environment variable overrides (useful for testing/debugging)
+    return {
+        "groups": os.getenv("OVERRIDE_GROUPS", conversion_params.get("groups", "")),
+        "extra_flags": os.getenv("OVERRIDE_EXTRA_FLAGS", conversion_params.get("extra_flags", "")),
+        "spatial_chunk": int(
+            os.getenv("OVERRIDE_SPATIAL_CHUNK", str(conversion_params.get("spatial_chunk", 4096)))
+        ),
+        "tile_width": int(
+            os.getenv("OVERRIDE_TILE_WIDTH", str(conversion_params.get("tile_width", 512)))
+        ),
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
