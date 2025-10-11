@@ -77,6 +77,13 @@ spec:
       image: ghcr.io/eopf-explorer/data-pipeline:{{workflow.parameters.pipeline_image_version}}
       imagePullPolicy: Always
       command: [bash, -c]
+      resources:
+        requests:
+          memory: "6Gi"
+          cpu: "2"
+        limits:
+          memory: "10Gi"
+          cpu: "4"
       args:
         - |
           set -euo pipefail
@@ -172,6 +179,13 @@ spec:
       image: ghcr.io/eopf-explorer/data-pipeline:{{workflow.parameters.pipeline_image_version}}
       imagePullPolicy: Always
       command: [bash]
+      resources:
+        requests:
+          memory: "2Gi"
+          cpu: "1"
+        limits:
+          memory: "4Gi"
+          cpu: "2"
       source: |
         set -euo pipefail
 
@@ -218,6 +232,13 @@ spec:
       image: ghcr.io/eopf-explorer/data-pipeline:{{workflow.parameters.pipeline_image_version}}
       imagePullPolicy: Always
       command: [bash]
+      resources:
+        requests:
+          memory: "1Gi"
+          cpu: "500m"
+        limits:
+          memory: "2Gi"
+          cpu: "1"
       source: |
         set -euo pipefail
 
@@ -252,6 +273,14 @@ spec:
       image: ghcr.io/eopf-explorer/data-pipeline:{{workflow.parameters.pipeline_image_version}}
       imagePullPolicy: Always
       command: [bash]
+      resources:
+        requests:
+          memory: "1Gi"
+          cpu: "500m"
+        limits:
+          memory: "2Gi"
+          cpu: "1"
+      source: |
       source: |
         set -euo pipefail
 
