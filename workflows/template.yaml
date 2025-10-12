@@ -242,6 +242,11 @@ spec:
       source: |
         set -euo pipefail
 
+        # Start metrics server in background (for Prometheus scraping)
+        python -c "from scripts.metrics import start_metrics_server; start_metrics_server()" &
+        METRICS_PID=$!
+        trap "kill $METRICS_PID 2>/dev/null || true" EXIT
+
         echo "════════════════════════════════════════════════════════════════════════════"
         echo "  STEP 3/4: STAC REGISTRATION"
         echo "════════════════════════════════════════════════════════════════════════════"
@@ -281,8 +286,12 @@ spec:
           memory: "2Gi"
           cpu: "1"
       source: |
-      source: |
         set -euo pipefail
+
+        # Start metrics server in background (for Prometheus scraping)
+        python -c "from scripts.metrics import start_metrics_server; start_metrics_server()" &
+        METRICS_PID=$!
+        trap "kill $METRICS_PID 2>/dev/null || true" EXIT
 
         echo "════════════════════════════════════════════════════════════════════════════"
         echo "  STEP 4/4: STAC AUGMENTATION"

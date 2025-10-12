@@ -110,7 +110,7 @@ def main(argv: list[str] | None = None) -> int:
         if speedup > 1:
             logger.info(f"✅ GeoZarr is {speedup}x faster than EOPF")
         else:
-            logger.warning(f"⚠️  EOPF is {1/speedup:.2f}x faster than GeoZarr")
+            logger.warning(f"⚠️  EOPF is {1 / speedup:.2f}x faster than GeoZarr")
 
         return 0
 
