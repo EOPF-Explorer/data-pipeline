@@ -154,7 +154,7 @@ def benchmark_zoom_level(
         status = "✓" if result["success"] else "✗"
         logger.debug(
             f"  {status} z{z}/{x}/{y}: {result['latency_ms']:.1f}ms "
-            f"({result['size_bytes']/1024:.1f}KB)"
+            f"({result['size_bytes'] / 1024:.1f}KB)"
         )
 
     # Calculate statistics
