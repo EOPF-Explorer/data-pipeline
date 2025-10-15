@@ -1,10 +1,10 @@
 """Tests for validate_geozarr.py - GeoZarr compliance validation."""
 
 import json
-import subprocess
 
 import pytest
 
+from scripts.eopf_cli import CLIResult
 from scripts.validate_geozarr import main, validate_geozarr
 
 
@@ -12,12 +12,10 @@ class TestValidateGeozarr:
     """Test validation logic."""
 
     def test_successful_validation(self, mocker):
-        """Validation passes when subprocess exits 0."""
-        mock_run = mocker.patch("scripts.validate_geozarr.subprocess.run")
-        mock_run.return_value = mocker.Mock(
-            returncode=0,
-            stdout="All checks passed",
-            stderr="",
+        """Validation passes when CLI returns success."""
+        mock_cli = mocker.patch("scripts.validate_geozarr.cli.validate")
+        mock_cli.return_value = CLIResult(
+            success=True, exit_code=0, stdout="All checks passed", stderr=""
         )
 
         result = validate_geozarr("s3://bucket/dataset.zarr")
@@ -25,20 +23,13 @@ class TestValidateGeozarr:
         assert result["valid"] is True
         assert result["exit_code"] == 0
         assert "All checks passed" in result["stdout"]
-        mock_run.assert_called_once_with(
-            ["eopf-geozarr", "validate", "s3://bucket/dataset.zarr"],
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
+        mock_cli.assert_called_once_with("s3://bucket/dataset.zarr", verbose=False)
 
     def test_failed_validation(self, mocker):
-        """Validation fails when subprocess exits non-zero."""
-        mock_run = mocker.patch("scripts.validate_geozarr.subprocess.run")
-        mock_run.return_value = mocker.Mock(
-            returncode=1,
-            stdout="",
-            stderr="Missing required attribute: spatial_ref",
+        """Validation fails when CLI returns failure."""
+        mock_cli = mocker.patch("scripts.validate_geozarr.cli.validate")
+        mock_cli.return_value = CLIResult(
+            success=False, exit_code=1, stdout="", stderr="Missing required attribute: spatial_ref"
         )
 
         result = validate_geozarr("s3://bucket/invalid.zarr")
@@ -48,36 +39,33 @@ class TestValidateGeozarr:
         assert "Missing required attribute" in result["stderr"]
 
     def test_verbose_flag_passed(self, mocker):
-        """Verbose flag is passed to subprocess."""
-        mock_run = mocker.patch("scripts.validate_geozarr.subprocess.run")
-        mock_run.return_value = mocker.Mock(returncode=0, stdout="", stderr="")
+        """Verbose flag is passed to CLI wrapper."""
+        mock_cli = mocker.patch("scripts.validate_geozarr.cli.validate")
+        mock_cli.return_value = CLIResult(success=True, exit_code=0, stdout="", stderr="")
 
         validate_geozarr("s3://bucket/dataset.zarr", verbose=True)
 
-        mock_run.assert_called_once_with(
-            ["eopf-geozarr", "validate", "s3://bucket/dataset.zarr", "--verbose"],
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
+        mock_cli.assert_called_once_with("s3://bucket/dataset.zarr", verbose=True)
 
     def test_timeout_handling(self, mocker):
-        """Handles subprocess timeout gracefully."""
-        mock_run = mocker.patch("scripts.validate_geozarr.subprocess.run")
-        mock_run.side_effect = subprocess.TimeoutExpired(
-            cmd=["eopf-geozarr", "validate"], timeout=300
+        """Handles timeout gracefully."""
+        mock_cli = mocker.patch("scripts.validate_geozarr.cli.validate")
+        mock_cli.return_value = CLIResult(
+            success=False, exit_code=-1, stdout="", stderr="", error="Command timed out after 300s"
         )
 
         result = validate_geozarr("s3://bucket/large.zarr")
 
         assert result["valid"] is False
         assert result["exit_code"] == -1
-        assert "timeout" in result["error"].lower()
+        assert "timed out" in result["error"].lower()
 
     def test_subprocess_exception(self, mocker):
-        """Handles subprocess exceptions."""
-        mock_run = mocker.patch("scripts.validate_geozarr.subprocess.run")
-        mock_run.side_effect = FileNotFoundError("eopf-geozarr not found")
+        """Handles exceptions."""
+        mock_cli = mocker.patch("scripts.validate_geozarr.cli.validate")
+        mock_cli.return_value = CLIResult(
+            success=False, exit_code=-1, stdout="", stderr="", error="eopf-geozarr not found"
+        )
 
         result = validate_geozarr("s3://bucket/dataset.zarr")
 
