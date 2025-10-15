@@ -38,7 +38,7 @@ spec:
     - name: s3_output_prefix
       value: "tests-output"
     - name: pipeline_image_version
-      value: "v26"  # v26 includes Dask parallel processing
+      value: "feat-prometheus-metrics"  # Prometheus metrics integration
 
   templates:
   - name: main
@@ -232,6 +232,9 @@ spec:
       image: ghcr.io/eopf-explorer/data-pipeline:{{workflow.parameters.pipeline_image_version}}
       imagePullPolicy: Always
       command: [bash]
+      ports:
+      - containerPort: 8000
+        name: metrics
       resources:
         requests:
           memory: "1Gi"
