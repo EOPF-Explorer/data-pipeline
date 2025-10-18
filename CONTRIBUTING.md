@@ -1,5 +1,40 @@
 # Contributing
 
+## Branch Strategy (NEW)
+
+**Rule:** One functional change per branch.
+
+```bash
+# Current chain
+feat/prometheus-metrics-integration
+  → feat/validation (STAC/TMS/CF validation)
+  → feat/stac-client (pystac-client example)
+  → feat/stac-extensions (next - augment refactor)
+```
+
+**Creating a branch:**
+```bash
+git checkout feat/stac-client  # Base on latest
+git checkout -b feat/my-feature
+
+# Make ONE focused change
+vim scripts/file.py
+
+# Commit with clear message
+git add scripts/file.py
+git commit -m "feat: add XYZ validation"
+
+# Update CHANGELOG.md
+git add CHANGELOG.md
+git commit -m "docs: update CHANGELOG"
+```
+
+**Commit format:** `feat/fix/refactor/test/docs: what changed`
+
+See [CHANGELOG.md](CHANGELOG.md) for active changes.
+
+---
+
 ## Setup
 
 ```bash
