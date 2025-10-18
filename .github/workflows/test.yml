@@ -7,6 +7,10 @@ on:
     branches: [ main, feat/performance-validation ]
   workflow_dispatch:
 
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   test:
     runs-on: ubuntu-latest
