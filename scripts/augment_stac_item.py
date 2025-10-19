@@ -11,9 +11,13 @@ from collections.abc import Sequence
 
 import httpx
 import zarr
-from metrics import PREVIEW_GENERATION_DURATION
 from pystac import Item, Link
 from pystac.extensions.projection import ProjectionExtension
+
+try:
+    from metrics import PREVIEW_GENERATION_DURATION
+except ImportError:
+    PREVIEW_GENERATION_DURATION = None
 
 # Preview configuration
 _S2_TRUE_COLOR = [
@@ -147,7 +151,16 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     # Augment
     target_collection = item.collection_id or args.collection
-    with PREVIEW_GENERATION_DURATION.labels(collection=target_collection).time():
+
+    if PREVIEW_GENERATION_DURATION:
+        with PREVIEW_GENERATION_DURATION.labels(collection=target_collection).time():
+            augment(
+                item,
+                raster_base=args.raster_base,
+                collection_id=target_collection,
+                verbose=args.verbose,
+            )
+    else:
         augment(
             item,
             raster_base=args.raster_base,
