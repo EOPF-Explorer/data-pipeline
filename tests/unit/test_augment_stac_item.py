@@ -46,7 +46,7 @@ def test_get_s1_preview_query():
         ),
     )
 
-    query = _get_s1_preview_query(item)
+    query = _get_s1_preview_query(item, "0,219", "/measurements:grd")
 
     # Should extract path from asset href and use grd variable
     assert "variables=" in query

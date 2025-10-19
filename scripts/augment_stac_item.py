@@ -5,12 +5,14 @@ Uses ProjectionExtension for CRS metadata and simplified TiTiler integration.
 """
 
 import argparse
+import os
 import sys
 import urllib.parse
 from collections.abc import Sequence
 
 import httpx
 import zarr
+from preview_config import get_preview_config
 from pystac import Item, Link
 from pystac.extensions.projection import ProjectionExtension
 
@@ -19,14 +21,10 @@ try:
 except ImportError:
     PREVIEW_GENERATION_DURATION = None
 
-# Preview configuration
-_S2_TRUE_COLOR = [
-    "/measurements/reflectance/r10m/0:b04",
-    "/measurements/reflectance/r10m/0:b03",
-    "/measurements/reflectance/r10m/0:b02",
-]
-_S2_RESCALE = "0,0.1"
-_S1_POLARIZATIONS = ["vh", "vv", "hh", "hv"]
+# Configuration from environment
+S3_ENDPOINT = os.getenv("S3_ENDPOINT_URL", "https://s3.de.io.cloud.ovh.net")
+EXPLORER_BASE = os.getenv("EXPLORER_BASE_URL", "https://explorer.eopf.copernicus.eu")
+S1_POLARIZATIONS = ["vh", "vv", "hh", "hv"]  # Order of preference
 
 
 def _build_tilejson_query(variables: list[str], rescale: str | None = None) -> str:
@@ -39,13 +37,13 @@ def _build_tilejson_query(variables: list[str], rescale: str | None = None) -> s
     return "&".join(f"{k}={urllib.parse.quote_plus(v)}" for k, v in pairs)
 
 
-def _get_s1_preview_query(item: Item) -> str:
+def _get_s1_preview_query(item: Item, rescale: str, fallback: str | None) -> str:
     """S1 GRD preview (first available polarization)."""
-    for pol in _S1_POLARIZATIONS:
+    for pol in S1_POLARIZATIONS:
         if pol in item.assets and item.assets[pol].href and ".zarr/" in item.assets[pol].href:
             zarr_path = item.assets[pol].href.split(".zarr/")[1]
-            return _build_tilejson_query([f"/{zarr_path}:grd"], "0,219")
-    return _build_tilejson_query(["/measurements:grd"], "0,219")
+            return _build_tilejson_query([f"/{zarr_path}:grd"], rescale)
+    return _build_tilejson_query([fallback or "/measurements:grd"], rescale)
 
 
 def add_projection(item: Item) -> None:
@@ -76,14 +74,25 @@ def add_visualization(item: Item, raster_base: str, collection_id: str) -> None:
     if not zarr_asset:
         return
 
+    # Get collection preview config
+    config = get_preview_config(collection_id)
+    if not config:
+        return  # Skip preview for unknown collections
+
     # Build query
     is_s1 = collection_id.lower().startswith(("sentinel-1", "sentinel1"))
     query = (
-        _get_s1_preview_query(item) if is_s1 else _build_tilejson_query(_S2_TRUE_COLOR, _S2_RESCALE)
+        _get_s1_preview_query(item, config.rescale, config.fallback_variable)
+        if is_s1
+        else _build_tilejson_query(config.variables, config.rescale)
     )
 
     # Normalize href (s3:// → https://)
-    href = zarr_asset.href.replace("s3://eopf-", "https://s3.de.io.cloud.ovh.net/eopf-")
+    href = zarr_asset.href
+    if href.startswith("s3://"):
+        bucket = href.split("/")[2]
+        path = "/".join(href.split("/")[3:])
+        href = f"{S3_ENDPOINT}/{bucket}/{path}"
 
     # Add links
     encoded_url = urllib.parse.quote(href)
@@ -106,7 +115,7 @@ def add_visualization(item: Item, raster_base: str, collection_id: str) -> None:
     item.add_link(
         Link(
             "via",
-            f"https://explorer.eopf.copernicus.eu/collections/{collection_id.lower().replace('_', '-')}/items/{item.id}",
+            f"{EXPLORER_BASE}/collections/{collection_id.lower().replace('_', '-')}/items/{item.id}",
             title="EOPF Explorer",
         )
     )
