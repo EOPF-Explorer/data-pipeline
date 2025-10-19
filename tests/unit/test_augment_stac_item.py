@@ -35,7 +35,7 @@ def test_get_s1_preview_query():
         id="test",
         geometry={"type": "Point", "coordinates": [0, 0]},
         bbox=[0, 0, 1, 1],
-        datetime=None,
+        datetime="2025-01-01T00:00:00Z",
         properties={},
     )
     item.add_asset(
@@ -48,9 +48,9 @@ def test_get_s1_preview_query():
 
     query = _get_s1_preview_query(item)
 
-    # Should extract vh and use default rescale
+    # Should extract path from asset href and use grd variable
     assert "variables=" in query
-    assert "vh" in query.lower()
+    assert "measurements%2fgrd%2fiw_grdh_1sdv" in query.lower()
     assert "rescale=" in query
 
 
@@ -60,7 +60,7 @@ def test_add_projection_requires_zarr_asset():
         id="test",
         geometry={"type": "Point", "coordinates": [0, 0]},
         bbox=[0, 0, 1, 1],
-        datetime=None,
+        datetime="2025-01-01T00:00:00Z",
         properties={},
     )
     item.add_asset("not_zarr", Asset(href="http://example.com", media_type="image/tiff"))
