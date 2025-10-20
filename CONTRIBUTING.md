@@ -161,9 +161,10 @@ data-pipeline/
 │   ├── publish_amqp.py
 │   ├── register_stac.py
 │   └── augment_stac_item.py
-├── workflows/         # Argo Workflow templates
-│   ├── geozarr-convert-template.yaml
-│   └── payload.json
+├── workflows/         # Argo Workflow templates (kustomize)
+│   ├── base/         # Templates, RBAC, event sources
+│   ├── overlays/     # Environment-specific configs
+│   └── tests/        # Test workflows & payloads
 ├── examples/          # Standalone examples and interactive tools
 │   ├── simple_register.py
 │   └── operator.ipynb

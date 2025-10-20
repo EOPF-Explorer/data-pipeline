@@ -2,7 +2,7 @@ apiVersion: argoproj.io/v1alpha1
 kind: Sensor
 metadata:
   name: geozarr-sensor
-  namespace: devseed-staging
+  namespace: null
 spec:
   template:
     serviceAccountName: operate-workflow-sa
@@ -22,7 +22,6 @@ spec:
             kind: Workflow
             metadata:
               generateName: geozarr-
-              namespace: devseed-staging
               labels:
                 app: geozarr-pipeline
                 owner: devseed-staging

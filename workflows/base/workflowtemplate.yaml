@@ -1,0 +1,265 @@
+apiVersion: argoproj.io/v1alpha1
+kind: WorkflowTemplate
+metadata:
+  name: geozarr-pipeline
+  namespace: null
+spec:
+  serviceAccountName: operate-workflow-sa
+  entrypoint: main
+  archiveLogs: false
+  ttlStrategy:
+    secondsAfterCompletion: 86400
+  podGC:
+    strategy: OnWorkflowSuccess
+  workflowMetadata:
+    labels:
+      workflows.argoproj.io/workflow-template: geozarr-pipeline
+  arguments:
+    parameters:
+    - name: source_url
+    - name: item_id
+    - name: register_collection
+      value: sentinel-2-l2a-dp-test
+    - name: stac_api_url
+      value: https://api.explorer.eopf.copernicus.eu/stac
+    - name: raster_api_url
+      value: https://api.explorer.eopf.copernicus.eu/raster
+    - name: s3_endpoint
+      value: https://s3.de.io.cloud.ovh.net
+    - name: s3_output_bucket
+      value: esa-zarr-sentinel-explorer-fra
+    - name: s3_output_prefix
+      value: tests-output
+    - name: pipeline_image_version
+      value: feat-prometheus-metrics
+  templates:
+  - name: main
+    dag:
+      tasks:
+      - name: show-parameters
+        template: show-parameters
+      - name: convert
+        template: convert-geozarr
+        dependencies:
+        - show-parameters
+      - name: validate
+        template: validate
+        dependencies:
+        - convert
+      - name: register
+        template: register-stac
+        dependencies:
+        - validate
+      - name: augment
+        template: augment-stac
+        dependencies:
+        - register
+  - name: show-parameters
+    activeDeadlineSeconds: 60
+    container:
+      image: ghcr.io/eopf-explorer/data-pipeline:{{workflow.parameters.pipeline_image_version}}
+      imagePullPolicy: Always
+      command:
+      - /bin/sh
+      args:
+      - -c
+      - 'echo "=== Workflow Parameters ==="
+
+        echo "{{workflow.parameters}}"
+
+        '
+  - name: convert-geozarr
+    activeDeadlineSeconds: 3600
+    container:
+      image: ghcr.io/eopf-explorer/data-pipeline:{{workflow.parameters.pipeline_image_version}}
+      imagePullPolicy: Always
+      command:
+      - bash
+      - -c
+      resources:
+        requests:
+          memory: 6Gi
+          cpu: '2'
+        limits:
+          memory: 10Gi
+          cpu: '4'
+      args:
+      - "set -euo pipefail\n\necho \"\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\"\necho \"  STEP 1/4: GEOZARR CONVERSION\"\necho \"\u2550\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\"\necho \"\"\n\nSOURCE_URL=\"{{workflow.parameters.source_url}}\"\
+        \nCOLLECTION=\"{{workflow.parameters.register_collection}}\"\nOUTPUT_PATH=\"s3://{{workflow.parameters.s3_output_bucket}}/{{workflow.parameters.s3_output_prefix}}/$COLLECTION/{{workflow.parameters.item_id}}.zarr\"\
+        \n\necho \"\U0001F50D [1/6] Resolving source...\"\n# Check if source is STAC item or direct zarr\nif [[ \"$SOURCE_URL\"\
+        \ == *\"/items/\"* ]]; then\n  echo \"\U0001F4E1 Extracting Zarr URL from STAC item...\"\n  ZARR_URL=$(python3 /app/scripts/get_zarr_url.py\
+        \ \"$SOURCE_URL\")\n  echo \"\u2705 Zarr URL: $ZARR_URL\"\nelse\n  ZARR_URL=\"$SOURCE_URL\"\n  echo \"\u2705 Direct\
+        \ Zarr URL: $ZARR_URL\"\nfi\necho \"\"\n\necho \"\uFFFD [2/6] Getting conversion parameters for $COLLECTION...\"\n\
+        eval $(python3 /app/scripts/get_conversion_params.py --collection \"$COLLECTION\")\necho \"   Groups:      $ZARR_GROUPS\"\
+        \necho \"   Chunk:       $CHUNK\"\necho \"   Tile width:  $TILE_WIDTH\"\necho \"   Extra flags: $EXTRA_FLAGS\"\necho\
+        \ \"\"\n\necho \"\U0001F9F9 [3/6] Cleaning up existing output...\"\nif [ -f /app/scripts/cleanup_s3_path.py ]; then\n\
+        \  python3 /app/scripts/cleanup_s3_path.py \"$OUTPUT_PATH\" || echo \"\u26A0\uFE0F  Cleanup failed (may not exist\
+        \ yet)\"\nelse\n  echo \"\u2139\uFE0F  Skipping cleanup (script not available)\"\nfi\necho \"\"\n\necho \"\U0001F680\
+        \ [4/6] Starting GeoZarr conversion...\"\necho \"   Source:      $ZARR_URL\"\necho \"   Destination: $OUTPUT_PATH\"\
+        \necho \"   Collection:  $COLLECTION\"\necho \"\"\necho \"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\
+        \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\
+        \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\
+        \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\
+        \u2501\u2501\u2501\u2501\u2501\"\necho \"  CONVERSION LOGS (parallel processing with local Dask cluster)\"\necho \"\
+        \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\
+        \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\
+        \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\
+        \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\"\necho \"\"\n\n# Build\
+        \ conversion command with parallel processing\n# - Enable local Dask cluster for parallel chunk processing\n# - Higher\
+        \ CPU/memory resources support multiple Dask workers\neopf-geozarr convert \"$ZARR_URL\" \"$OUTPUT_PATH\" \\\n  --groups\
+        \ \"$ZARR_GROUPS\" \\\n  $EXTRA_FLAGS \\\n  --spatial-chunk $CHUNK \\\n  --tile-width $TILE_WIDTH \\\n  --dask-cluster\
+        \ \\\n  --verbose\n\necho \"\"\necho \"\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\
+        \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\
+        \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\
+        \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\
+        \u2501\u2501\"\necho \"\u2705 [6/6] Conversion completed successfully!\"\necho \"\u2501\u2501\u2501\u2501\u2501\u2501\
+        \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\
+        \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\
+        \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\
+        \u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\"\n"
+      env:
+      - name: PYTHONUNBUFFERED
+        value: '1'
+      - name: AWS_ACCESS_KEY_ID
+        valueFrom:
+          secretKeyRef:
+            name: geozarr-s3-credentials
+            key: AWS_ACCESS_KEY_ID
+      - name: AWS_SECRET_ACCESS_KEY
+        valueFrom:
+          secretKeyRef:
+            name: geozarr-s3-credentials
+            key: AWS_SECRET_ACCESS_KEY
+      - name: AWS_ENDPOINT_URL
+        value: '{{workflow.parameters.s3_endpoint}}'
+  - name: validate
+    activeDeadlineSeconds: 300
+    script:
+      image: ghcr.io/eopf-explorer/data-pipeline:{{workflow.parameters.pipeline_image_version}}
+      imagePullPolicy: Always
+      command:
+      - bash
+      resources:
+        requests:
+          memory: 2Gi
+        limits:
+          memory: 4Gi
+      source: "set -euo pipefail\n\necho \"\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\u2550\"\necho \"  STEP 2/4: GEOZARR VALIDATION\"\necho \"\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\"\necho \"\"\necho \"\U0001F50D Validating\
+        \ GeoZarr structure and compliance...\"\necho \"\"\n\npython /app/scripts/validate_geozarr.py \\\n  \"s3://{{workflow.parameters.s3_output_bucket}}/{{workflow.parameters.s3_output_prefix}}/{{workflow.parameters.register_collection}}/{{workflow.parameters.item_id}}.zarr\"\
+        \ \\\n  --item-id \"{{workflow.parameters.item_id}}\" \\\n  --verbose\n\necho \"\"\necho \"\u2705 Validation completed\
+        \ successfully!\"\n"
+      env:
+      - name: PYTHONUNBUFFERED
+        value: '1'
+      - name: AWS_ACCESS_KEY_ID
+        valueFrom:
+          secretKeyRef:
+            name: geozarr-s3-credentials
+            key: AWS_ACCESS_KEY_ID
+      - name: AWS_SECRET_ACCESS_KEY
+        valueFrom:
+          secretKeyRef:
+            name: geozarr-s3-credentials
+            key: AWS_SECRET_ACCESS_KEY
+      - name: AWS_ENDPOINT_URL
+        value: '{{workflow.parameters.s3_endpoint}}'
+      - name: ZARR_V3_EXPERIMENTAL_API
+        value: '1'
+  - name: register-stac
+    activeDeadlineSeconds: 300
+    script:
+      image: ghcr.io/eopf-explorer/data-pipeline:{{workflow.parameters.pipeline_image_version}}
+      imagePullPolicy: Always
+      command:
+      - bash
+      ports:
+      - containerPort: 8000
+        name: metrics
+      resources:
+        requests:
+          memory: 1Gi
+          cpu: 500m
+        limits:
+          memory: 2Gi
+          cpu: '1'
+      source: "set -euo pipefail\n\n# Start metrics server in background (for Prometheus scraping)\npython -c \"from scripts.metrics\
+        \ import start_metrics_server; start_metrics_server()\" &\nMETRICS_PID=$!\ntrap \"kill $METRICS_PID 2>/dev/null ||\
+        \ true\" EXIT\n\necho \"\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\"\necho \"  STEP 3/4: STAC REGISTRATION\"\necho \"\u2550\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\"\necho \"\"\necho \"\U0001F4DD Registering\
+        \ item in STAC API...\"\necho \"   Collection: {{workflow.parameters.register_collection}}\"\necho \"   Item ID: \
+        \   {{workflow.parameters.item_id}}\"\necho \"   STAC API:   {{workflow.parameters.stac_api_url}}\"\necho \"\"\n\n\
+        python /app/scripts/register_stac.py \\\n  --stac \"{{workflow.parameters.stac_api_url}}\" \\\n  --collection \"{{workflow.parameters.register_collection}}\"\
+        \ \\\n  --item-id \"{{workflow.parameters.item_id}}\" \\\n  --output \"s3://{{workflow.parameters.s3_output_bucket}}/{{workflow.parameters.s3_output_prefix}}/{{workflow.parameters.register_collection}}/{{workflow.parameters.item_id}}.zarr\"\
+        \ \\\n  --src-item \"{{workflow.parameters.source_url}}\" \\\n  --s3-endpoint \"{{workflow.parameters.s3_endpoint}}\"\
+        \ \\\n  --mode \"update\"\n\necho \"\"\necho \"\u2705 Registration completed successfully!\"\n"
+      env:
+      - name: PYTHONUNBUFFERED
+        value: '1'
+  - name: augment-stac
+    activeDeadlineSeconds: 300
+    script:
+      image: ghcr.io/eopf-explorer/data-pipeline:{{workflow.parameters.pipeline_image_version}}
+      imagePullPolicy: Always
+      command:
+      - bash
+      resources:
+        requests:
+          memory: 1Gi
+          cpu: 500m
+        limits:
+          memory: 2Gi
+          cpu: '1'
+      source: "set -euo pipefail\n\n# Start metrics server in background (for Prometheus scraping)\npython -c \"from scripts.metrics\
+        \ import start_metrics_server; start_metrics_server()\" &\nMETRICS_PID=$!\ntrap \"kill $METRICS_PID 2>/dev/null ||\
+        \ true\" EXIT\n\necho \"\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\"\necho \"  STEP 4/4: STAC AUGMENTATION\"\necho \"\u2550\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\"\necho \"\"\necho \"\U0001F3A8 Adding preview\
+        \ links and metadata to STAC item...\"\necho \"   Collection:  {{workflow.parameters.register_collection}}\"\necho\
+        \ \"   Item ID:     {{workflow.parameters.item_id}}\"\necho \"   Raster API:  {{workflow.parameters.raster_api_url}}\"\
+        \necho \"\"\n\npython /app/scripts/augment_stac_item.py \\\n  --stac \"{{workflow.parameters.stac_api_url}}\" \\\n\
+        \  --raster-base \"{{workflow.parameters.raster_api_url}}\" \\\n  --collection \"{{workflow.parameters.register_collection}}\"\
+        \ \\\n  --item-id \"{{workflow.parameters.item_id}}\" \\\n  --verbose\n\necho \"\"\necho \"\u2705 Augmentation completed\
+        \ successfully!\"\necho \"\"\necho \"\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\u2550\u2550\"\necho \"  \U0001F389 PIPELINE COMPLETED SUCCESSFULLY!\"\necho \"\u2550\u2550\
+        \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\
+        \u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\"\necho \"\"\
+        \necho \"\U0001F4CD View item in STAC API:\"\necho \"   {{workflow.parameters.stac_api_url}}/collections/{{workflow.parameters.register_collection}}/items/{{workflow.parameters.item_id}}\"\
+        \necho \"\"\necho \"\U0001F4E6 GeoZarr output location:\"\necho \"   s3://{{workflow.parameters.s3_output_bucket}}/{{workflow.parameters.s3_output_prefix}}/{{workflow.parameters.register_collection}}/{{workflow.parameters.item_id}}.zarr\"\
+        \necho \"\"\n"
+      env:
+      - name: PYTHONUNBUFFERED
+        value: '1'
