@@ -19,12 +19,13 @@ spec:
       image: ghcr.io/eopf-explorer/data-pipeline:v25-dataarray
       command: ["python3"]
       args:
-      - /app/scripts/benchmark_comparison.py
-      - --geozarr-url={{workflow.parameters.geozarr_url}}
-      - --eopf-url={{workflow.parameters.eopf_url}}
+      - /app/scripts/benchmark_tile_performance.py
+      - --stac-api=https://api.explorer.eopf.copernicus.eu/stac
+      - --raster-api=https://api.explorer.eopf.copernicus.eu/raster
+      - --collection=sentinel-2-l2a
       - --item-id={{workflow.parameters.item_id}}
-      - --windows=5
-      - --window-size=512
+      - --num-tiles=5
+      - --zoom-levels=10,12,14
       env:
       - name: PYTHONUNBUFFERED
         value: "1"
