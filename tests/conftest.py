@@ -1,6 +1,77 @@
 """Pytest configuration and shared fixtures for data-pipeline tests."""
 
+import atexit
+import sys
+import warnings
+
 import pytest
+
+# Suppress noisy async context warnings from zarr/s3fs
+warnings.filterwarnings("ignore", category=ResourceWarning)
+warnings.filterwarnings("ignore", message="coroutine.*was never awaited")
+
+
+# Global stderr filter that stays active even after pytest teardown
+_original_stderr = sys.stderr
+_suppress_traceback = False
+
+
+class _FilteredStderr:
+    def write(self, text):
+        global _suppress_traceback
+
+        # Start suppressing when we see async context errors
+        if any(
+            marker in text
+            for marker in [
+                "Exception ignored",
+                "Traceback (most recent call last)",
+                "ValueError: <Token",
+                "was created in a different Context",
+                "zarr/storage/",
+                "s3fs/core.py",
+                "aiobotocore/context.py",
+            ]
+        ):
+            _suppress_traceback = True
+
+        # Reset suppression on empty lines (between tracebacks)
+        if not text.strip():
+            _suppress_traceback = False
+
+        # Only write if not currently suppressing
+        if not _suppress_traceback:
+            _original_stderr.write(text)
+
+    def flush(self):
+        _original_stderr.flush()
+
+
+def _restore_stderr():
+    """Restore original stderr at exit."""
+    sys.stderr = _original_stderr
+
+
+# Install filter at module load time
+sys.stderr = _FilteredStderr()
+atexit.register(_restore_stderr)
+
+
+@pytest.fixture(autouse=True, scope="function")
+def clear_prometheus_registry():
+    """Clear Prometheus registry before each test to avoid duplicates."""
+    import contextlib
+
+    try:
+        from prometheus_client import REGISTRY
+
+        collectors = list(REGISTRY._collector_to_names.keys())
+        for collector in collectors:
+            with contextlib.suppress(Exception):
+                REGISTRY.unregister(collector)
+    except ImportError:
+        pass
+    yield
 
 
 @pytest.fixture

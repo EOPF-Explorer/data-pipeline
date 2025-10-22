@@ -224,3 +224,42 @@ class TestEnvironmentVariableOverrides:
         params = get_conversion_params("sentinel-2-l2a")
         assert params["groups"] == "/quality/l2a_quicklook/r10m"
         assert params["spatial_chunk"] == 4096
+
+    def test_missing_default_collection_raises(self, monkeypatch):
+        """Test error when default collection config is missing."""
+        # Temporarily remove default collection from registry
+        import scripts.get_conversion_params as gcp_module
+
+        original_configs = gcp_module._COLLECTION_CONFIGS.copy()
+
+        try:
+            # Test with unknown collection and no default
+            gcp_module._COLLECTION_CONFIGS.pop("sentinel-2-l2a", None)
+            with pytest.raises(ValueError, match="No config for collection"):
+                get_conversion_params("unknown-collection")
+        finally:
+            gcp_module._COLLECTION_CONFIGS.update(original_configs)
+
+
+class TestMainCLIErrorHandling:
+    """Test CLI error handling."""
+
+    def test_invalid_collection_exits_with_error(self, capsys, monkeypatch):
+        """Test main() exits with error for invalid collection."""
+        # Temporarily break the config to trigger ValueError
+        import scripts.get_conversion_params as gcp_module
+
+        original_configs = gcp_module._COLLECTION_CONFIGS.copy()
+
+        try:
+            # Remove all configs to force error
+            gcp_module._COLLECTION_CONFIGS.clear()
+
+            with pytest.raises(SystemExit) as exc_info:
+                main(["--collection", "invalid-collection"])
+
+            assert exc_info.value.code == 1
+            captured = capsys.readouterr()
+            assert "Error:" in captured.err
+        finally:
+            gcp_module._COLLECTION_CONFIGS.update(original_configs)

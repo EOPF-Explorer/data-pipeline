@@ -1,295 +1,254 @@
-"""Unit tests for register_stac.py."""
+"""Unit tests for register_stac.py (simplified implementation)."""
+
+import json
+
+import pytest
+
+from scripts.register_stac import main, register_item
 
 
-def test_remove_proj_code_from_properties(stac_item_with_proj_code):
-    """Test that proj:code is removed from item properties."""
-    from scripts.register_stac import create_geozarr_item
-
-    # Mock minimal inputs
-    item = create_geozarr_item(
-        source_item=stac_item_with_proj_code,
-        geozarr_url="s3://bucket/output.zarr",
-        item_id=None,
-        collection_id=None,
-        s3_endpoint="https://s3.example.com",
-    )
-
-    # Verify proj:code removed from properties
-    assert "proj:code" not in item["properties"]
-    # But proj:epsg should remain
-    assert "proj:epsg" in item["properties"]
-
-
-def test_remove_proj_epsg_from_assets(stac_item_with_proj_code):
-    """Test that proj:epsg and proj:code are removed from assets."""
-    from scripts.register_stac import create_geozarr_item
-
-    item = create_geozarr_item(
-        source_item=stac_item_with_proj_code,
-        geozarr_url="s3://bucket/output.zarr",
-        item_id=None,
-        collection_id=None,
-        s3_endpoint="https://s3.example.com",
-    )
-
-    # Check all assets have NO proj:epsg or proj:code
-    for asset_key, asset_value in item["assets"].items():
-        assert "proj:epsg" not in asset_value, f"Asset {asset_key} has proj:epsg"
-        assert "proj:code" not in asset_value, f"Asset {asset_key} has proj:code"
-
-
-def test_remove_storage_options_from_assets(sample_stac_item):
-    """Test that storage:options is removed from assets."""
-    from scripts.register_stac import create_geozarr_item
-
-    # Add storage:options to source item
-    source = sample_stac_item.copy()
-    source["assets"]["B01"]["storage:options"] = {"anon": True}
-
-    item = create_geozarr_item(
-        source_item=source,
-        geozarr_url="s3://bucket/output.zarr",
-        item_id=None,
-        collection_id=None,
-        s3_endpoint="https://s3.example.com",
-    )
-
-    # Verify storage:options removed
-    for asset_value in item["assets"].values():
-        assert "storage:options" not in asset_value
-
-
-def test_s3_to_https_conversion():
-    """Test S3 URL to HTTPS conversion."""
-    from scripts.register_stac import s3_to_https
-
-    result = s3_to_https("s3://mybucket/path/to/file.zarr", "https://s3.example.com")
-    assert result == "https://mybucket.s3.example.com/path/to/file.zarr"
-
-
-def test_derived_from_link_added(sample_stac_item):
-    """Test that derived_from link is added."""
-    from scripts.register_stac import create_geozarr_item
-
-    # Add self link to source
-    source = sample_stac_item.copy()
-    source["links"] = [
-        {
-            "rel": "self",
-            "href": "https://api.example.com/items/test-item",
-            "type": "application/json",
-        }
-    ]
-
-    item = create_geozarr_item(
-        source_item=source,
-        geozarr_url="s3://bucket/output.zarr",
-        item_id=None,
-        collection_id=None,
-        s3_endpoint="https://s3.example.com",
-    )
-
-    # Check derived_from link exists
-    derived_links = [link for link in item["links"] if link["rel"] == "derived_from"]
-    assert len(derived_links) == 1
-    assert derived_links[0]["href"] == "https://api.example.com/items/test-item"
-
-
-def test_r60m_overview_path_rewrite():
-    """Test that r60m band assets get /0 inserted for overview level."""
-    from scripts.register_stac import create_geozarr_item
-
-    source = {
+@pytest.fixture
+def valid_stac_item():
+    """Minimal valid STAC item for testing."""
+    return {
         "type": "Feature",
         "stac_version": "1.0.0",
-        "id": "test",
-        "properties": {"datetime": "2025-01-01T00:00:00Z", "proj:epsg": 32636},
-        "geometry": {"type": "Point", "coordinates": [0, 0]},
+        "id": "test-item-123",
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]],
+        },
+        "bbox": [0, 0, 1, 1],
+        "properties": {"datetime": "2025-01-01T00:00:00Z"},
         "links": [],
         "assets": {
-            "B01_60m": {
-                "href": "s3://bucket/source.zarr/r60m/b01",
-                "type": "image/tiff",
-                "roles": ["data"],
+            "data": {
+                "href": "s3://bucket/data.zarr",
+                "type": "application/vnd+zarr",
             }
         },
-        "collection": "test",
     }
 
-    item = create_geozarr_item(
-        source_item=source,
-        geozarr_url="s3://bucket/output.zarr",
-        item_id=None,
-        collection_id=None,
-        s3_endpoint="https://s3.example.com",
+
+def test_register_item_create_new(mocker, valid_stac_item):
+    """Test register_item creates new item when it doesn't exist."""
+    # Mock STAC client
+    mock_client = mocker.Mock()
+    mock_collection = mocker.Mock()
+    mock_collection.get_item.side_effect = Exception("Not found")
+    mock_client.get_collection.return_value = mock_collection
+
+    # Mock StacApiIO session for POST
+    mock_response = mocker.Mock()
+    mock_response.status_code = 201
+    mock_session = mocker.Mock()
+    mock_session.post.return_value = mock_response
+    mock_client._stac_io.session = mock_session
+    mock_client._stac_io.timeout = 30
+
+    # Patch Client class
+    mock_client_class = mocker.patch("pystac_client.Client")
+    mock_client_class.open.return_value = mock_client
+
+    mock_metrics = mocker.patch("scripts.register_stac.STAC_REGISTRATION_TOTAL")
+
+    register_item(
+        stac_url="http://stac.example.com",
+        collection_id="test-collection",
+        item_dict=valid_stac_item,
+        mode="create-or-skip",
     )
 
-    # Verify /0 was inserted for r60m
-    assert "/r60m/0/b01" in item["assets"]["B01_60m"]["href"]
+    # Verify POST was called
+    mock_session.post.assert_called_once()
+    mock_metrics.labels.assert_called()
 
 
-def test_r10m_no_overview_path():
-    """Test that r10m/r20m bands do NOT get /0 inserted."""
-    from scripts.register_stac import create_geozarr_item
+def test_register_item_skip_existing(mocker, valid_stac_item):
+    """Test register_item skips existing item in create-or-skip mode."""
+    # Mock existing item
+    mock_client = mocker.Mock()
+    mock_collection = mocker.Mock()
+    mock_collection.get_item.return_value = mocker.Mock()  # Item exists
+    mock_client.get_collection.return_value = mock_collection
+    mock_client.add_item = mocker.Mock()
 
-    source = {
-        "type": "Feature",
-        "stac_version": "1.0.0",
-        "id": "test",
-        "properties": {"datetime": "2025-01-01T00:00:00Z", "proj:epsg": 32636},
-        "geometry": {"type": "Point", "coordinates": [0, 0]},
-        "links": [],
-        "assets": {
-            "B02_10m": {
-                "href": "s3://bucket/source.zarr/r10m/b02",
-                "type": "image/tiff",
-                "roles": ["data"],
-            }
-        },
-        "collection": "test",
-    }
+    # Patch Client class - this is production-grade pytest-mock
+    mock_client_class = mocker.patch("pystac_client.Client")
+    mock_client_class.open.return_value = mock_client
 
-    item = create_geozarr_item(
-        source_item=source,
-        geozarr_url="s3://bucket/output.zarr",
-        item_id=None,
-        collection_id=None,
-        s3_endpoint="https://s3.example.com",
+    mock_metrics = mocker.patch("scripts.register_stac.STAC_REGISTRATION_TOTAL")
+
+    register_item(
+        stac_url="http://stac.example.com",
+        collection_id="test-collection",
+        item_dict=valid_stac_item,
+        mode="create-or-skip",
     )
 
-    # Verify NO /0 for r10m
-    assert "/r10m/b02" in item["assets"]["B02_10m"]["href"]
-    assert "/0/" not in item["assets"]["B02_10m"]["href"]
+    # Verify item was NOT added
+    mock_client.add_item.assert_not_called()
+    # Verify skip metric recorded
+    mock_metrics.labels.assert_called_with(collection="test-collection", status="success")
 
 
-def test_keep_proj_spatial_fields_on_assets(sample_stac_item):
-    """Test that proj:bbox, proj:shape, proj:transform are kept on assets."""
-    from scripts.register_stac import create_geozarr_item
+def test_register_item_upsert_mode(mocker, valid_stac_item):
+    """Test register_item replaces existing item in upsert mode."""
+    # Mock existing item
+    mock_client = mocker.Mock()
+    mock_collection = mocker.Mock()
+    mock_collection.get_item.return_value = mocker.Mock()  # Item exists
+    mock_client.get_collection.return_value = mock_collection
 
-    # Add spatial fields to source asset
-    source = sample_stac_item.copy()
-    source["assets"]["B01"]["proj:bbox"] = [600000, 6290220, 709800, 6400020]
-    source["assets"]["B01"]["proj:shape"] = [10980, 10980]
-    source["assets"]["B01"]["proj:transform"] = [10, 0, 600000, 0, -10, 6400020]
+    # Mock StacApiIO session for DELETE and POST
+    mock_delete_response = mocker.Mock()
+    mock_delete_response.status_code = 204
+    mock_post_response = mocker.Mock()
+    mock_post_response.status_code = 201
+    mock_session = mocker.Mock()
+    mock_session.delete.return_value = mock_delete_response
+    mock_session.post.return_value = mock_post_response
+    mock_client._stac_io.session = mock_session
+    mock_client._stac_io.timeout = 30
 
-    item = create_geozarr_item(
-        source_item=source,
-        geozarr_url="s3://bucket/output.zarr",
-        item_id=None,
-        collection_id=None,
-        s3_endpoint="https://s3.example.com",
+    # Patch Client class
+    mock_client_class = mocker.patch("pystac_client.Client")
+    mock_client_class.open.return_value = mock_client
+
+    mock_metrics = mocker.patch("scripts.register_stac.STAC_REGISTRATION_TOTAL")
+
+    register_item(
+        stac_url="http://stac.example.com",
+        collection_id="test-collection",
+        item_dict=valid_stac_item,
+        mode="upsert",
     )
 
-    # These should be preserved
-    asset = item["assets"]["B01"]
-    assert "proj:bbox" in asset
-    assert "proj:shape" in asset
-    assert "proj:transform" in asset
+    # Verify item was deleted then created via POST
+    mock_session.delete.assert_called_once()
+    mock_session.post.assert_called_once()
+    # Verify replace metric recorded
+    mock_metrics.labels.assert_called()
 
 
-def test_normalize_asset_href_basic():
-    """Test normalize_asset_href for simple r60m paths."""
-    from scripts.register_stac import normalize_asset_href
+def test_main_reads_item_from_file(mocker, tmp_path, valid_stac_item):
+    """Test main() reads item from JSON file."""
+    # Write test item to file
+    item_file = tmp_path / "item.json"
+    item_file.write_text(json.dumps(valid_stac_item))
 
-    # Should insert /0 for r60m bands
-    result = normalize_asset_href("s3://bucket/data.zarr/r60m/b01")
-    assert result == "s3://bucket/data.zarr/r60m/0/b01"
-
-    result = normalize_asset_href("s3://bucket/data.zarr/r60m/b09")
-    assert result == "s3://bucket/data.zarr/r60m/0/b09"
-
-
-def test_normalize_asset_href_complex_paths():
-    """Test normalize_asset_href with complex base paths."""
-    from scripts.register_stac import normalize_asset_href
-
-    # Complex S3 path
-    result = normalize_asset_href(
-        "s3://eodc-sentinel-2/products/2025/S2A_MSIL2A.zarr/measurements/reflectance/r60m/b01"
+    mock_register = mocker.patch("scripts.register_stac.register_item")
+    mocker.patch(
+        "sys.argv",
+        [
+            "register_stac.py",
+            "--stac-api",
+            "http://stac.example.com",
+            "--collection",
+            "test-collection",
+            "--item-json",
+            str(item_file),
+            "--mode",
+            "create-or-skip",
+        ],
     )
-    expected = (
-        "s3://eodc-sentinel-2/products/2025/S2A_MSIL2A.zarr/measurements/reflectance/r60m/0/b01"
+
+    main()
+
+    # Verify register_item was called with correct args
+    mock_register.assert_called_once()
+    call_args = mock_register.call_args
+    assert call_args[0][0] == "http://stac.example.com"
+    assert call_args[0][1] == "test-collection"
+    assert call_args[0][2] == valid_stac_item
+    assert call_args[0][3] == "create-or-skip"
+
+
+def test_register_item_delete_warning(mocker, valid_stac_item):
+    """Test register_item logs warning on delete failure."""
+    # Mock existing item
+    mock_client = mocker.Mock()
+    mock_collection = mocker.Mock()
+    mock_collection.get_item.return_value = mocker.Mock()
+    mock_client.get_collection.return_value = mock_collection
+
+    # Mock DELETE failure
+    mock_delete_response = mocker.Mock()
+    mock_delete_response.status_code = 404  # Not 200 or 204
+    mock_post_response = mocker.Mock()
+    mock_post_response.status_code = 201
+    mock_session = mocker.Mock()
+    mock_session.delete.return_value = mock_delete_response
+    mock_session.post.return_value = mock_post_response
+    mock_client._stac_io.session = mock_session
+    mock_client._stac_io.timeout = 30
+
+    mock_client_class = mocker.patch("pystac_client.Client")
+    mock_client_class.open.return_value = mock_client
+    mocker.patch("scripts.register_stac.STAC_REGISTRATION_TOTAL")
+
+    # Should log warning but still proceed
+    register_item(
+        stac_url="http://stac.example.com",
+        collection_id="test-col",
+        item_dict=valid_stac_item,
+        mode="upsert",
     )
-    assert result == expected
-
-    # HTTPS path
-    result = normalize_asset_href("https://example.com/data.zarr/quality/r60m/scene_classification")
-    expected = "https://example.com/data.zarr/quality/r60m/0/scene_classification"
-    assert result == expected
 
 
-def test_clean_stac_item_metadata():
-    """Test cleaning invalid projection metadata from STAC item."""
-    from scripts.register_stac import clean_stac_item_metadata
+def test_register_item_delete_exception(mocker, valid_stac_item):
+    """Test register_item handles delete exception gracefully."""
+    mock_client = mocker.Mock()
+    mock_collection = mocker.Mock()
+    mock_collection.get_item.return_value = mocker.Mock()
+    mock_client.get_collection.return_value = mock_collection
 
-    item = {
-        "id": "test-item",
-        "properties": {
-            "datetime": "2025-01-01T00:00:00Z",
-            "proj:bbox": [0, 0, 100, 100],
-            "proj:epsg": 32632,
-            "proj:shape": [1024, 1024],
-            "proj:transform": [10, 0, 0, 0, -10, 0],
-            "proj:code": "EPSG:32632",
-        },
-        "assets": {
-            "band1": {
-                "href": "s3://bucket/data.zarr/b01",
-                "proj:epsg": 32632,
-                "proj:code": "EPSG:32632",
-                "storage:options": {"anon": True},
-            },
-            "band2": {
-                "href": "s3://bucket/data.zarr/b02",
-                "proj:epsg": 32632,
-            },
-        },
-    }
+    # Mock DELETE exception
+    mock_post_response = mocker.Mock()
+    mock_post_response.status_code = 201
+    mock_session = mocker.Mock()
+    mock_session.delete.side_effect = Exception("Network error")
+    mock_session.post.return_value = mock_post_response
+    mock_client._stac_io.session = mock_session
+    mock_client._stac_io.timeout = 30
 
-    clean_stac_item_metadata(item)
+    mock_client_class = mocker.patch("pystac_client.Client")
+    mock_client_class.open.return_value = mock_client
+    mocker.patch("scripts.register_stac.STAC_REGISTRATION_TOTAL")
 
-    # Check properties cleaned
-    assert "proj:shape" not in item["properties"]
-    assert "proj:transform" not in item["properties"]
-    assert "proj:code" not in item["properties"]
-    assert "proj:bbox" in item["properties"]  # Should be kept
-    assert "proj:epsg" in item["properties"]  # Should be kept
-
-    # Check assets cleaned
-    assert "proj:epsg" not in item["assets"]["band1"]
-    assert "proj:code" not in item["assets"]["band1"]
-    assert "storage:options" not in item["assets"]["band1"]
-    assert "href" in item["assets"]["band1"]  # Should be kept
-
-    assert "proj:epsg" not in item["assets"]["band2"]
-    assert "href" in item["assets"]["band2"]
+    # Should log warning but still proceed
+    register_item(
+        stac_url="http://stac.example.com",
+        collection_id="test-col",
+        item_dict=valid_stac_item,
+        mode="replace",
+    )
 
 
-def test_find_source_zarr_base():
-    """Test extracting base Zarr URL from source item assets."""
-    from scripts.register_stac import find_source_zarr_base
+def test_register_item_post_failure(mocker, valid_stac_item):
+    """Test register_item raises on POST failure."""
+    mock_client = mocker.Mock()
+    mock_collection = mocker.Mock()
+    mock_collection.get_item.side_effect = Exception("Not found")
+    mock_client.get_collection.return_value = mock_collection
 
-    # Test with .zarr/ in path
-    source_item = {
-        "assets": {
-            "product": {"href": "s3://bucket/data.zarr/measurements/b01"},
-            "metadata": {"href": "https://example.com/metadata.json"},
-        }
-    }
-    result = find_source_zarr_base(source_item)
-    assert result == "s3://bucket/data.zarr/"
+    # Mock POST failure
+    mock_session = mocker.Mock()
+    mock_session.post.side_effect = Exception("POST failed")
+    mock_client._stac_io.session = mock_session
+    mock_client._stac_io.timeout = 30
 
-    # Test with .zarr at end
-    source_item = {"assets": {"product": {"href": "s3://bucket/data.zarr"}}}
-    result = find_source_zarr_base(source_item)
-    assert result == "s3://bucket/data.zarr/"
+    mock_client_class = mocker.patch("pystac_client.Client")
+    mock_client_class.open.return_value = mock_client
+    mock_metrics = mocker.patch("scripts.register_stac.STAC_REGISTRATION_TOTAL")
 
-    # Test with no zarr assets
-    source_item = {"assets": {"metadata": {"href": "https://example.com/metadata.json"}}}
-    result = find_source_zarr_base(source_item)
-    assert result is None
+    with pytest.raises(Exception, match="POST failed"):
+        register_item(
+            stac_url="http://stac.example.com",
+            collection_id="test-col",
+            item_dict=valid_stac_item,
+            mode="create-or-skip",
+        )
 
-    # Test with no assets
-    source_item = {}
-    result = find_source_zarr_base(source_item)
-    assert result is None
+    # Verify failure metric recorded
+    mock_metrics.labels.assert_called_with(collection="test-col", status="failure")

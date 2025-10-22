@@ -1,11 +1,11 @@
-"""Tests for get_zarr_url.py - STAC asset URL extraction."""
+"""Tests for utils.py - STAC asset URL extraction."""
 
 import json
 from unittest.mock import mock_open, patch
 
 import pytest
 
-from scripts.get_zarr_url import get_zarr_url
+from scripts.utils import get_zarr_url
 
 
 class TestGetZarrUrl:
@@ -22,7 +22,7 @@ class TestGetZarrUrl:
                 }
             }
         )
-        with patch("scripts.get_zarr_url.urlopen", mock_open(read_data=stac_json.encode())):
+        with patch("scripts.utils.urlopen", mock_open(read_data=stac_json.encode())):
             url = get_zarr_url("https://stac.example.com/item")
             assert url == "s3://bucket/product.zarr"
 
@@ -37,7 +37,7 @@ class TestGetZarrUrl:
                 }
             }
         )
-        with patch("scripts.get_zarr_url.urlopen", mock_open(read_data=stac_json.encode())):
+        with patch("scripts.utils.urlopen", mock_open(read_data=stac_json.encode())):
             url = get_zarr_url("https://stac.example.com/item")
             assert url == "s3://bucket/data.zarr"
 
@@ -51,7 +51,7 @@ class TestGetZarrUrl:
                 }
             }
         )
-        with patch("scripts.get_zarr_url.urlopen", mock_open(read_data=stac_json.encode())):
+        with patch("scripts.utils.urlopen", mock_open(read_data=stac_json.encode())):
             url = get_zarr_url("https://stac.example.com/item")
             assert url == "s3://bucket/measurements.zarr"
 
@@ -66,7 +66,7 @@ class TestGetZarrUrl:
             }
         )
         with (
-            patch("scripts.get_zarr_url.urlopen", mock_open(read_data=stac_json.encode())),
+            patch("scripts.utils.urlopen", mock_open(read_data=stac_json.encode())),
             pytest.raises(RuntimeError, match="No Zarr asset found"),
         ):
             get_zarr_url("https://stac.example.com/item")
@@ -75,7 +75,7 @@ class TestGetZarrUrl:
         """Raises RuntimeError if assets dict is empty."""
         stac_json = json.dumps({"assets": {}})
         with (
-            patch("scripts.get_zarr_url.urlopen", mock_open(read_data=stac_json.encode())),
+            patch("scripts.utils.urlopen", mock_open(read_data=stac_json.encode())),
             pytest.raises(RuntimeError, match="No Zarr asset found"),
         ):
             get_zarr_url("https://stac.example.com/item")
@@ -84,7 +84,7 @@ class TestGetZarrUrl:
         """Raises RuntimeError if no assets key in item."""
         stac_json = json.dumps({"id": "test-item"})
         with (
-            patch("scripts.get_zarr_url.urlopen", mock_open(read_data=stac_json.encode())),
+            patch("scripts.utils.urlopen", mock_open(read_data=stac_json.encode())),
             pytest.raises(RuntimeError, match="No Zarr asset found"),
         ):
             get_zarr_url("https://stac.example.com/item")
@@ -99,7 +99,7 @@ class TestGetZarrUrl:
                 }
             }
         )
-        with patch("scripts.get_zarr_url.urlopen", mock_open(read_data=stac_json.encode())):
+        with patch("scripts.utils.urlopen", mock_open(read_data=stac_json.encode())):
             url = get_zarr_url("https://stac.example.com/item")
             assert url == "s3://bucket/data.zarr"
 
@@ -112,6 +112,22 @@ class TestGetZarrUrl:
                 }
             }
         )
-        with patch("scripts.get_zarr_url.urlopen", mock_open(read_data=stac_json.encode())):
+        with patch("scripts.utils.urlopen", mock_open(read_data=stac_json.encode())):
             url = get_zarr_url("https://stac.example.com/item")
             assert url == "https://example.com/data.zarr"
+
+
+def test_extract_item_id_from_stac_url():
+    """Test extracting item ID from STAC item URL."""
+    from scripts.utils import extract_item_id
+
+    url = "https://stac.example.com/collections/sentinel-2-l2a/items/S2A_MSIL2A_20251021T101101_N0511_R022_T32TNR_20251021T115713"
+    assert extract_item_id(url) == "S2A_MSIL2A_20251021T101101_N0511_R022_T32TNR_20251021T115713"
+
+
+def test_extract_item_id_with_trailing_slash():
+    """Test extracting item ID from URL with trailing slash."""
+    from scripts.utils import extract_item_id
+
+    url = "https://stac.example.com/collections/sentinel-2-l2a/items/S2A_MSIL2A_20251021/"
+    assert extract_item_id(url) == "S2A_MSIL2A_20251021"
