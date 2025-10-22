@@ -1,0 +1,26 @@
+apiVersion: argoproj.io/v1alpha1
+kind: EventSource
+metadata:
+  name: rabbitmq-geozarr
+  namespace: null
+spec:
+  amqp:
+    geozarr-events:
+      # Use auth from secret instead of hardcoded credentials
+      url: amqp://rabbitmq.core.svc.cluster.local:5672/
+      auth:
+        username:
+          name: rabbitmq-credentials
+          key: username
+        password:
+          name: rabbitmq-credentials
+          key: password
+      exchangeName: geozarr
+      exchangeType: topic
+      routingKey: eopf.items.*
+      jsonBody: true
+      connectionBackoff:
+        duration: 10s
+        factor: 2
+        jitter: 0.1
+        steps: 5
