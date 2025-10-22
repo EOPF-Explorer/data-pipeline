@@ -487,7 +487,7 @@ requires-dist = [
     { name = "pre-commit", marker = "extra == 'dev'", specifier = ">=3.7.0" },
     { name = "prometheus-client", specifier = ">=0.19.0" },
     { name = "pystac", specifier = ">=1.10.0" },
-    { name = "pystac-client", specifier = ">=0.8.0" },
+    { name = "pystac-client", specifier = ">=0.7.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.1.0" },
     { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.12.0" },
