@@ -10,7 +10,6 @@ from typing import Any
 
 from metrics import STAC_REGISTRATION_TOTAL
 from pystac import Item
-from pystac_client import Client
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -22,7 +21,10 @@ def register_item(
     item_dict: dict[str, Any],
     mode: str = "create-or-skip",
 ) -> None:
-    """Register STAC item using pystac-client.
+    """Register STAC item to STAC API with transaction support.
+
+    Uses pystac-client's StacApiIO for HTTP operations to leverage
+    existing session management, retry logic, and request modification.
 
     Args:
         stac_url: STAC API URL
@@ -30,11 +32,16 @@ def register_item(
         item_dict: STAC item as dict
         mode: create-or-skip | upsert | replace
     """
-    # Validate before sending
+    from pystac_client import Client
+
+    # Load item (skip local validation - STAC API will validate)
+    # Working production items have inconsistent raster properties that validate
+    # successfully in the STAC API but fail local pystac validation
     item = Item.from_dict(item_dict)
-    item.validate()
 
     item_id = item.id
+
+    # Open client to reuse its StacApiIO session
     client = Client.open(stac_url)
 
     # Check existence
@@ -47,24 +54,48 @@ def register_item(
     if exists:
         if mode == "create-or-skip":
             logger.info(f"Item {item_id} exists, skipping")
-            STAC_REGISTRATION_TOTAL.labels(
-                collection=collection_id, operation="skip", status="success"
-            ).inc()
+            STAC_REGISTRATION_TOTAL.labels(collection=collection_id, status="success").inc()
             return
 
-        # Delete then create for upsert/replace
+        # Delete for upsert/replace using StacApiIO's session
         logger.info(f"Replacing {item_id}")
         delete_url = f"{stac_url}/collections/{collection_id}/items/{item_id}"
-        client._stac_io._session.delete(delete_url)
+        try:
+            # Use the session directly for DELETE (not in StacApiIO.request)
+            resp = client._stac_io.session.delete(delete_url, timeout=30)
+            if resp.status_code not in (200, 204):
+                logger.warning(f"Delete returned {resp.status_code}")
+        except Exception as e:
+            logger.warning(f"Delete failed (item may not exist): {e}")
 
-    # Create item
-    client.add_item(item, collection_id)
-    logger.info(f"✅ Registered {item_id}")
-    STAC_REGISTRATION_TOTAL.labels(
-        collection=collection_id,
-        operation="create" if not exists else "replace",
-        status="success",
-    ).inc()
+    # Create item via POST using StacApiIO's session
+    # Note: StacApiIO.request() only accepts status 200, but STAC Transaction
+    # extension returns 201 for creates, so we use the session directly
+    create_url = f"{stac_url}/collections/{collection_id}/items"
+    item_json = item.to_dict()
+
+    try:
+        logger.debug(f"POST {create_url}")
+        response = client._stac_io.session.post(
+            create_url,
+            json=item_json,
+            headers={"Content-Type": "application/json"},
+            timeout=client._stac_io.timeout or 30,
+        )
+        response.raise_for_status()
+
+        logger.info(f"✅ Registered {item_id} (HTTP {response.status_code})")
+        STAC_REGISTRATION_TOTAL.labels(
+            collection=collection_id,
+            status="success",
+        ).inc()
+    except Exception as e:
+        logger.error(f"Failed to register {item_id}: {e}")
+        STAC_REGISTRATION_TOTAL.labels(
+            collection=collection_id,
+            status="failure",
+        ).inc()
+        raise
 
 
 def main() -> None:
