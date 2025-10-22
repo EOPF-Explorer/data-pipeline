@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "data-pipeline"
 version = "1.0.0"
-description = "GeoZarr conversion and STAC registration pipeline for Sentinel satellite data"
+description = "Minimal event-driven Argo Workflows pipeline for Sentinel-2 GeoZarr conversion and STAC registration"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
