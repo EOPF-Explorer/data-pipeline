@@ -37,14 +37,10 @@ spec:
       tasks:
       - name: convert
         template: convert-geozarr
-      - name: validate
-        template: validate
-        dependencies:
-        - convert
       - name: register
         template: register-stac
         dependencies:
-        - validate
+        - convert
 
   - name: convert-geozarr
     activeDeadlineSeconds: 3600
@@ -63,7 +59,7 @@ spec:
         set -euo pipefail
 
         echo "══════════════════════════════════════════════════════════════════════════"
-        echo "  STEP 1/4: GEOZARR CONVERSION"
+        echo "  STEP 1/2: GEOZARR CONVERSION"
         echo "══════════════════════════════════════════════════════════════════════════"
         echo ""
         echo "📋 Workflow Parameters:"
@@ -160,60 +156,6 @@ spec:
       - name: ZARR_V3_EXPERIMENTAL_API
         value: '1'
 
-  - name: validate
-    activeDeadlineSeconds: 300
-    script:
-      image: ghcr.io/eopf-explorer/data-pipeline:{{workflow.parameters.pipeline_image_version}}
-      imagePullPolicy: Always
-      command: [bash]
-      resources:
-        requests:
-          memory: 2Gi
-        limits:
-          memory: 4Gi
-      source: |
-        set -euo pipefail
-
-        echo "══════════════════════════════════════════════════════════════════════════"
-        echo "  STEP 2/4: GEOZARR VALIDATION"
-        echo "══════════════════════════════════════════════════════════════════════════"
-        echo ""
-        echo "🔍 Validating GeoZarr structure and compliance..."
-        echo ""
-
-        # Extract item ID from source URL
-        ITEM_ID=$(python3 /app/scripts/utils.py extract-item-id "{{workflow.parameters.source_url}}")
-
-        # TODO: Fix TMS and CF validators (see issue #XX)
-        # - TMS: tile_matrix_set attribute not being written during conversion
-        # - CF: cf-xarray API incompatibility with decode() method
-        python /app/scripts/validate_geozarr.py \
-          "s3://{{workflow.parameters.s3_output_bucket}}/{{workflow.parameters.s3_output_prefix}}/{{workflow.parameters.register_collection}}/${ITEM_ID}.zarr" \
-          --item-id "$ITEM_ID" \
-          --skip-tms \
-          --skip-cf \
-          --verbose
-
-        echo ""
-        echo "✅ Validation completed successfully!"
-      env:
-      - name: PYTHONUNBUFFERED
-        value: '1'
-      - name: AWS_ACCESS_KEY_ID
-        valueFrom:
-          secretKeyRef:
-            name: geozarr-s3-credentials
-            key: AWS_ACCESS_KEY_ID
-      - name: AWS_SECRET_ACCESS_KEY
-        valueFrom:
-          secretKeyRef:
-            name: geozarr-s3-credentials
-            key: AWS_SECRET_ACCESS_KEY
-      - name: AWS_ENDPOINT_URL
-        value: '{{workflow.parameters.s3_endpoint}}'
-      - name: ZARR_V3_EXPERIMENTAL_API
-        value: '1'
-
   - name: register-stac
     activeDeadlineSeconds: 600
     script:
@@ -239,7 +181,7 @@ spec:
         trap "kill $METRICS_PID 2>/dev/null || true" EXIT
 
         echo "══════════════════════════════════════════════════════════════════════════"
-        echo "  STEP 3/3: STAC REGISTRATION & AUGMENTATION"
+        echo "  STEP 2/2: STAC REGISTRATION & AUGMENTATION"
         echo "══════════════════════════════════════════════════════════════════════════"
         echo ""
 

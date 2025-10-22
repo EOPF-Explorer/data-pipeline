@@ -41,34 +41,60 @@ def add_visualization(item: Item, raster_base: str, collection_id: str) -> None:
     base_url = f"{raster_base}/collections/{collection_id}/items/{item.id}"
     is_s1 = collection_id.lower().startswith(("sentinel-1", "sentinel1"))
 
-    if is_s1:
-        asset, variables = "SR_10m", "/measurements:grd"
-        # Properly encode the variables parameter
-        query = f"variables={urllib.parse.quote(variables, safe='')}&assets={asset}"
-        title = "Sentinel-1 GRD Image"
-    else:
-        asset, variables = "TCI_10m", "/quality/l2a_quicklook/r10m:tci"
-        # Properly encode the variables parameter
-        query = f"variables={urllib.parse.quote(variables, safe='')}&bidx=1&bidx=2&bidx=3&assets={asset}"
-        title = "Sentinel-2 L2A True Color Image (10m)"
-
     item.add_link(Link("viewer", f"{base_url}/viewer", "text/html", f"Viewer for {item.id}"))
-    item.add_link(
-        Link(
-            "xyz",
-            f"{base_url}/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png?{query}",
-            "image/png",
-            title,
+
+    if is_s1:
+        # S1: Extract swath-mode path from vh asset href
+        # e.g., s3://.../S1A...zarr/S01SIWGRD_..._VH/measurements -> /S01SIWGRD_..._VH/measurements:grd
+        vh_asset = item.assets.get("vh")
+        if vh_asset and vh_asset.href:
+            # Extract path after .zarr/
+            zarr_parts = vh_asset.href.split(".zarr/")
+            if len(zarr_parts) == 2:
+                swath_path = zarr_parts[1]  # e.g., "S01SIWGRD_.../measurements"
+                variables = f"/{swath_path}:grd"
+                asset = "vh"
+                query = f"variables={urllib.parse.quote(variables, safe='')}&bidx=1&rescale=0%2C219&assets={asset}"
+                title = "Sentinel-1 GRD VH"
+
+                item.add_link(
+                    Link(
+                        "xyz",
+                        f"{base_url}/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png?{query}",
+                        "image/png",
+                        title,
+                    )
+                )
+                item.add_link(
+                    Link(
+                        "tilejson",
+                        f"{base_url}/WebMercatorQuad/tilejson.json?{query}",
+                        "application/json",
+                        f"TileJSON for {item.id}",
+                    )
+                )
+    else:
+        # S2: Add xyz and tilejson links with quicklook
+        asset, variables = "TCI_10m", "/quality/l2a_quicklook/r10m:tci"
+        query = f"variables={urllib.parse.quote(variables, safe='')}&bidx=1&bidx=2&bidx=3&assets={asset}"
+        title = "Sentinel-2 L2A True Color"
+
+        item.add_link(
+            Link(
+                "xyz",
+                f"{base_url}/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png?{query}",
+                "image/png",
+                title,
+            )
         )
-    )
-    item.add_link(
-        Link(
-            "tilejson",
-            f"{base_url}/WebMercatorQuad/tilejson.json?{query}",
-            "application/json",
-            f"Tilejson for {item.id}",
+        item.add_link(
+            Link(
+                "tilejson",
+                f"{base_url}/WebMercatorQuad/tilejson.json?{query}",
+                "application/json",
+                f"TileJSON for {item.id}",
+            )
         )
-    )
     item.add_link(
         Link(
             "via",
