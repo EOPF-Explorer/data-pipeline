@@ -100,6 +100,25 @@ kubectl top nodes
 
 See [GETTING_STARTED.md](GETTING_STARTED.md#troubleshooting) for more.
 
+## Project Structure
+
+```
+workflows/          Argo WorkflowTemplates (YAML manifests)
+scripts/            Production pipeline scripts (7 files, 904 lines)
+  ├── utils.py                 Extract item IDs & Zarr asset URLs from STAC items (unified CLI)
+  ├── get_conversion_params.py Sentinel-1/2 collection-specific settings (groups, chunks, tile sizes)
+  ├── validate_geozarr.py      Validate Zarr structure, OGC TMS, CF conventions, spatial references
+  ├── create_geozarr_item.py   Build STAC item from converted GeoZarr, copying source metadata
+  ├── register_stac.py         Register/update items in STAC API via Transaction extension (upsert mode)
+  ├── augment_stac_item.py     Add TiTiler viewer/xyz/tilejson links & projection metadata via pystac
+  └── metrics.py               Expose Prometheus metrics (registration counts, preview timings)
+tools/              Development & benchmarking (not in production)
+  ├── benchmarking/  Performance testing (benchmark_geozarr.py, benchmark_tile_performance.py)
+  └── testing/       Test utilities (publish_amqp.py for workflow trigger testing)
+tests/              Pytest suite (93 tests, 85% coverage on scripts/)
+notebooks/          Jupyter tutorials & examples (operator.ipynb, performance analysis)
+```
+
 ## Development
 
 ```bash
@@ -108,13 +127,11 @@ uv sync --all-extras
 pre-commit install
 
 # Test
-pytest tests/ -v  # 100/100 passing
+pytest tests/ -v --cov=scripts
 
 # Deploy
 kubectl apply -f workflows/template.yaml -n devseed
 ```
-
-**Project structure:** `workflows/` (manifests) • `scripts/` (Python utils) • `tests/` (pytest) • `notebooks/` (tutorials)
 
 **Documentation:** [CONTRIBUTING.md](CONTRIBUTING.md) • [GETTING_STARTED.md](GETTING_STARTED.md)
 

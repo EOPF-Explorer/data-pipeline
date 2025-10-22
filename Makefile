@@ -59,9 +59,7 @@ publish: build push
 	@echo "Published $(IMAGE_NAME):$(TAG)"
 
 deploy:
-	kubectl apply -f workflows/template.yaml
-	kubectl apply -f workflows/eventsource.yaml
-	kubectl apply -f workflows/sensor.yaml
+	kubectl apply -k workflows/overlays/staging
 
 clean:
 	@echo "Cleaning generated files..."
