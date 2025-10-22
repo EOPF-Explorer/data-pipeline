@@ -28,7 +28,7 @@ uv run python examples/submit.py --stac-url "..." --item-id "custom-$(date +%s)"
 
 **Custom payload:**
 ```bash
-uv run python examples/submit.py --stac-url "..." --payload workflows/payload.json
+uv run python examples/submit.py --stac-url "..." --payload workflows/tests/s2-minimal.json
 ```
 
 **Port-forward:**

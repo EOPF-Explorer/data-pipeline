@@ -104,7 +104,7 @@ curl "https://stac.core.eopf.eodc.eu/collections/sentinel-2-l2a/items?limit=10" 
 
 **Jupyter notebook:** `jupyter lab notebooks/operator.ipynb` for interactive operations.
 
-**Custom payloads:** Edit `workflows/payload.json` (groups, spatial_chunk, tile_width), then `--payload workflows/payload.json`.
+**Custom payloads:** Copy `workflows/tests/s2-minimal.json`, edit parameters, then `--payload your-payload.json`.
 
 ## Troubleshooting
 
