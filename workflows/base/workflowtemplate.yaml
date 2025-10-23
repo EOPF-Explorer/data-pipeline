@@ -97,33 +97,15 @@ spec:
           memory: 2Gi
           cpu: '1'
       source: |
-        import os
-        import sys
-
-        # Extract item ID from source URL (for constructing geozarr_url)
-        sys.path.insert(0, '/app/scripts')
-        from utils import extract_item_id
-
-        source_url = "{{workflow.parameters.source_url}}"
-        collection = "{{workflow.parameters.register_collection}}"
-        item_id = extract_item_id(source_url)
-        geozarr_url = f"s3://{{{{workflow.parameters.s3_output_bucket}}}}/{{{{workflow.parameters.s3_output_prefix}}}}/{collection}/{item_id}.zarr"
-
-        # Run registration workflow
-        os.execv(
-            sys.executable,
-            [
-                sys.executable,
-                "/app/scripts/register.py",
-                "--source-url", source_url,
-                "--collection", collection,
-                "--geozarr-url", geozarr_url,
-                "--stac-api-url", "{{workflow.parameters.stac_api_url}}",
-                "--raster-api-url", "{{workflow.parameters.raster_api_url}}",
-                "--s3-endpoint", "{{workflow.parameters.s3_endpoint}}",
-                "--verbose",
-            ]
-        )
+        /app/scripts/register.py \
+          --source-url "{{workflow.parameters.source_url}}" \
+          --collection "{{workflow.parameters.register_collection}}" \
+          --stac-api-url "{{workflow.parameters.stac_api_url}}" \
+          --raster-api-url "{{workflow.parameters.raster_api_url}}" \
+          --s3-endpoint "{{workflow.parameters.s3_endpoint}}" \
+          --s3-output-bucket "{{workflow.parameters.s3_output_bucket}}" \
+          --s3-output-prefix "{{workflow.parameters.s3_output_prefix}}" \
+          --verbose
       env:
       - name: PYTHONUNBUFFERED
         value: '1'
