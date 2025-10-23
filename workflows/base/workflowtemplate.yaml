@@ -121,7 +121,6 @@ spec:
                 "--stac-api-url", "{{workflow.parameters.stac_api_url}}",
                 "--raster-api-url", "{{workflow.parameters.raster_api_url}}",
                 "--s3-endpoint", "{{workflow.parameters.s3_endpoint}}",
-                "--enable-metrics",
                 "--verbose",
             ]
         )

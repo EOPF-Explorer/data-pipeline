@@ -12,7 +12,6 @@ from pathlib import Path
 
 from augment_stac_item import augment
 from create_geozarr_item import create_geozarr_item
-from metrics import start_metrics_server
 from pystac import Item
 from register_stac import register_item
 from utils import extract_item_id
@@ -135,15 +134,8 @@ def main(argv: list[str] | None = None) -> int:
         choices=["create-or-skip", "upsert", "replace"],
         help="Registration mode",
     )
-    parser.add_argument(
-        "--enable-metrics", action="store_true", help="Start Prometheus metrics server"
-    )
 
     args = parser.parse_args(argv)
-
-    # Start metrics server if requested
-    if args.enable_metrics:
-        start_metrics_server()
 
     try:
         run_registration(
