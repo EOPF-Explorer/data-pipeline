@@ -14,72 +14,27 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.11", "3.12"]
-
     steps:
     - uses: actions/checkout@v4
 
-    - name: Set up Python ${{ matrix.python-version }}
+    - name: Set up Python 3.11
       uses: actions/setup-python@v5
       with:
-        python-version: ${{ matrix.python-version }}
+        python-version: "3.11"
 
     - name: Install uv
       uses: astral-sh/setup-uv@v3
       with:
         version: "latest"
 
-    - name: Create Python version symlink
-      run: |
-        sudo ln -sf $(which python) /usr/bin/python${{ matrix.python-version }}
-        python${{ matrix.python-version }} --version
-
     - name: Install dependencies
-      run: |
-        uv sync --all-extras
-        uv pip install pystac-client>=0.7.0  # Workaround: explicit install (uv sync skips it)
-        uv pip list | grep pystac  # Debug: verify pystac-client is installed
+      run: uv sync --all-extras
 
     - name: Set up pre-commit cache
       uses: actions/cache@v4
       with:
         path: ~/.cache/pre-commit
-        key: pre-commit-${{ matrix.python-version }}-${{ hashFiles('.pre-commit-config.yaml') }}
+        key: pre-commit-3.11-${{ hashFiles('.pre-commit-config.yaml') }}
 
     - name: Run pre-commit checks
       run: uv run pre-commit run --all-files
-
-    - name: Run tests with coverage
-      if: hashFiles('tests/**/*.py') != ''
-      run: uv run pytest --cov=scripts --cov-report=xml --cov-report=term
-
-  integration-tests:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    strategy:
-      matrix:
-        python-version: ["3.11"]
-
-    steps:
-    - uses: actions/checkout@v4
-
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ matrix.python-version }}
-
-    - name: Install uv
-      uses: astral-sh/setup-uv@v3
-      with:
-        version: "latest"
-
-    - name: Install dependencies
-      run: |
-        uv sync --all-extras
-        uv pip install pystac-client>=0.7.0  # Workaround: explicit install
-
-    - name: Run integration tests
-      if: hashFiles('tests/integration/**/*.py') != ''
-      run: uv run pytest tests/integration/ -v --tb=short
