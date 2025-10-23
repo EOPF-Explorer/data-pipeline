@@ -1,118 +1,69 @@
 #!/usr/bin/env python3
-"""Generate GeoZarr conversion parameters from collection registry.
+"""GeoZarr conversion parameters for satellite collections.
 
-This script exports conversion parameters (groups, flags, chunks) for
-different satellite collections, enabling the workflow template to use
-data-driven configuration instead of hard-coded bash conditionals.
-
-Environment Variable Overrides (for testing/debugging):
-    OVERRIDE_GROUPS: Override groups parameter
-    OVERRIDE_EXTRA_FLAGS: Override extra_flags parameter
-    OVERRIDE_SPATIAL_CHUNK: Override spatial_chunk parameter
-    OVERRIDE_TILE_WIDTH: Override tile_width parameter
+Provides conversion parameters (groups, flags, chunks) for different
+satellite collections. Supports Sentinel-1 and Sentinel-2 with simple
+prefix matching.
 
 Usage:
     python3 get_conversion_params.py --collection sentinel-1-l1-grd
     python3 get_conversion_params.py --collection sentinel-2-l2a --format json
     python3 get_conversion_params.py --collection sentinel-2-l2a --param groups
-    OVERRIDE_GROUPS="/custom/path" python3 get_conversion_params.py --collection sentinel-2-l2a
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import sys
-from typing import Any, cast
+from typing import Any
 
-# Import collection configs from augment_stac_item
-# In production, this would be a shared module
-_COLLECTION_CONFIGS: dict[str, dict[str, Any]] = {
-    "sentinel-1-l1-grd": {
-        "pattern": "sentinel-1-l1-grd*",
-        "conversion": {
-            "groups": "/measurements",
-            "extra_flags": "--gcp-group /conditions/gcp",
-            "spatial_chunk": 4096,  # Increased from 2048 for faster I/O
-            "tile_width": 512,
-        },
+# Conversion parameters by mission
+CONFIGS: dict[str, dict[str, Any]] = {
+    "sentinel-1": {
+        "groups": "/measurements",
+        "extra_flags": "--gcp-group /conditions/gcp",
+        "spatial_chunk": 4096,
+        "tile_width": 512,
     },
-    "sentinel-2-l2a": {
-        "pattern": "sentinel-2-l2a*",
-        "conversion": {
-            "groups": "/quality/l2a_quicklook/r10m",
-            "extra_flags": "--crs-groups /quality/l2a_quicklook/r10m",
-            "spatial_chunk": 4096,
-            "tile_width": 512,
-        },
+    "sentinel-2": {
+        "groups": "/quality/l2a_quicklook/r10m",
+        "extra_flags": "--crs-groups /quality/l2a_quicklook/r10m",
+        "spatial_chunk": 4096,
+        "tile_width": 512,
     },
 }
-
-_DEFAULT_COLLECTION = "sentinel-2-l2a"
-
-
-def _match_collection_config(collection_id: str) -> dict[str, Any] | None:
-    """Match collection ID to configuration using pattern matching."""
-    for _key, config in _COLLECTION_CONFIGS.items():
-        # mypy needs help understanding .items() returns dict values
-        cfg = cast(dict[str, Any], config)  # type: ignore[redundant-cast]
-        pattern = str(cfg.get("pattern", ""))
-        if collection_id.startswith(pattern.rstrip("*")):
-            return cfg
-    return None
 
 
 def get_conversion_params(collection_id: str) -> dict[str, Any]:
     """Get conversion parameters for collection.
 
-    Environment variables can override configuration values:
-    - OVERRIDE_GROUPS: Override groups parameter
-    - OVERRIDE_EXTRA_FLAGS: Override extra_flags parameter
-    - OVERRIDE_SPATIAL_CHUNK: Override spatial_chunk parameter (integer)
-    - OVERRIDE_TILE_WIDTH: Override tile_width parameter (integer)
-
     Args:
-        collection_id: Collection identifier (e.g., sentinel-1-l1-grd-dp-test)
+        collection_id: Collection identifier (e.g., sentinel-1-l1-grd, sentinel-2-l2a-dp-test)
 
     Returns:
         Dict of conversion parameters (groups, extra_flags, spatial_chunk, tile_width)
-
-    Raises:
-        ValueError: If collection not found in registry
     """
-    config = _match_collection_config(collection_id)
-    if not config:
-        # Fallback to default - mypy needs help with dict.get() return type
-        default_config = cast(dict[str, Any] | None, _COLLECTION_CONFIGS.get(_DEFAULT_COLLECTION))  # type: ignore[redundant-cast]
-        if not default_config:
-            raise ValueError(f"No config for collection {collection_id}")
-        config = default_config
+    # Extract mission prefix (sentinel-1 or sentinel-2)
+    parts = collection_id.lower().split("-")
+    if len(parts) >= 2:
+        prefix = f"{parts[0]}-{parts[1]}"  # "sentinel-1" or "sentinel-2"
+        if prefix in CONFIGS:
+            return CONFIGS[prefix]
 
-    conversion_params = cast(dict[str, Any], config.get("conversion", {}))
-
-    # Apply environment variable overrides (useful for testing/debugging)
-    return {
-        "groups": os.getenv("OVERRIDE_GROUPS", conversion_params.get("groups", "")),
-        "extra_flags": os.getenv("OVERRIDE_EXTRA_FLAGS", conversion_params.get("extra_flags", "")),
-        "spatial_chunk": int(
-            os.getenv("OVERRIDE_SPATIAL_CHUNK", str(conversion_params.get("spatial_chunk", 4096)))
-        ),
-        "tile_width": int(
-            os.getenv("OVERRIDE_TILE_WIDTH", str(conversion_params.get("tile_width", 512)))
-        ),
-    }
+    # Default to Sentinel-2 if no match
+    return CONFIGS["sentinel-2"]
 
 
 def main(argv: list[str] | None = None) -> int:
     """Main entry point."""
     parser = argparse.ArgumentParser(
-        description="Get GeoZarr conversion parameters from collection registry"
+        description="Get GeoZarr conversion parameters for satellite collections"
     )
     parser.add_argument(
         "--collection",
         required=True,
-        help="Collection ID (e.g., sentinel-1-l1-grd, sentinel-2-l2a-dp-test)",
+        help="Collection ID (e.g., sentinel-1-l1-grd, sentinel-2-l2a)",
     )
     parser.add_argument(
         "--format",
@@ -127,27 +78,20 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     args = parser.parse_args(argv)
-
-    try:
-        params = get_conversion_params(args.collection)
-    except ValueError as exc:
-        # Use print for CLI output, not logging
-        print(f"Error: {exc}", file=sys.stderr)
-        sys.exit(1)
+    params = get_conversion_params(args.collection)
 
     if args.param:
         # Output single parameter (for shell variable assignment)
-        value = params.get(args.param, "")
-        print(value)
+        print(params.get(args.param, ""))
     elif args.format == "json":
         # Output JSON (for parsing with jq)
         print(json.dumps(params, indent=2))
     else:
         # Output shell variables (for eval/source)
-        print(f"ZARR_GROUPS='{params.get('groups', '')}'")
-        print(f"EXTRA_FLAGS='{params.get('extra_flags', '')}'")
-        print(f"CHUNK={params.get('spatial_chunk', 4096)}")
-        print(f"TILE_WIDTH={params.get('tile_width', 512)}")
+        print(f"ZARR_GROUPS='{params['groups']}'")
+        print(f"EXTRA_FLAGS='{params['extra_flags']}'")
+        print(f"CHUNK={params['spatial_chunk']}")
+        print(f"TILE_WIDTH={params['tile_width']}")
 
     return 0
 
