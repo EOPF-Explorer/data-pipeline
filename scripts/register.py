@@ -25,10 +25,11 @@ logger = logging.getLogger(__name__)
 def run_registration(
     source_url: str,
     collection: str,
-    geozarr_url: str,
     stac_api_url: str,
     raster_api_url: str,
     s3_endpoint: str,
+    s3_output_bucket: str,
+    s3_output_prefix: str,
     verbose: bool = False,
     mode: str = "upsert",
 ) -> None:
@@ -37,10 +38,11 @@ def run_registration(
     Args:
         source_url: Source STAC item URL
         collection: Target collection ID
-        geozarr_url: GeoZarr output URL (s3://...)
         stac_api_url: STAC API base URL
         raster_api_url: TiTiler raster API base URL
         s3_endpoint: S3 endpoint for HTTP access
+        s3_output_bucket: S3 bucket name
+        s3_output_prefix: S3 prefix path
         verbose: Enable verbose logging
         mode: Registration mode (create-or-skip | upsert | replace)
 
@@ -51,10 +53,13 @@ def run_registration(
     logger.info("  STEP 2/2: STAC REGISTRATION & AUGMENTATION")
     logger.info("=" * 78)
 
-    # Extract item ID from source URL
+    # Extract item ID from source URL and construct geozarr URL
     item_id = extract_item_id(source_url)
+    geozarr_url = f"s3://{s3_output_bucket}/{s3_output_prefix}/{collection}/{item_id}.zarr"
+
     logger.info(f"Item ID: {item_id}")
     logger.info(f"Collection: {collection}")
+    logger.info(f"GeoZarr URL: {geozarr_url}")
     logger.info(f"STAC API: {stac_api_url}")
 
     # Create temporary file for item JSON
@@ -123,10 +128,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run STAC registration workflow")
     parser.add_argument("--source-url", required=True, help="Source STAC item URL")
     parser.add_argument("--collection", required=True, help="Target collection ID")
-    parser.add_argument("--geozarr-url", required=True, help="GeoZarr output URL (s3://...)")
     parser.add_argument("--stac-api-url", required=True, help="STAC API base URL")
     parser.add_argument("--raster-api-url", required=True, help="TiTiler raster API base URL")
     parser.add_argument("--s3-endpoint", required=True, help="S3 endpoint for HTTP access")
+    parser.add_argument("--s3-output-bucket", required=True, help="S3 bucket name")
+    parser.add_argument("--s3-output-prefix", required=True, help="S3 prefix path")
     parser.add_argument("--verbose", action="store_true", help="Verbose logging")
     parser.add_argument(
         "--mode",
@@ -141,10 +147,11 @@ def main(argv: list[str] | None = None) -> int:
         run_registration(
             args.source_url,
             args.collection,
-            args.geozarr_url,
             args.stac_api_url,
             args.raster_api_url,
             args.s3_endpoint,
+            args.s3_output_bucket,
+            args.s3_output_prefix,
             args.verbose,
             args.mode,
         )
