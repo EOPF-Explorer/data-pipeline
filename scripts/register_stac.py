@@ -8,6 +8,7 @@ import json
 import logging
 from typing import Any
 
+from metrics import STAC_REGISTRATION_TOTAL
 from pystac import Item
 
 logging.basicConfig(level=logging.INFO)
@@ -53,6 +54,7 @@ def register_item(
     if exists:
         if mode == "create-or-skip":
             logger.info(f"Item {item_id} exists, skipping")
+            STAC_REGISTRATION_TOTAL.labels(collection=collection_id, status="success").inc()
             return
 
         # Delete for upsert/replace using StacApiIO's session
@@ -83,8 +85,16 @@ def register_item(
         response.raise_for_status()
 
         logger.info(f"✅ Registered {item_id} (HTTP {response.status_code})")
+        STAC_REGISTRATION_TOTAL.labels(
+            collection=collection_id,
+            status="success",
+        ).inc()
     except Exception as e:
         logger.error(f"Failed to register {item_id}: {e}")
+        STAC_REGISTRATION_TOTAL.labels(
+            collection=collection_id,
+            status="failure",
+        ).inc()
         raise
 
 
