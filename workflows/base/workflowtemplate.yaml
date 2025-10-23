@@ -47,7 +47,7 @@ spec:
     script:
       image: ghcr.io/eopf-explorer/data-pipeline:{{workflow.parameters.pipeline_image_version}}
       imagePullPolicy: Always
-      command: [bash]
+      command: [python]
       resources:
         requests:
           memory: 4Gi
@@ -56,88 +56,12 @@ spec:
           memory: 8Gi
           cpu: '2'
       source: |
-        set -euo pipefail
-
-        echo "══════════════════════════════════════════════════════════════════════════"
-        echo "  STEP 1/2: GEOZARR CONVERSION"
-        echo "══════════════════════════════════════════════════════════════════════════"
-        echo ""
-        echo "📋 Workflow Parameters:"
-        echo "   source_url:            {{workflow.parameters.source_url}}"
-        echo "   register_collection:   {{workflow.parameters.register_collection}}"
-        echo "   stac_api_url:          {{workflow.parameters.stac_api_url}}"
-        echo "   s3_output_bucket:      {{workflow.parameters.s3_output_bucket}}"
-        echo "   s3_output_prefix:      {{workflow.parameters.s3_output_prefix}}"
-        echo "   pipeline_image:        {{workflow.parameters.pipeline_image_version}}"
-        echo ""
-
-        SOURCE_URL="{{workflow.parameters.source_url}}"
-        COLLECTION="{{workflow.parameters.register_collection}}"
-
-        # Extract item ID from source URL
-        ITEM_ID=$(python3 /app/scripts/utils.py extract-item-id "$SOURCE_URL")
-        echo "📋 Item ID: $ITEM_ID"
-
-        OUTPUT_PATH="s3://{{workflow.parameters.s3_output_bucket}}/{{workflow.parameters.s3_output_prefix}}/$COLLECTION/${ITEM_ID}.zarr"
-
-        echo "🔍 [1/6] Resolving source..."
-        # Check if source is STAC item or direct zarr
-        if [[ "$SOURCE_URL" == *"/items/"* ]]; then
-          echo "📡 Extracting Zarr URL from STAC item..."
-          ZARR_URL=$(python3 /app/scripts/utils.py get-zarr-url "$SOURCE_URL")
-          echo "✅ Zarr URL: $ZARR_URL"
-        else
-          ZARR_URL="$SOURCE_URL"
-          echo "✅ Direct Zarr URL: $ZARR_URL"
-        fi
-        echo ""
-
-        echo "⚙️  [2/6] Getting conversion parameters for $COLLECTION..."
-        eval $(python3 /app/scripts/get_conversion_params.py --collection "$COLLECTION")
-        echo "   Groups:      $ZARR_GROUPS"
-        echo "   Chunk:       $CHUNK"
-        echo "   Tile width:  $TILE_WIDTH"
-        echo "   Extra flags: $EXTRA_FLAGS"
-        echo ""
-
-        echo "🧹 [3/6] Cleaning up existing output..."
-        if [ -f /app/scripts/cleanup_s3_path.py ]; then
-          python3 /app/scripts/cleanup_s3_path.py "$OUTPUT_PATH" || echo "⚠️  Cleanup failed (may not exist yet)"
-        else
-          echo "ℹ️  Skipping cleanup (script not available)"
-        fi
-        echo ""
-
-        echo "🚀 [4/6] Starting GeoZarr conversion..."
-        echo "   Source:      $ZARR_URL"
-        echo "   Destination: $OUTPUT_PATH"
-        echo "   Collection:  $COLLECTION"
-        echo ""
-        echo "─────────────────────────────────────────────────────────────────────────"
-        echo "  CONVERSION LOGS (parallel processing with local Dask cluster)"
-        echo "─────────────────────────────────────────────────────────────────────────"
-        echo ""
-
-        # Build conversion command with parallel processing
-        # - Enable local Dask cluster for parallel chunk processing
-        # - Higher CPU/memory resources support multiple Dask workers
-        eopf-geozarr convert "$ZARR_URL" "$OUTPUT_PATH" \
-          --groups "$ZARR_GROUPS" \
-          $EXTRA_FLAGS \
-          --spatial-chunk $CHUNK \
-          --tile-width $TILE_WIDTH \
-          --dask-cluster \
+        /app/scripts/convert.py \
+          --source-url "{{workflow.parameters.source_url}}" \
+          --collection "{{workflow.parameters.register_collection}}" \
+          --s3-output-bucket "{{workflow.parameters.s3_output_bucket}}" \
+          --s3-output-prefix "{{workflow.parameters.s3_output_prefix}}" \
           --verbose
-
-        echo ""
-        echo "─────────────────────────────────────────────────────────────────────────"
-        echo "✅ [6/6] Conversion completed successfully!"
-        echo "─────────────────────────────────────────────────────────────────────────"
-        echo ""
-        echo "📋 Run Summary:"
-        echo "   Source:       {{workflow.parameters.source_url}}"
-        echo "   Output:       s3://{{workflow.parameters.s3_output_bucket}}/{{workflow.parameters.s3_output_prefix}}/{{workflow.parameters.register_collection}}/${ITEM_ID}.zarr"
-        echo "   Collection:   {{workflow.parameters.register_collection}}"
       env:
       - name: PYTHONUNBUFFERED
         value: '1'
@@ -161,7 +85,7 @@ spec:
     script:
       image: ghcr.io/eopf-explorer/data-pipeline:{{workflow.parameters.pipeline_image_version}}
       imagePullPolicy: Always
-      command: [bash]
+      command: [python]
       ports:
       - containerPort: 8000
         name: metrics
@@ -173,70 +97,34 @@ spec:
           memory: 2Gi
           cpu: '1'
       source: |
-        set -euo pipefail
+        import os
+        import sys
 
-        # Start metrics server in background (for Prometheus scraping)
-        python -c "from scripts.metrics import start_metrics_server; start_metrics_server()" &
-        METRICS_PID=$!
-        trap "kill $METRICS_PID 2>/dev/null || true" EXIT
+        # Extract item ID from source URL (for constructing geozarr_url)
+        sys.path.insert(0, '/app/scripts')
+        from utils import extract_item_id
 
-        echo "══════════════════════════════════════════════════════════════════════════"
-        echo "  STEP 2/2: STAC REGISTRATION & AUGMENTATION"
-        echo "══════════════════════════════════════════════════════════════════════════"
-        echo ""
+        source_url = "{{workflow.parameters.source_url}}"
+        collection = "{{workflow.parameters.register_collection}}"
+        item_id = extract_item_id(source_url)
+        geozarr_url = f"s3://{{{{workflow.parameters.s3_output_bucket}}}}/{{{{workflow.parameters.s3_output_prefix}}}}/{collection}/{item_id}.zarr"
 
-        # Extract item ID from source URL
-        ITEM_ID=$(python3 /app/scripts/utils.py extract-item-id "{{workflow.parameters.source_url}}")
-
-        echo "📝 Creating STAC item from source..."
-        echo "   Collection: {{workflow.parameters.register_collection}}"
-        echo "   Item ID:    $ITEM_ID"
-        echo "   STAC API:   {{workflow.parameters.stac_api_url}}"
-        echo ""
-
-        ITEM_JSON="/tmp/item.json"
-        GEOZARR_URL="s3://{{workflow.parameters.s3_output_bucket}}/{{workflow.parameters.s3_output_prefix}}/{{workflow.parameters.register_collection}}/${ITEM_ID}.zarr"
-
-        python /app/scripts/create_geozarr_item.py \
-          --source-url "{{workflow.parameters.source_url}}" \
-          --collection "{{workflow.parameters.register_collection}}" \
-          --geozarr-url "$GEOZARR_URL" \
-          --s3-endpoint "{{workflow.parameters.s3_endpoint}}" \
-          --output "$ITEM_JSON"
-
-        echo ""
-        echo "📤 Registering item in STAC API..."
-        python /app/scripts/register_stac.py \
-          --stac-api "{{workflow.parameters.stac_api_url}}" \
-          --collection "{{workflow.parameters.register_collection}}" \
-          --item-json "$ITEM_JSON" \
-          --mode "upsert"
-
-        echo ""
-        echo "🎨 Adding preview links and metadata..."
-        echo "   Raster API:  {{workflow.parameters.raster_api_url}}"
-        echo ""
-
-        python /app/scripts/augment_stac_item.py \
-          --stac "{{workflow.parameters.stac_api_url}}" \
-          --raster-base "{{workflow.parameters.raster_api_url}}" \
-          --collection "{{workflow.parameters.register_collection}}" \
-          --item-id "$ITEM_ID" \
-          --verbose
-
-        echo ""
-        echo "✅ Registration & augmentation completed successfully!"
-        echo ""
-        echo "══════════════════════════════════════════════════════════════════════════"
-        echo "  🎉 PIPELINE COMPLETED SUCCESSFULLY!"
-        echo "══════════════════════════════════════════════════════════════════════════"
-        echo ""
-        echo "📍 View item in STAC API:"
-        echo "   {{workflow.parameters.stac_api_url}}/collections/{{workflow.parameters.register_collection}}/items/$ITEM_ID"
-        echo ""
-        echo "📦 GeoZarr output location:"
-        echo "   s3://{{workflow.parameters.s3_output_bucket}}/{{workflow.parameters.s3_output_prefix}}/{{workflow.parameters.register_collection}}/${ITEM_ID}.zarr"
-        echo ""
+        # Run registration workflow
+        os.execv(
+            sys.executable,
+            [
+                sys.executable,
+                "/app/scripts/register.py",
+                "--source-url", source_url,
+                "--collection", collection,
+                "--geozarr-url", geozarr_url,
+                "--stac-api-url", "{{workflow.parameters.stac_api_url}}",
+                "--raster-api-url", "{{workflow.parameters.raster_api_url}}",
+                "--s3-endpoint", "{{workflow.parameters.s3_endpoint}}",
+                "--enable-metrics",
+                "--verbose",
+            ]
+        )
       env:
       - name: PYTHONUNBUFFERED
         value: '1'
