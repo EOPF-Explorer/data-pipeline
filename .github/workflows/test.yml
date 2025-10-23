@@ -14,8 +14,6 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    # Skip tests on slim branch (no tests directory)
-    if: github.ref != 'refs/heads/slim'
     strategy:
       matrix:
         python-version: ["3.11", "3.12"]
@@ -54,6 +52,7 @@ jobs:
       run: uv run pre-commit run --all-files
 
     - name: Run tests with coverage
+      if: hashFiles('tests/**/*.py') != ''
       run: uv run pytest --cov=scripts --cov-report=xml --cov-report=term
 
   integration-tests:
@@ -82,4 +81,5 @@ jobs:
         uv pip install pystac-client>=0.7.0  # Workaround: explicit install
 
     - name: Run integration tests
+      if: hashFiles('tests/integration/**/*.py') != ''
       run: uv run pytest tests/integration/ -v --tb=short
