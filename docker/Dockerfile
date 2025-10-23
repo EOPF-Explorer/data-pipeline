@@ -1,5 +1,5 @@
 # Build for linux/amd64: docker buildx build --platform linux/amd64 -t <tag> . --push
-FROM python:3.11-slim
+FROM python:3.13-slim
 
 # System dependencies (including GDAL for rasterio)
 RUN apt-get update && apt-get install -y \
