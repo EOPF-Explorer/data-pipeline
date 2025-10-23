@@ -4,17 +4,39 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import subprocess
 import sys
+from urllib.parse import urlparse
+from urllib.request import urlopen
 
 from get_conversion_params import get_conversion_params
-from utils import extract_item_id, get_zarr_url
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+
+def get_zarr_url(stac_item_url: str) -> str:
+    """Get Zarr asset URL from STAC item."""
+    with urlopen(stac_item_url) as response:
+        item = json.loads(response.read())
+
+    assets = item.get("assets", {})
+
+    # Priority: product, zarr, then any .zarr asset
+    for key in ["product", "zarr"]:
+        if key in assets and (href := assets[key].get("href")):
+            return str(href)
+
+    # Fallback: any asset with .zarr in href
+    for asset in assets.values():
+        if ".zarr" in asset.get("href", ""):
+            return str(asset["href"])
+
+    raise RuntimeError("No Zarr asset found in STAC item")
 
 
 def run_conversion(
@@ -44,7 +66,7 @@ def run_conversion(
     logger.info("=" * 78)
 
     # Extract item ID from URL
-    item_id = extract_item_id(source_url)
+    item_id = urlparse(source_url).path.rstrip("/").split("/")[-1]
     logger.info(f"Item ID: {item_id}")
 
     # Resolve source: STAC item or direct Zarr URL

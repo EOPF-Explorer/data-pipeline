@@ -193,10 +193,12 @@ kubectl get wf -n devseed-staging --sort-by=.metadata.creationTimestamp \
 
 ```
 scripts/                      # Workflow steps
-├── get_conversion_params.py  # Fetch collection config
+├── convert.py                # GeoZarr conversion (extract zarr URL, convert, upload)
+├── register.py               # STAC registration orchestrator
+├── register_stac.py          # STAC item creation with TiTiler links
 ├── create_geozarr_item.py    # Convert zarr → geozarr
-├── register_stac.py          # Register to STAC catalog
-└── utils.py                  # Extract zarr URL from STAC item
+├── augment_stac_item.py      # Add visualization links to STAC items
+└── get_conversion_params.py  # Fetch collection config
 
 workflows/                    # Kubernetes manifests (Kustomize)
 ├── base/                     # WorkflowTemplate, EventSource, Sensor, RBAC
