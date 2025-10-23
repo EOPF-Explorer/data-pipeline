@@ -45,6 +45,13 @@ dev = [
     "pre-commit>=3.7.0",
     "types-boto3>=1.0.2",
 ]
+notebooks = [
+    "jupyter>=1.0.0",
+    "jupyterlab>=4.0.0",
+    "ipykernel>=6.29.0",
+    "matplotlib>=3.8.0",
+    "dask>=2024.0.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/EOPF-Explorer/data-pipeline"
