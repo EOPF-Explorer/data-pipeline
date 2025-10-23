@@ -38,3 +38,9 @@ jobs:
 
     - name: Run pre-commit checks
       run: uv run pre-commit run --all-files
+
+    - name: Run unit tests
+      run: uv run pytest tests/unit -v --tb=short
+
+    - name: Generate coverage report
+      run: uv run pytest tests/unit --cov=scripts --cov-report=term-missing --cov-report=html
