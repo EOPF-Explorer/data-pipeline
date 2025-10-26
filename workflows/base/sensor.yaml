@@ -2,7 +2,7 @@ apiVersion: argoproj.io/v1alpha1
 kind: Sensor
 metadata:
   name: geozarr-sensor
-  namespace: null
+  namespace: "" # Set by kustomize overlay
 spec:
   template:
     serviceAccountName: operate-workflow-sa
@@ -21,7 +21,7 @@ spec:
             apiVersion: argoproj.io/v1alpha1
             kind: Workflow
             metadata:
-              generateName: geozarr-
+              generateName: geozarr-  # Creates unique names like geozarr-abc123
               labels:
                 app: geozarr-pipeline
                 owner: devseed-staging

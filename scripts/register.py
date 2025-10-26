@@ -4,17 +4,15 @@
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import sys
-import tempfile
-from pathlib import Path
+from urllib.parse import urlparse
 
+import httpx
 from augment_stac_item import augment
 from create_geozarr_item import create_geozarr_item
 from pystac import Item
 from register_stac import register_item
-from utils import extract_item_id
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -30,8 +28,7 @@ def run_registration(
     s3_endpoint: str,
     s3_output_bucket: str,
     s3_output_prefix: str,
-    verbose: bool = False,
-    mode: str = "upsert",
+    mode: str = "create-or-skip",
 ) -> None:
     """Run STAC registration workflow.
 
@@ -43,84 +40,50 @@ def run_registration(
         s3_endpoint: S3 endpoint for HTTP access
         s3_output_bucket: S3 bucket name
         s3_output_prefix: S3 prefix path
-        verbose: Enable verbose logging
         mode: Registration mode (create-or-skip | upsert | replace)
 
     Raises:
         RuntimeError: If registration fails
     """
-    logger.info("=" * 78)
-    logger.info("  STEP 2/2: STAC REGISTRATION & AUGMENTATION")
-    logger.info("=" * 78)
-
     # Extract item ID from source URL and construct geozarr URL
-    item_id = extract_item_id(source_url)
+    item_id = urlparse(source_url).path.rstrip("/").split("/")[-1]
     geozarr_url = f"s3://{s3_output_bucket}/{s3_output_prefix}/{collection}/{item_id}.zarr"
 
-    logger.info(f"Item ID: {item_id}")
-    logger.info(f"Collection: {collection}")
-    logger.info(f"GeoZarr URL: {geozarr_url}")
-    logger.info(f"STAC API: {stac_api_url}")
+    logger.info(f"Starting registration for {item_id} in {collection}")
+    logger.info(f"GeoZarr: {geozarr_url}")
+    # Step 1: Create STAC item from source
+    logger.info("Creating STAC item from source...")
+    item_dict = create_geozarr_item(source_url, collection, geozarr_url, s3_endpoint)
 
-    # Create temporary file for item JSON
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tmp:
-        item_json_path = tmp.name
+    # Step 2: Register to STAC API
+    logger.info("Registering item in STAC API...")
+    register_item(stac_api_url, collection, item_dict, mode)
 
-    try:
-        # Step 1: Create STAC item from source
-        logger.info("Creating STAC item from source...")
-        create_geozarr_item(source_url, collection, geozarr_url, s3_endpoint, item_json_path)
+    # Step 3: Augment with preview links and CRS metadata
+    logger.info("Adding preview links and metadata...")
+    logger.info(f"  Raster API: {raster_api_url}")
 
-        # Step 2: Register to STAC API
-        logger.info("Registering item in STAC API...")
-        with open(item_json_path) as f:
-            item_dict = json.load(f)
-        register_item(stac_api_url, collection, item_dict, mode)
+    # Fetch the registered item
+    item_url = f"{stac_api_url.rstrip('/')}/collections/{collection}/items/{item_id}"
+    r = httpx.get(item_url, timeout=30.0)
+    r.raise_for_status()
+    item = Item.from_dict(r.json())
 
-        # Step 3: Augment with preview links and CRS metadata
-        logger.info("Adding preview links and metadata...")
-        logger.info(f"  Raster API: {raster_api_url}")
+    # Augment in place
+    augment(item, raster_base=raster_api_url, collection_id=collection)
 
-        # Fetch the registered item to augment
-        import httpx
+    # Update via PUT
+    r = httpx.put(
+        item_url,
+        json=item.to_dict(),
+        headers={"Content-Type": "application/json"},
+        timeout=30.0,
+    )
+    r.raise_for_status()
 
-        item_url = f"{stac_api_url.rstrip('/')}/collections/{collection}/items/{item_id}"
-        with httpx.Client() as client:
-            r = client.get(item_url, timeout=30.0)
-            r.raise_for_status()
-            item = Item.from_dict(r.json())
-
-        # Augment in place
-        augment(item, raster_base=raster_api_url, collection_id=collection, verbose=verbose)
-
-        # Update via PUT
-        with httpx.Client() as client:
-            r = client.put(
-                item_url,
-                json=item.to_dict(),
-                headers={"Content-Type": "application/json"},
-                timeout=30.0,
-            )
-            r.raise_for_status()
-            if verbose:
-                logger.info(f"PUT {item_url} → {r.status_code}")
-
-        logger.info("✅ Registration & augmentation completed successfully!")
-        logger.info("")
-        logger.info("=" * 78)
-        logger.info("  🎉 PIPELINE COMPLETED SUCCESSFULLY!")
-        logger.info("=" * 78)
-        logger.info("")
-        logger.info("📍 View item in STAC API:")
-        logger.info(f"   {stac_api_url}/collections/{collection}/items/{item_id}")
-        logger.info("")
-        logger.info("📦 GeoZarr output location:")
-        logger.info(f"   {geozarr_url}")
-        logger.info("")
-
-    finally:
-        # Clean up temp file
-        Path(item_json_path).unlink(missing_ok=True)
+    logger.info(f"✅ Registered and augmented {item_id} in {collection}")
+    logger.info(f"   STAC API: {stac_api_url}/collections/{collection}/items/{item_id}")
+    logger.info(f"   GeoZarr:  {geozarr_url}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -133,12 +96,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--s3-endpoint", required=True, help="S3 endpoint for HTTP access")
     parser.add_argument("--s3-output-bucket", required=True, help="S3 bucket name")
     parser.add_argument("--s3-output-prefix", required=True, help="S3 prefix path")
-    parser.add_argument("--verbose", action="store_true", help="Verbose logging")
     parser.add_argument(
         "--mode",
-        default="upsert",
+        default="create-or-skip",
         choices=["create-or-skip", "upsert", "replace"],
-        help="Registration mode",
+        help="Registration mode (default: create-or-skip)",
     )
 
     args = parser.parse_args(argv)
@@ -152,7 +114,6 @@ def main(argv: list[str] | None = None) -> int:
             args.s3_endpoint,
             args.s3_output_bucket,
             args.s3_output_prefix,
-            args.verbose,
             args.mode,
         )
         return 0

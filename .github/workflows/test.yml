@@ -3,13 +3,9 @@ name: Tests
 on:
   push:
     branches: [ '**' ]
-  pull_request:
-    branches: [ main ]
-  workflow_dispatch:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   test:

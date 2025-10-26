@@ -53,8 +53,10 @@ def submit_workflow(payload: dict) -> bool:
 if __name__ == "__main__":
     # ✅ Use STAC item URL (pipeline extracts zarr URL from assets)
     # ❌ NOT direct zarr URL
+    item_id = "S2A_MSIL2A_20251022T094121_N0511_R036_T34TDT_20251022T114817"
     payload = {
-        "source_url": "https://stac.core.eopf.eodc.eu/collections/sentinel-2-l2a/items/S2A_MSIL2A_20251022T094121_N0511_R036_T34TDT_20251022T114817",
+        "source_url": f"https://stac.core.eopf.eodc.eu/collections/sentinel-2-l2a/items/{item_id}",
+        "item_id": item_id,
         "collection": "sentinel-2-l2a-dp-test",
     }
 

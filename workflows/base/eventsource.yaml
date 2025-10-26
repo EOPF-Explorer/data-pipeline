@@ -2,7 +2,7 @@ apiVersion: argoproj.io/v1alpha1
 kind: EventSource
 metadata:
   name: rabbitmq-geozarr
-  namespace: null
+  namespace: "" # Set by kustomize overlay
 spec:
   amqp:
     geozarr-events:
