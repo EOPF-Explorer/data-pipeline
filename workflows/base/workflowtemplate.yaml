@@ -2,6 +2,7 @@ apiVersion: argoproj.io/v1alpha1
 kind: WorkflowTemplate
 metadata:
   name: geozarr-pipeline
+  namespace: "" # Set by kustomize overlay
 spec:
   serviceAccountName: operate-workflow-sa
   entrypoint: main
@@ -47,7 +48,16 @@ spec:
     script:
       image: ghcr.io/eopf-explorer/data-pipeline:{{workflow.parameters.pipeline_image_version}}
       imagePullPolicy: Always
-      command: [python]
+      command: [python, /app/scripts/convert.py]
+      args:
+      - --source-url
+      - "{{workflow.parameters.source_url}}"
+      - --collection
+      - "{{workflow.parameters.register_collection}}"
+      - --s3-output-bucket
+      - "{{workflow.parameters.s3_output_bucket}}"
+      - --s3-output-prefix
+      - "{{workflow.parameters.s3_output_prefix}}"
       resources:
         requests:
           memory: 4Gi
@@ -55,13 +65,6 @@ spec:
         limits:
           memory: 8Gi
           cpu: '2'
-      source: |
-        /app/scripts/convert.py \
-          --source-url "{{workflow.parameters.source_url}}" \
-          --collection "{{workflow.parameters.register_collection}}" \
-          --s3-output-bucket "{{workflow.parameters.s3_output_bucket}}" \
-          --s3-output-prefix "{{workflow.parameters.s3_output_prefix}}" \
-          --verbose
       env:
       - name: PYTHONUNBUFFERED
         value: '1'
@@ -85,7 +88,22 @@ spec:
     script:
       image: ghcr.io/eopf-explorer/data-pipeline:{{workflow.parameters.pipeline_image_version}}
       imagePullPolicy: Always
-      command: [python]
+      command: [python, /app/scripts/register.py]
+      args:
+      - --source-url
+      - "{{workflow.parameters.source_url}}"
+      - --collection
+      - "{{workflow.parameters.register_collection}}"
+      - --stac-api-url
+      - "{{workflow.parameters.stac_api_url}}"
+      - --raster-api-url
+      - "{{workflow.parameters.raster_api_url}}"
+      - --s3-endpoint
+      - "{{workflow.parameters.s3_endpoint}}"
+      - --s3-output-bucket
+      - "{{workflow.parameters.s3_output_bucket}}"
+      - --s3-output-prefix
+      - "{{workflow.parameters.s3_output_prefix}}"
       ports:
       - containerPort: 8000
         name: metrics
@@ -96,16 +114,6 @@ spec:
         limits:
           memory: 2Gi
           cpu: '1'
-      source: |
-        /app/scripts/register.py \
-          --source-url "{{workflow.parameters.source_url}}" \
-          --collection "{{workflow.parameters.register_collection}}" \
-          --stac-api-url "{{workflow.parameters.stac_api_url}}" \
-          --raster-api-url "{{workflow.parameters.raster_api_url}}" \
-          --s3-endpoint "{{workflow.parameters.s3_endpoint}}" \
-          --s3-output-bucket "{{workflow.parameters.s3_output_bucket}}" \
-          --s3-output-prefix "{{workflow.parameters.s3_output_prefix}}" \
-          --verbose
       env:
       - name: PYTHONUNBUFFERED
         value: '1'

@@ -37,11 +37,57 @@ kubectl apply -k workflows/overlays/production
 
 **Verify deployment:**
 ```bash
-# Check resources
+# Check resources (expected output shows 1 of each)
 kubectl get workflowtemplate,sensor,eventsource,sa -n devseed-staging
 
-# Watch for workflows
+# Example output:
+# NAME                                                AGE
+# workflowtemplate.argoproj.io/geozarr-pipeline      5m
+#
+# NAME                                    AGE
+# sensor.argoproj.io/geozarr-sensor      5m
+#
+# NAME                                          AGE
+# eventsource.argoproj.io/rabbitmq-geozarr     5m
+#
+# NAME                                SECRETS   AGE
+# serviceaccount/operate-workflow-sa   0         5m
+
+# Watch for workflows (should show Running/Succeeded/Failed)
 kubectl get wf -n devseed-staging --watch
+```
+
+## Required Secrets
+
+The pipeline requires these Kubernetes secrets in the target namespace:
+
+### 1. `rabbitmq-credentials`
+RabbitMQ authentication for EventSource:
+
+```bash
+kubectl create secret generic rabbitmq-credentials \
+  --from-literal=username=<rabbitmq-user> \
+  --from-literal=password=<rabbitmq-password> \
+  -n devseed-staging
+```
+
+### 2. `geozarr-s3-credentials`
+S3 credentials for GeoZarr output:
+
+```bash
+kubectl create secret generic geozarr-s3-credentials \
+  --from-literal=AWS_ACCESS_KEY_ID=<access-key> \
+  --from-literal=AWS_SECRET_ACCESS_KEY=<secret-key> \
+  -n devseed-staging
+```
+
+### 3. `stac-api-token` (optional)
+Bearer token for STAC API authentication (if required):
+
+```bash
+kubectl create secret generic stac-api-token \
+  --from-literal=token=<bearer-token> \
+  -n devseed-staging
 ```
 
 ## WorkflowTemplate Parameters

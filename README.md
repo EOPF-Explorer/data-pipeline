@@ -64,7 +64,7 @@ Transforms Sentinel-1/2 satellite data into web-ready visualizations:
   - Argo Workflows (pipeline orchestration)
   - RabbitMQ (event-driven automation)
   - STAC API & TiTiler (catalog & visualization)
-- **Python 3.11+** with `uv` package manager
+- **Python 3.13+** with `uv` package manager
 - **S3 storage** credentials (OVH de region)
 - **Kubeconfig** in `.work/kubeconfig`
 
@@ -205,9 +205,10 @@ workflows/                    # Kubernetes manifests (Kustomize)
 └── overlays/                 # staging, production configs
 
 docker/Dockerfile             # Pipeline image
-submit_test_workflow.py       # RabbitMQ submission script
-notebooks/01_quickstart.ipynb # Interactive example
+tools/submit_burst.py         # RabbitMQ burst submission tool
 ```
+
+Tests are available in `tests/` directory (unit and integration tests using pytest).
 
 ---
 
@@ -221,7 +222,7 @@ kubectl apply -k workflows/overlays/staging
 kubectl apply -k workflows/overlays/production
 ```
 
-**Config:** Image version, S3 endpoints, STAC API URLs, RabbitMQ exchanges
+**Config:** Image version, S3 endpoints, STAC API URLs, RabbitMQ exchanges configured via kustomize overlays.
 
 ---
 
@@ -314,13 +315,7 @@ kubectl logs -n devseed-staging -l eventsource-name=rabbitmq-geozarr --tail=50
 - [platform-deploy](https://github.com/EOPF-Explorer/platform-deploy) - Infrastructure (Argo, RabbitMQ, STAC, TiTiler)
 
 **Documentation:**
-- Interactive notebook: `notebooks/01_quickstart.ipynb`
-- Workflow docs: `workflows/README.md`
+- Workflow manifests: `workflows/README.md`
+- Tests: `tests/` (pytest unit and integration tests)
 
-
-- Image: `ghcr.io/eopf-explorer/data-pipeline:slim`
-- Memory: 6Gi per workflow
-- CPU: 500m-2000m (burstable)
-- Supports: Sentinel-1 GRD, Sentinel-2 L2A
-
-**License:** Apache 2.0
+**License:** MIT
