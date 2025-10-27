@@ -31,7 +31,7 @@ spec:
     - name: s3_output_prefix
       value: tests-output
     - name: pipeline_image_version
-      value: fix-unit-tests
+      value: slim
   templates:
   - name: main
     dag:
@@ -58,6 +58,7 @@ spec:
       - "{{workflow.parameters.s3_output_bucket}}"
       - --s3-output-prefix
       - "{{workflow.parameters.s3_output_prefix}}"
+      - --verbose
       resources:
         requests:
           memory: 4Gi

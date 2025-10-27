@@ -21,13 +21,13 @@ from typing import Any
 # Conversion parameters by mission
 CONFIGS: dict[str, dict[str, Any]] = {
     "sentinel-1": {
-        "groups": ["/measurements"],
+        "groups": "/measurements",
         "extra_flags": "--gcp-group /conditions/gcp",
         "spatial_chunk": 4096,
         "tile_width": 512,
     },
     "sentinel-2": {
-        "groups": ["/quality/l2a_quicklook/r10m"],
+        "groups": "/quality/l2a_quicklook/r10m",
         "extra_flags": "--crs-groups /quality/l2a_quicklook/r10m",
         "spatial_chunk": 4096,
         "tile_width": 512,
