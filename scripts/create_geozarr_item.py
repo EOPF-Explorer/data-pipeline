@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import re
 from typing import Any
 from urllib.parse import urlparse
 
@@ -29,30 +28,6 @@ def s3_to_https(s3_url: str, endpoint: str) -> str:
     host = endpoint_parsed.netloc or endpoint_parsed.path
 
     return f"https://{bucket}.{host}/{path}"
-
-
-def normalize_r60m_href(href: str) -> str:
-    """Add /0/ subdirectory to r10m/r20m/r60m paths to match GeoZarr output structure.
-
-    GeoZarr conversion creates /0/ subdirectories (overview level 0) for all
-    resolution bands. This normalizes asset hrefs accordingly.
-
-    Example: .../r10m/tci → .../r10m/0/tci
-             .../r60m/b09 → .../r60m/0/b09
-    """
-    # Check for any resolution level pattern
-    for res in ["r10m", "r20m", "r60m"]:
-        if f"/{res}/" not in href:
-            continue
-
-        # If already has /0/ or other digit subdirectory, don't modify
-        if re.search(rf"/{res}/\d+/", href):
-            continue
-
-        # Insert /0/ after /{res}/
-        href = re.sub(rf"/({res})/", r"/\1/0/", href)
-
-    return href
 
 
 def find_source_zarr_base(source_item: dict) -> str | None:
@@ -111,9 +86,6 @@ def create_geozarr_item(
                     # Extract subpath and append to output base
                     subpath = old_href[len(source_zarr_base) :]
                     new_href = output_zarr_base + subpath
-
-                    # Normalize r60m paths to include /0/ subdirectory (GeoZarr structure)
-                    new_href = normalize_r60m_href(new_href)
 
                     # Convert to https if needed
                     if new_href.startswith("s3://"):
