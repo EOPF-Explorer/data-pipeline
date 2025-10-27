@@ -32,22 +32,27 @@ def s3_to_https(s3_url: str, endpoint: str) -> str:
 
 
 def normalize_r60m_href(href: str) -> str:
-    """Add /0/ subdirectory to r60m paths to match GeoZarr output structure.
+    """Add /0/ subdirectory to r10m/r20m/r60m paths to match GeoZarr output structure.
 
-    GeoZarr conversion creates /0/ subdirectories for r60m resolution bands,
-    but not for r10m or r20m. This normalizes r60m asset hrefs accordingly.
+    GeoZarr conversion creates /0/ subdirectories (overview level 0) for all
+    resolution bands. This normalizes asset hrefs accordingly.
 
-    Example: .../r60m/b09 → .../r60m/0/b09
+    Example: .../r10m/tci → .../r10m/0/tci
+             .../r60m/b09 → .../r60m/0/b09
     """
-    if "/r60m/" not in href:
-        return href
+    # Check for any resolution level pattern
+    for res in ["r10m", "r20m", "r60m"]:
+        if f"/{res}/" not in href:
+            continue
 
-    # If already has /0/ or other digit subdirectory, don't modify
-    if re.search(r"/r60m/\d+/", href):
-        return href
+        # If already has /0/ or other digit subdirectory, don't modify
+        if re.search(rf"/{res}/\d+/", href):
+            continue
 
-    # Insert /0/ after /r60m/
-    return re.sub(r"(/r60m)/", r"\1/0/", href)
+        # Insert /0/ after /{res}/
+        href = re.sub(rf"/({res})/", r"/\1/0/", href)
+
+    return href
 
 
 def find_source_zarr_base(source_item: dict) -> str | None:

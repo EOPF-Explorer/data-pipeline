@@ -66,8 +66,9 @@ def add_visualization(item: Item, raster_base: str, collection_id: str) -> None:
             _add_tile_links(item, base_url, query, "Sentinel-1 GRD VH")
 
     elif coll_lower.startswith(("sentinel-2", "sentinel2")):
-        # S2: Quicklook path
-        var_path = "/quality/l2a_quicklook/r10m:tci"
+        # S2: Point to overview level 0 for quicklook TCI
+        # Use /r10m/0/tci path to access the overview array with spatial_ref
+        var_path = "/quality/l2a_quicklook/r10m/0/tci"
         query = (
             f"variables={urllib.parse.quote(var_path, safe='')}&bidx=1&bidx=2&bidx=3&assets=TCI_10m"
         )
