@@ -1,6 +1,6 @@
 # EOPF GeoZarr Data Pipeline
 
-**Kubernetes pipeline: Sentinel CPM Zarr → Cloud-Optimized GeoZarr + STAC Registration**
+**Kubernetes pipeline: Sentinel Zarr → Cloud-Optimized GeoZarr + STAC Registration**
 
 Automated pipeline for converting Sentinel-1/2 Zarr datasets to cloud-optimized GeoZarr format with STAC catalog integration and interactive visualization.
 
@@ -56,33 +56,21 @@ Transforms Sentinel-1/2 satellite data into web-ready visualizations:
 - Sentinel-1 GRD (SAR backscatter)
 
 
-## Requirements & Setup
+## Setup
 
-### Prerequisites
+**Prerequisites:**
+- Kubernetes cluster with [platform-deploy](https://github.com/EOPF-Explorer/platform-deploy) (Argo Workflows, RabbitMQ, STAC API, TiTiler)
+- Python 3.13+ with `uv`
+- `kubectl` configured
 
-- **Kubernetes cluster** with [platform-deploy](https://github.com/EOPF-Explorer/platform-deploy) infrastructure
-  - Argo Workflows (pipeline orchestration)
-  - RabbitMQ (event-driven automation)
-  - STAC API & TiTiler (catalog & visualization)
-- **Python 3.13+** with `uv` package manager
-- **S3 storage** credentials (OVH de region)
-- **Kubeconfig** in `.work/kubeconfig`
+**📖 Complete setup guide:** See [workflows/README.md](workflows/README.md) for:
+- kubectl configuration (OVH Manager kubeconfig download)
+- Required secrets (RabbitMQ, S3, STAC API)
+- Workflow deployment (`kubectl apply -k`)
 
-Verify infrastructure:
+**Quick verification:**
 ```bash
-export KUBECONFIG=$(pwd)/.work/kubeconfig
-kubectl get pods -n core -l app.kubernetes.io/name=argo-workflows
-kubectl get pods -n core -l app.kubernetes.io/name=rabbitmq
-```
-
-### Deploy Workflows
-
-```bash
-# Apply to staging
-kubectl apply -k workflows/overlays/staging
-
-# Apply to production
-kubectl apply -k workflows/overlays/production
+kubectl get wf,sensor,eventsource -n devseed-staging
 ```
 
 ---
@@ -214,40 +202,12 @@ Tests are planned for `tests/` directory (structure exists, test files to be add
 
 ## Configuration
 
-### S3 Storage
+**📖 Full configuration:** See [workflows/README.md](workflows/README.md) for secrets setup and parameters.
 
-```bash
-kubectl create secret generic geozarr-s3-credentials -n devseed-staging \
-  --from-literal=AWS_ACCESS_KEY_ID="<your-key>" \
-  --from-literal=AWS_SECRET_ACCESS_KEY="<your-secret>"
-```
-
-| Setting | Value |
-|---------|-------|
-| **Endpoint** | `https://s3.de.io.cloud.ovh.net` |
-| **Bucket** | `esa-zarr-sentinel-explorer-fra` |
-| **Region** | `de` |
-
-### RabbitMQ
-
-Get password:
-```bash
-kubectl get secret rabbitmq-password -n core -o jsonpath='{.data.rabbitmq-password}' | base64 -d
-```
-
-| Setting | Value |
-|---------|-------|
-| **URL** | `amqp://user:PASSWORD@rabbitmq.core.svc.cluster.local:5672/` |
-| **Exchange** | `geozarr-staging` |
-| **Routing key** | `eopf.items.test` |
-
-**Message format:**
-```json
-{
-  "source_url": "https://stac.core.eopf.eodc.eu/collections/sentinel-2-l2a/items/...",
-  "collection": "sentinel-2-l2a-dp-test"
-}
-```
+**Quick reference:**
+- S3: `s3.de.io.cloud.ovh.net` / `esa-zarr-sentinel-explorer-fra`
+- Staging collection: `sentinel-2-l2a-dp-test`
+- Production collection: `sentinel-2-l2a`
 
 ---
 
