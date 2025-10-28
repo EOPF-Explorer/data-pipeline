@@ -1,142 +1,150 @@
 # Workflows
 
-Argo Workflows configuration using Kustomize for environment management.
+Event-driven Argo Workflows for Sentinel-2 GeoZarr conversion and STAC registration.
 
-## Purpose
+**Architecture**: RabbitMQ messages → Sensor → WorkflowTemplate (convert → register) → S3 + STAC API
 
-Event-driven pipeline orchestration for Sentinel-2 GeoZarr conversion and STAC registration. RabbitMQ messages trigger workflows that run a 2-step DAG: **convert → register**.
+---
+
+## Quick Setup
+
+### 1. Configure kubectl
+
+Download kubeconfig from [OVH Manager → Kubernetes](https://www.ovh.com/manager/#/public-cloud/pci/projects/bcc5927763514f499be7dff5af781d57/kubernetes/f5f25708-bd15-45b9-864e-602a769a5fcf/service) (**Access and Security** tab).
+
+```bash
+mv ~/Downloads/kubeconfig-*.yml .work/kubeconfig
+export KUBECONFIG=$(pwd)/.work/kubeconfig
+kubectl get nodes  # Verify: should list 3-5 nodes
+```
+
+### 2. Create Required Secrets
+
+The pipeline needs 3 secrets for: **event ingestion** (RabbitMQ), **output storage** (S3), and **STAC registration** (API auth).
+
+**RabbitMQ credentials** (receives workflow trigger events):
+```bash
+# Get password from cluster-managed secret
+RABBITMQ_PASS=$(kubectl get secret rabbitmq-password -n core -o jsonpath='{.data.rabbitmq-password}' | base64 -d)
+
+kubectl create secret generic rabbitmq-credentials -n devseed-staging \
+  --from-literal=username=user \
+  --from-literal=password="$RABBITMQ_PASS"
+```
+
+**S3 credentials** (writes converted GeoZarr files):
+```bash
+# Get from OVH Manager → Users & Roles → OpenStack credentials
+# https://www.ovh.com/manager/\#/public-cloud/pci/projects/bcc5927763514f499be7dff5af781d57/users
+
+kubectl create secret generic geozarr-s3-credentials -n devseed-staging \
+  --from-literal=AWS_ACCESS_KEY_ID=<your-ovh-access-key> \
+  --from-literal=AWS_SECRET_ACCESS_KEY=<your-ovh-secret-key>
+```
+
+**STAC API token** (registers items, optional if API is public):
+```bash
+kubectl create secret generic stac-api-token -n devseed-staging \
+  --from-literal=token=<bearer-token>
+```
+
+### 3. Deploy Workflows
+
+```bash
+kubectl apply -k workflows/overlays/staging     # Staging (devseed-staging)
+kubectl apply -k workflows/overlays/production  # Production (devseed)
+```
+
+**Verify deployment:**
+```bash
+kubectl get workflowtemplate,sensor,eventsource,sa -n devseed-staging
+# Expected: 1 WorkflowTemplate, 1 Sensor, 1 EventSource, 1 ServiceAccount
+```
+
+---
 
 ## Structure
 
 ```
 workflows/
-├── base/                           # Core resources (namespace-agnostic)
-│   ├── kustomization.yaml          # References all resources
-│   ├── workflowtemplate.yaml       # 2-step pipeline DAG
-│   ├── sensor.yaml                 # RabbitMQ → Workflow trigger
-│   ├── eventsource.yaml            # RabbitMQ connection config
-│   └── rbac.yaml                   # ServiceAccount + permissions
+├── base/                      # Core resources (namespace-agnostic)
+│   ├── workflowtemplate.yaml  # 2-step DAG: convert → register
+│   ├── sensor.yaml            # RabbitMQ trigger
+│   ├── eventsource.yaml       # RabbitMQ connection
+│   ├── rbac.yaml              # Permissions
+│   └── kustomization.yaml
 └── overlays/
-    ├── staging/
-    │   └── kustomization.yaml      # devseed-staging namespace patches
-    └── production/
-        └── kustomization.yaml      # devseed namespace patches
+    ├── staging/               # devseed-staging namespace
+    └── production/            # devseed namespace
 ```
 
-## Apply to Cluster
+---
 
-**Staging (devseed-staging):**
+## Monitoring
+
+**Watch workflows:**
 ```bash
-kubectl apply -k workflows/overlays/staging
-```
-
-**Production (devseed):**
-```bash
-kubectl apply -k workflows/overlays/production
-```
-
-**Verify deployment:**
-```bash
-# Check resources (expected output shows 1 of each)
-kubectl get workflowtemplate,sensor,eventsource,sa -n devseed-staging
-
-# Example output:
-# NAME                                                AGE
-# workflowtemplate.argoproj.io/geozarr-pipeline      5m
-#
-# NAME                                    AGE
-# sensor.argoproj.io/geozarr-sensor      5m
-#
-# NAME                                          AGE
-# eventsource.argoproj.io/rabbitmq-geozarr     5m
-#
-# NAME                                SECRETS   AGE
-# serviceaccount/operate-workflow-sa   0         5m
-
-# Watch for workflows (should show Running/Succeeded/Failed)
 kubectl get wf -n devseed-staging --watch
 ```
 
-## Required Secrets
-
-The pipeline requires these Kubernetes secrets in the target namespace:
-
-### 1. `rabbitmq-credentials`
-RabbitMQ authentication for EventSource:
-
-```bash
-kubectl create secret generic rabbitmq-credentials \
-  --from-literal=username=<rabbitmq-user> \
-  --from-literal=password=<rabbitmq-password> \
-  -n devseed-staging
+**Example output:**
+```
+NAME            STATUS      AGE
+geozarr-79jmg   Running     5m
+geozarr-95rgx   Succeeded   9h
+geozarr-jflnj   Failed      10h
 ```
 
-### 2. `geozarr-s3-credentials`
-S3 credentials for GeoZarr output:
+---
 
-```bash
-kubectl create secret generic geozarr-s3-credentials \
-  --from-literal=AWS_ACCESS_KEY_ID=<access-key> \
-  --from-literal=AWS_SECRET_ACCESS_KEY=<secret-key> \
-  -n devseed-staging
-```
+## Configuration
 
-### 3. `stac-api-token` (optional)
-Bearer token for STAC API authentication (if required):
+### S3 Storage
 
-```bash
-kubectl create secret generic stac-api-token \
-  --from-literal=token=<bearer-token> \
-  -n devseed-staging
-```
+- **Endpoint**: `https://s3.de.io.cloud.ovh.net` (OVH Frankfurt)
+- **Bucket**: `esa-zarr-sentinel-explorer-fra`
+- **Paths**: `tests-output/` (staging), `geozarr/` (production)
 
-## WorkflowTemplate Parameters
+### Workflow Parameters
 
-See main [README.md](../README.md) for complete parameter reference.
+Key parameters (see [../README.md](../README.md) for full reference):
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `source_url` | - | STAC item URL or direct Zarr URL |
-| `register_collection` | sentinel-2-l2a-dp-test | STAC collection ID |
-| `stac_api_url` | https://api... | STAC API endpoint |
-| `raster_api_url` | https://api... | TiTiler endpoint |
-| `s3_output_bucket` | esa-zarr... | S3 output bucket |
-| `pipeline_image_version` | fix-unit-tests | Docker image tag |
+- `source_url`: STAC item URL or Zarr URL
+- `register_collection`: Target STAC collection (default: `sentinel-2-l2a-dp-test`)
+- `s3_output_bucket`: Output bucket
+- `pipeline_image_version`: Docker image tag
 
-## Resource Configuration
+### Resource Tuning
 
-To adjust CPU/memory limits, edit `workflows/base/workflowtemplate.yaml`:
+Edit `workflows/base/workflowtemplate.yaml`:
 
 ```yaml
-- name: convert-geozarr
-  resources:
-    requests:
-      memory: 4Gi    # Increase for larger datasets
-      cpu: '1'
-    limits:
-      memory: 8Gi
-      cpu: '2'
+resources:
+  requests: { memory: 4Gi, cpu: '1' }
+  limits:   { memory: 8Gi, cpu: '2' }  # Increase for larger datasets
 ```
+
+---
 
 ## Troubleshooting
 
-**Kustomize build fails:**
+**Workflow not triggered:**
 ```bash
-# Validate structure
-kubectl kustomize workflows/overlays/staging
-
-# Check for duplicate resources
-find workflows -name "*.yaml" -not -path "*/base/*" -not -path "*/overlays/*"
+kubectl logs -n devseed-staging -l eventsource-name=rabbitmq  # Check RabbitMQ connection
+kubectl get sensor -n devseed-staging geozarr-trigger -o yaml  # Check sensor status
 ```
 
-**Workflow not triggered:**
-- Check EventSource connection: `kubectl logs -n devseed-staging -l eventsource-name=rabbitmq`
-- Check Sensor status: `kubectl get sensor -n devseed-staging geozarr-trigger -o yaml`
-- Verify RabbitMQ port-forward or service access
-
 **Workflow fails:**
-- Check pod logs: `kubectl logs -n devseed-staging <workflow-pod-name>`
-- Verify secrets exist: `kubectl get secret -n devseed-staging geozarr-s3-credentials stac-api-token`
-- Check RBAC: `kubectl auth can-i create workflows --as=system:serviceaccount:devseed-staging:operate-workflow-sa`
+```bash
+kubectl logs -n devseed-staging <workflow-pod-name>  # View logs
+kubectl get secret -n devseed-staging                 # Verify secrets exist
+```
 
-For full pipeline documentation, see [../README.md](../README.md).
+**Kustomize validation:**
+```bash
+kubectl kustomize workflows/overlays/staging  # Validate YAML
+```
+
+---
+
+For complete documentation, see [../README.md](../README.md).
