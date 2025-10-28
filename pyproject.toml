@@ -145,6 +145,7 @@ warn_no_return = true
 strict_equality = true
 exclude = ["examples/"]
 
+# Relax type checking for test files (structure exists, tests to be added)
 [[tool.mypy.overrides]]
 module = "tests.*"
 disallow_untyped_defs = false
