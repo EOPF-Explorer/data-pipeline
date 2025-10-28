@@ -171,7 +171,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
 
     except Exception as e:
-        logger.error(f"Failed to augment {args.item_id}: {e}")
+        logger.error(f"Failed to augment {item_url}: {e}")
         return 1
 
 
