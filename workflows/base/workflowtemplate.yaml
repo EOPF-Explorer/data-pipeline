@@ -32,6 +32,15 @@ spec:
       value: tests-output
     - name: pipeline_image_version
       value: slim
+    # Optional conversion parameter overrides (empty = use collection defaults)
+    - name: override_groups
+      value: ""
+    - name: override_spatial_chunk
+      value: ""
+    - name: override_tile_width
+      value: ""
+    - name: override_enable_sharding
+      value: ""
   templates:
   - name: main
     dag:
@@ -59,6 +68,14 @@ spec:
       - --s3-output-prefix
       - "{{workflow.parameters.s3_output_prefix}}"
       - --verbose
+      - --groups
+      - "{{workflow.parameters.override_groups}}"
+      - --spatial-chunk
+      - "{{workflow.parameters.override_spatial_chunk}}"
+      - --tile-width
+      - "{{workflow.parameters.override_tile_width}}"
+      - --enable-sharding
+      - "{{workflow.parameters.override_enable_sharding}}"
       resources:
         requests:
           memory: 4Gi
