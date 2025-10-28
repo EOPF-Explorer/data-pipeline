@@ -208,21 +208,7 @@ docker/Dockerfile             # Pipeline image
 tools/submit_burst.py         # RabbitMQ burst submission tool
 ```
 
-Tests are available in `tests/` directory (unit and integration tests using pytest).
-
----
-
-## Deploy
-
-```bash
-# Apply to staging
-kubectl apply -k workflows/overlays/staging
-
-# Apply to production
-kubectl apply -k workflows/overlays/production
-```
-
-**Config:** Image version, S3 endpoints, STAC API URLs, RabbitMQ exchanges configured via kustomize overlays.
+Tests are planned for `tests/` directory (structure exists, test files to be added).
 
 ---
 
