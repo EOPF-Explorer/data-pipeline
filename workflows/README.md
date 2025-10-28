@@ -56,6 +56,14 @@ kubectl get workflowtemplate,sensor,eventsource,sa -n devseed-staging
 # Watch for workflows (should show Running/Succeeded/Failed)
 kubectl get wf -n devseed-staging --watch
 ```
+Example outputs:
+```
+NAME            STATUS      AGE
+geozarr-79jmg   Running     5m
+geozarr-95rgx   Succeeded   9h
+geozarr-hpcvf   Succeeded   10h
+geozarr-jflnj   Failed      10h
+```
 
 ## Required Secrets
 
