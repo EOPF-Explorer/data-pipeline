@@ -27,10 +27,15 @@ CONFIGS: dict[str, dict[str, Any]] = {
         "tile_width": 512,
     },
     "sentinel-2": {
-        "groups": "/quality/l2a_quicklook/r10m",
-        "extra_flags": "--crs-groups /quality/l2a_quicklook/r10m",
-        "spatial_chunk": 4096,
-        "tile_width": 512,
+        "groups": [
+            "/measurements/reflectance/r10m",
+            "/measurements/reflectance/r20m",
+            "/measurements/reflectance/r60m",
+            "/quality/l2a_quicklook/r10m",
+        ],
+        "extra_flags": "--crs-groups /conditions/geometry",
+        "spatial_chunk": 1024,
+        "tile_width": 256,
     },
 }
 
