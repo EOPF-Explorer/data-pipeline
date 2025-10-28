@@ -9,9 +9,11 @@ import os
 import sys
 from urllib.parse import urlparse
 
+import boto3
 import fsspec
 import httpx
 import xarray as xr
+from botocore.exceptions import ClientError
 from eopf_geozarr import create_geozarr_dataset
 from eopf_geozarr.conversion.fs_utils import get_storage_options
 from get_conversion_params import get_conversion_params
@@ -20,6 +22,28 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+
+def check_output_exists(
+    s3_output_bucket: str, s3_output_prefix: str, collection: str, item_id: str
+) -> bool:
+    """Check if output already exists in S3."""
+    try:
+        s3 = boto3.client(
+            "s3",
+            endpoint_url=os.getenv("AWS_ENDPOINT_URL"),
+            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+        )
+        prefix = f"{s3_output_prefix}/{collection}/{item_id}.zarr/"
+        response = s3.list_objects_v2(Bucket=s3_output_bucket, Prefix=prefix, MaxKeys=1)
+        exists: bool = response.get("KeyCount", 0) > 0
+        if exists:
+            logger.info(f"Output exists at s3://{s3_output_bucket}/{prefix} - skipping")
+        return exists
+    except ClientError as e:
+        logger.warning(f"Could not check S3: {e}")
+        return False
 
 
 def get_zarr_url(stac_item_url: str) -> str:
@@ -46,6 +70,7 @@ def run_conversion(
     collection: str,
     s3_output_bucket: str,
     s3_output_prefix: str,
+    overwrite: bool = False,
 ) -> str:
     """Run GeoZarr conversion workflow.
 
@@ -54,6 +79,7 @@ def run_conversion(
         collection: Collection ID for parameter lookup
         s3_output_bucket: S3 bucket for output
         s3_output_prefix: S3 prefix for output
+        overwrite: Force conversion even if output exists
 
     Returns:
         Output Zarr URL (s3://...)
@@ -64,6 +90,13 @@ def run_conversion(
     # Extract item ID from URL
     item_id = urlparse(source_url).path.rstrip("/").split("/")[-1]
     logger.info(f"Starting GeoZarr conversion for {item_id}")
+
+    # Idempotency: skip if output exists
+    if not overwrite and check_output_exists(
+        s3_output_bucket, s3_output_prefix, collection, item_id
+    ):
+        output_url = f"s3://{s3_output_bucket}/{s3_output_prefix}/{collection}/{item_id}.zarr"
+        return output_url
 
     # Resolve source: STAC item or direct Zarr URL
     if "/items/" in source_url:
@@ -149,6 +182,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--collection", required=True, help="Collection ID")
     parser.add_argument("--s3-output-bucket", required=True, help="S3 output bucket")
     parser.add_argument("--s3-output-prefix", required=True, help="S3 output prefix")
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Force conversion even if output exists",
+    )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
 
     args = parser.parse_args(argv)
@@ -162,6 +200,7 @@ def main(argv: list[str] | None = None) -> int:
             args.collection,
             args.s3_output_bucket,
             args.s3_output_prefix,
+            overwrite=args.overwrite,
         )
         logger.info(f"Success: {output_url}")
         return 0

@@ -7,6 +7,8 @@ spec:
   serviceAccountName: operate-workflow-sa
   entrypoint: main
   archiveLogs: false
+  parallelism: 10
+  activeDeadlineSeconds: 7200
   ttlStrategy:
     secondsAfterCompletion: 86400
   podGC:
@@ -45,6 +47,9 @@ spec:
 
   - name: convert-geozarr
     activeDeadlineSeconds: 3600
+    synchronization:
+      mutex:
+        name: "item-{{workflow.parameters.source_url | sha1sum | trunc 8}}"
     script:
       image: ghcr.io/eopf-explorer/data-pipeline:{{workflow.parameters.pipeline_image_version}}
       imagePullPolicy: Always
