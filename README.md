@@ -209,6 +209,24 @@ Tests are planned for `tests/` directory (structure exists, test files to be add
 - Staging collection: `sentinel-2-l2a-dp-test`
 - Production collection: `sentinel-2-l2a`
 
+### Logging Level
+
+By default, scripts log at **INFO** level. Third-party libraries (botocore, s3fs) are silenced to WARNING.
+
+**Enable DEBUG logging:**
+```yaml
+# Add to workflow parameters or pod environment
+env:
+- name: LOG_LEVEL
+  value: DEBUG
+```
+
+Or for local development:
+```bash
+export LOG_LEVEL=DEBUG
+python scripts/convert.py --source-url ...
+```
+
 ---
 
 ## Monitor

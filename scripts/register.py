@@ -17,10 +17,19 @@ from pystac import Item, Link
 from pystac.extensions.projection import ProjectionExtension
 from pystac_client import Client
 
+# Configure logging: INFO by default, DEBUG if LOG_LEVEL=DEBUG env var set
+log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    level=getattr(logging, log_level, logging.INFO),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+# Silence noisy third-party loggers
+logging.getLogger("botocore").setLevel(logging.WARNING)
+logging.getLogger("s3fs").setLevel(logging.WARNING)
+logging.getLogger("aiobotocore").setLevel(logging.WARNING)
+logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 EXPLORER_BASE = os.getenv("EXPLORER_BASE_URL", "https://explorer.eopf.copernicus.eu")
 
