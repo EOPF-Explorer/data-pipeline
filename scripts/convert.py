@@ -16,19 +16,14 @@ import xarray as xr
 from eopf_geozarr import create_geozarr_dataset
 from eopf_geozarr.conversion.fs_utils import get_storage_options
 
-# Configure logging: INFO by default, DEBUG if LOG_LEVEL=DEBUG env var set
-log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+# Configure logging (set LOG_LEVEL=DEBUG for verbose output)
 logging.basicConfig(
-    level=getattr(logging, log_level, logging.INFO),
+    level=os.getenv("LOG_LEVEL", "INFO"),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
-
-# Silence noisy third-party loggers
-logging.getLogger("botocore").setLevel(logging.WARNING)
-logging.getLogger("s3fs").setLevel(logging.WARNING)
-logging.getLogger("aiobotocore").setLevel(logging.WARNING)
-logging.getLogger("urllib3").setLevel(logging.WARNING)
+for lib in ["botocore", "s3fs", "aiobotocore", "urllib3"]:
+    logging.getLogger(lib).setLevel(logging.WARNING)
 
 
 # === Conversion Parameters ===
