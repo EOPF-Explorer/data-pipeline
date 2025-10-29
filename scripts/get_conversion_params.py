@@ -25,6 +25,7 @@ CONFIGS: dict[str, dict[str, Any]] = {
         "extra_flags": "--gcp-group /conditions/gcp",
         "spatial_chunk": 4096,
         "tile_width": 512,
+        "enable_sharding": False,
     },
     "sentinel-2": {
         "groups": [
@@ -36,6 +37,7 @@ CONFIGS: dict[str, dict[str, Any]] = {
         "extra_flags": "--crs-groups /conditions/geometry",
         "spatial_chunk": 1024,
         "tile_width": 256,
+        "enable_sharding": True,
     },
 }
 
@@ -47,7 +49,7 @@ def get_conversion_params(collection_id: str) -> dict[str, Any]:
         collection_id: Collection identifier (e.g., sentinel-1-l1-grd, sentinel-2-l2a-dp-test)
 
     Returns:
-        Dict of conversion parameters (groups, extra_flags, spatial_chunk, tile_width)
+        Dict of conversion parameters (groups, extra_flags, spatial_chunk, tile_width, enable_sharding)
     """
     # Extract mission prefix (sentinel-1 or sentinel-2)
     parts = collection_id.lower().split("-")
@@ -78,7 +80,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--param",
-        choices=["groups", "extra_flags", "spatial_chunk", "tile_width"],
+        choices=["groups", "extra_flags", "spatial_chunk", "tile_width", "enable_sharding"],
         help="Get single parameter (for shell scripts)",
     )
 
@@ -87,7 +89,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.param:
         # Output single parameter (for shell variable assignment)
-        print(params.get(args.param, ""))
+        value = params.get(args.param, "")
+        # Convert boolean to shell-friendly format
+        if isinstance(value, bool):
+            print("true" if value else "false")
+        else:
+            print(value if value is not None else "")
     elif args.format == "json":
         # Output JSON (for parsing with jq)
         print(json.dumps(params, indent=2))
@@ -97,6 +104,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"EXTRA_FLAGS='{params['extra_flags']}'")
         print(f"CHUNK={params['spatial_chunk']}")
         print(f"TILE_WIDTH={params['tile_width']}")
+        print(f"ENABLE_SHARDING={'true' if params['enable_sharding'] else 'false'}")
 
     return 0
 
