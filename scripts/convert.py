@@ -15,7 +15,6 @@ import httpx
 import xarray as xr
 from eopf_geozarr import create_geozarr_dataset
 from eopf_geozarr.conversion.fs_utils import get_storage_options
-from get_conversion_params import get_conversion_params
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -23,8 +22,54 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+# === Conversion Parameters ===
+
+# Conversion parameters by mission
+CONFIGS: dict[str, dict[str, Any]] = {
+    "sentinel-1": {
+        "groups": "/measurements",
+        "extra_flags": "--gcp-group /conditions/gcp",
+        "spatial_chunk": 4096,
+        "tile_width": 512,
+        "enable_sharding": False,
+    },
+    "sentinel-2": {
+        "groups": [
+            "/measurements/reflectance/r10m",
+            "/measurements/reflectance/r20m",
+            "/measurements/reflectance/r60m",
+            "/quality/l2a_quicklook/r10m",
+        ],
+        "extra_flags": "--crs-groups /conditions/geometry",
+        "spatial_chunk": 1024,
+        "tile_width": 256,
+        "enable_sharding": True,
+    },
+}
+
+
+def get_conversion_params(collection_id: str) -> dict[str, Any]:
+    """Get conversion parameters for collection. Defaults to Sentinel-2 if unrecognized."""
+    parts = collection_id.lower().split("-")
+    if len(parts) >= 2:
+        prefix = f"{parts[0]}-{parts[1]}"
+        if prefix in CONFIGS:
+            return CONFIGS[prefix]
+    return CONFIGS["sentinel-2"]
+
+
 def get_zarr_url(stac_item_url: str) -> str:
-    """Get Zarr asset URL from STAC item."""
+    """Get Zarr asset URL from STAC item.
+
+    Args:
+        stac_item_url: STAC item URL
+
+    Returns:
+        Zarr asset href
+
+    Raises:
+        RuntimeError: If no Zarr asset found
+    """
     r = httpx.get(stac_item_url, timeout=30.0, follow_redirects=True)
     r.raise_for_status()
     assets = r.json().get("assets", {})
@@ -40,6 +85,9 @@ def get_zarr_url(stac_item_url: str) -> str:
             return str(asset["href"])
 
     raise RuntimeError("No Zarr asset found in STAC item")
+
+
+# === Conversion Workflow ===
 
 
 def run_conversion(
@@ -83,17 +131,19 @@ def run_conversion(
         zarr_url = source_url
         logger.info(f"Direct Zarr URL: {zarr_url}")
 
-    # Get conversion parameters (with optional overrides)
+    # Get conversion parameters and apply overrides
     params = get_conversion_params(collection)
-    overrides = {
-        "groups": groups.split(",") if groups and "," in groups else groups or None,
+    parsed_overrides = {
+        "groups": groups.split(",") if groups else None,
         "spatial_chunk": spatial_chunk,
         "tile_width": tile_width,
         "enable_sharding": enable_sharding,
     }
-    params.update({k: v for k, v in overrides.items() if v is not None})
+    params.update({k: v for k, v in parsed_overrides.items() if v is not None})
 
-    logger.info(f"Conversion params: {params}")  # Construct output path
+    logger.info(f"Conversion params: {params}")
+
+    # Construct output path
     output_url = f"s3://{s3_output_bucket}/{s3_output_prefix}/{collection}/{item_id}.zarr"
 
     # Clean up existing output to avoid base array artifacts
