@@ -11,6 +11,11 @@ import zarr
 from pystac import Item, Link
 from pystac.extensions.projection import ProjectionExtension
 
+try:
+    from metrics import PREVIEW_GENERATION_DURATION
+except ImportError:
+    PREVIEW_GENERATION_DURATION = None
+
 EXPLORER_BASE = os.getenv("EXPLORER_BASE_URL", "https://explorer.eopf.copernicus.eu")
 
 
@@ -136,12 +141,26 @@ def main(argv: list[str] | None = None) -> int:
     # Augment with CRS + preview links
     target_collection = item.collection_id or args.collection
 
-    augment(
-        item,
-        raster_base=args.raster_base,
-        collection_id=target_collection,
-        verbose=args.verbose,
-    )
+    if PREVIEW_GENERATION_DURATION:
+        preview_type = (
+            "s1_grd" if target_collection.lower().startswith("sentinel-1") else "true_color"
+        )
+        with PREVIEW_GENERATION_DURATION.labels(
+            collection=target_collection, preview_type=preview_type
+        ).time():
+            augment(
+                item,
+                raster_base=args.raster_base,
+                collection_id=target_collection,
+                verbose=args.verbose,
+            )
+    else:
+        augment(
+            item,
+            raster_base=args.raster_base,
+            collection_id=target_collection,
+            verbose=args.verbose,
+        )
 
     # Update item via PUT
     target_url = f"{args.stac.rstrip('/')}/collections/{target_collection}/items/{item.id}"
