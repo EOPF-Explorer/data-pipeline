@@ -2,9 +2,9 @@ name: Tests
 
 on:
   push:
-    branches: [ main, feat/dask-integration ]
+    branches: [ main ]
   pull_request:
-    branches: [ main, feat/performance-validation ]
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
