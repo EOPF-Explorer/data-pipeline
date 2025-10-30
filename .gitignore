@@ -61,4 +61,3 @@ Thumbs.db
 # Project-specific
 *.zarr
 out/
-reports/

@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - '**'  # Build all branches during rapid iteration
+    tags:
+      - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: read

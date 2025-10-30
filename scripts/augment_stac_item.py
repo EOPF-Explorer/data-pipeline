@@ -2,7 +2,6 @@
 """STAC item augmentation: add CRS metadata and preview links."""
 
 import argparse
-import logging
 import os
 import sys
 import urllib.parse
@@ -11,11 +10,6 @@ import httpx
 import zarr
 from pystac import Item, Link
 from pystac.extensions.projection import ProjectionExtension
-
-logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
-logger = logging.getLogger(__name__)
 
 EXPLORER_BASE = os.getenv("EXPLORER_BASE_URL", "https://explorer.eopf.copernicus.eu")
 
@@ -66,7 +60,7 @@ def add_visualization(item: Item, raster_base: str, collection_id: str) -> None:
             _add_tile_links(item, base_url, query, "Sentinel-1 GRD VH")
 
     elif coll_lower.startswith(("sentinel-2", "sentinel2")):
-        # S2: Quicklook path
+        # S2: Static quicklook path
         var_path = "/quality/l2a_quicklook/r10m:tci"
         query = (
             f"variables={urllib.parse.quote(var_path, safe='')}&bidx=1&bidx=2&bidx=3&assets=TCI_10m"
@@ -102,17 +96,10 @@ def _add_tile_links(item: Item, base_url: str, query: str, title: str) -> None:
     )
 
 
-def augment(item: Item, *, raster_base: str, collection_id: str) -> Item:
-    """Augment STAC item with extensions and links.
-
-    Args:
-        item: STAC item to augment
-        raster_base: TiTiler raster API base URL
-        collection_id: Collection ID for viewer links
-
-    Returns:
-        Augmented item (modified in place)
-    """
+def augment(item: Item, *, raster_base: str, collection_id: str, verbose: bool) -> Item:
+    """Augment STAC item with extensions and links."""
+    if verbose:
+        print(f"[augment] {item.id}")
     add_projection(item)
     add_visualization(item, raster_base, collection_id)
     return item
@@ -121,42 +108,45 @@ def augment(item: Item, *, raster_base: str, collection_id: str) -> Item:
 def main(argv: list[str] | None = None) -> int:
     """Main entry point."""
     p = argparse.ArgumentParser(description="Augment STAC item")
-    p.add_argument("--stac-api-url", required=True, help="STAC API base URL")
-    p.add_argument("--collection-id", required=True, help="Collection ID")
+    p.add_argument("--stac", required=True, help="STAC API base")
+    p.add_argument("--collection", required=True, help="Collection ID")
     p.add_argument("--item-id", required=True, help="Item ID")
-    p.add_argument("--bearer", default="", help="Bearer token (optional)")
+    p.add_argument("--bearer", default="", help="Bearer token")
     p.add_argument(
-        "--raster-api-url",
+        "--raster-base",
         default="https://api.explorer.eopf.copernicus.eu/raster",
-        help="TiTiler raster API base URL",
+        help="TiTiler base",
     )
-    p.add_argument("--verbose", action="store_true", help="Enable verbose logging")
+    p.add_argument("--verbose", action="store_true")
     args = p.parse_args(argv)
 
-    if args.verbose:
-        logger.setLevel(logging.DEBUG)
-
     headers = {"Authorization": f"Bearer {args.bearer}"} if args.bearer else {}
-    item_url = (
-        f"{args.stac_api_url.rstrip('/')}/collections/{args.collection_id}/items/{args.item_id}"
-    )
+    item_url = f"{args.stac.rstrip('/')}/collections/{args.collection}/items/{args.item_id}"
 
-    # Fetch, augment, and update item
+    # Fetch item
     try:
         with httpx.Client() as client:
-            # Fetch item
             r = client.get(item_url, headers=headers, timeout=30.0)
             r.raise_for_status()
             item = Item.from_dict(r.json())
+    except Exception as e:
+        print(f"ERROR: GET failed: {e}", file=sys.stderr)
+        return 1
 
-            # Augment with CRS + preview links
-            target_collection = item.collection_id or args.collection_id
-            augment(item, raster_base=args.raster_api_url, collection_id=target_collection)
+    # Augment with CRS + preview links
+    target_collection = item.collection_id or args.collection
 
-            # Update item via PUT
-            target_url = (
-                f"{args.stac_api_url.rstrip('/')}/collections/{target_collection}/items/{item.id}"
-            )
+    augment(
+        item,
+        raster_base=args.raster_base,
+        collection_id=target_collection,
+        verbose=args.verbose,
+    )
+
+    # Update item via PUT
+    target_url = f"{args.stac.rstrip('/')}/collections/{target_collection}/items/{item.id}"
+    try:
+        with httpx.Client() as client:
             r = client.put(
                 target_url,
                 json=item.to_dict(),
@@ -165,14 +155,12 @@ def main(argv: list[str] | None = None) -> int:
             )
             r.raise_for_status()
             if args.verbose:
-                logger.debug(f"PUT {target_url} → {r.status_code}")
-
-            logger.info(f"✅ Augmented {item.id} in {target_collection}")
-            return 0
-
+                print(f"PUT {target_url} → {r.status_code}")
     except Exception as e:
-        logger.error(f"Failed to augment {args.item_id}: {e}")
+        print(f"ERROR: PUT failed: {e}", file=sys.stderr)
         return 1
+
+    return 0
 
 
 if __name__ == "__main__":
