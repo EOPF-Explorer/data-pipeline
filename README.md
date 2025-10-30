@@ -251,7 +251,7 @@ kubectl logs -n devseed-staging -l eventsource-name=rabbitmq-geozarr --tail=50
 
 ## Resources
 
-**Pipeline Image:** `ghcr.io/eopf-explorer/data-pipeline:main`
+**Container Image:** `ghcr.io/eopf-explorer/data-pipeline:latest`
 
 **Resource Limits:**
 - CPU: 2 cores (convert), 500m (register)

@@ -3,7 +3,10 @@ name: Build Docker Image
 on:
   push:
     branches:
-      - '**'  # Build all branches during rapid iteration
+      - main
+  pull_request:
+    branches:
+      - main
 
 permissions:
   contents: read
@@ -34,9 +37,22 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GHCR_PAT || secrets.GITHUB_TOKEN }}
 
-    - name: Sanitize branch name for Docker tag
-      id: tag
-      run: echo "name=$(echo ${{ github.ref_name }} | sed 's/\//-/g')" >> $GITHUB_OUTPUT
+    - name: Generate Docker tags
+      id: meta
+      run: |
+        IMAGE="${{ env.REGISTRY }}/${{ steps.image.outputs.name }}"
+        SHA_SHORT=$(echo ${{ github.sha }} | cut -c1-7)
+
+        if [ "${{ github.event_name }}" = "pull_request" ]; then
+          # PR builds: tag as pr-<number>
+          TAGS="${IMAGE}:pr-${{ github.event.pull_request.number }},${IMAGE}:sha-${SHA_SHORT}"
+        else
+          # Push to main: tag as both 'main' and 'latest'
+          TAGS="${IMAGE}:main,${IMAGE}:latest,${IMAGE}:sha-${SHA_SHORT}"
+        fi
+
+        echo "tags=${TAGS}" >> $GITHUB_OUTPUT
+        echo "primary_tag=$(echo ${TAGS} | cut -d',' -f1 | cut -d':' -f2)" >> $GITHUB_OUTPUT
 
     - name: Build and push Docker image
       uses: docker/build-push-action@v5
@@ -45,7 +61,7 @@ jobs:
         file: docker/Dockerfile
         platforms: linux/amd64
         push: true
-        tags: ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}:${{ steps.tag.outputs.name }}
+        tags: ${{ steps.meta.outputs.tags }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
 
@@ -53,4 +69,4 @@ jobs:
       run: |
         echo "### Docker Image Built 🐳" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
-        echo "**Image:** ${{ env.REGISTRY }}/${{ steps.image.outputs.name }}:${{ steps.tag.outputs.name }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Tags:** ${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
