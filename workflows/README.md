@@ -114,6 +114,25 @@ Key parameters (see [../README.md](../README.md) for full reference):
 - `s3_output_bucket`: Output bucket
 - `pipeline_image_version`: Docker image tag
 
+**Override conversion parameters** (optional, for testing):
+
+```bash
+# Example: Test with different chunk size and disable sharding
+argo submit workflows/base/workflowtemplate.yaml \
+  --from workflowtemplate/geozarr-pipeline \
+  -p source_url="https://api.example.com/stac/.../items/ITEM_ID" \
+  -p override_spatial_chunk="2048" \
+  -p override_enable_sharding="false"
+```
+
+Available overrides (empty = use collection defaults):
+- `override_groups`: Comma-separated zarr groups (e.g., `/measurements/reflectance/r10m`)
+- `override_spatial_chunk`: Chunk size (e.g., `2048`)
+- `override_tile_width`: Tile width (e.g., `512`)
+- `override_enable_sharding`: Enable sharding (`true`/`false`)
+
+Defaults: S2 (1024/256/true), S1 (4096/512/false). See `scripts/get_conversion_params.py`.
+
 ### Resource Tuning
 
 Edit `workflows/base/workflowtemplate.yaml`:
