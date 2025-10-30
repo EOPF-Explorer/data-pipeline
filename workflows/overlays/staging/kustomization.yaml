@@ -37,4 +37,4 @@ patches:
           - name: s3_output_prefix
             value: tests-output
           - name: pipeline_image_version
-            value: slim
+            value: main

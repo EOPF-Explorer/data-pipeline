@@ -138,15 +138,20 @@ Access via **EOxHub workspace** (single sign-on): [workspace.devseed.hub-eopf-ex
 
 ## Pipeline
 
-```
-STAC item URL → Extract zarr → Convert (Dask) → S3 → Register STAC + TiTiler → Done (~15-20 min)
-```
+**Flow:** STAC item URL → Extract zarr → Convert to GeoZarr → Upload S3 → Register STAC item → Add visualization links
 
-**Steps:**
-1. **Convert** - Fetch STAC item, extract zarr URL, convert to GeoZarr, upload to S3
-2. **Register** - Create STAC item with TiTiler preview links, register to catalog
+**Processing:**
+1. **convert.py** - Fetch STAC item, extract zarr URL, convert to cloud-optimized GeoZarr, upload to S3
+2. **register.py** - Create STAC item with asset hrefs, add projection metadata and TiTiler links, register to catalog
 
-**Stack:** Argo Workflows • [eopf-geozarr](https://github.com/EOPF-Explorer/data-model) • Dask • RabbitMQ • Kustomize
+**Runtime:** ~15-20 minutes per item
+
+**Stack:**
+- Orchestration: Argo Workflows, Kustomize
+- Processing: eopf-geozarr, Dask, Python 3.13
+- Storage: S3 (OVH)
+- Catalog: pgSTAC, TiTiler
+- Events: RabbitMQ
 
 ---
 
@@ -177,26 +182,22 @@ kubectl get wf -n devseed-staging --sort-by=.metadata.creationTimestamp \
 
 ---
 
-## Structure
+## Repository Structure
 
 ```
-scripts/                      # Workflow steps
-├── convert.py                # GeoZarr conversion (extract zarr URL, convert, upload)
-├── register.py               # STAC registration orchestrator
-├── register_stac.py          # STAC item creation with TiTiler links
-├── create_geozarr_item.py    # Convert zarr → geozarr
-├── augment_stac_item.py      # Add visualization links to STAC items
-└── get_conversion_params.py  # Fetch collection config
+scripts/
+├── convert.py               # Zarr → GeoZarr conversion and S3 upload
+└── register.py              # STAC item creation and catalog registration
 
-workflows/                    # Kubernetes manifests (Kustomize)
-├── base/                     # WorkflowTemplate, EventSource, Sensor, RBAC
-└── overlays/                 # staging, production configs
+workflows/                   # Kubernetes manifests
+├── base/                    # WorkflowTemplate, EventSource, Sensor, RBAC
+└── overlays/staging/        # Environment configuration
+           /production/
 
-docker/Dockerfile             # Pipeline image
-tools/submit_burst.py         # RabbitMQ burst submission tool
+docker/Dockerfile            # Container image
+tests/unit/                  # Unit tests
+     /integration/           # Integration tests
 ```
-
-Tests are planned for `tests/` directory (structure exists, test files to be added).
 
 ---
 
@@ -250,7 +251,7 @@ kubectl logs -n devseed-staging -l eventsource-name=rabbitmq-geozarr --tail=50
 
 ## Resources
 
-**Pipeline Image:** `ghcr.io/eopf-explorer/data-pipeline:slim`
+**Pipeline Image:** `ghcr.io/eopf-explorer/data-pipeline:main`
 
 **Resource Limits:**
 - CPU: 2 cores (convert), 500m (register)
