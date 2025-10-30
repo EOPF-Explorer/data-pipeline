@@ -197,7 +197,8 @@ def run_registration(
     item_id = urlparse(source_url).path.rstrip("/").split("/")[-1]
     geozarr_url = f"s3://{s3_output_bucket}/{s3_output_prefix}/{collection}/{item_id}.zarr"
 
-    logger.info(f"Registering {item_id} → {collection}")
+    logger.info(f"📝 Registering: {item_id}")
+    logger.info(f"   Collection: {collection}")
 
     # 1. Fetch source item and clone with new collection
     with httpx.Client(timeout=30.0, follow_redirects=True) as http:
@@ -207,6 +208,7 @@ def run_registration(
 
     item = source_item.clone()
     item.collection_id = collection
+    logger.info(f"   📥 Fetched source item with {len(item.assets)} assets")
 
     # 2. Rewrite asset hrefs from source zarr to output geozarr
     source_zarr_base = next(
@@ -218,22 +220,27 @@ def run_registration(
         None,
     )
     if source_zarr_base:
-        logger.info(f"Rewriting assets: {source_zarr_base} → {geozarr_url}")
+        logger.info(f"   🔗 Rewriting {len(item.assets)} asset hrefs")
+        logger.debug(f"      From: {source_zarr_base}")
+        logger.debug(f"      To:   {geozarr_url}")
         rewrite_asset_hrefs(item, source_zarr_base, geozarr_url, s3_endpoint)
     else:
-        logger.warning("No source zarr found - assets not rewritten")
+        logger.warning("   ⚠️  No source zarr found - assets not rewritten")
 
     # 3. Add projection metadata from zarr
     add_projection_from_zarr(item)
 
     # 4. Add visualization links (viewer, xyz, tilejson)
     add_visualization_links(item, raster_api_url, collection)
+    logger.info("   🎨 Added visualization links")
 
     # 5. Register to STAC API
     client = Client.open(stac_api_url)
     upsert_item(client, collection, item)
 
-    logger.info(f"✅ Complete: {stac_api_url}/collections/{collection}/items/{item_id}")
+    logger.info(
+        f"✅ Registration complete → {stac_api_url}/collections/{collection}/items/{item_id}"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
