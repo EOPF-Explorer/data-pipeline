@@ -42,7 +42,7 @@ CONFIGS: dict[str, dict] = {
             "/measurements/reflectance/r60m",
             "/quality/l2a_quicklook/r10m",
         ],
-        "crs_groups": ["/conditions/geometry"],
+        "crs_groups": ["/quality/l2a_quicklook/r10m"],
         "spatial_chunk": 1024,
         "tile_width": 256,
         "enable_sharding": True,
@@ -157,6 +157,11 @@ def run_conversion(
     return output_url
 
 
+def optional_int(value: str) -> int | None:
+    """Convert string to int, return None for empty strings."""
+    return int(value) if value else None
+
+
 def main() -> None:
     """CLI entry point for GeoZarr conversion."""
     parser = argparse.ArgumentParser(description="Convert EOPF Zarr to GeoZarr format")
@@ -165,10 +170,15 @@ def main() -> None:
     parser.add_argument("--s3-output-bucket", required=True, help="S3 bucket")
     parser.add_argument("--s3-output-prefix", required=True, help="S3 prefix")
     parser.add_argument("--groups", help="Override groups (comma-separated)")
-    parser.add_argument("--spatial-chunk", type=int, help="Override spatial chunk size")
-    parser.add_argument("--tile-width", type=int, help="Override tile width")
-    parser.add_argument("--enable-sharding", action="store_true", help="Enable sharding")
+    parser.add_argument("--spatial-chunk", type=optional_int, help="Override spatial chunk size")
+    parser.add_argument("--tile-width", type=optional_int, help="Override tile width")
+    parser.add_argument("--enable-sharding", help="Override sharding flag (true/false)")
     args = parser.parse_args()
+
+    # Convert enable_sharding string to bool (or None)
+    enable_sharding = None
+    if args.enable_sharding:
+        enable_sharding = args.enable_sharding.lower() in ("true", "1", "yes")
 
     run_conversion(
         source_url=args.source_url,
@@ -178,7 +188,7 @@ def main() -> None:
         groups=args.groups,
         spatial_chunk=args.spatial_chunk,
         tile_width=args.tile_width,
-        enable_sharding=args.enable_sharding,
+        enable_sharding=enable_sharding,
     )
 
 

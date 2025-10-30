@@ -31,7 +31,7 @@ spec:
     - name: s3_output_prefix
       value: tests-output
     - name: pipeline_image_version
-      value: feature-align-data-model
+      value: main
     # Optional conversion parameter overrides (empty = use collection defaults)
     - name: override_groups
       value: ""
@@ -67,6 +67,14 @@ spec:
       - "{{workflow.parameters.s3_output_bucket}}"
       - --s3-output-prefix
       - "{{workflow.parameters.s3_output_prefix}}"
+      - --groups
+      - "{{workflow.parameters.override_groups}}"
+      - --spatial-chunk
+      - "{{workflow.parameters.override_spatial_chunk}}"
+      - --tile-width
+      - "{{workflow.parameters.override_tile_width}}"
+      - --enable-sharding
+      - "{{workflow.parameters.override_enable_sharding}}"
       resources:
         requests:
           memory: 4Gi
