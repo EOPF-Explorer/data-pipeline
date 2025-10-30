@@ -22,7 +22,9 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
-for lib in ["botocore", "s3fs", "aiobotocore", "urllib3"]:
+
+# Suppress verbose library logging
+for lib in ["botocore", "s3fs", "aiobotocore", "urllib3", "httpx", "httpcore"]:
     logging.getLogger(lib).setLevel(logging.WARNING)
 
 EXPLORER_BASE = os.getenv("EXPLORER_BASE_URL", "https://explorer.eopf.copernicus.eu")
@@ -66,15 +68,16 @@ def upsert_item(client: Client, collection_id: str, item: Item) -> None:
     except Exception:
         exists = False
 
-    stac_url = str(client.self_href).rstrip("/stac")  # Remove /stac suffix if present
+    # Use client's base URL directly (includes /stac if present)
+    base_url = str(client.self_href).rstrip("/")
     if exists:
         # DELETE then POST (pgstac doesn't support PUT for items)
-        delete_url = f"{stac_url}/collections/{collection_id}/items/{item.id}"
+        delete_url = f"{base_url}/collections/{collection_id}/items/{item.id}"
         client._stac_io.session.delete(delete_url, timeout=30)
         logger.info(f"Deleted existing {item.id}")
 
     # POST new/updated item
-    create_url = f"{stac_url}/collections/{collection_id}/items"
+    create_url = f"{base_url}/collections/{collection_id}/items"
     resp = client._stac_io.session.post(
         create_url,
         json=item.to_dict(),
