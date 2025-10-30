@@ -5,11 +5,9 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
 import sys
 from urllib.parse import urlparse
 
-import fsspec
 import httpx
 import xarray as xr
 from eopf_geozarr import create_geozarr_dataset
@@ -85,15 +83,6 @@ def run_conversion(
     # Construct output path
     output_url = f"s3://{s3_output_bucket}/{s3_output_prefix}/{collection}/{item_id}.zarr"
 
-    # Clean up existing output to avoid base array artifacts
-    logger.info(f"🧹 Cleaning up existing output at: {output_url}")
-    try:
-        fs = fsspec.filesystem("s3", client_kwargs={"endpoint_url": os.getenv("AWS_ENDPOINT_URL")})
-        fs.rm(output_url, recursive=True)
-        logger.info("✅ Cleanup completed")
-    except Exception as e:
-        logger.info(f"ℹ️  No existing output to clean (or cleanup failed): {e}")
-
     logger.info("Starting GeoZarr conversion...")
     logger.info(f"  Source:      {zarr_url}")
     logger.info(f"  Destination: {output_url}")
@@ -124,12 +113,9 @@ def run_conversion(
             crs_groups_str = params["extra_flags"].split("--crs-groups")[1].strip().split()[0]
             kwargs["crs_groups"] = [crs_groups_str]
 
-        # groups parameter must be a list
-        groups_list = [params["groups"]] if isinstance(params["groups"], str) else params["groups"]
-
         create_geozarr_dataset(
             dt_input=dt,
-            groups=groups_list,
+            groups=params["groups"],
             output_path=output_url,
             spatial_chunk=params["spatial_chunk"],
             tile_width=params["tile_width"],
@@ -149,12 +135,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--collection", required=True, help="Collection ID")
     parser.add_argument("--s3-output-bucket", required=True, help="S3 output bucket")
     parser.add_argument("--s3-output-prefix", required=True, help="S3 output prefix")
-    parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
 
     args = parser.parse_args(argv)
-
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
 
     try:
         output_url = run_conversion(
