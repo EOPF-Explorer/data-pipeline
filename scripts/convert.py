@@ -77,11 +77,10 @@ def run_conversion(
     # Get conversion parameters from collection config
     logger.debug(f"Getting conversion parameters for {collection}...")
     params = get_conversion_params(collection)
-    logger.debug(f"  Groups:          {params['groups']}")
-    logger.debug(f"  Chunk:           {params['spatial_chunk']}")
-    logger.debug(f"  Tile width:      {params['tile_width']}")
-    logger.debug(f"  Extra flags:     {params['extra_flags']}")
-    logger.debug(f"  Enable sharding: {params['enable_sharding']}")
+    logger.debug(f"  Groups:      {params['groups']}")
+    logger.debug(f"  Chunk:       {params['spatial_chunk']}")
+    logger.debug(f"  Tile width:  {params['tile_width']}")
+    logger.debug(f"  Extra flags: {params['extra_flags']}")
 
     # Construct output path
     output_url = f"s3://{s3_output_bucket}/{s3_output_prefix}/{collection}/{item_id}.zarr"
@@ -99,60 +98,46 @@ def run_conversion(
     logger.info(f"  Source:      {zarr_url}")
     logger.info(f"  Destination: {output_url}")
 
-    # Optional: Set up Dask cluster if enabled via environment variable
-    # Note: eopf-geozarr handles its own Dask setup when using create_geozarr_dataset
-    # This is here only for future compatibility if we need external cluster management
-    use_dask = os.getenv("ENABLE_DASK_CLUSTER", "").lower() in ("true", "1", "yes")
-    if use_dask:
-        logger.info("🚀 Dask cluster enabled via ENABLE_DASK_CLUSTER env var")
-        # Future: Could connect to external cluster here if needed
-        # from dask.distributed import Client
-        # dask_address = os.getenv("DASK_SCHEDULER_ADDRESS")
-        # client = Client(dask_address) if dask_address else Client()
+    # Set up Dask cluster for parallel processing
+    from dask.distributed import Client
 
-    # Load source dataset
-    logger.info("Loading source dataset...")
-    storage_options = get_storage_options(zarr_url)
-    dt = xr.open_datatree(
-        zarr_url,
-        engine="zarr",
-        chunks="auto",
-        storage_options=storage_options,
-    )
-    logger.info(f"Loaded DataTree with {len(dt.children)} groups")
+    with Client() as client:
+        logger.info(f"🚀 Dask cluster started: {client.dashboard_link}")
 
-    # Convert to GeoZarr
-    logger.info("Converting to GeoZarr format...")
+        # Load source dataset
+        logger.info("Loading source dataset...")
+        storage_options = get_storage_options(zarr_url)
+        dt = xr.open_datatree(
+            zarr_url,
+            engine="zarr",
+            chunks="auto",
+            storage_options=storage_options,
+        )
+        logger.info(f"Loaded DataTree with {len(dt.children)} groups")
 
-    # Parse extra flags for optional parameters
-    kwargs = {}
-    if params["extra_flags"] and "--crs-groups" in params["extra_flags"]:
-        crs_groups_str = params["extra_flags"].split("--crs-groups")[1].strip().split()[0]
-        kwargs["crs_groups"] = [crs_groups_str]
+        # Convert to GeoZarr
+        logger.info("Converting to GeoZarr format...")
 
-    # Add sharding if enabled
-    if params.get("enable_sharding", False):
-        kwargs["enable_sharding"] = True
+        # Parse extra flags for optional parameters
+        kwargs = {}
+        if params["extra_flags"] and "--crs-groups" in params["extra_flags"]:
+            crs_groups_str = params["extra_flags"].split("--crs-groups")[1].strip().split()[0]
+            kwargs["crs_groups"] = [crs_groups_str]
 
-    # groups parameter must be a list
-    groups_param = params["groups"]
-    if isinstance(groups_param, str):
-        groups_list: list[str] = [groups_param]
-    else:
-        # groups_param is list[str] in mission configs
-        groups_list = list(groups_param) if groups_param else []
+        # groups parameter must be a list
+        groups_list = [params["groups"]] if isinstance(params["groups"], str) else params["groups"]
 
-    create_geozarr_dataset(
-        dt_input=dt,
-        groups=groups_list,
-        output_path=output_url,
-        spatial_chunk=params["spatial_chunk"],
-        tile_width=params["tile_width"],
-        **kwargs,
-    )
+        create_geozarr_dataset(
+            dt_input=dt,
+            groups=groups_list,
+            output_path=output_url,
+            spatial_chunk=params["spatial_chunk"],
+            tile_width=params["tile_width"],
+            **kwargs,
+        )
 
-    logger.info("✅ Conversion completed successfully!")
-    logger.info(f"Output: {output_url}")
+        logger.info("✅ Conversion completed successfully!")
+        logger.info(f"Output: {output_url}")
 
     return output_url
 
