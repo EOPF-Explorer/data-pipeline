@@ -58,7 +58,6 @@ spec:
       - "{{workflow.parameters.s3_output_bucket}}"
       - --s3-output-prefix
       - "{{workflow.parameters.s3_output_prefix}}"
-      - --verbose
       resources:
         requests:
           memory: 4Gi
