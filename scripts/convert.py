@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import sys
 from urllib.parse import urlparse
 
 import fsspec
@@ -14,21 +13,55 @@ import httpx
 import xarray as xr
 from eopf_geozarr import create_geozarr_dataset
 from eopf_geozarr.conversion.fs_utils import get_storage_options
-from get_conversion_params import get_conversion_params
 
+# Configure logging (set LOG_LEVEL=DEBUG for verbose output)
 logging.basicConfig(
-    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+for lib in ["botocore", "s3fs", "aiobotocore", "urllib3"]:
+    logging.getLogger(lib).setLevel(logging.WARNING)
+
+
+# === Conversion Parameters ===
+
+# Conversion parameters by mission (defaults to Sentinel-2 if unrecognized)
+CONFIGS: dict[str, dict] = {
+    "sentinel-1": {
+        "groups": ["/measurements"],
+        "crs_groups": ["/conditions/gcp"],
+        "spatial_chunk": 4096,
+        "tile_width": 512,
+        "enable_sharding": False,
+    },
+    "sentinel-2": {
+        "groups": [
+            "/measurements/reflectance/r10m",
+            "/measurements/reflectance/r20m",
+            "/measurements/reflectance/r60m",
+            "/quality/l2a_quicklook/r10m",
+        ],
+        "crs_groups": ["/conditions/geometry"],
+        "spatial_chunk": 1024,
+        "tile_width": 256,
+        "enable_sharding": True,
+    },
+}
+
+
+def get_config(collection_id: str) -> dict:
+    """Get conversion config for collection (defaults to Sentinel-2)."""
+    prefix = "-".join(collection_id.lower().split("-")[:2])
+    return CONFIGS.get(prefix, CONFIGS["sentinel-2"]).copy()
 
 
 def get_zarr_url(stac_item_url: str) -> str:
-    """Get Zarr asset URL from STAC item."""
-    r = httpx.get(stac_item_url, timeout=30.0, follow_redirects=True)
-    r.raise_for_status()
-    assets = r.json().get("assets", {})
+    """Get Zarr asset URL from STAC item (priority: product, zarr, any .zarr)."""
+    with httpx.Client(timeout=30.0, follow_redirects=True) as client:
+        assets = client.get(stac_item_url).raise_for_status().json().get("assets", {})
 
-    # Priority: product, zarr, then any .zarr asset
+    # Try priority assets first
     for key in ["product", "zarr"]:
         if key in assets and (href := assets[key].get("href")):
             return str(href)
@@ -41,11 +74,18 @@ def get_zarr_url(stac_item_url: str) -> str:
     raise RuntimeError("No Zarr asset found in STAC item")
 
 
+# === Conversion Workflow ===
+
+
 def run_conversion(
     source_url: str,
     collection: str,
     s3_output_bucket: str,
     s3_output_prefix: str,
+    groups: str | None = None,
+    spatial_chunk: int | None = None,
+    tile_width: int | None = None,
+    enable_sharding: bool | None = None,
 ) -> str:
     """Run GeoZarr conversion workflow.
 
@@ -54,136 +94,93 @@ def run_conversion(
         collection: Collection ID for parameter lookup
         s3_output_bucket: S3 bucket for output
         s3_output_prefix: S3 prefix for output
+        groups: Override groups (comma-separated if multiple)
+        spatial_chunk: Override spatial chunk size
+        tile_width: Override tile width
+        enable_sharding: Override sharding flag
 
     Returns:
         Output Zarr URL (s3://...)
-
-    Raises:
-        RuntimeError: If conversion fails
     """
-    # Extract item ID from URL
     item_id = urlparse(source_url).path.rstrip("/").split("/")[-1]
-    logger.info(f"Starting GeoZarr conversion for {item_id}")
+    logger.info(f"🔄 Converting: {item_id}")
+    logger.info(f"   Collection: {collection}")
 
     # Resolve source: STAC item or direct Zarr URL
-    if "/items/" in source_url:
-        logger.info("Extracting Zarr URL from STAC item...")
-        zarr_url = get_zarr_url(source_url)
-        logger.info(f"Zarr URL: {zarr_url}")
-    else:
-        zarr_url = source_url
-        logger.info(f"Direct Zarr URL: {zarr_url}")
+    zarr_url = get_zarr_url(source_url) if "/items/" in source_url else source_url
+    logger.info(f"   Source: {zarr_url}")
 
-    # Get conversion parameters from collection config
-    logger.debug(f"Getting conversion parameters for {collection}...")
-    params = get_conversion_params(collection)
-    logger.debug(f"  Groups:          {params['groups']}")
-    logger.debug(f"  Chunk:           {params['spatial_chunk']}")
-    logger.debug(f"  Tile width:      {params['tile_width']}")
-    logger.debug(f"  Extra flags:     {params['extra_flags']}")
-    logger.debug(f"  Enable sharding: {params['enable_sharding']}")
+    # Get config and apply overrides
+    config = get_config(collection)
+    if groups:
+        config["groups"] = groups.split(",")
+    if spatial_chunk is not None:
+        config["spatial_chunk"] = spatial_chunk
+    if tile_width is not None:
+        config["tile_width"] = tile_width
+    if enable_sharding is not None:
+        config["enable_sharding"] = enable_sharding
 
-    # Construct output path
+    logger.info(
+        f"   Parameters: chunk={config['spatial_chunk']}, tile={config['tile_width']}, sharding={config['enable_sharding']}"
+    )
+
+    # Construct output path and clean existing
     output_url = f"s3://{s3_output_bucket}/{s3_output_prefix}/{collection}/{item_id}.zarr"
+    logger.info(f"   Output: {output_url}")
 
-    # Clean up existing output to avoid base array artifacts
-    logger.info(f"🧹 Cleaning up existing output at: {output_url}")
     try:
         fs = fsspec.filesystem("s3", client_kwargs={"endpoint_url": os.getenv("AWS_ENDPOINT_URL")})
         fs.rm(output_url, recursive=True)
-        logger.info("✅ Cleanup completed")
+        logger.info("   🧹 Cleaned existing output")
+    except FileNotFoundError:
+        pass
     except Exception as e:
-        logger.info(f"ℹ️  No existing output to clean (or cleanup failed): {e}")
+        logger.warning(f"   ⚠️  Cleanup warning: {e}")
 
-    logger.info("Starting GeoZarr conversion...")
-    logger.info(f"  Source:      {zarr_url}")
-    logger.info(f"  Destination: {output_url}")
-
-    # Optional: Set up Dask cluster if enabled via environment variable
-    # Note: eopf-geozarr handles its own Dask setup when using create_geozarr_dataset
-    # This is here only for future compatibility if we need external cluster management
-    use_dask = os.getenv("ENABLE_DASK_CLUSTER", "").lower() in ("true", "1", "yes")
-    if use_dask:
-        logger.info("🚀 Dask cluster enabled via ENABLE_DASK_CLUSTER env var")
-        # Future: Could connect to external cluster here if needed
-        # from dask.distributed import Client
-        # dask_address = os.getenv("DASK_SCHEDULER_ADDRESS")
-        # client = Client(dask_address) if dask_address else Client()
-
-    # Load source dataset
-    logger.info("Loading source dataset...")
+    # Load and convert
     storage_options = get_storage_options(zarr_url)
-    dt = xr.open_datatree(
-        zarr_url,
-        engine="zarr",
-        chunks="auto",
-        storage_options=storage_options,
-    )
-    logger.info(f"Loaded DataTree with {len(dt.children)} groups")
-
-    # Convert to GeoZarr
-    logger.info("Converting to GeoZarr format...")
-
-    # Parse extra flags for optional parameters
-    kwargs = {}
-    if params["extra_flags"] and "--crs-groups" in params["extra_flags"]:
-        crs_groups_str = params["extra_flags"].split("--crs-groups")[1].strip().split()[0]
-        kwargs["crs_groups"] = [crs_groups_str]
-
-    # Add sharding if enabled
-    if params.get("enable_sharding", False):
-        kwargs["enable_sharding"] = True
-
-    # groups parameter must be a list
-    groups_param = params["groups"]
-    if isinstance(groups_param, str):
-        groups_list: list[str] = [groups_param]
-    else:
-        # groups_param is list[str] in mission configs
-        groups_list = list(groups_param) if groups_param else []
+    dt = xr.open_datatree(zarr_url, engine="zarr", chunks="auto", storage_options=storage_options)
+    logger.info(f"   📂 Loaded {len(dt.children)} groups from source")
 
     create_geozarr_dataset(
         dt_input=dt,
-        groups=groups_list,
+        groups=config["groups"],
         output_path=output_url,
-        spatial_chunk=params["spatial_chunk"],
-        tile_width=params["tile_width"],
-        **kwargs,
+        spatial_chunk=config["spatial_chunk"],
+        tile_width=config["tile_width"],
+        crs_groups=config.get("crs_groups"),
+        enable_sharding=config["enable_sharding"],
     )
 
-    logger.info("✅ Conversion completed successfully!")
-    logger.info(f"Output: {output_url}")
-
+    logger.info(f"✅ Conversion complete → {output_url}")
     return output_url
 
 
-def main(argv: list[str] | None = None) -> int:
-    """Main entry point."""
-    parser = argparse.ArgumentParser(description="Run GeoZarr conversion workflow")
+def main() -> None:
+    """CLI entry point for GeoZarr conversion."""
+    parser = argparse.ArgumentParser(description="Convert EOPF Zarr to GeoZarr format")
     parser.add_argument("--source-url", required=True, help="Source STAC item or Zarr URL")
     parser.add_argument("--collection", required=True, help="Collection ID")
-    parser.add_argument("--s3-output-bucket", required=True, help="S3 output bucket")
-    parser.add_argument("--s3-output-prefix", required=True, help="S3 output prefix")
-    parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
+    parser.add_argument("--s3-output-bucket", required=True, help="S3 bucket")
+    parser.add_argument("--s3-output-prefix", required=True, help="S3 prefix")
+    parser.add_argument("--groups", help="Override groups (comma-separated)")
+    parser.add_argument("--spatial-chunk", type=int, help="Override spatial chunk size")
+    parser.add_argument("--tile-width", type=int, help="Override tile width")
+    parser.add_argument("--enable-sharding", action="store_true", help="Enable sharding")
+    args = parser.parse_args()
 
-    args = parser.parse_args(argv)
-
-    if args.verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
-
-    try:
-        output_url = run_conversion(
-            args.source_url,
-            args.collection,
-            args.s3_output_bucket,
-            args.s3_output_prefix,
-        )
-        logger.info(f"Success: {output_url}")
-        return 0
-    except Exception as e:
-        logger.error(f"Conversion failed: {e}")
-        return 1
+    run_conversion(
+        source_url=args.source_url,
+        collection=args.collection,
+        s3_output_bucket=args.s3_output_bucket,
+        s3_output_prefix=args.s3_output_prefix,
+        groups=args.groups,
+        spatial_chunk=args.spatial_chunk,
+        tile_width=args.tile_width,
+        enable_sharding=args.enable_sharding,
+    )
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
