@@ -1,0 +1,22 @@
+---
+# Direct workflow run for S1 GRD test
+# Bypasses AMQP/EventSource to test workflow template directly
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: geozarr-s1-test-
+  namespace: devseed-staging
+  labels:
+    app: geozarr-pipeline
+    test: s1-grd-direct
+spec:
+  workflowTemplateRef:
+    name: geozarr-pipeline
+  arguments:
+    parameters:
+      - name: source_url
+        value: "https://stac.core.eopf.eodc.eu/collections/sentinel-1-l1-grd/items/S1C_IW_GRDH_1SDV_20251008T163126_20251008T163151_004473_008DBA_9AB4"
+      - name: item_id
+        value: "S1C_IW_GRDH_20251008_test"
+      - name: register_collection
+        value: "sentinel-1-l1-grd-dp-test"

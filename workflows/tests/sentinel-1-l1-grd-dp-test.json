@@ -1,0 +1,161 @@
+{
+  "type": "Collection",
+  "id": "sentinel-1-l1-grd-dp-test",
+  "title": "Sentinel-1 Level-1 GRD [Data Pipeline Test]",
+  "description": "Sentinel-1 Level-1 Ground Range Detected (GRD) products consist of focused SAR data that has been detected, multi-looked and projected to ground range using an Earth ellipsoid model. GRD products are available in three resolutions: Full Resolution (FR), High Resolution (HR) and Medium Resolution (MR). This test collection is used for validating the data pipeline conversion and registration workflow.",
+  "keywords": [
+    "Copernicus",
+    "Sentinel",
+    "EU",
+    "ESA",
+    "Satellite",
+    "SAR",
+    "C-band",
+    "Backscatter"
+  ],
+  "license": "proprietary",
+  "extent": {
+    "spatial": {
+      "bbox": [
+        [
+          -180,
+          -90,
+          180,
+          90
+        ]
+      ]
+    },
+    "temporal": {
+      "interval": [
+        [
+          "2014-10-03T00:00:00Z",
+          null
+        ]
+      ]
+    }
+  },
+  "summaries": {
+    "gsd": [
+      10,
+      25,
+      40
+    ],
+    "platform": [
+      "Sentinel-1A",
+      "Sentinel-1B",
+      "Sentinel-1C"
+    ],
+    "instruments": [
+      "c-sar"
+    ],
+    "constellation": [
+      "sentinel-1"
+    ],
+    "sar:frequency_band": [
+      "C"
+    ],
+    "sar:instrument_mode": [
+      "IW",
+      "EW",
+      "SM"
+    ],
+    "sar:polarizations": [
+      "VV",
+      "VH",
+      "HH",
+      "HV"
+    ],
+    "sar:product_type": [
+      "GRD"
+    ],
+    "processing:level": [
+      "L1"
+    ],
+    "sat:platform_international_designator": [
+      "2014-016A",
+      "2016-025A",
+      "2024-087A"
+    ]
+  },
+  "item_assets": {
+    "vh": {
+      "type": "application/vnd+zarr",
+      "roles": [
+        "data",
+        "amplitude",
+        "dataset"
+      ],
+      "title": "VH Polarization",
+      "description": "Vertical transmit, Horizontal receive backscatter amplitude"
+    },
+    "vv": {
+      "type": "application/vnd+zarr",
+      "roles": [
+        "data",
+        "amplitude",
+        "dataset"
+      ],
+      "title": "VV Polarization",
+      "description": "Vertical transmit, Vertical receive backscatter amplitude"
+    },
+    "hh": {
+      "type": "application/vnd+zarr",
+      "roles": [
+        "data",
+        "amplitude",
+        "dataset"
+      ],
+      "title": "HH Polarization",
+      "description": "Horizontal transmit, Horizontal receive backscatter amplitude"
+    },
+    "hv": {
+      "type": "application/vnd+zarr",
+      "roles": [
+        "data",
+        "amplitude",
+        "dataset"
+      ],
+      "title": "HV Polarization",
+      "description": "Horizontal transmit, Vertical receive backscatter amplitude"
+    },
+    "product": {
+      "type": "application/vnd+zarr",
+      "roles": [
+        "data",
+        "metadata"
+      ],
+      "title": "EOPF Product",
+      "description": "The full Zarr hierarchy of the EOPF product"
+    },
+    "product_metadata": {
+      "type": "application/json",
+      "roles": [
+        "metadata"
+      ],
+      "title": "Consolidated Metadata",
+      "description": "Consolidated metadata of the EOPF product"
+    }
+  },
+  "links": [
+    {
+      "rel": "self",
+      "type": "application/json",
+      "href": "https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-1-l1-grd-dp-test"
+    },
+    {
+      "rel": "items",
+      "type": "application/geo+json",
+      "href": "https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-1-l1-grd-dp-test/items"
+    },
+    {
+      "rel": "root",
+      "type": "application/json",
+      "href": "https://api.explorer.eopf.copernicus.eu/stac"
+    },
+    {
+      "rel": "parent",
+      "type": "application/json",
+      "href": "https://api.explorer.eopf.copernicus.eu/stac"
+    }
+  ]
+}

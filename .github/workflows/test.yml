@@ -14,8 +14,6 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    # Skip tests on slim branch (no tests directory)
-    if: github.ref != 'refs/heads/slim'
     strategy:
       matrix:
         python-version: ["3.11", "3.12"]
