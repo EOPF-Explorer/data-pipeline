@@ -31,7 +31,6 @@ CONFIGS: dict[str, dict[str, Any]] = {
             "/measurements/reflectance/r10m",
             "/measurements/reflectance/r20m",
             "/measurements/reflectance/r60m",
-            "/quality/l2a_quicklook/r10m",
         ],
         "extra_flags": "--crs-groups /conditions/geometry",
         "spatial_chunk": 1024,
