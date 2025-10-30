@@ -27,10 +27,10 @@ def load_payload(payload_file: Path) -> dict[str, Any]:
         data: dict[str, Any] = json.loads(payload_file.read_text())
         return data
     except FileNotFoundError:
-        logger.exception("Payload file not found", extra={"file": str(payload_file)})
+        logger.error("Payload file not found: %s", payload_file)
         sys.exit(1)
-    except json.JSONDecodeError:
-        logger.exception("Invalid JSON in payload file", extra={"file": str(payload_file)})
+    except json.JSONDecodeError as e:
+        logger.error("Invalid JSON in payload file: %s", e)
         sys.exit(1)
 
 
@@ -41,11 +41,8 @@ def format_routing_key(template: str, payload: dict[str, Any]) -> str:
     """
     try:
         return template.format(**payload)
-    except KeyError:
-        logger.exception(
-            "Missing required field in payload for routing key template",
-            extra={"template": template, "available_fields": list(payload.keys())},
-        )
+    except KeyError as e:
+        logger.error("Missing field %s in payload for routing key template", e)
         sys.exit(1)
 
 
@@ -127,15 +124,8 @@ def main() -> None:
             payload=payload,
             virtual_host=args.virtual_host,
         )
-    except Exception:
-        logger.exception(
-            "Failed to publish AMQP message",
-            extra={
-                "exchange": args.exchange,
-                "routing_key": routing_key,
-                "host": args.host,
-            },
-        )
+    except Exception as e:
+        logger.error("Failed to publish message: %s", e)
         sys.exit(1)
 
 
