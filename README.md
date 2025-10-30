@@ -138,20 +138,15 @@ Access via **EOxHub workspace** (single sign-on): [workspace.devseed.hub-eopf-ex
 
 ## Pipeline
 
-**Flow:** STAC item URL → Extract zarr → Convert to GeoZarr → Upload S3 → Register STAC item → Add visualization links
+```
+STAC item URL → Extract zarr → Convert (Dask) → S3 → Register STAC + TiTiler → Done (~15-20 min)
+```
 
-**Processing:**
-1. **convert.py** - Fetch STAC item, extract zarr URL, convert to cloud-optimized GeoZarr, upload to S3
-2. **register.py** - Create STAC item with asset hrefs, add projection metadata and TiTiler links, register to catalog
+**Steps:**
+1. **Convert** - Fetch STAC item, extract zarr URL, convert to GeoZarr, upload to S3
+2. **Register** - Create STAC item with TiTiler preview links, register to catalog
 
-**Runtime:** ~15-20 minutes per item
-
-**Stack:**
-- Orchestration: Argo Workflows, Kustomize
-- Processing: eopf-geozarr, Dask, Python 3.13
-- Storage: S3 (OVH)
-- Catalog: pgSTAC, TiTiler
-- Events: RabbitMQ
+**Stack:** Argo Workflows • [eopf-geozarr](https://github.com/EOPF-Explorer/data-model) • Dask • RabbitMQ • Kustomize
 
 ---
 
@@ -182,22 +177,26 @@ kubectl get wf -n devseed-staging --sort-by=.metadata.creationTimestamp \
 
 ---
 
-## Repository Structure
+## Structure
 
 ```
-scripts/
-├── convert.py               # Zarr → GeoZarr conversion and S3 upload
-└── register.py              # STAC item creation and catalog registration
+scripts/                      # Workflow steps
+├── convert.py                # GeoZarr conversion (extract zarr URL, convert, upload)
+├── register.py               # STAC registration orchestrator
+├── register_stac.py          # STAC item creation with TiTiler links
+├── create_geozarr_item.py    # Convert zarr → geozarr
+├── augment_stac_item.py      # Add visualization links to STAC items
+└── get_conversion_params.py  # Fetch collection config
 
-workflows/                   # Kubernetes manifests
-├── base/                    # WorkflowTemplate, EventSource, Sensor, RBAC
-└── overlays/staging/        # Environment configuration
-           /production/
+workflows/                    # Kubernetes manifests (Kustomize)
+├── base/                     # WorkflowTemplate, EventSource, Sensor, RBAC
+└── overlays/                 # staging, production configs
 
-docker/Dockerfile            # Container image
-tests/unit/                  # Unit tests
-     /integration/           # Integration tests
+docker/Dockerfile             # Pipeline image
+tools/submit_burst.py         # RabbitMQ burst submission tool
 ```
+
+Tests are planned for `tests/` directory (structure exists, test files to be added).
 
 ---
 
