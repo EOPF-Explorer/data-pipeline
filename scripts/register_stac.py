@@ -15,7 +15,6 @@ import json
 import logging
 import os
 import sys
-import time
 from typing import Any, cast
 from urllib.parse import urlparse
 
@@ -437,8 +436,6 @@ def register_item(
 
 def main() -> int:
     """CLI entrypoint."""
-    start_time = time.perf_counter()
-
     parser = argparse.ArgumentParser(description="Register GeoZarr output to STAC API")
     parser.add_argument(
         "--stac",
@@ -513,13 +510,11 @@ def main() -> int:
             headers=headers,
         )
 
-        duration = time.perf_counter() - start_time
-        logger.info(f"Registration complete in {duration:.2f}s")
+        logger.info("Registration complete")
         return 0
 
     except Exception as exc:
-        duration = time.perf_counter() - start_time
-        logger.error(f"Registration failed after {duration:.2f}s: {exc}")
+        logger.error(f" {exc}")
         import traceback
 
         traceback.print_exc()
