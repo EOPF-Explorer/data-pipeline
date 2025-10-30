@@ -208,6 +208,7 @@ Tests are planned for `tests/` directory (structure exists, test files to be add
 - S3: `s3.de.io.cloud.ovh.net` / `esa-zarr-sentinel-explorer-fra`
 - Staging collection: `sentinel-2-l2a-dp-test`
 - Production collection: `sentinel-2-l2a`
+- **Enable debug logs:** `export LOG_LEVEL=DEBUG` (or add to workflow env)
 
 ---
 
