@@ -62,5 +62,3 @@ Thumbs.db
 *.zarr
 out/
 reports/
-*.pyc
-pipeline_utils.py
