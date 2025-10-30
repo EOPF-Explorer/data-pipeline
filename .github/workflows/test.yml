@@ -2,9 +2,9 @@ name: Tests
 
 on:
   push:
-    branches: [ '**' ]
+    branches: [ main, feat/dask-integration ]
   pull_request:
-    branches: [ main ]
+    branches: [ main, feat/performance-validation ]
   workflow_dispatch:
 
 permissions:
@@ -37,10 +37,7 @@ jobs:
         python${{ matrix.python-version }} --version
 
     - name: Install dependencies
-      run: |
-        uv sync --all-extras
-        uv pip install pystac-client>=0.7.0  # Workaround: explicit install (uv sync skips it)
-        uv pip list | grep pystac  # Debug: verify pystac-client is installed
+      run: uv sync --all-extras
 
     - name: Set up pre-commit cache
       uses: actions/cache@v4
@@ -81,9 +78,7 @@ jobs:
         version: "latest"
 
     - name: Install dependencies
-      run: |
-        uv sync --all-extras
-        uv pip install pystac-client>=0.7.0  # Workaround: explicit install
+      run: uv sync --all-extras
 
     - name: Run integration tests
       run: uv run pytest tests/integration/ -v --tb=short

@@ -3,7 +3,8 @@ name: Build Docker Image
 on:
   push:
     branches:
-      - '**'  # Build all branches during rapid iteration
+      - main
+      - feat/prometheus-metrics-integration
     tags:
       - 'v*'
   workflow_dispatch:
