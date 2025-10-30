@@ -1,37 +1,30 @@
-# EOPF GeoZarr Data Pipeline
+# Data Pipeline# EOPF GeoZarr Data Pipeline
 
-Automated pipeline for converting Sentinel-2 Zarr datasets to cloud-optimized GeoZarr format with STAC catalog integration and interactive visualization.
 
-## Quick Reference
 
-```bash
-# 1. Submit a workflow (simplest method)
-uv run python examples/submit.py --stac-url "https://stac.core.eopf.eodc.eu/collections/sentinel-2-l2a/items/S2B_..."
+GeoZarr conversion pipeline for EOPF data processing.Automated pipeline for converting Sentinel-2 Zarr datasets to cloud-optimized GeoZarr format with STAC catalog integration and interactive visualization.
 
-# 2. Monitor progress
-kubectl get wf -n devseed -w
 
-# 3. View result
-# Check logs for viewer URL: https://api.explorer.eopf.copernicus.eu/raster/viewer?url=...
-```
 
-💡 **Local testing:** Port-forward RabbitMQ first: `kubectl port-forward -n core svc/rabbitmq 5672:5672 &`
+## Features[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
-## Features
+- STAC item registration with retry logic[![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 
-[![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://github.com/EOPF-Explorer/data-pipeline/workflows/Tests/badge.svg)](https://github.com/EOPF-Explorer/data-pipeline/actions)
+- GeoZarr format conversion[![Tests](https://github.com/EOPF-Explorer/data-pipeline/workflows/Tests/badge.svg)](https://github.com/EOPF-Explorer/data-pipeline/actions)
 
-- STAC item registration with retry logic
-- GeoZarr format conversion
 - Cloud-native workflows
 
 ## What It Does
 
-Transforms Sentinel-2 satellite data into web-ready visualizations:
+## Development
 
-**Input:** STAC item URL → **Output:** Interactive web map (~5-10 min)
+```bashTransforms Sentinel-2 satellite data into web-ready visualizations:
+
+uv sync --all-extras
+
+uv run pytest**Input:** STAC item URL → **Output:** Interactive web map (~5-10 min)
+
+```
 
 **Pipeline:** Convert (5 min) → Register (30 sec) → Augment (10 sec)
 
@@ -102,28 +95,6 @@ STAC URL → submit.py → RabbitMQ → AMQP Sensor → Argo Workflow
 ```
 
 **Automation:** New Sentinel-2 data publishes to RabbitMQ → Pipeline runs automatically
-
-## Submitting Workflows
-
-**Choose your approach:**
-
-| Method | Best For | Documentation |
-|--------|----------|---------------|
-| 🎯 **CLI tool** | Quick testing, automation | [examples/README.md](examples/README.md) |
-| 📓 **Jupyter notebook** | Learning, exploration | [notebooks/README.md](notebooks/README.md) |
-| ⚡ **Event-driven** | Production (auto) | Already running! |
-| 🔧 **Custom pika** | Custom integrations | [See Configuration](#configuration) |
-
-**Quick example:**
-```bash
-uv run python examples/submit.py --stac-url "https://stac.core.eopf.eodc.eu/collections/sentinel-2-l2a/items/S2B_..."
-```
-
-**Monitor:**
-```bash
-kubectl get wf -n devseed -w  # Watch workflows
-kubectl logs -n devseed -l sensor-name=geozarr-sensor --tail=50  # Sensor logs
-```
 
 ### Related Projects
 
