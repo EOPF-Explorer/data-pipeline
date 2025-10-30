@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
-"""STAC item augmentation: add CRS metadata and preview links."""
+"""STAC item augmentation using pystac extensions.
+
+Uses ProjectionExtension for CRS metadata and simplified TiTiler integration.
+"""
 
 import argparse
 import os
 import sys
 import urllib.parse
+from collections.abc import Sequence
 
 import httpx
 import zarr
+from preview_config import get_preview_config
 from pystac import Item, Link
 from pystac.extensions.projection import ProjectionExtension
 
@@ -16,17 +21,40 @@ try:
 except ImportError:
     PREVIEW_GENERATION_DURATION = None
 
+# Configuration from environment
+S3_ENDPOINT = os.getenv("S3_ENDPOINT_URL", "https://s3.de.io.cloud.ovh.net")
 EXPLORER_BASE = os.getenv("EXPLORER_BASE_URL", "https://explorer.eopf.copernicus.eu")
+S1_POLARIZATIONS = ["vh", "vv", "hh", "hv"]  # Order of preference
+
+
+def _build_tilejson_query(variables: list[str], rescale: str | None = None) -> str:
+    """Build TiTiler query string."""
+    pairs = [("variables", var) for var in variables]
+    if rescale:
+        pairs.extend(("rescale", rescale) for _ in variables)
+    if len(variables) == 3:
+        pairs.append(("color_formula", "Gamma RGB 1.4"))
+    return "&".join(f"{k}={urllib.parse.quote_plus(v)}" for k, v in pairs)
+
+
+def _get_s1_preview_query(item: Item, rescale: str, fallback: str | None) -> str:
+    """S1 GRD preview (first available polarization)."""
+    for pol in S1_POLARIZATIONS:
+        if pol in item.assets and item.assets[pol].href and ".zarr/" in item.assets[pol].href:
+            zarr_path = item.assets[pol].href.split(".zarr/")[1]
+            return _build_tilejson_query([f"/{zarr_path}:grd"], rescale)
+    return _build_tilejson_query([fallback or "/measurements:grd"], rescale)
 
 
 def add_projection(item: Item) -> None:
-    """Add ProjectionExtension from zarr spatial_ref attribute."""
+    """Add ProjectionExtension from first zarr asset with spatial_ref."""
     for asset in item.assets.values():
         if asset.media_type == "application/vnd+zarr" and asset.href:
             try:
-                store = zarr.open(asset.href, mode="r")
+                store = zarr.open(asset.href.replace("s3://", "s3://"), mode="r")
                 spatial_ref = store.attrs.get("spatial_ref", {})
-                if epsg := spatial_ref.get("spatial_ref"):
+                epsg = spatial_ref.get("spatial_ref")
+                if epsg:
                     proj_ext = ProjectionExtension.ext(item, add_if_missing=True)
                     proj_ext.epsg = int(epsg)
                     if wkt := spatial_ref.get("crs_wkt"):
@@ -37,36 +65,51 @@ def add_projection(item: Item) -> None:
 
 
 def add_visualization(item: Item, raster_base: str, collection_id: str) -> None:
-    """Add viewer/xyz/tilejson links via titiler collection/items endpoint."""
-    base_url = f"{raster_base}/collections/{collection_id}/items/{item.id}"
+    """Add preview, tilejson, and viewer links."""
+    # Find first zarr asset
+    zarr_asset = next(
+        (a for a in item.assets.values() if a.media_type == "application/vnd+zarr" and a.href),
+        None,
+    )
+    if not zarr_asset:
+        return
+
+    # Get collection preview config
+    config = get_preview_config(collection_id)
+    if not config:
+        return  # Skip preview for unknown collections
+
+    # Build query
     is_s1 = collection_id.lower().startswith(("sentinel-1", "sentinel1"))
+    query = (
+        _get_s1_preview_query(item, config.rescale, config.fallback_variable)
+        if is_s1
+        else _build_tilejson_query(config.variables, config.rescale)
+    )
 
-    if is_s1:
-        asset, variables = "SR_10m", "/measurements:grd"
-        # Properly encode the variables parameter
-        query = f"variables={urllib.parse.quote(variables, safe='')}&assets={asset}"
-        title = "Sentinel-1 GRD Image"
-    else:
-        asset, variables = "TCI_10m", "/quality/l2a_quicklook/r10m:tci"
-        # Properly encode the variables parameter
-        query = f"variables={urllib.parse.quote(variables, safe='')}&bidx=1&bidx=2&bidx=3&assets={asset}"
-        title = "Sentinel-2 L2A True Color Image (10m)"
+    # Normalize href (s3:// → https://)
+    href = zarr_asset.href
+    if href.startswith("s3://"):
+        bucket = href.split("/")[2]
+        path = "/".join(href.split("/")[3:])
+        href = f"{S3_ENDPOINT}/{bucket}/{path}"
 
-    item.add_link(Link("viewer", f"{base_url}/viewer", "text/html", f"Viewer for {item.id}"))
+    # Add links
+    encoded_url = urllib.parse.quote(href)
     item.add_link(
         Link(
-            "xyz",
-            f"{base_url}/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png?{query}",
+            "preview",
+            f"{raster_base}/preview?url={encoded_url}&{query}",
             "image/png",
-            title,
+            "Preview image",
         )
     )
     item.add_link(
         Link(
             "tilejson",
-            f"{base_url}/WebMercatorQuad/tilejson.json?{query}",
+            f"{raster_base}/tilejson.json?url={encoded_url}&{query}",
             "application/json",
-            f"Tilejson for {item.id}",
+            "TileJSON",
         )
     )
     item.add_link(
@@ -87,9 +130,9 @@ def augment(item: Item, *, raster_base: str, collection_id: str, verbose: bool) 
     return item
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: Sequence[str] | None = None) -> int:
     """Main entry point."""
-    p = argparse.ArgumentParser(description="Augment STAC item")
+    p = argparse.ArgumentParser(description="Augment STAC item using extensions")
     p.add_argument("--stac", required=True, help="STAC API base")
     p.add_argument("--collection", required=True, help="Collection ID")
     p.add_argument("--item-id", required=True, help="Item ID")
@@ -105,26 +148,21 @@ def main(argv: list[str] | None = None) -> int:
     headers = {"Authorization": f"Bearer {args.bearer}"} if args.bearer else {}
     item_url = f"{args.stac.rstrip('/')}/collections/{args.collection}/items/{args.item_id}"
 
-    # Fetch item
+    # Fetch
     try:
         with httpx.Client() as client:
             r = client.get(item_url, headers=headers, timeout=30.0)
             r.raise_for_status()
             item = Item.from_dict(r.json())
     except Exception as e:
-        print(f"ERROR: GET failed: {e}", file=sys.stderr)
+        print(f"[augment] ERROR: GET failed: {e}", file=sys.stderr)
         return 1
 
-    # Augment with CRS + preview links
+    # Augment
     target_collection = item.collection_id or args.collection
 
     if PREVIEW_GENERATION_DURATION:
-        preview_type = (
-            "s1_grd" if target_collection.lower().startswith("sentinel-1") else "true_color"
-        )
-        with PREVIEW_GENERATION_DURATION.labels(
-            collection=target_collection, preview_type=preview_type
-        ).time():
+        with PREVIEW_GENERATION_DURATION.labels(collection=target_collection).time():
             augment(
                 item,
                 raster_base=args.raster_base,
@@ -139,7 +177,7 @@ def main(argv: list[str] | None = None) -> int:
             verbose=args.verbose,
         )
 
-    # Update item via PUT
+    # Update
     target_url = f"{args.stac.rstrip('/')}/collections/{target_collection}/items/{item.id}"
     try:
         with httpx.Client() as client:
@@ -151,9 +189,9 @@ def main(argv: list[str] | None = None) -> int:
             )
             r.raise_for_status()
             if args.verbose:
-                print(f"PUT {target_url} → {r.status_code}")
+                print(f"[augment] PUT {target_url} → {r.status_code}")
     except Exception as e:
-        print(f"ERROR: PUT failed: {e}", file=sys.stderr)
+        print(f"[augment] ERROR: PUT failed: {e}", file=sys.stderr)
         return 1
 
     return 0
