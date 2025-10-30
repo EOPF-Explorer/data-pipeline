@@ -13,7 +13,6 @@ from typing import Any
 import httpx
 import s3fs
 import zarr
-from metrics import PREVIEW_GENERATION_DURATION, PREVIEW_HTTP_REQUEST_DURATION
 from pystac import Asset, Item, Link
 from pystac.extensions.projection import ProjectionExtension
 
@@ -1050,23 +1049,21 @@ def _request(
 
 
 def http_get(url: str, headers: dict[str, str]) -> dict[str, Any]:
-    with PREVIEW_HTTP_REQUEST_DURATION.labels(operation="get", endpoint="item").time():
-        data = _request("GET", url, headers).json()
+    data = _request("GET", url, headers).json()
     if isinstance(data, dict):
         return data
     raise ValueError("unexpected non-mapping response body")
 
 
 def http_put(url: str, data: dict[str, Any], headers: dict[str, str]) -> int:
-    with PREVIEW_HTTP_REQUEST_DURATION.labels(operation="put", endpoint="item").time():
-        return int(
-            _request(
-                "PUT",
-                url,
-                {**headers, "Content-Type": "application/json"},
-                json_body=data,
-            ).status_code
-        )
+    return int(
+        _request(
+            "PUT",
+            url,
+            {**headers, "Content-Type": "application/json"},
+            json_body=data,
+        ).status_code
+    )
 
 
 def ensure_collection_thumbnail(
@@ -1146,14 +1143,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     item = Item.from_dict(payload)
     target_collection = item.collection_id or args.collection
-
-    with PREVIEW_GENERATION_DURATION.labels(collection=target_collection).time():
-        _augment_item(
-            item,
-            raster_base=args.raster_base,
-            collection_id=target_collection,
-            verbose=args.verbose,
-        )
+    _augment_item(
+        item,
+        raster_base=args.raster_base,
+        collection_id=target_collection,
+        verbose=args.verbose,
+    )
 
     target_url = f"{args.stac.rstrip('/')}/collections/{target_collection}/items/{item.id}"
     try:

@@ -21,7 +21,6 @@ from urllib.parse import urlparse
 
 import httpx
 import xarray as xr
-from metrics import STAC_HTTP_REQUEST_DURATION, STAC_REGISTRATION_TOTAL
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 # Config: override via env vars
@@ -396,8 +395,7 @@ def register_item(
     with httpx.Client(timeout=TIMEOUT) as client:
         # Check if item exists
         try:
-            with STAC_HTTP_REQUEST_DURATION.labels(operation="get", endpoint="item").time():
-                response = client.get(item_url, headers=headers)
+            response = client.get(item_url, headers=headers)
             exists = response.status_code == 200
         except httpx.HTTPError:
             exists = False
@@ -407,59 +405,34 @@ def register_item(
 
             if mode == "create-or-skip":
                 logger.info("Skipping (mode=create-or-skip)")
-                STAC_REGISTRATION_TOTAL.labels(
-                    collection=collection_id, operation="skip", status="success"
-                ).inc()
                 return
             elif mode in ("upsert", "update"):
                 logger.info("Updating existing item (mode=upsert)")
-                with STAC_HTTP_REQUEST_DURATION.labels(operation="put", endpoint="item").time():
-                    response = client.put(item_url, json=item, headers=headers)
+                response = client.put(item_url, json=item, headers=headers)
                 if response.status_code >= 400:
                     logger.error(f" {response.status_code} {response.reason_phrase}")
                     logger.info(f"Response body: {response.text}")
-                    STAC_REGISTRATION_TOTAL.labels(
-                        collection=collection_id, operation="update", status="error"
-                    ).inc()
                 response.raise_for_status()
                 logger.info(f"Successfully updated item {item_id}")
-                STAC_REGISTRATION_TOTAL.labels(
-                    collection=collection_id, operation="update", status="success"
-                ).inc()
             elif mode in ("force", "replace"):
                 logger.info("Deleting and recreating (mode=replace)")
-                with STAC_HTTP_REQUEST_DURATION.labels(operation="delete", endpoint="item").time():
-                    client.delete(item_url, headers=headers)
-                with STAC_HTTP_REQUEST_DURATION.labels(operation="post", endpoint="items").time():
-                    response = client.post(items_url, json=item, headers=headers)
+                client.delete(item_url, headers=headers)
+                response = client.post(items_url, json=item, headers=headers)
                 if response.status_code >= 400:
                     logger.error(f" {response.status_code} {response.reason_phrase}")
                     logger.info(f"Response body: {response.text}")
-                    STAC_REGISTRATION_TOTAL.labels(
-                        collection=collection_id, operation="replace", status="error"
-                    ).inc()
                 response.raise_for_status()
                 logger.info(f"Successfully replaced item {item_id}")
-                STAC_REGISTRATION_TOTAL.labels(
-                    collection=collection_id, operation="replace", status="success"
-                ).inc()
             else:
                 raise ValueError(f"Unknown mode: {mode}")
         else:
             logger.info(f"Creating new item {item_id}")
-            with STAC_HTTP_REQUEST_DURATION.labels(operation="post", endpoint="items").time():
-                response = client.post(items_url, json=item, headers=headers)
+            response = client.post(items_url, json=item, headers=headers)
             if response.status_code >= 400:
                 logger.error(f" {response.status_code} {response.reason_phrase}")
                 logger.info(f"Response body: {response.text}")
-                STAC_REGISTRATION_TOTAL.labels(
-                    collection=collection_id, operation="create", status="error"
-                ).inc()
             response.raise_for_status()
             logger.info(f"Successfully created item {item_id}")
-            STAC_REGISTRATION_TOTAL.labels(
-                collection=collection_id, operation="create", status="success"
-            ).inc()
 
 
 def main() -> int:
