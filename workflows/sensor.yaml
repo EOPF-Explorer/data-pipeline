@@ -8,8 +8,8 @@ spec:
     serviceAccountName: operate-workflow-sa
   dependencies:
   - name: geozarr-event
-    eventSourceName: rabbitmq-geozarr
-    eventName: geozarr-events
+    eventSourceName: amqp
+    eventName: eopf-items-convert
 
   triggers:
   - template:
