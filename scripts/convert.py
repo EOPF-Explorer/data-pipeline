@@ -42,7 +42,6 @@ CONFIGS: dict[str, dict] = {
             "/measurements/reflectance/r60m",
             "/quality/l2a_quicklook/r10m",
         ],
-        "crs_groups": ["/conditions/geometry"],
         "spatial_chunk": 1024,
         "tile_width": 256,
         "enable_sharding": True,
@@ -118,8 +117,8 @@ def run_conversion(
         config["spatial_chunk"] = spatial_chunk
     if tile_width is not None:
         config["tile_width"] = tile_width
-    if enable_sharding is not None:
-        config["enable_sharding"] = enable_sharding
+    if enable_sharding:
+        config["enable_sharding"] = True
 
     logger.info(
         f"   Parameters: chunk={config['spatial_chunk']}, tile={config['tile_width']}, sharding={config['enable_sharding']}"
