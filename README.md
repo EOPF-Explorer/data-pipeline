@@ -232,6 +232,12 @@ kubectl logs -n devseed-staging -l sensor-name=geozarr-sensor --tail=50
 kubectl logs -n devseed-staging -l eventsource-name=rabbitmq-geozarr --tail=50
 ```
 
+## Quicklook Availability
+
+- Sentinel-2 CPM releases from 2025-10-29 and 2025-10-31 unexpectedly omit the `/quality/l2a_quicklook` group from the Zarr store even though STAC still advertises the asset, so treat it as an upstream gap while we watch for the next EODC update.
+- `scripts/convert.py` now probes every advertised quicklook, keeps the ones that respond, and continues when the dataset 404s; resulting GeoZarr artifacts publish without previews until the upstream store restores them.
+- Expect empty preview links in TiTiler while the upstream dataset is missing; rerun the conversion once the provider repopulates the quicklook to attach it.
+- Regression check: `uv run -q pytest -q tests/test_cli_e2e.py::TestCLIEndToEnd::test_cli_convert_real_sentinel2_data -q`.
 
 ---
 
