@@ -1,4 +1,4 @@
-# Build for linux/amd64: docker buildx build --platform linux/amd64 -t <tag> . --push
+# Build for linux/amd64: docker buildx build --platform linux/amd64 -t ghcr.io/eopf-explorer/data-pipeline:fix-s2-quicklook-path . --push
 FROM python:3.13-slim
 
 # System dependencies (including GDAL for rasterio)

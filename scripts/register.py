@@ -42,6 +42,38 @@ def s3_to_https(s3_url: str, endpoint: str) -> str:
     return f"https://{parsed.netloc}.{host}{parsed.path}"
 
 
+def _ensure_s2_quicklook_level(href: str) -> str:
+    """Insert multiscale level for Sentinel-2 quicklook assets if missing."""
+    quicklook_root = "/quality/l2a_quicklook/r10m"
+    if quicklook_root not in href or f"{quicklook_root}/0" in href:
+        return href
+
+    if ":tci" in href:
+        return href.replace(f"{quicklook_root}:tci", f"{quicklook_root}/0:tci", 1)
+
+    return href.replace(f"{quicklook_root}/", f"{quicklook_root}/0/", 1)
+
+
+def _get_s2_quicklook_var_path(item: Item) -> str | None:
+    """Derive Sentinel-2 quicklook variable path for TiTiler."""
+    for key in ("TCI_10m", "TCI", "TCI_20m"):
+        asset = item.assets.get(key)
+        if not asset or not asset.href or ".zarr/" not in asset.href:
+            continue
+
+        suffix = asset.href.split(".zarr/", 1)[1].strip("/")
+        base, _, _ = suffix.partition(":")
+        path = base[:-4] if base.endswith("/tci") else base
+        normalized = path.lstrip("/")
+        if "quality/l2a_quicklook/" not in normalized:
+            continue
+        if "/r10m/0" not in normalized:
+            normalized = normalized.replace("/r10m", "/r10m/0", 1)
+        return f"/{normalized}:tci"
+
+    return None
+
+
 def rewrite_asset_hrefs(item: Item, old_base: str, new_base: str, s3_endpoint: str) -> None:
     """Rewrite all asset hrefs from old_base to new_base (in place)."""
     old_base = old_base.rstrip("/") + "/"
@@ -50,6 +82,8 @@ def rewrite_asset_hrefs(item: Item, old_base: str, new_base: str, s3_endpoint: s
     for key, asset in item.assets.items():
         if asset.href and asset.href.startswith(old_base):
             new_href = new_base + asset.href[len(old_base) :]
+            if "/quality/l2a_quicklook/r10m" in new_href:
+                new_href = _ensure_s2_quicklook_level(new_href)
             if new_href.startswith("s3://"):
                 new_href = s3_to_https(new_href, s3_endpoint)
             logger.debug(f"  {key}: {asset.href} -> {new_href}")
@@ -140,7 +174,7 @@ def add_visualization_links(item: Item, raster_base: str, collection_id: str) ->
             )
     elif coll_lower.startswith(("sentinel-2", "sentinel2")):
         # S2: True color quicklook
-        var_path = "/quality/l2a_quicklook/r10m:tci"
+        var_path = _get_s2_quicklook_var_path(item) or "/quality/l2a_quicklook/r10m/0:tci"
         query = (
             f"variables={urllib.parse.quote(var_path, safe='')}&bidx=1&bidx=2&bidx=3&assets=TCI_10m"
         )
