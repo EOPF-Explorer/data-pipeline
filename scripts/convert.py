@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+from collections.abc import Iterable
 from urllib.parse import urlparse
 
 import fsspec
@@ -48,6 +49,40 @@ CONFIGS: dict[str, dict] = {
         "enable_sharding": True,
     },
 }
+
+
+def _collect_group_paths(tree: xr.DataTree) -> set[str]:
+    """Return all group paths (prefixed with '/') present in the DataTree."""
+
+    def _walk(node: xr.DataTree, prefix: str, paths: set[str]) -> None:
+        for name, child in node.children.items():
+            child_path = f"{prefix}/{name}" if prefix else f"/{name}"
+            paths.add(child_path)
+            _walk(child, child_path, paths)
+
+    collected: set[str] = set()
+    _walk(tree, "", collected)
+    return collected
+
+
+def _filter_existing_paths(paths: Iterable[str], available: set[str], label: str) -> list[str]:
+    """Filter requested paths to those present in the DataTree, logging skips."""
+
+    available_normalized = {path.lstrip("/") for path in available}
+    kept: list[str] = []
+    missing: list[str] = []
+
+    for path in paths:
+        normalized = path.lstrip("/")
+        if normalized in available_normalized:
+            kept.append(path)
+        else:
+            missing.append(path)
+
+    if missing:
+        logger.warning("   ⚠️  Skipping missing %s: %s", label, ", ".join(missing))
+
+    return kept
 
 
 def get_config(collection_id: str) -> dict:
@@ -143,13 +178,24 @@ def run_conversion(
     dt = xr.open_datatree(zarr_url, engine="zarr", chunks="auto", storage_options=storage_options)
     logger.info(f"   📂 Loaded {len(dt.children)} groups from source")
 
+    available_paths = _collect_group_paths(dt)
+    config["groups"] = _filter_existing_paths(config["groups"], available_paths, "groups")
+    if not config["groups"]:
+        raise RuntimeError("No measurement groups found in source dataset")
+
+    crs_groups = config.get("crs_groups")
+    filtered_crs = None
+    if crs_groups:
+        filtered = _filter_existing_paths(crs_groups, available_paths, "CRS groups")
+        filtered_crs = filtered or None
+
     create_geozarr_dataset(
         dt_input=dt,
         groups=config["groups"],
         output_path=output_url,
         spatial_chunk=config["spatial_chunk"],
         tile_width=config["tile_width"],
-        crs_groups=config.get("crs_groups"),
+        crs_groups=filtered_crs,
         enable_sharding=config["enable_sharding"],
     )
 

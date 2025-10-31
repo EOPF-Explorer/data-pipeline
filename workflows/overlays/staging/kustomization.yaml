@@ -36,5 +36,5 @@ patches:
             value: esa-zarr-sentinel-explorer-fra
           - name: s3_output_prefix
             value: tests-output
-          - name: pipeline_image_version
-            value: sha256:da82f5942bc0113a6a1bdb027167974e34f987315c39ce316f735f1fbd93375d
+          - name: pipeline_image
+            value: ghcr.io/eopf-explorer/data-pipeline@sha256:da82f5942bc0113a6a1bdb027167974e34f987315c39ce316f735f1fbd93375d
