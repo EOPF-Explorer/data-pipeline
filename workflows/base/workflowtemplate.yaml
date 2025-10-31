@@ -31,7 +31,7 @@ spec:
     - name: s3_output_prefix
       value: tests-output
     - name: pipeline_image
-      value: ghcr.io/eopf-explorer/data-pipeline:sha-238c7d9
+      value: ghcr.io/eopf-explorer/data-pipeline@sha256:ecc112139bd815322c1f871fbff17135ba5d00fab5dbdb07631785d563bfba20
     # Optional conversion parameter overrides (empty = use collection defaults)
     - name: override_groups
       value: ""
