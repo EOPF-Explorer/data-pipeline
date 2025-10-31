@@ -56,22 +56,56 @@ def get_config(collection_id: str) -> dict:
     return CONFIGS.get(prefix, CONFIGS["sentinel-2"]).copy()
 
 
-def get_zarr_url(stac_item_url: str) -> str:
-    """Get Zarr asset URL from STAC item (priority: product, zarr, any .zarr)."""
+def get_zarr_asset_info(stac_item_url: str) -> tuple[str, dict[str, dict]]:
+    """Fetch STAC item and extract Zarr URL along with assets."""
+
     with httpx.Client(timeout=30.0, follow_redirects=True) as client:
-        assets = client.get(stac_item_url).raise_for_status().json().get("assets", {})
+        item = client.get(stac_item_url).raise_for_status().json()
+
+    assets: dict[str, dict] = item.get("assets", {})
 
     # Try priority assets first
-    for key in ["product", "zarr"]:
+    for key in ("product", "zarr"):
         if key in assets and (href := assets[key].get("href")):
-            return str(href)
+            return str(href), assets
 
     # Fallback: any asset with .zarr in href
     for asset in assets.values():
         if ".zarr" in asset.get("href", ""):
-            return str(asset["href"])
+            return str(asset["href"]), assets
 
     raise RuntimeError("No Zarr asset found in STAC item")
+
+
+def _quicklook_groups_from_assets(assets: dict[str, dict]) -> list[str]:
+    if not assets:
+        return []
+
+    groups: list[str] = []
+    for asset in assets.values():
+        href = asset.get("href", "")
+        if "/quality/l2a_quicklook/" not in href or ".zarr/" not in href:
+            continue
+        rel = href.split(".zarr/", 1)[1].split("?", 1)[0].split(":", 1)[0]
+        rel = rel.strip("/")
+        if not rel:
+            continue
+        group = rel.rsplit("/", 1)[0] if "/" in rel else rel
+        group_path = f"/{group.strip('/')}"
+        if group_path not in groups:
+            groups.append(group_path)
+    return groups
+
+
+def _merge_quicklook_groups(default_groups: list[str], assets: dict[str, dict]) -> list[str]:
+    discovered = _quicklook_groups_from_assets(assets)
+    if not discovered:
+        return default_groups
+
+    merged = [group for group in default_groups if not group.startswith("/quality/l2a_quicklook")]
+    merged.extend(path for path in discovered if path not in merged)
+    logger.debug("Using quicklook groups derived from STAC assets: %s", discovered)
+    return merged
 
 
 # === Conversion Workflow ===
@@ -107,13 +141,19 @@ def run_conversion(
     logger.info(f"   Collection: {collection}")
 
     # Resolve source: STAC item or direct Zarr URL
-    zarr_url = get_zarr_url(source_url) if "/items/" in source_url else source_url
+    item_assets: dict[str, dict] = {}
+    if "/items/" in source_url:
+        zarr_url, item_assets = get_zarr_asset_info(source_url)
+    else:
+        zarr_url = source_url
     logger.info(f"   Source: {zarr_url}")
 
     # Get config and apply overrides
     config = get_config(collection)
     if groups:
         config["groups"] = groups.split(",")
+    else:
+        config["groups"] = _merge_quicklook_groups(config["groups"], item_assets)
     if spatial_chunk is not None:
         config["spatial_chunk"] = spatial_chunk
     if tile_width is not None:
@@ -124,6 +164,7 @@ def run_conversion(
     logger.info(
         f"   Parameters: chunk={config['spatial_chunk']}, tile={config['tile_width']}, sharding={config['enable_sharding']}"
     )
+    logger.debug("   Groups to convert: %s", ", ".join(config["groups"]))
 
     # Construct output path and clean existing
     output_url = f"s3://{s3_output_bucket}/{s3_output_prefix}/{collection}/{item_id}.zarr"
