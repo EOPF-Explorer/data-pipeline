@@ -31,7 +31,7 @@ spec:
     - name: s3_output_prefix
       value: tests-output
     - name: pipeline_image_version
-      value: sha-6d71776
+      value: sha-238c7d9
     # Optional conversion parameter overrides (empty = use collection defaults)
     - name: override_groups
       value: ""
