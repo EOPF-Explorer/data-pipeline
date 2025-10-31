@@ -432,7 +432,7 @@ requires-dist = [
     { name = "boto3", specifier = ">=1.34.0" },
     { name = "cf-xarray", specifier = ">=0.9.0" },
     { name = "click", specifier = ">=8.1.0" },
-    { name = "eopf-geozarr", git = "https://github.com/EOPF-Explorer/data-model.git?rev=fix%2Fs1-encoding-conflict" },
+    { name = "eopf-geozarr", git = "https://github.com/EOPF-Explorer/data-model.git?rev=fix%2Fzero-d-chunk" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "morecantile", specifier = ">=5.0.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.11.0" },
@@ -502,7 +502,7 @@ wheels = [
 [[package]]
 name = "eopf-geozarr"
 version = "0.1.0"
-source = { git = "https://github.com/EOPF-Explorer/data-model.git?rev=fix%2Fs1-encoding-conflict#cd6f4c8ca51c6597580ec7127effbbae86fc8131" }
+source = { git = "https://github.com/EOPF-Explorer/data-model.git?rev=fix%2Fzero-d-chunk#22e2a4d6aa85c77b1ff27b3e1f98d492e37f6ecd" }
 dependencies = [
     { name = "aiohttp" },
     { name = "boto3" },
