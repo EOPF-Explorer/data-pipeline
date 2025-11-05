@@ -32,6 +32,7 @@ CONFIGS: dict[str, dict] = {
         "groups": ["/measurements"],
         "crs_groups": ["/conditions/gcp"],
         "spatial_chunk": 4096,
+        "min_dimension": 256,
         "tile_width": 512,
         "enable_sharding": False,
     },
@@ -40,10 +41,10 @@ CONFIGS: dict[str, dict] = {
             "/measurements/reflectance/r10m",
             "/measurements/reflectance/r20m",
             "/measurements/reflectance/r60m",
-            "/quality/l2a_quicklook/r10m",
         ],
         "crs_groups": ["/conditions/geometry"],
         "spatial_chunk": 1024,
+        "min_dimension": 256,
         "tile_width": 256,
         "enable_sharding": True,
     },
@@ -84,8 +85,8 @@ def run_conversion(
     s3_output_prefix: str,
     groups: str | None = None,
     spatial_chunk: int | None = None,
+    min_dimension: int | None = None,
     tile_width: int | None = None,
-    enable_sharding: bool | None = None,
 ) -> str:
     """Run GeoZarr conversion workflow.
 
@@ -96,6 +97,7 @@ def run_conversion(
         s3_output_prefix: S3 prefix for output
         groups: Override groups (comma-separated if multiple)
         spatial_chunk: Override spatial chunk size
+        min_dimension: Override minimum dimension for pyramid creation
         tile_width: Override tile width
         enable_sharding: Override sharding flag
 
@@ -116,13 +118,13 @@ def run_conversion(
         config["groups"] = groups.split(",")
     if spatial_chunk is not None:
         config["spatial_chunk"] = spatial_chunk
+    if min_dimension is not None:
+        config["min_dimension"] = min_dimension
     if tile_width is not None:
         config["tile_width"] = tile_width
-    if enable_sharding is not None:
-        config["enable_sharding"] = enable_sharding
 
     logger.info(
-        f"   Parameters: chunk={config['spatial_chunk']}, tile={config['tile_width']}, sharding={config['enable_sharding']}"
+        f"   Parameters: chunk={config['spatial_chunk']}, min_dim={config['min_dimension']}, tile={config['tile_width']}, sharding={config['enable_sharding']}"
     )
 
     # Construct output path and clean existing
@@ -148,6 +150,7 @@ def run_conversion(
         groups=config["groups"],
         output_path=output_url,
         spatial_chunk=config["spatial_chunk"],
+        min_dimension=config["min_dimension"],
         tile_width=config["tile_width"],
         crs_groups=config.get("crs_groups"),
         enable_sharding=config["enable_sharding"],
@@ -166,8 +169,8 @@ def main() -> None:
     parser.add_argument("--s3-output-prefix", required=True, help="S3 prefix")
     parser.add_argument("--groups", help="Override groups (comma-separated)")
     parser.add_argument("--spatial-chunk", type=int, help="Override spatial chunk size")
+    parser.add_argument("--min-dimension", type=int, help="Override minimum dimension for pyramid")
     parser.add_argument("--tile-width", type=int, help="Override tile width")
-    parser.add_argument("--enable-sharding", action="store_true", help="Enable sharding")
     args = parser.parse_args()
 
     run_conversion(
@@ -177,8 +180,8 @@ def main() -> None:
         s3_output_prefix=args.s3_output_prefix,
         groups=args.groups,
         spatial_chunk=args.spatial_chunk,
+        min_dimension=args.min_dimension,
         tile_width=args.tile_width,
-        enable_sharding=args.enable_sharding,
     )
 
 

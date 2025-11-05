@@ -20,7 +20,7 @@ patches:
           - name: s3_output_prefix
             value: geozarr
           - name: pipeline_image_version
-            value: latest
+            value: v0
         templates:
         - name: convert-geozarr
           container:

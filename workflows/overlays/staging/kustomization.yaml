@@ -37,4 +37,6 @@ patches:
           - name: s3_output_prefix
             value: tests-output
           - name: pipeline_image_version
-            value: main
+            value: v0
+          - name: override_enable_sharding
+            value: "true"

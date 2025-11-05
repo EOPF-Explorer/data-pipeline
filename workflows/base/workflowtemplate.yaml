@@ -31,16 +31,7 @@ spec:
     - name: s3_output_prefix
       value: tests-output
     - name: pipeline_image_version
-      value: feature-align-data-model
-    # Optional conversion parameter overrides (empty = use collection defaults)
-    - name: override_groups
-      value: ""
-    - name: override_spatial_chunk
-      value: ""
-    - name: override_tile_width
-      value: ""
-    - name: override_enable_sharding
-      value: ""
+      value: v0
   templates:
   - name: main
     dag:
@@ -67,6 +58,7 @@ spec:
       - "{{workflow.parameters.s3_output_bucket}}"
       - --s3-output-prefix
       - "{{workflow.parameters.s3_output_prefix}}"
+
       resources:
         requests:
           memory: 4Gi
@@ -113,6 +105,7 @@ spec:
       - "{{workflow.parameters.s3_output_bucket}}"
       - --s3-output-prefix
       - "{{workflow.parameters.s3_output_prefix}}"
+
       ports:
       - containerPort: 8000
         name: metrics
@@ -120,9 +113,6 @@ spec:
         requests:
           memory: 1Gi
           cpu: 500m
-        limits:
-          memory: 2Gi
-          cpu: '1'
       env:
       - name: PYTHONUNBUFFERED
         value: '1'
