@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 
 import httpx
 import zarr
-from pystac import Item, Link
+from pystac import Asset, Item, Link
 from pystac.extensions.projection import ProjectionExtension
 from pystac_client import Client
 
@@ -139,17 +139,14 @@ def add_visualization_links(item: Item, raster_base: str, collection_id: str) ->
                 )
             )
     elif coll_lower.startswith(("sentinel-2", "sentinel2")):
-        # S2: True color quicklook
-        var_path = "/quality/l2a_quicklook/r10m:tci"
-        query = (
-            f"variables={urllib.parse.quote(var_path, safe='')}&bidx=1&bidx=2&bidx=3&assets=TCI_10m"
-        )
+        # S2: True color from reflectance bands (B04=Red, B03=Green, B02=Blue)
+        query = "rescale=0%2C1&color_formula=gamma+rgb+1.3%2C+sigmoidal+rgb+6+0.1%2C+saturation+1.2&variables=%2Fmeasurements%2Freflectance%2Fr60m%3Ab04&variables=%2Fmeasurements%2Freflectance%2Fr60m%3Ab03&variables=%2Fmeasurements%2Freflectance%2Fr60m%3Ab02&bidx=1"
         item.add_link(
             Link(
                 "xyz",
                 f"{base_url}/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png?{query}",
                 "image/png",
-                "Sentinel-2 L2A True Color",
+                "Sentinel-2 L2A True Color (60m)",
             )
         )
         item.add_link(
@@ -169,6 +166,80 @@ def add_visualization_links(item: Item, raster_base: str, collection_id: str) ->
             title="EOPF Explorer",
         )
     )
+
+
+def add_thumbnail_asset(item: Item, raster_base: str, collection_id: str) -> None:
+    """Add thumbnail preview asset for STAC browsers."""
+    if "thumbnail" in item.assets:
+        return
+
+    base_url = f"{raster_base}/collections/{collection_id}/items/{item.id}"
+    coll_lower = collection_id.lower()
+
+    # Mission-specific thumbnail parameters
+    if coll_lower.startswith(("sentinel-2", "sentinel2")):
+        params = "format=png&rescale=0%2C1&color_formula=gamma+rgb+1.3%2C+sigmoidal+rgb+6+0.1%2C+saturation+1.2&variables=%2Fmeasurements%2Freflectance%2Fr60m%3Ab04&variables=%2Fmeasurements%2Freflectance%2Fr60m%3Ab03&variables=%2Fmeasurements%2Freflectance%2Fr60m%3Ab02&bidx=1"
+        title = "Sentinel-2 L2A True Color (60m)"
+    elif coll_lower.startswith(("sentinel-1", "sentinel1")):
+        # Use VH band for S-1 thumbnail
+        if (vh := item.assets.get("vh")) and ".zarr/" in (vh.href or ""):
+            var_path = f"/{vh.href.split('.zarr/')[1]}:grd"
+            params = f"format=png&variables={urllib.parse.quote(var_path, safe='')}&bidx=1&rescale=0%2C219&assets=vh"
+            title = "Sentinel-1 GRD VH Preview"
+        else:
+            logger.debug("No VH asset found for S-1 thumbnail")
+            return
+    else:
+        logger.debug(f"Unknown mission for thumbnail: {collection_id}")
+        return
+
+    thumbnail = Asset(
+        href=f"{base_url}/preview?{params}",
+        media_type="image/png",
+        roles=["thumbnail"],
+        title=title,
+    )
+    item.add_asset("thumbnail", thumbnail)
+    logger.debug(f"Added thumbnail asset: {title}")
+
+
+def add_derived_from_link(item: Item, source_url: str) -> None:
+    """Add derived_from link pointing to original source item."""
+    # Remove existing derived_from links to avoid duplicates
+    item.links = [link for link in item.links if link.rel != "derived_from"]
+
+    item.add_link(
+        Link(
+            "derived_from",
+            source_url,
+            "application/json",
+            "Derived from original Zarr STAC item",
+        )
+    )
+    logger.debug(f"Added derived_from link: {source_url}")
+
+
+def remove_xarray_integration(item: Item) -> None:
+    """Remove XArray-specific fields from assets (ADR-111 compliance)."""
+    removed_count = 0
+    for asset in item.assets.values():
+        if hasattr(asset, "extra_fields"):
+            # Remove xarray-specific fields
+            if asset.extra_fields.pop("xarray:open_dataset_kwargs", None):
+                removed_count += 1
+            if asset.extra_fields.pop("xarray:open_datatree_kwargs", None):
+                removed_count += 1
+
+            # Remove alternate xarray configurations
+            if "alternate" in asset.extra_fields and isinstance(asset.extra_fields["alternate"], dict):
+                if asset.extra_fields["alternate"].pop("xarray", None):
+                    removed_count += 1
+                # Remove empty alternate section
+                if not asset.extra_fields["alternate"]:
+                    asset.extra_fields.pop("alternate")
+
+    if removed_count > 0:
+        logger.debug(f"Removed {removed_count} XArray integration field(s)")
 
 
 # === Registration Workflow ===
@@ -233,11 +304,20 @@ def run_registration(
     # 3. Add projection metadata from zarr
     add_projection_from_zarr(item)
 
-    # 4. Add visualization links (viewer, xyz, tilejson)
+    # 4. Remove XArray integration fields (ADR-111 compliance)
+    remove_xarray_integration(item)
+
+    # 5. Add visualization links (viewer, xyz, tilejson)
     add_visualization_links(item, raster_api_url, collection)
     logger.info("   🎨 Added visualization links")
 
-    # 5. Register to STAC API
+    # 6. Add thumbnail asset for STAC browsers
+    add_thumbnail_asset(item, raster_api_url, collection)
+
+    # 7. Add derived_from link to source item
+    add_derived_from_link(item, source_url)
+
+    # 8. Register to STAC API
     client = Client.open(stac_api_url)
     upsert_item(client, collection, item)
 
