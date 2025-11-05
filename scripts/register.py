@@ -231,7 +231,9 @@ def remove_xarray_integration(item: Item) -> None:
                 removed_count += 1
 
             # Remove alternate xarray configurations
-            if "alternate" in asset.extra_fields and isinstance(asset.extra_fields["alternate"], dict):
+            if "alternate" in asset.extra_fields and isinstance(
+                asset.extra_fields["alternate"], dict
+            ):
                 if asset.extra_fields["alternate"].pop("xarray", None):
                     removed_count += 1
                 # Remove empty alternate section
