@@ -38,5 +38,3 @@ patches:
             value: tests-output
           - name: pipeline_image_version
             value: v0
-          - name: override_enable_sharding
-            value: "true"

@@ -10,7 +10,7 @@ name = "data-pipeline"
 version = "1.0.0"
 description = "Minimal event-driven Argo Workflows pipeline for Sentinel-2 GeoZarr conversion and STAC registration"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "EOPF Explorer", email = "info@eopf-explorer.eu" }]
 keywords = ["geozarr", "stac", "sentinel", "earth-observation", "zarr"]
