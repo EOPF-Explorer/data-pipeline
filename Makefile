@@ -1,7 +1,9 @@
-.PHONY: help setup lint format typecheck pre-commit build push clean
+.PHONY: help setup lint format typecheck pre-commit build push clean release
 
 IMAGE_NAME := ghcr.io/eopf-explorer/data-pipeline
-TAG := v0
+TAG ?= v0
+MESSAGE ?=
+FLAGS ?=
 
 help:  ## Show this help message
 	@echo "🚀 EOPF GeoZarr Data Pipeline (Slim Branch)"
@@ -42,6 +44,10 @@ push:  ## Push Docker image to registry
 	@echo "Pushing $(IMAGE_NAME):$(TAG) ..."
 	docker push $(IMAGE_NAME):$(TAG)
 	docker push $(IMAGE_NAME):latest
+
+release:  ## Cut and push a git tag (set TAG=vX[.Y[.Z]], optional MESSAGE="...", FLAGS="--force")
+	@if [ "$(origin TAG)" = "default" ]; then echo "TAG is required, e.g. make release TAG=v0"; exit 1; fi
+	@if [ -n "$(MESSAGE)" ]; then scripts/tag_release.sh $(FLAGS) "$(TAG)" "$(MESSAGE)"; else scripts/tag_release.sh $(FLAGS) "$(TAG)"; fi
 
 clean:  ## Clean generated files and caches
 	@echo "Cleaning generated files..."

@@ -99,6 +99,21 @@ geozarr-jflnj   Failed      10h
 
 ## Configuration
 
+### Docker Image Versions
+
+CI now publishes images to `ghcr.io/eopf-explorer/data-pipeline` with the following tags:
+
+- `main`, `latest`, and `sha-<short>` whenever a change lands on `main`.
+- `vX.Y.Z`, `vX.Y`, `vX`, and `sha-<short>` from annotated semantic tags (for example `v1.2.0`).
+- `pr-<number>` and `sha-<short>` for every pull-request build.
+
+**Releasing a new tag**
+1. Merge to `main`, then run `make release TAG=v1.2.0 [MESSAGE="Release v1.2.0"]` from a clean repo. The helper ensures `main` is clean and in sync before tagging.
+2. Need to reuse an existing tag? Add `FLAGS="--force"`.
+3. After GitHub Actions completes, production keeps running the new `latest` image. To pin a specific tag:
+  - **Staging first (preferred):** set `pipeline_image_version` in `workflows/overlays/staging/kustomization.yaml` to the tag (for example `v1.2.0`) and run `kubectl apply -k workflows/overlays/staging`. If it passes validation, make the same edit in `workflows/overlays/production/kustomization.yaml` and apply it.
+  - **Ship now:** set the tag directly in `workflows/overlays/production/kustomization.yaml` and apply. Staging already tracks the latest `main`; bump it too if you want staging and production on the same image.
+
 ### S3 Storage
 
 - **Endpoint**: `https://s3.de.io.cloud.ovh.net` (OVH Frankfurt)
