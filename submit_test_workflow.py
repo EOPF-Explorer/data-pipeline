@@ -6,8 +6,8 @@ import pika
 
 # Test item that was failing (same as before)
 payload = {
-    "source_url": "https://stac.core.eopf.eodc.eu/collections/sentinel-2-l2a/items/S2A_MSIL2A_20251023T105131_N0511_R051_T31UET_20251023T122522",
-    "item_id": "S2A_MSIL2A_20251023T105131_N0511_R051_T31UET_20251023T122522",
+    "source_url": "https://stac.core.eopf.eodc.eu/collections/sentinel-2-l2a/items/S2A_MSIL2A_20251025T095111_N0511_R079_T33SVB_20251025T121315",
+    "item_id": "S2A_MSIL2A_20251025T095111_N0511_R079_T33SVB_20251025T121315",
     "collection": "sentinel-2-l2a-dp-test",
 }
 
@@ -17,8 +17,8 @@ channel = connection.channel()
 
 message = json.dumps(payload)
 channel.basic_publish(
-    exchange="geozarr-events",
-    routing_key="geozarr.convert",
+    exchange="geozarr-staging",
+    routing_key="eopf.items.found",
     body=message,
     properties=pika.BasicProperties(content_type="application/json"),
 )
