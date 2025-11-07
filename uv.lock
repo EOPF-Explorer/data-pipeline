@@ -456,18 +456,13 @@ version = "1.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "boto3" },
-    { name = "cf-xarray" },
-    { name = "click" },
     { name = "eopf-geozarr" },
     { name = "httpx" },
     { name = "morecantile" },
     { name = "pika" },
     { name = "pystac" },
     { name = "pystac-client" },
-    { name = "s3fs" },
     { name = "tenacity" },
-    { name = "xarray" },
-    { name = "zarr" },
 ]
 
 [package.optional-dependencies]
@@ -484,8 +479,6 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "boto3", specifier = ">=1.34.0" },
-    { name = "cf-xarray", specifier = ">=0.9.0" },
-    { name = "click", specifier = ">=8.1.0" },
     { name = "eopf-geozarr", git = "https://github.com/EOPF-Explorer/data-model.git?rev=v0.3.0" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "morecantile", specifier = ">=5.0.0" },
@@ -498,11 +491,8 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.1.0" },
     { name = "pytest-mock", marker = "extra == 'dev'", specifier = ">=3.12.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.8.0" },
-    { name = "s3fs", specifier = ">=2025.9.0" },
     { name = "tenacity", specifier = ">=8.0.0" },
     { name = "types-boto3", marker = "extra == 'dev'", specifier = ">=1.0.2" },
-    { name = "xarray", specifier = ">=2025.9.1" },
-    { name = "zarr", specifier = ">=3.1.3" },
 ]
 provides-extras = ["dev"]
 
