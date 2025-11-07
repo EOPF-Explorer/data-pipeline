@@ -16,25 +16,3 @@ patches:
         amqp:
           geozarr-events:
             exchangeName: geozarr-staging
-  - patch: |-
-      apiVersion: argoproj.io/v1alpha1
-      kind: WorkflowTemplate
-      metadata:
-        name: geozarr-pipeline
-      spec:
-        arguments:
-          parameters:
-          - name: register_collection
-            value: sentinel-2-l2a-dp-test
-          - name: stac_api_url
-            value: https://api.explorer.eopf.copernicus.eu/stac
-          - name: raster_api_url
-            value: https://api.explorer.eopf.copernicus.eu/raster
-          - name: s3_endpoint
-            value: https://s3.de.io.cloud.ovh.net
-          - name: s3_output_bucket
-            value: esa-zarr-sentinel-explorer-fra
-          - name: s3_output_prefix
-            value: tests-output
-          - name: pipeline_image_version
-            value: main
