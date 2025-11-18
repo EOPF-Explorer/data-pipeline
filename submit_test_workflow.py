@@ -6,8 +6,8 @@ import pika
 
 # Test item that was failing (same as before)
 payload = {
-    "source_url": "https://stac.core.eopf.eodc.eu/collections/sentinel-2-l2a/items/S2A_MSIL2A_20251023T105131_N0511_R051_T31UET_20251023T122522",
-    "item_id": "S2A_MSIL2A_20251023T105131_N0511_R051_T31UET_20251023T122522",
+    "source_url": "https://stac.core.eopf.eodc.eu/collections/sentinel-2-l2a/items/S2B_MSIL2A_20250619T083559_N0511_R064_T35RQQ_20250619T105831",
+    "item_id": "S2B_MSIL2A_20250619T083559_N0511_R064_T35RQQ_20250619T105831",
     "collection": "sentinel-2-l2a-dp-test",
 }
 
