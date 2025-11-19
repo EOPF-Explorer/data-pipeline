@@ -17,8 +17,8 @@ channel = connection.channel()
 
 message = json.dumps(payload)
 channel.basic_publish(
-    exchange="geozarr-events",
-    routing_key="geozarr.convert",
+    exchange="eopf_samples",
+    routing_key="eopf_samples.convert",
     body=message,
     properties=pika.BasicProperties(content_type="application/json"),
 )
