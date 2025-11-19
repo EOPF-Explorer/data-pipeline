@@ -40,7 +40,6 @@ CONFIGS: dict[str, dict] = {
             "/measurements/reflectance/r10m",
             "/measurements/reflectance/r20m",
             "/measurements/reflectance/r60m",
-            "/quality/l2a_quicklook/r10m",
         ],
         "crs_groups": ["/conditions/geometry"],
         "spatial_chunk": 1024,
