@@ -62,7 +62,6 @@ Transforms Sentinel-1/2 satellite data into web-ready visualizations:
 - Kubernetes cluster with [platform-deploy](https://github.com/EOPF-Explorer/platform-deploy) (Argo Workflows, RabbitMQ, STAC API, TiTiler)
 - Python 3.13+ with `uv`
 - `kubectl` configured
-- Install project dependencies with `uv sync`
 
 **📖 Complete setup guide:** See [workflows/README.md](workflows/README.md) for:
 - kubectl configuration (OVH Manager kubeconfig download)
@@ -73,6 +72,10 @@ Transforms Sentinel-1/2 satellite data into web-ready visualizations:
 ```bash
 kubectl get wf,sensor,eventsource -n devseed-staging
 ```
+
+### For development
+
+- Make sure project dependencies are installed by running `make setup`
 
 ---
 
