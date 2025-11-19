@@ -26,14 +26,14 @@ The pipeline needs 3 secrets for: **event ingestion** (RabbitMQ), **output stora
 
 Check if secret already exists:
 ```bash
-kubectl get secret rabbitmq-credentials -n devseed-staging >/dev/null && echo "Secret already exists" 
+kubectl get secret rabbitmq-credentials -n devseed-staging >/dev/null && echo "Secret already exists"
 ```
 
 If you see the error message `Error from server (NotFound): secrets "rabbitmq-credentials" not found`, the secret doesn't exist and needs to be create with:
 ```bash
 # Get password from cluster-managed secret
 RABBITMQ_PASS=$(kubectl get secret rabbitmq-password -n core -o jsonpath='{.data.rabbitmq-password}' | base64 -d)
-  
+
 kubectl create secret generic rabbitmq-credentials -n devseed-staging \
     --from-literal=username=user \
     --from-literal=password="$RABBITMQ_PASS"
@@ -44,14 +44,14 @@ kubectl create secret generic rabbitmq-credentials -n devseed-staging \
 
 Check if secret already exists:
 ```bash
-kubectl get secret geozarr-s3-credentials -n devseed-staging >/dev/null && echo "Secret already exists" 
+kubectl get secret geozarr-s3-credentials -n devseed-staging >/dev/null && echo "Secret already exists"
 ```
 
 If you see the error message `Error from server (NotFound): secrets "geozarr-s3-credentials" not found`, the secret doesn't exist and needs to be create with:
 ```bash
   # Get from OVH Manager → Users & Roles → OpenStack credentials
   # https://www.ovh.com/manager/\#/public-cloud/pci/projects/bcc5927763514f499be7dff5af781d57/users
-  
+
   kubectl create secret generic geozarr-s3-credentials -n devseed-staging \
     --from-literal=AWS_ACCESS_KEY_ID=<your-ovh-access-key> \
     --from-literal=AWS_SECRET_ACCESS_KEY=<your-ovh-secret-key>
@@ -61,7 +61,7 @@ If you see the error message `Error from server (NotFound): secrets "geozarr-s3-
 
 Check if secret already exists:
 ```bash
-kubectl get secret stac-api-token -n devseed-staging >/dev/null && echo "Secret already exists" 
+kubectl get secret stac-api-token -n devseed-staging >/dev/null && echo "Secret already exists"
 ```
 
 If you see the error message `Error from server (NotFound): secrets "stac-api-token" not found`, the secret doesn't exist and needs to be create with:
