@@ -22,5 +22,5 @@ channel.basic_publish(
     properties=pika.BasicProperties(content_type="application/json"),
 )
 
-print(f"✅ Published workflow for item: {payload['item_id']}")
+print(f"✅ Published workflow for item: {payload['source_url']}")
 connection.close()
