@@ -6,7 +6,7 @@ import pika
 
 # Test item that was failing (same as before)
 payload = {
-    "source_url": "https://stac.core.eopf.eodc.eu/collections/sentinel-2-l2a/items/S2A_MSIL2A_20251023T105131_N0511_R051_T31UET_20251023T122522",
+    "source_url": "https://stac.core.eopf.eodc.eu/collections/sentinel-2-l2a/items/S2B_MSIL2A_20251109T103149_N0511_R108_T31TEE_20251109T125446",
     "collection": "sentinel-2-l2a-dp-test",
 }
 
@@ -22,5 +22,5 @@ channel.basic_publish(
     properties=pika.BasicProperties(content_type="application/json"),
 )
 
-print(f"✅ Published workflow for item: {payload['item_id']}")
+print(f"✅ Published workflow for item: {payload['source_url']}")
 connection.close()
