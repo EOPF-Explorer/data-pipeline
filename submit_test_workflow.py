@@ -6,7 +6,7 @@ import pika
 
 # Test item that was failing (same as before)
 payload = {
-    "source_url": "https://stac.core.eopf.eodc.eu/collections/sentinel-2-l2a/items/S2B_MSIL2A_20251109T103149_N0511_R108_T31TEE_20251109T125446",
+    "source_url": "https://stac.core.eopf.eodc.eu/collections/sentinel-2-l2a/items/S2B_MSIL2A_20250619T083559_N0511_R064_T35RQQ_20250619T105831",
     "collection": "sentinel-2-l2a-dp-test",
 }
 

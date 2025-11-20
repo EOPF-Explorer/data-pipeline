@@ -57,7 +57,7 @@ spec:
     script:
       image: w9mllyot.c1.de1.container-registry.ovh.net/eopf-sentinel-zarr-explorer/data-pipeline:{{workflow.parameters.pipeline_image_version}}
       imagePullPolicy: Always
-      command: [python, /app/scripts/convert.py]
+      command: [python, /app/scripts/convert_v0.py]
       args:
       - --source-url
       - "{{workflow.parameters.source_url}}"

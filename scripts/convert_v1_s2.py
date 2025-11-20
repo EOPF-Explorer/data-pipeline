@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GeoZarr conversion entry point - orchestrates conversion workflow."""
+"""S2 Optimized GeoZarr conversion entry point - uses S2-specific converter."""
 
 from __future__ import annotations
 
@@ -10,8 +10,7 @@ from urllib.parse import urlparse
 
 import fsspec
 import httpx
-import xarray as xr
-from eopf_geozarr import create_geozarr_dataset
+from eopf_geozarr.s2_optimized import convert_s2_optimized
 from eopf_geozarr.conversion.fs_utils import get_storage_options
 
 # Configure logging (set LOG_LEVEL=DEBUG for verbose output)
@@ -24,35 +23,13 @@ for lib in ["botocore", "s3fs", "aiobotocore", "urllib3"]:
     logging.getLogger(lib).setLevel(logging.WARNING)
 
 
-# === Conversion Parameters ===
+# === S2 Optimized Conversion Parameters ===
 
-# Conversion parameters by mission (defaults to Sentinel-2 if unrecognized)
-CONFIGS: dict[str, dict] = {
-    "sentinel-1": {
-        "groups": ["/measurements"],
-        "crs_groups": ["/conditions/gcp"],
-        "spatial_chunk": 4096,
-        "tile_width": 512,
-        "enable_sharding": False,
-    },
-    "sentinel-2": {
-        "groups": [
-            "/measurements/reflectance/r10m",
-            "/measurements/reflectance/r20m",
-            "/measurements/reflectance/r60m",
-        ],
-        "crs_groups": ["/conditions/geometry"],
-        "spatial_chunk": 1024,
-        "tile_width": 256,
-        "enable_sharding": True,
-    },
-}
-
-
-def get_config(collection_id: str) -> dict:
-    """Get conversion config for collection (defaults to Sentinel-2)."""
-    prefix = "-".join(collection_id.lower().split("-")[:2])
-    return CONFIGS.get(prefix, CONFIGS["sentinel-2"]).copy()
+# Default parameters for S2 optimized conversion
+DEFAULT_SPATIAL_CHUNK = 1024
+DEFAULT_COMPRESSION_LEVEL = 5
+DEFAULT_ENABLE_SHARDING = True
+DEFAULT_DASK_CLUSTER = True
 
 
 def get_zarr_url(stac_item_url: str) -> str:
@@ -81,47 +58,42 @@ def run_conversion(
     collection: str,
     s3_output_bucket: str,
     s3_output_prefix: str,
-    groups: str | None = None,
     spatial_chunk: int | None = None,
-    tile_width: int | None = None,
+    compression_level: int | None = None,
     enable_sharding: bool | None = None,
+    use_dask_cluster: bool = False,
 ) -> str:
-    """Run GeoZarr conversion workflow.
+    """Run S2 Optimized GeoZarr conversion workflow.
 
     Args:
         source_url: Source STAC item URL or direct Zarr URL
-        collection: Collection ID for parameter lookup
+        collection: Collection ID (for output path)
         s3_output_bucket: S3 bucket for output
         s3_output_prefix: S3 prefix for output
-        groups: Override groups (comma-separated if multiple)
-        spatial_chunk: Override spatial chunk size
-        tile_width: Override tile width
-        enable_sharding: Override sharding flag
+        spatial_chunk: Override spatial chunk size (default: 1024)
+        compression_level: Compression level 1-9 (default: 5)
+        enable_sharding: Enable sharding (default: True)
+        use_dask_cluster: Use dask cluster for parallel processing
 
     Returns:
         Output Zarr URL (s3://...)
     """
     item_id = urlparse(source_url).path.rstrip("/").split("/")[-1]
-    logger.info(f"🔄 Converting: {item_id}")
+    logger.info(f"🔄 Converting (S2 Optimized): {item_id}")
     logger.info(f"   Collection: {collection}")
 
     # Resolve source: STAC item or direct Zarr URL
     zarr_url = get_zarr_url(source_url) if "/items/" in source_url else source_url
     logger.info(f"   Source: {zarr_url}")
 
-    # Get config and apply overrides
-    config = get_config(collection)
-    if groups:
-        config["groups"] = groups.split(",")
-    if spatial_chunk is not None:
-        config["spatial_chunk"] = spatial_chunk
-    if tile_width is not None:
-        config["tile_width"] = tile_width
-    if enable_sharding is not None:
-        config["enable_sharding"] = enable_sharding
-
+    # Apply defaults
+    spatial_chunk = spatial_chunk or DEFAULT_SPATIAL_CHUNK
+    compression_level = compression_level or DEFAULT_COMPRESSION_LEVEL
+    enable_sharding = enable_sharding if enable_sharding is not None else DEFAULT_ENABLE_SHARDING
+    use_dask_cluster = use_dask_cluster if use_dask_cluster is not None else DEFAULT_DASK_CLUSTER
+    
     logger.info(
-        f"   Parameters: chunk={config['spatial_chunk']}, tile={config['tile_width']}, sharding={config['enable_sharding']}"
+        f"   Parameters: chunk={spatial_chunk}, compression={compression_level}, sharding={enable_sharding}, dask={use_dask_cluster}"
     )
 
     # Construct output path and clean existing
@@ -137,19 +109,14 @@ def run_conversion(
     except Exception as e:
         logger.warning(f"   ⚠️  Cleanup warning: {e}")
 
-    # Load and convert
-    storage_options = get_storage_options(zarr_url)
-    dt = xr.open_datatree(zarr_url, engine="zarr", chunks="auto", storage_options=storage_options)
-    logger.info(f"   📂 Loaded {len(dt.children)} groups from source")
-
-    create_geozarr_dataset(
-        dt_input=dt,
-        groups=config["groups"],
+    # Run S2 optimized conversion
+    convert_s2_optimized(
+        input_path=zarr_url,
         output_path=output_url,
-        spatial_chunk=config["spatial_chunk"],
-        tile_width=config["tile_width"],
-        crs_groups=config.get("crs_groups"),
-        enable_sharding=config["enable_sharding"],
+        spatial_chunk=spatial_chunk,
+        compression_level=compression_level,
+        enable_sharding=enable_sharding,
+        use_dask_cluster=use_dask_cluster,
     )
 
     logger.info(f"✅ Conversion complete → {output_url}")
@@ -157,16 +124,38 @@ def run_conversion(
 
 
 def main() -> None:
-    """CLI entry point for GeoZarr conversion."""
-    parser = argparse.ArgumentParser(description="Convert EOPF Zarr to GeoZarr format")
+    """CLI entry point for S2 Optimized GeoZarr conversion."""
+    parser = argparse.ArgumentParser(
+        description="Convert EOPF Sentinel-2 Zarr to GeoZarr format using S2-optimized converter"
+    )
     parser.add_argument("--source-url", required=True, help="Source STAC item or Zarr URL")
     parser.add_argument("--collection", required=True, help="Collection ID")
     parser.add_argument("--s3-output-bucket", required=True, help="S3 bucket")
     parser.add_argument("--s3-output-prefix", required=True, help="S3 prefix")
-    parser.add_argument("--groups", help="Override groups (comma-separated)")
-    parser.add_argument("--spatial-chunk", type=int, help="Override spatial chunk size")
-    parser.add_argument("--tile-width", type=int, help="Override tile width")
-    parser.add_argument("--enable-sharding", action="store_true", help="Enable sharding")
+    parser.add_argument(
+        "--spatial-chunk",
+        type=int,
+        default=DEFAULT_SPATIAL_CHUNK,
+        help=f"Spatial chunk size (default: {DEFAULT_SPATIAL_CHUNK})",
+    )
+    parser.add_argument(
+        "--compression-level",
+        type=int,
+        default=DEFAULT_COMPRESSION_LEVEL,
+        help=f"Compression level 1-9 (default: {DEFAULT_COMPRESSION_LEVEL})",
+    )
+    parser.add_argument(
+        "--enable-sharding",
+        action="store_true",
+        default=DEFAULT_ENABLE_SHARDING,
+        help=f"Enable sharding (default: {DEFAULT_ENABLE_SHARDING})",
+    )
+    parser.add_argument(
+        "--dask-cluster",
+        action="store_true",
+        default=DEFAULT_DASK_CLUSTER,
+        help=f"Use dask cluster for parallel processing (default: {DEFAULT_DASK_CLUSTER})",
+    )
     args = parser.parse_args()
 
     run_conversion(
@@ -174,10 +163,10 @@ def main() -> None:
         collection=args.collection,
         s3_output_bucket=args.s3_output_bucket,
         s3_output_prefix=args.s3_output_prefix,
-        groups=args.groups,
         spatial_chunk=args.spatial_chunk,
-        tile_width=args.tile_width,
+        compression_level=args.compression_level,
         enable_sharding=args.enable_sharding,
+        use_dask_cluster=args.dask_cluster,
     )
 
 
