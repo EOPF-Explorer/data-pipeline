@@ -6,42 +6,6 @@ Automated pipeline for converting Sentinel-1/2 Zarr datasets to cloud-optimized 
 
 ---
 
-## Quick Reference
-
-```bash
-# 1. Submit workflow (Sentinel-2 example)
-kubectl create -n devseed-staging -f - <<'EOF'
-apiVersion: argoproj.io/v1alpha1
-kind: Workflow
-metadata:
-  generateName: geozarr-
-spec:
-  workflowTemplateRef:
-    name: geozarr-pipeline
-  arguments:
-    parameters:
-    - name: source_url
-      value: "https://stac.core.eopf.eodc.eu/collections/sentinel-2-l2a/items/S2A_MSIL2A_20251022T094121_N0511_R036_T34TDT_20251022T114817"
-    - name: register_collection
-      value: "sentinel-2-l2a-dp-test"
-EOF
-
-# Or Sentinel-1:
-# source_url: "https://stac.core.eopf.eodc.eu/collections/sentinel-1-l1-grd/items/S1A_IW_GRDH_1SDV_..."
-# register_collection: "sentinel-1-l1-grd-dp-test"
-
-# 2. Monitor progress
-kubectl get wf -n devseed-staging --watch
-
-# 3. View result in browser
-# Check Argo UI: https://argo.core.eopf.eodc.eu/workflows/devseed-staging
-# STAC Browser: https://api.explorer.eopf.copernicus.eu/stac
-# TiTiler Viewer: https://api.explorer.eopf.copernicus.eu/raster
-```
-
-💡 **RabbitMQ submission:** Port-forward first: `kubectl port-forward -n devseed-staging svc/rabbitmq 5672:5672 &`
-
----
 
 ## What It Does
 
@@ -91,8 +55,12 @@ else
 fi
 ```
 
+### Setup port forwarding from local machine to RabbitMQ service
+```bash
+kubectl port-forward -n core svc/rabbitmq 5672:5672 &
+```
 
-### For development
+### For development and running notebooks
 
 - Make sure project dependencies are installed by running `make setup`
 
@@ -101,7 +69,19 @@ fi
 
 ## Submit Workflow
 
-### Method 1: kubectl (Testing - Bypasses Event System)
+### Method 1: RabbitMQ (Production - Event-Driven)
+
+Triggers via EventSource → Sensor:
+
+**Submit workflow from python script**
+```bash
+python submit_test_workflow.py
+```
+
+or using the example [Notebook](submit_stac_items_notebook.ipynb)
+
+
+### Method 3: kubectl (Testing - Bypasses Event System)
 
 Direct workflow submission:
 
@@ -126,21 +106,6 @@ kubectl get wf -n devseed-staging --watch
 ```
 
 **Monitor:** [Argo UI](https://argo.core.eopf.eodc.eu/workflows/devseed-staging)
-
-### Method 2: RabbitMQ (Production - Event-Driven)
-
-Triggers via EventSource → Sensor:
-
-```bash
-# Port-forward RabbitMQ
-kubectl port-forward -n devseed-staging svc/rabbitmq 5672:5672 &
-
-# Get password
-export RABBITMQ_PASSWORD=$(kubectl get secret rabbitmq-password -n core -o jsonpath='{.data.rabbitmq-password}' | base64 -d)
-
-# Submit workflow
-python submit_test_workflow.py
-```
 
 ---
 
