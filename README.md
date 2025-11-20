@@ -58,24 +58,44 @@ Transforms Sentinel-1/2 satellite data into web-ready visualizations:
 
 ## Setup
 
-**Prerequisites:**
+### Prerequisites:
 - Kubernetes cluster with [platform-deploy](https://github.com/EOPF-Explorer/platform-deploy) (Argo Workflows, RabbitMQ, STAC API, TiTiler)
 - Python 3.13+ with `uv`
-- `kubectl` configured
+- `GDAL` installed (on MacOS: `brew install gdal`)
+- `kubectl` installed
 
-**📖 Complete setup guide:** See [workflows/README.md](workflows/README.md) for:
-- kubectl configuration (OVH Manager kubeconfig download)
-- Required secrets (RabbitMQ, S3, STAC API)
-- Workflow deployment (`kubectl apply -k`)
+### If needed, configure kubectl
 
-**Quick verification:**
+Download kubeconfig from [OVH Manager → Kubernetes](https://www.ovh.com/manager/#/public-cloud/pci/projects/bcc5927763514f499be7dff5af781d57/kubernetes/f5f25708-bd15-45b9-864e-602a769a5fcf/service) (**Access and Security** tab).
+
+```bash
+mv ~/Downloads/kubeconfig.yml .work/kubeconfig
+export KUBECONFIG=$(pwd)/.work/kubeconfig
+kubectl get nodes  # Verify: should list several nodes
+```
+
+#### Quick verification:
 ```bash
 kubectl get wf,sensor,eventsource -n devseed-staging
 ```
 
+### Retrieve RABBITMQ_PASSWORD and store in .env file
+
+```bash
+# Check if RABBITMQ_PASSWORD already exists in .env
+if [ -f .env ] && grep -q "^RABBITMQ_PASSWORD=" .env; then
+  echo "RABBITMQ_PASSWORD already exists in .env"
+else
+  echo "RABBITMQ_PASSWORD=$(kubectl get secret rabbitmq-password -n core -o jsonpath='{.data.rabbitmq-password}' | base64 -d)" >> .env
+  echo "✅ RABBITMQ_PASSWORD added to .env"
+fi
+```
+
+
 ### For development
 
 - Make sure project dependencies are installed by running `make setup`
+
 
 ---
 
