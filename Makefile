@@ -1,6 +1,6 @@
 .PHONY: help setup lint format typecheck pre-commit build push clean
 
-IMAGE_NAME := ghcr.io/eopf-explorer/data-pipeline
+IMAGE_NAME := w9mllyot.c1.de1.container-registry.ovh.net/eopf-sentinel-zarr-explorer/data-pipeline
 TAG := v0
 
 help:  ## Show this help message
