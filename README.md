@@ -141,7 +141,7 @@ Access via **EOxHub workspace** (single sign-on): [workspace.devseed.hub-eopf-ex
 **Flow:** STAC item URL → Extract zarr → Convert to GeoZarr → Upload S3 → Register STAC item → Add visualization links
 
 **Processing:**
-1. **convert.py** - Fetch STAC item, extract zarr URL, convert to cloud-optimized GeoZarr, upload to S3
+1. **convert_v0.py** - Fetch STAC item, extract zarr URL, convert to cloud-optimized GeoZarr, upload to S3
 2. **register.py** - Create STAC item with asset hrefs, add projection metadata and TiTiler links, register to catalog
 
 **Runtime:** ~15-20 minutes per item
@@ -186,7 +186,7 @@ kubectl get wf -n devseed-staging --sort-by=.metadata.creationTimestamp \
 
 ```
 scripts/
-├── convert.py               # Zarr → GeoZarr conversion and S3 upload
+├── convert_v0.py               # Zarr → GeoZarr conversion for V0  and S3 upload
 └── register.py              # STAC item creation and catalog registration
 
 workflows/                   # Kubernetes manifests

@@ -9,11 +9,11 @@ from pathlib import Path
 import pytest
 from pystac import Item
 
-# Import the function we're testing
+# Import the functions we're testing
 import sys
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
-from register import consolidate_reflectance_assets
+from register_v1 import consolidate_reflectance_assets, add_store_link
 
 
 def get_fixture_files():
@@ -105,11 +105,11 @@ class TestConsolidateReflectanceAssets:
         # Verify all bands have required structure
         for band in bands:
             assert "name" in band, "Band should have name"
-            assert "/" in band["name"], (
-                "Band name should include resolution prefix (e.g., r10m/b02)"
+            assert "/" not in band["name"], (
+                "Band name should NOT include resolution prefix (best practice: just 'b01', not 'r60m/b01')"
             )
             assert "description" in band, "Band should have description"
-            assert "gsd" in band, "Band should have gsd"
+            assert "gsd" in band, "Band should have gsd (resolution info is here, not in name)"
 
     def test_reflectance_asset_has_cube_variables(self, stac_item):
         """Test that reflectance asset has cube:variables."""
@@ -200,8 +200,8 @@ class TestConsolidateReflectanceAssets:
         bands = reflectance.extra_fields["bands"]
         cube_vars = reflectance.extra_fields["cube:variables"]
 
-        # Extract band names without resolution prefix
-        band_names = {band["name"].split("/")[-1] for band in bands}
+        # Band names should directly match variable names (no resolution prefix)
+        band_names = {band["name"] for band in bands}
         var_names = set(cube_vars.keys())
 
         assert band_names == var_names, (
@@ -233,3 +233,105 @@ class TestConsolidateReflectanceAssets:
 
         band_names = [band["name"] for band in bands]
         assert band_names == sorted(band_names), "Bands should be sorted by name"
+
+    def test_cube_dimensions_have_extent_when_available(self, stac_item):
+        """Test that cube dimensions include extent when proj:transform is available."""
+        # Set up test data with proj:transform
+        stac_item.properties["proj:transform"] = [699960.0, 10.0, 0.0, 4700040.0, 0.0, -10.0]
+        stac_item.properties["proj:shape"] = [10980, 10980]
+
+        consolidate_reflectance_assets(
+            stac_item,
+            "s3://test-bucket/test-prefix/sentinel-2-l2a/test-item.zarr",
+            "https://test-endpoint.com",
+        )
+
+        reflectance = stac_item.assets["reflectance"]
+        cube_dims = reflectance.extra_fields["cube:dimensions"]
+
+        # Check if extent is computed (should be when proj:transform is available)
+        if "extent" in cube_dims["x"]:
+            assert isinstance(cube_dims["x"]["extent"], list), "x extent should be a list"
+            assert len(cube_dims["x"]["extent"]) == 2, "x extent should have 2 values [min, max]"
+            assert cube_dims["x"]["extent"][0] < cube_dims["x"]["extent"][1], "x extent min < max"
+
+        if "extent" in cube_dims["y"]:
+            assert isinstance(cube_dims["y"]["extent"], list), "y extent should be a list"
+            assert len(cube_dims["y"]["extent"]) == 2, "y extent should have 2 values [min, max]"
+            assert cube_dims["y"]["extent"][0] < cube_dims["y"]["extent"][1], "y extent min < max"
+
+
+class TestAddStoreLink:
+    """Test suite for add_store_link function.
+    
+    Tests that the store link is properly added following the 
+    Multiscale reflectance group representation best practices.
+    """
+
+    def test_store_link_is_added(self, stac_item):
+        """Test that store link is added to the item."""
+        add_store_link(
+            stac_item,
+            "s3://test-bucket/test-prefix/sentinel-2-l2a/test-item.zarr",
+            "https://test-endpoint.com",
+        )
+        
+        # Check if store link exists
+        store_links = [link for link in stac_item.links if link.rel == "store"]
+        assert len(store_links) == 1, "Should have exactly one store link"
+
+    def test_store_link_has_correct_href(self, stac_item):
+        """Test that store link points to the correct HTTPS URL."""
+        add_store_link(
+            stac_item,
+            "s3://test-bucket/test-prefix/sentinel-2-l2a/test-item.zarr",
+            "https://test-endpoint.com",
+        )
+        
+        store_link = next(link for link in stac_item.links if link.rel == "store")
+        assert store_link.href.startswith("https://"), "Store link should use HTTPS"
+        assert "test-bucket" in store_link.href, "Store link should contain bucket name"
+        assert ".zarr" in store_link.href, "Store link should point to zarr store"
+
+    def test_store_link_has_correct_media_type(self, stac_item):
+        """Test that store link has correct Zarr media type."""
+        add_store_link(
+            stac_item,
+            "s3://test-bucket/test-prefix/sentinel-2-l2a/test-item.zarr",
+            "https://test-endpoint.com",
+        )
+        
+        store_link = next(link for link in stac_item.links if link.rel == "store")
+        assert store_link.media_type == "application/vnd+zarr; version=2", (
+            "Store link should have correct Zarr media type"
+        )
+
+    def test_store_link_has_title(self, stac_item):
+        """Test that store link has a title."""
+        add_store_link(
+            stac_item,
+            "s3://test-bucket/test-prefix/sentinel-2-l2a/test-item.zarr",
+            "https://test-endpoint.com",
+        )
+        
+        store_link = next(link for link in stac_item.links if link.rel == "store")
+        assert store_link.title is not None, "Store link should have a title"
+        assert "Zarr" in store_link.title, "Store link title should mention Zarr"
+
+    def test_store_link_no_duplicates(self, stac_item):
+        """Test that calling add_store_link multiple times doesn't create duplicates."""
+        # Add store link twice
+        add_store_link(
+            stac_item,
+            "s3://test-bucket/test-prefix/sentinel-2-l2a/test-item.zarr",
+            "https://test-endpoint.com",
+        )
+        add_store_link(
+            stac_item,
+            "s3://test-bucket/test-prefix/sentinel-2-l2a/test-item.zarr",
+            "https://test-endpoint.com",
+        )
+        
+        # Should still have only one store link
+        store_links = [link for link in stac_item.links if link.rel == "store"]
+        assert len(store_links) == 1, "Should not create duplicate store links"
