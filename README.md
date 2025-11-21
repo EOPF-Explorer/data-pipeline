@@ -55,14 +55,44 @@ else
 fi
 ```
 
+### Add Harbor Registry credentials to .env file
+
+Make sure you have an `HARBOR_USERNAME` and `HARBOR_PASSWORD` for OVH container registry added to the `.env` file.
+
+
 ### Setup port forwarding from local machine to RabbitMQ service
 ```bash
 kubectl port-forward -n core svc/rabbitmq 5672:5672 &
 ```
 
-### For development and running notebooks
+### For development
 
-- Make sure project dependencies are installed by running `make setup`
+**Make sure all dependencies are installed by running**
+```bash
+make setup
+```
+
+#### To test new code
+
+- Authenticate with Harbor registry:
+```bash
+source .env
+echo $HARBOR_PASSWORD | docker login w9mllyot.c1.de1.container-registry.ovh.net -u $HARBOR_USERNAME --password-stdin
+```
+
+- Build the new version of the code:
+
+```bash
+docker build -f docker/Dockerfile --network host -t w9mllyot.c1.de1.container-registry.ovh.net/eopf-sentinel-zarr-explorer/data-pipeline:v0 .
+```
+
+- Push to container registry:
+```bash
+docker push w9mllyot.c1.de1.container-registry.ovh.net/eopf-sentinel-zarr-explorer/data-pipeline:v0
+```
+
+- Once the new image is pushed, run the example [Notebook](submit_stac_items_notebook.ipynb) and verify that worflows are running in [Argo Workflow server](https://workspace.devseed.hub-eopf-explorer.eox.at/argo-workflows-server)
+
 
 
 ---
@@ -81,7 +111,7 @@ python submit_test_workflow.py
 or using the example [Notebook](submit_stac_items_notebook.ipynb)
 
 
-### Method 3: kubectl (Testing - Bypasses Event System)
+### Method 2: kubectl (Testing - Bypasses Event System)
 
 Direct workflow submission:
 
