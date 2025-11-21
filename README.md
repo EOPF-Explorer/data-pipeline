@@ -82,9 +82,19 @@ echo $HARBOR_PASSWORD | docker login w9mllyot.c1.de1.container-registry.ovh.net 
 
 - Build the new version of the code:
 
+
+On macOS, the linux architecture needs to be specified when building the image with the flag `--platform linux/amd64` :
 ```bash
-docker build -f docker/Dockerfile --network host -t w9mllyot.c1.de1.container-registry.ovh.net/eopf-sentinel-zarr-explorer/data-pipeline:v0 .
+docker build -f docker/Dockerfile --network host -t w9mllyot.c1.de1.container-registry.ovh.net/eopf-sentinel-zarr-explorer/data-pipeline:v0 --platform linux/amd64 .
 ```
+
+on linux:
+
+```bash
+docker build -f docker/Dockerfile --network host -t w9mllyot.c1.de1.container-registry.ovh.net/eopf-sentinel-zarr-explorer/data-pipeline:v0  .
+```
+
+
 
 - Push to container registry:
 ```bash
