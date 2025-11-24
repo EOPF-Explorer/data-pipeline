@@ -13,39 +13,61 @@ Event-driven Argo Workflows for Sentinel-2 GeoZarr conversion and STAC registrat
 Download kubeconfig from [OVH Manager → Kubernetes](https://www.ovh.com/manager/#/public-cloud/pci/projects/bcc5927763514f499be7dff5af781d57/kubernetes/f5f25708-bd15-45b9-864e-602a769a5fcf/service) (**Access and Security** tab).
 
 ```bash
-mv ~/Downloads/kubeconfig-*.yml .work/kubeconfig
+mv ~/Downloads/kubeconfig.yml .work/kubeconfig
 export KUBECONFIG=$(pwd)/.work/kubeconfig
 kubectl get nodes  # Verify: should list 3-5 nodes
 ```
 
-### 2. Create Required Secrets
+### 2. Create Required Secrets if needed
 
 The pipeline needs 3 secrets for: **event ingestion** (RabbitMQ), **output storage** (S3), and **STAC registration** (API auth).
 
-**RabbitMQ credentials** (receives workflow trigger events):
+#### **RabbitMQ credentials** (receives workflow trigger events)
+
+Check if secret already exists:
+```bash
+kubectl get secret rabbitmq-credentials -n devseed-staging >/dev/null && echo "Secret already exists"
+```
+
+If you see the error message `Error from server (NotFound): secrets "rabbitmq-credentials" not found`, the secret doesn't exist and needs to be create with:
 ```bash
 # Get password from cluster-managed secret
 RABBITMQ_PASS=$(kubectl get secret rabbitmq-password -n core -o jsonpath='{.data.rabbitmq-password}' | base64 -d)
 
 kubectl create secret generic rabbitmq-credentials -n devseed-staging \
-  --from-literal=username=user \
-  --from-literal=password="$RABBITMQ_PASS"
+    --from-literal=username=user \
+    --from-literal=password="$RABBITMQ_PASS"
+
 ```
 
-**S3 credentials** (writes converted GeoZarr files):
-```bash
-# Get from OVH Manager → Users & Roles → OpenStack credentials
-# https://www.ovh.com/manager/\#/public-cloud/pci/projects/bcc5927763514f499be7dff5af781d57/users
+#### **S3 credentials** (writes converted GeoZarr files):
 
-kubectl create secret generic geozarr-s3-credentials -n devseed-staging \
-  --from-literal=AWS_ACCESS_KEY_ID=<your-ovh-access-key> \
-  --from-literal=AWS_SECRET_ACCESS_KEY=<your-ovh-secret-key>
+Check if secret already exists:
+```bash
+kubectl get secret geozarr-s3-credentials -n devseed-staging >/dev/null && echo "Secret already exists"
 ```
 
-**STAC API token** (registers items, optional if API is public):
+If you see the error message `Error from server (NotFound): secrets "geozarr-s3-credentials" not found`, the secret doesn't exist and needs to be create with:
 ```bash
-kubectl create secret generic stac-api-token -n devseed-staging \
-  --from-literal=token=<bearer-token>
+  # Get from OVH Manager → Users & Roles → OpenStack credentials
+  # https://www.ovh.com/manager/\#/public-cloud/pci/projects/bcc5927763514f499be7dff5af781d57/users
+
+  kubectl create secret generic geozarr-s3-credentials -n devseed-staging \
+    --from-literal=AWS_ACCESS_KEY_ID=<your-ovh-access-key> \
+    --from-literal=AWS_SECRET_ACCESS_KEY=<your-ovh-secret-key>
+```
+
+#### **STAC API token** (registers items, optional if API is public):
+
+Check if secret already exists:
+```bash
+kubectl get secret stac-api-token -n devseed-staging >/dev/null && echo "Secret already exists"
+```
+
+If you see the error message `Error from server (NotFound): secrets "stac-api-token" not found`, the secret doesn't exist and needs to be create with:
+```bash
+  kubectl create secret generic stac-api-token -n devseed-staging \
+    --from-literal=token=<bearer-token>
 ```
 
 ### 3. Deploy Workflows

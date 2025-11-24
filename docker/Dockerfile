@@ -23,7 +23,4 @@ RUN uv pip install --system --no-cache /app
 # Copy scripts
 COPY scripts/ /app/scripts/
 
-# Copy workflows (example payloads and templates)
-COPY workflows/ /app/workflows/
-
 CMD ["/bin/bash"]

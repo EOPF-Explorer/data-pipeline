@@ -57,6 +57,7 @@ notebooks = [
     "matplotlib>=3.10.7",
     "shapely>=2.1.2",
     "python-dotenv>=1.2.1",
+    "pika>=1.3.2",
 ]
 
 [project.urls]
