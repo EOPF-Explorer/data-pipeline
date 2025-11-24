@@ -337,19 +337,21 @@ def consolidate_reflectance_assets(item: Item, geozarr_url: str, s3_endpoint: st
                         bands_info[band_name] = band_data
 
     # Remove all old reflectance assets
-    assets_to_remove = []
+    assets_removed = []
     for key in list(item.assets.keys()):
-        if key.startswith("SR_") or (
-            key.startswith("B")
-            and "_" in key
-            and any(key.endswith(f"_{res}") for res in ["10m", "20m", "60m"])
+        if (
+            key.startswith("SR_")
+            or (
+                key.startswith("B")
+                and "_" in key
+                and any(key.endswith(f"_{res}") for res in ["10m", "20m", "60m"])
+            )
+            or key == "TCI_10m"
+            or key == "product"
+            or key == "product_metadata"
         ):
-            assets_to_remove.append(key)
+            assets_removed.append(key)
             item.assets.pop(key)
-
-    assets_to_remove.append("TCI_10m")  # Also remove TCI asset if present
-    assets_to_remove.append("product")  # Also remove product asset if present
-    assets_to_remove.append("product_metadata")  # Also remove product_metadata asset if present
 
     if not bands_info:
         logger.warning("No band information found to create reflectance asset")
@@ -426,7 +428,7 @@ def consolidate_reflectance_assets(item: Item, geozarr_url: str, s3_endpoint: st
     item.assets["reflectance"] = reflectance_asset
 
     logger.info(
-        f"   🔧 Consolidated {len(assets_to_remove)} assets into single 'reflectance' asset with {len(bands_list)} bands"
+        f"   🔧 Consolidated {len(assets_removed)} assets into single 'reflectance' asset with {len(bands_list)} bands"
     )
 
 
