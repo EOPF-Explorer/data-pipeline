@@ -346,7 +346,7 @@ def consolidate_reflectance_assets(item: Item, geozarr_url: str, s3_endpoint: st
         ):
             assets_to_remove.append(key)
             item.assets.pop(key)
-            
+
     assets_to_remove.append("TCI_10m")  # Also remove TCI asset if present
     assets_to_remove.append("product")  # Also remove product asset if present
     assets_to_remove.append("product_metadata")  # Also remove product_metadata asset if present
