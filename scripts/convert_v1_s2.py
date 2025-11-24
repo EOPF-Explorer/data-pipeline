@@ -10,8 +10,12 @@ from urllib.parse import urlparse
 
 import fsspec
 import httpx
-from eopf_geozarr.s2_optimized import convert_s2_optimized
-from eopf_geozarr.conversion.fs_utils import get_storage_options
+import xarray as xr
+from eopf_geozarr.cli import setup_dask_cluster
+from eopf_geozarr.conversion.fs_utils import (
+    get_storage_options,
+)
+from eopf_geozarr.s2_optimization.s2_converter import convert_s2_optimized
 
 # Configure logging (set LOG_LEVEL=DEBUG for verbose output)
 logging.basicConfig(
@@ -26,8 +30,8 @@ for lib in ["botocore", "s3fs", "aiobotocore", "urllib3"]:
 # === S2 Optimized Conversion Parameters ===
 
 # Default parameters for S2 optimized conversion
-DEFAULT_SPATIAL_CHUNK = 1024
-DEFAULT_COMPRESSION_LEVEL = 5
+DEFAULT_SPATIAL_CHUNK = 512
+DEFAULT_COMPRESSION_LEVEL = 3
 DEFAULT_ENABLE_SHARDING = True
 DEFAULT_DASK_CLUSTER = True
 
@@ -70,8 +74,8 @@ def run_conversion(
         collection: Collection ID (for output path)
         s3_output_bucket: S3 bucket for output
         s3_output_prefix: S3 prefix for output
-        spatial_chunk: Override spatial chunk size (default: 1024)
-        compression_level: Compression level 1-9 (default: 5)
+        spatial_chunk: Override spatial chunk size (default: 512)
+        compression_level: Compression level 1-9 (default: 3)
         enable_sharding: Enable sharding (default: True)
         use_dask_cluster: Use dask cluster for parallel processing
 
@@ -91,7 +95,7 @@ def run_conversion(
     compression_level = compression_level or DEFAULT_COMPRESSION_LEVEL
     enable_sharding = enable_sharding if enable_sharding is not None else DEFAULT_ENABLE_SHARDING
     use_dask_cluster = use_dask_cluster if use_dask_cluster is not None else DEFAULT_DASK_CLUSTER
-    
+
     logger.info(
         f"   Parameters: chunk={spatial_chunk}, compression={compression_level}, sharding={enable_sharding}, dask={use_dask_cluster}"
     )
@@ -109,14 +113,27 @@ def run_conversion(
     except Exception as e:
         logger.warning(f"   ⚠️  Cleanup warning: {e}")
 
+    dask_client = setup_dask_cluster(
+        enable_dask=use_dask_cluster, verbose=True
+    )
+
+    # Load input dataset
+    logger.info(f"{'   📥 Loading input dataset '}{zarr_url}")
+    storage_options = get_storage_options(str(zarr_url))
+    dt_input = xr.open_datatree(
+        str(zarr_url),
+        engine="zarr",
+        chunks="auto",
+        storage_options=storage_options,
+    )
+
     # Run S2 optimized conversion
     convert_s2_optimized(
-        input_path=zarr_url,
+        dt_input=dt_input,
         output_path=output_url,
         spatial_chunk=spatial_chunk,
         compression_level=compression_level,
         enable_sharding=enable_sharding,
-        use_dask_cluster=use_dask_cluster,
     )
 
     logger.info(f"✅ Conversion complete → {output_url}")

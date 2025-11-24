@@ -184,7 +184,7 @@
   "assets": {
     "reflectance": {
       "href": "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-2-l2a/S2A_MSIL2A_20251008T100041_N0511_R122_T32TQM_20251008T122613.zarr/measurements/reflectance",
-      "type": "application/vnd+zarr; version=2; profile=multiscales",
+      "type": "application/vnd.zarr; version=3; profile=multiscales",
       "title": "Surface Reflectance",
       "gsd": 10,
       "proj:code": "EPSG:32632",
@@ -287,7 +287,7 @@
           "description": "SWIR 2 (band 12)",
           "center_wavelength": 2.19,
           "full_width_half_max": 0.242,
-          "proj:shape": [5490, 5490], 
+          "proj:shape": [5490, 5490],
           "gsd": 20
         }
       ],

@@ -94,7 +94,7 @@ def upsert_item(client: Client, collection_id: str, item: Item) -> None:
 def add_projection_from_zarr(item: Item) -> None:
     """Add ProjectionExtension from first zarr asset's spatial_ref attribute."""
     for asset in item.assets.values():
-        if asset.media_type and asset.media_type.startswith("application/vnd+zarr") and asset.href:
+        if asset.media_type and asset.media_type.startswith("application/vnd.zarr") and asset.href:
             try:
                 store = zarr.open(asset.href, mode="r")
                 if (spatial_ref := store.attrs.get("spatial_ref")) and (
@@ -205,24 +205,26 @@ def add_thumbnail_asset(item: Item, raster_base: str, collection_id: str) -> Non
 
 def add_store_link(item: Item, geozarr_url: str, s3_endpoint: str) -> None:
     """Add store link pointing to the root Zarr location.
-    
+
     Following the Multiscale reflectance group representation best practices,
     the store link provides the root Zarr location for clients to discover
     the Zarr hierarchy.
     """
     # Remove existing store links to avoid duplicates
     item.links = [link for link in item.links if link.rel != "store"]
-    
+
     # Convert S3 URL to HTTPS for the store link
     store_href = geozarr_url
     if store_href.startswith("s3://"):
         store_href = s3_to_https(store_href, s3_endpoint)
-    
+
     item.add_link(
         Link(
             "store",
             store_href,
-            "application/vnd+zarr; version=2",
+            # TODO remove temporary comment when application/vnd.zarr; version=3 is supported by zarr-extension
+            # "application/vnd.zarr; version=3",
+            "application/octet-stream",
             "Zarr Store",
         )
     )
@@ -272,7 +274,7 @@ def remove_xarray_integration(item: Item) -> None:
 
 def consolidate_reflectance_assets(item: Item, geozarr_url: str, s3_endpoint: str) -> None:
     """Consolidate multiple resolution/band assets into single reflectance asset.
-    
+
     Transforms old structure (SR_10m, SR_20m, SR_60m, B01_20m, etc.) into new
     structure with single 'reflectance' asset containing bands, cube:variables,
     and cube:dimensions following the Multiscale reflectance group representation
@@ -284,11 +286,11 @@ def consolidate_reflectance_assets(item: Item, geozarr_url: str, s3_endpoint: st
         if hasattr(reflectance, "extra_fields") and "cube:variables" in reflectance.extra_fields:
             logger.debug("Reflectance asset already in new format, skipping consolidation")
             return
-    
+
     # Collect band information from existing assets
     bands_info = {}  # Use dict to deduplicate by band name
     resolutions = {"r10m": 10, "r20m": 20, "r60m": 60}
-    
+
     # Gather all reflectance bands from old-style assets
     for key, asset in list(item.assets.items()):
         # Extract band info from individual band assets (e.g., B01_20m, B02_10m)
@@ -299,7 +301,7 @@ def consolidate_reflectance_assets(item: Item, geozarr_url: str, s3_endpoint: st
                 band_name = parts[0].lower()
                 res = parts[1]  # e.g., "10m", "20m", "60m"
                 res_key = f"r{res}"  # e.g., "r10m", "r20m"
-                
+
                 # Get band metadata from the asset's bands array
                 if hasattr(asset, "extra_fields") and "bands" in asset.extra_fields:
                     band_list = asset.extra_fields["bands"]
@@ -311,15 +313,19 @@ def consolidate_reflectance_assets(item: Item, geozarr_url: str, s3_endpoint: st
                         if "proj:shape" in asset.extra_fields:
                             band_data["proj:shape"] = asset.extra_fields["proj:shape"]
                         bands_info[band_name] = band_data
-    
+
     # If no bands found from individual assets, try SR_* assets
     if not bands_info:
         for key, asset in list(item.assets.items()):
-            if key.startswith("SR_") and hasattr(asset, "extra_fields") and "bands" in asset.extra_fields:
+            if (
+                key.startswith("SR_")
+                and hasattr(asset, "extra_fields")
+                and "bands" in asset.extra_fields
+            ):
                 res = key.replace("SR_", "").lower()  # e.g., "10m", "20m"
                 res_key = f"r{res}"
                 gsd = resolutions.get(res_key, 10)
-                
+
                 for band in asset.extra_fields.get("bands", []):
                     band_data = band.copy()
                     band_name = band_data.get("name", "").lower()
@@ -329,21 +335,29 @@ def consolidate_reflectance_assets(item: Item, geozarr_url: str, s3_endpoint: st
                     # Only add if not already present (prefer higher resolution)
                     if band_name not in bands_info or bands_info[band_name]["gsd"] > gsd:
                         bands_info[band_name] = band_data
-    
+
     # Remove all old reflectance assets
     assets_to_remove = []
     for key in list(item.assets.keys()):
-        if key.startswith("SR_") or (key.startswith("B") and "_" in key and any(key.endswith(f"_{res}") for res in ["10m", "20m", "60m"])):
+        if key.startswith("SR_") or (
+            key.startswith("B")
+            and "_" in key
+            and any(key.endswith(f"_{res}") for res in ["10m", "20m", "60m"])
+        ):
             assets_to_remove.append(key)
             item.assets.pop(key)
-    
+            
+    assets_to_remove.append("TCI_10m")  # Also remove TCI asset if present
+    assets_to_remove.append("product")  # Also remove product asset if present
+    assets_to_remove.append("product_metadata")  # Also remove product_metadata asset if present
+
     if not bands_info:
         logger.warning("No band information found to create reflectance asset")
         return
-    
+
     # Convert dict to sorted list
     bands_list = sorted(bands_info.values(), key=lambda x: x.get("name", ""))
-    
+
     # Build cube:variables from bands
     cube_variables = {}
     for band in bands_list:
@@ -351,49 +365,49 @@ def consolidate_reflectance_assets(item: Item, geozarr_url: str, s3_endpoint: st
         cube_variables[band_name] = {
             "dimensions": ["y", "x"],
             "description": band.get("description", ""),
-            "type": "data"
+            "type": "data",
         }
-    
+
     # Build cube:dimensions with extent (use projection info from item if available)
     proj_bbox = item.properties.get("proj:bbox", [])
     cube_dimensions = {
         "x": {
             "type": "spatial",
             "axis": "x",
-            "reference_system": item.properties.get("proj:code", "EPSG:32632")
+            "reference_system": item.properties.get("proj:code", "EPSG:32632"),
         },
         "y": {
             "type": "spatial",
             "axis": "y",
-            "reference_system": item.properties.get("proj:code", "EPSG:32632")
-        }
+            "reference_system": item.properties.get("proj:code", "EPSG:32632"),
+        },
     }
-    
+
     # Add extent if proj:bbox is available (assuming it's in projected coordinates)
     if len(proj_bbox) >= 4 and isinstance(proj_bbox[0], (int, float)):
         # proj:bbox might be in lat/lon, need to check if we have projected bbox
         # For now, we'll use proj:transform and proj:shape to compute extent
         proj_transform = item.properties.get("proj:transform")
         proj_shape = item.properties.get("proj:shape", [10980, 10980])
-        
+
         if proj_transform and len(proj_transform) >= 6:
             # GeoTransform: [x_min, pixel_width, 0, y_max, 0, -pixel_height]
             x_min = proj_transform[0]
             pixel_width = proj_transform[1]
             y_max = proj_transform[3]
             pixel_height = abs(proj_transform[5])
-            
+
             x_max = x_min + (proj_shape[1] * pixel_width)
             y_min = y_max - (proj_shape[0] * pixel_height)
-            
+
             cube_dimensions["x"]["extent"] = [x_min, x_max]
             cube_dimensions["y"]["extent"] = [y_min, y_max]
-    
+
     # Create new reflectance asset
     reflectance_href = f"{geozarr_url}/measurements/reflectance"
     if reflectance_href.startswith("s3://"):
         reflectance_href = s3_to_https(reflectance_href, s3_endpoint)
-    
+
     reflectance_asset = Asset(
         href=reflectance_href,
         media_type="application/vnd+zarr; version=2; profile=multiscales",
@@ -405,13 +419,15 @@ def consolidate_reflectance_assets(item: Item, geozarr_url: str, s3_endpoint: st
             "proj:shape": [10980, 10980],
             "bands": bands_list,
             "cube:dimensions": cube_dimensions,
-            "cube:variables": cube_variables
-        }
+            "cube:variables": cube_variables,
+        },
     )
-    
+
     item.assets["reflectance"] = reflectance_asset
-    
-    logger.info(f"   🔧 Consolidated {len(assets_to_remove)} assets into single 'reflectance' asset with {len(bands_list)} bands")
+
+    logger.info(
+        f"   🔧 Consolidated {len(assets_to_remove)} assets into single 'reflectance' asset with {len(bands_list)} bands"
+    )
 
 
 # === Registration Workflow ===

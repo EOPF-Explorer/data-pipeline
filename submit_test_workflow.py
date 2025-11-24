@@ -6,7 +6,7 @@ import pika
 
 # Test item that was failing (same as before)
 payload = {
-    "source_url": "https://stac.core.eopf.eodc.eu/collections/sentinel-2-l2a/items/S2B_MSIL2A_20250619T083559_N0511_R064_T35RQQ_20250619T105831",
+    "source_url": "https://stac.core.eopf.eodc.eu/collections/sentinel-2-l2a/items/S2C_MSIL2A_20251117T090251_N0511_R007_T35SMA_20251117T124014",
     "collection": "sentinel-2-l2a-dp-test",
 }
 
@@ -17,7 +17,7 @@ channel = connection.channel()
 message = json.dumps(payload)
 channel.basic_publish(
     exchange="eopf_samples",
-    routing_key="eopf_samples.convert",
+    routing_key="eopf_samples.convert.v1",
     body=message,
     properties=pika.BasicProperties(content_type="application/json"),
 )

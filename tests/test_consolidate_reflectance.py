@@ -4,16 +4,16 @@
 from __future__ import annotations
 
 import json
+
+# Import the functions we're testing
+import sys
 from pathlib import Path
 
 import pytest
 from pystac import Item
 
-# Import the functions we're testing
-import sys
-
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
-from register_v1 import consolidate_reflectance_assets, add_store_link
+from register_v1 import add_store_link, consolidate_reflectance_assets
 
 
 def get_fixture_files():
@@ -65,9 +65,9 @@ class TestConsolidateReflectanceAssets:
             "https://test-endpoint.com",
         )
 
-        assert "reflectance" in stac_item.assets, (
-            "Should have reflectance asset after consolidation"
-        )
+        assert (
+            "reflectance" in stac_item.assets
+        ), "Should have reflectance asset after consolidation"
 
     def test_after_consolidation_no_old_format_assets(self, stac_item):
         """Test that after consolidation, old-format assets are removed."""
@@ -105,9 +105,9 @@ class TestConsolidateReflectanceAssets:
         # Verify all bands have required structure
         for band in bands:
             assert "name" in band, "Band should have name"
-            assert "/" not in band["name"], (
-                "Band name should NOT include resolution prefix (best practice: just 'b01', not 'r60m/b01')"
-            )
+            assert (
+                "/" not in band["name"]
+            ), "Band name should NOT include resolution prefix (best practice: just 'b01', not 'r60m/b01')"
             assert "description" in band, "Band should have description"
             assert "gsd" in band, "Band should have gsd (resolution info is here, not in name)"
 
@@ -131,9 +131,10 @@ class TestConsolidateReflectanceAssets:
             assert "dimensions" in var_data, f"Variable {var_name} should have dimensions"
             assert "description" in var_data, f"Variable {var_name} should have description"
             assert "type" in var_data, f"Variable {var_name} should have type"
-            assert var_data["dimensions"] == ["y", "x"], (
-                f"Variable {var_name} should have y,x dimensions"
-            )
+            assert var_data["dimensions"] == [
+                "y",
+                "x",
+            ], f"Variable {var_name} should have y,x dimensions"
             assert var_data["type"] == "data", f"Variable {var_name} should have type 'data'"
 
     def test_reflectance_asset_has_cube_dimensions(self, stac_item):
@@ -170,9 +171,9 @@ class TestConsolidateReflectanceAssets:
         )
 
         reflectance = stac_item.assets["reflectance"]
-        assert reflectance.media_type == "application/vnd+zarr; version=2; profile=multiscales", (
-            "Should have correct zarr media type"
-        )
+        assert (
+            reflectance.media_type == "application/vnd+zarr; version=2; profile=multiscales"
+        ), "Should have correct zarr media type"
 
     def test_reflectance_asset_href_structure(self, stac_item):
         """Test that reflectance asset has correct href structure."""
@@ -183,9 +184,9 @@ class TestConsolidateReflectanceAssets:
         )
 
         reflectance = stac_item.assets["reflectance"]
-        assert "measurements/reflectance" in reflectance.href, (
-            "HREF should point to measurements/reflectance"
-        )
+        assert (
+            "measurements/reflectance" in reflectance.href
+        ), "HREF should point to measurements/reflectance"
         assert reflectance.href.startswith("https://"), "HREF should be HTTPS"
 
     def test_band_names_match_cube_variables(self, stac_item):
@@ -204,9 +205,9 @@ class TestConsolidateReflectanceAssets:
         band_names = {band["name"] for band in bands}
         var_names = set(cube_vars.keys())
 
-        assert band_names == var_names, (
-            f"Band names {band_names} should match variable names {var_names}"
-        )
+        assert (
+            band_names == var_names
+        ), f"Band names {band_names} should match variable names {var_names}"
 
     def test_reflectance_asset_roles(self, stac_item):
         """Test that reflectance asset has correct roles."""
@@ -263,8 +264,8 @@ class TestConsolidateReflectanceAssets:
 
 class TestAddStoreLink:
     """Test suite for add_store_link function.
-    
-    Tests that the store link is properly added following the 
+
+    Tests that the store link is properly added following the
     Multiscale reflectance group representation best practices.
     """
 
@@ -275,7 +276,7 @@ class TestAddStoreLink:
             "s3://test-bucket/test-prefix/sentinel-2-l2a/test-item.zarr",
             "https://test-endpoint.com",
         )
-        
+
         # Check if store link exists
         store_links = [link for link in stac_item.links if link.rel == "store"]
         assert len(store_links) == 1, "Should have exactly one store link"
@@ -287,7 +288,7 @@ class TestAddStoreLink:
             "s3://test-bucket/test-prefix/sentinel-2-l2a/test-item.zarr",
             "https://test-endpoint.com",
         )
-        
+
         store_link = next(link for link in stac_item.links if link.rel == "store")
         assert store_link.href.startswith("https://"), "Store link should use HTTPS"
         assert "test-bucket" in store_link.href, "Store link should contain bucket name"
@@ -300,11 +301,11 @@ class TestAddStoreLink:
             "s3://test-bucket/test-prefix/sentinel-2-l2a/test-item.zarr",
             "https://test-endpoint.com",
         )
-        
+
         store_link = next(link for link in stac_item.links if link.rel == "store")
-        assert store_link.media_type == "application/vnd+zarr; version=2", (
-            "Store link should have correct Zarr media type"
-        )
+        assert (
+            store_link.media_type == "application/vnd+zarr; version=2"
+        ), "Store link should have correct Zarr media type"
 
     def test_store_link_has_title(self, stac_item):
         """Test that store link has a title."""
@@ -313,7 +314,7 @@ class TestAddStoreLink:
             "s3://test-bucket/test-prefix/sentinel-2-l2a/test-item.zarr",
             "https://test-endpoint.com",
         )
-        
+
         store_link = next(link for link in stac_item.links if link.rel == "store")
         assert store_link.title is not None, "Store link should have a title"
         assert "Zarr" in store_link.title, "Store link title should mention Zarr"
@@ -331,7 +332,7 @@ class TestAddStoreLink:
             "s3://test-bucket/test-prefix/sentinel-2-l2a/test-item.zarr",
             "https://test-endpoint.com",
         )
-        
+
         # Should still have only one store link
         store_links = [link for link in stac_item.links if link.rel == "store"]
         assert len(store_links) == 1, "Should not create duplicate store links"
