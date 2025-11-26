@@ -35,7 +35,9 @@ dependencies = [
     "tenacity>=8.0.0",
     "morecantile>=5.0.0",
     "cf-xarray>=0.9.0",
-    "eopf-geozarr @ git+https://github.com/EOPF-Explorer/data-model.git@v0.4.0",
+    "eopf-geozarr @ git+https://github.com/EOPF-Explorer/data-model.git@new_s2",
+    "requests",
+
 ]
 
 [dependency-groups]
@@ -44,6 +46,7 @@ dev = [
     "mypy>=1.11.0",
     "pre-commit>=3.7.0",
     "types-boto3>=1.0.2",
+    "types-requests",
 ]
 test = [
     "pytest>=9.0.1",
