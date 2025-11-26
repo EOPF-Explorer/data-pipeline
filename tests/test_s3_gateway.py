@@ -1,7 +1,7 @@
 """Unit tests for S3 gateway format and alternate asset extension."""
 
-import pytest
 from pystac import Asset, Item
+
 from scripts.register_v1 import (
     add_alternate_s3_assets,
     https_to_s3,
@@ -75,7 +75,9 @@ class TestHttpsToS3:
     def test_new_gateway_format_deep_path(self):
         """Test conversion from new gateway format - deep nested path."""
         https_url = "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-2-l2a-staging/file.zarr"
-        expected = "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-2-l2a-staging/file.zarr"
+        expected = (
+            "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-2-l2a-staging/file.zarr"
+        )
         assert https_to_s3(https_url) == expected
 
     def test_new_gateway_format_bucket_only(self):
@@ -92,7 +94,9 @@ class TestHttpsToS3:
 
     def test_old_s3_format_de_region(self):
         """Test backwards compatibility with old S3 format (de region)."""
-        https_url = "https://esa-zarr-sentinel-explorer-fra.s3.de.io.cloud.ovh.net/tests-output/file.zarr"
+        https_url = (
+            "https://esa-zarr-sentinel-explorer-fra.s3.de.io.cloud.ovh.net/tests-output/file.zarr"
+        )
         expected = "s3://esa-zarr-sentinel-explorer-fra/tests-output/file.zarr"
         assert https_to_s3(https_url) == expected
 
@@ -289,8 +293,13 @@ class TestAddAlternateS3Assets:
         add_alternate_s3_assets(item, s3_endpoint)
 
         # Check extensions were added
-        assert "https://stac-extensions.github.io/alternate-assets/v1.2.0/schema.json" in item.stac_extensions
-        assert "https://stac-extensions.github.io/storage/v2.0.0/schema.json" in item.stac_extensions
+        assert (
+            "https://stac-extensions.github.io/alternate-assets/v1.2.0/schema.json"
+            in item.stac_extensions
+        )
+        assert (
+            "https://stac-extensions.github.io/storage/v2.0.0/schema.json" in item.stac_extensions
+        )
 
         # Check alternate was added
         asset = item.assets["data"]
@@ -510,11 +519,11 @@ class TestAddAlternateS3Assets:
         add_alternate_s3_assets(item, "https://s3.de.io.cloud.ovh.net")
 
         # Count occurrences of alternate-assets extension
-        alternate_count = sum(
-            1 for ext in item.stac_extensions if "alternate-assets" in ext
-        )
+        alternate_count = sum(1 for ext in item.stac_extensions if "alternate-assets" in ext)
         assert alternate_count == 1
-        assert "https://stac-extensions.github.io/storage/v2.0.0/schema.json" in item.stac_extensions
+        assert (
+            "https://stac-extensions.github.io/storage/v2.0.0/schema.json" in item.stac_extensions
+        )
 
 
 class TestEdgeCases:

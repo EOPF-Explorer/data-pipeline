@@ -17,7 +17,9 @@ def s3_to_https(s3_url: str, gateway_url: str = "https://s3.explorer.eopf.copern
     return f"{gateway_base}/{bucket}{path}"
 
 
-def https_to_s3(https_url: str, gateway_url: str = "https://s3.explorer.eopf.copernicus.eu") -> str | None:
+def https_to_s3(
+    https_url: str, gateway_url: str = "https://s3.explorer.eopf.copernicus.eu"
+) -> str | None:
     """Convert https:// URL back to s3:// URL."""
     if not https_url.startswith("https://"):
         return None
@@ -47,7 +49,7 @@ def https_to_s3(https_url: str, gateway_url: str = "https://s3.explorer.eopf.cop
     return None
 
 
-def main():
+def main() -> int:
     """Test the gateway format conversions."""
     print("Testing S3 Gateway Format Conversions")
     print("=" * 70)
@@ -88,28 +90,30 @@ def main():
     print("-" * 70)
     for test in test_cases:
         https_url = test["expected_https"]
-        result = https_to_s3(https_url)
-        passed = result == test["s3"]
+        s3_result = https_to_s3(https_url)
+        passed = s3_result == test["s3"]
         all_passed = all_passed and passed
         status = "✅ PASS" if passed else "❌ FAIL"
         print(f"\n{status} - {test['name']}")
         print(f"  Input:    {https_url}")
         print(f"  Expected: {test['s3']}")
-        print(f"  Got:      {result}")
+        print(f"  Got:      {s3_result}")
 
     # Test backwards compatibility with old format
     print("\n\n3. Testing backwards compatibility with old S3 format")
     print("-" * 70)
-    old_format_url = "https://esa-zarr-sentinel-explorer-fra.s3.de.io.cloud.ovh.net/tests-output/file.zarr"
+    old_format_url = (
+        "https://esa-zarr-sentinel-explorer-fra.s3.de.io.cloud.ovh.net/tests-output/file.zarr"
+    )
     expected_s3 = "s3://esa-zarr-sentinel-explorer-fra/tests-output/file.zarr"
-    result = https_to_s3(old_format_url)
-    passed = result == expected_s3
+    old_result = https_to_s3(old_format_url)
+    passed = old_result == expected_s3
     all_passed = all_passed and passed
     status = "✅ PASS" if passed else "❌ FAIL"
     print(f"\n{status} - Old S3 subdomain format")
     print(f"  Input:    {old_format_url}")
     print(f"  Expected: {expected_s3}")
-    print(f"  Got:      {result}")
+    print(f"  Got:      {old_result}")
 
     # Summary
     print("\n" + "=" * 70)

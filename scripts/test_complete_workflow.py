@@ -19,7 +19,9 @@ def s3_to_https(s3_url: str, gateway_url: str = "https://s3.explorer.eopf.copern
     return f"{gateway_base}/{bucket}{path}"
 
 
-def https_to_s3(https_url: str, gateway_url: str = "https://s3.explorer.eopf.copernicus.eu") -> str | None:
+def https_to_s3(
+    https_url: str, gateway_url: str = "https://s3.explorer.eopf.copernicus.eu"
+) -> str | None:
     """Convert https:// URL back to s3:// URL."""
     if not https_url.startswith("https://"):
         return None
@@ -121,7 +123,7 @@ def process_item_with_gateway(item_dict: dict, s3_endpoint: str) -> dict:
                 if s3_url:
                     new_href = s3_to_https(s3_url)
                     link["href"] = new_href
-                    print(f"  🔄 Converted store link:")
+                    print("  🔄 Converted store link:")
                     print(f"     From: {old_href}")
                     print(f"     To:   {new_href}")
 
@@ -129,10 +131,14 @@ def process_item_with_gateway(item_dict: dict, s3_endpoint: str) -> dict:
     return item_dict
 
 
-def main():
+def main() -> int:
     """Test the complete workflow."""
     # Read the sample JSON
-    sample_file = Path(__file__).parent.parent / "stac" / "S2A_MSIL2A_20250831T103701_N0511_R008_T31TFL_20250831T145420.json"
+    sample_file = (
+        Path(__file__).parent.parent
+        / "stac"
+        / "S2A_MSIL2A_20250831T103701_N0511_R008_T31TFL_20250831T145420.json"
+    )
 
     if not sample_file.exists():
         print(f"❌ Sample file not found: {sample_file}")
@@ -156,7 +162,7 @@ def main():
             break
 
     # Process with new gateway format
-    print(f"\n🔧 Processing with new gateway format...\n")
+    print("\n🔧 Processing with new gateway format...\n")
     s3_endpoint = "https://s3.de.io.cloud.ovh.net"
     modified_item = process_item_with_gateway(item_dict, s3_endpoint)
 
