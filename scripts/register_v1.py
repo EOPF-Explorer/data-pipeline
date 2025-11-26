@@ -33,21 +33,41 @@ EXPLORER_BASE = os.getenv("EXPLORER_BASE_URL", "https://explorer.eopf.copernicus
 # === Utilities ===
 
 
-def s3_to_https(s3_url: str, endpoint: str) -> str:
-    """Convert s3:// URL to https:// using endpoint."""
+def s3_to_https(s3_url: str, gateway_url: str = "https://s3.explorer.eopf.copernicus.eu") -> str:
+    """Convert s3:// URL to https:// using S3 gateway.
+
+    Uses gateway format: https://s3.explorer.eopf.copernicus.eu/bucket/path
+
+    Args:
+        s3_url: S3 URL (s3://bucket/path)
+        gateway_url: S3 gateway base URL (default: https://s3.explorer.eopf.copernicus.eu)
+
+    Returns:
+        HTTPS URL with bucket as path prefix
+    """
     if not s3_url.startswith("s3://"):
         return s3_url
+
     parsed = urlparse(s3_url)
-    host = urlparse(endpoint).netloc or urlparse(endpoint).path
-    return f"https://{parsed.netloc}.{host}{parsed.path}"
+    bucket = parsed.netloc
+    path = parsed.path
+
+    gateway_base = gateway_url.rstrip("/")
+    return f"{gateway_base}/{bucket}{path}"
 
 
-def https_to_s3(https_url: str, endpoint: str) -> str | None:
-    """Convert https:// URL back to s3:// URL if it matches the S3 endpoint pattern.
+def https_to_s3(
+    https_url: str, gateway_url: str = "https://s3.explorer.eopf.copernicus.eu"
+) -> str | None:
+    """Convert https:// URL back to s3:// URL.
+
+    Handles both formats:
+    - New gateway format: https://s3.explorer.eopf.copernicus.eu/bucket/path
+    - Old S3 format: https://bucket.s3.endpoint.com/path
 
     Args:
         https_url: HTTPS URL potentially pointing to S3
-        endpoint: S3 endpoint URL
+        gateway_url: S3 gateway base URL (default: https://s3.explorer.eopf.copernicus.eu)
 
     Returns:
         S3 URL if conversion is possible, None otherwise
@@ -55,23 +75,32 @@ def https_to_s3(https_url: str, endpoint: str) -> str | None:
     if not https_url.startswith("https://"):
         return None
 
-    # Extract the host from the endpoint
-    endpoint_host = urlparse(endpoint).netloc or urlparse(endpoint).path
-
-    # Parse the HTTPS URL
     parsed = urlparse(https_url)
+    gateway_parsed = urlparse(gateway_url)
+    gateway_host = gateway_parsed.netloc
 
-    # Check if URL matches the S3 endpoint pattern: bucket.endpoint_host/path
-    if endpoint_host in parsed.netloc:
-        # Extract bucket name (everything before the endpoint host)
-        bucket = parsed.netloc.replace(f".{endpoint_host}", "")
-        # Reconstruct S3 URL
-        return f"s3://{bucket}{parsed.path}"
+    # Check if URL matches the new gateway format: gateway-host/bucket/path
+    if parsed.netloc == gateway_host:
+        # Extract bucket from path (first component)
+        path_parts = parsed.path.lstrip("/").split("/", 1)
+        if len(path_parts) >= 1:
+            bucket = path_parts[0]
+            remaining_path = "/" + path_parts[1] if len(path_parts) > 1 else ""
+            return f"s3://{bucket}{remaining_path}"
+
+    # Check if URL matches old S3 endpoint pattern: bucket.endpoint-host/path
+    # This is for backwards compatibility
+    if ".s3." in parsed.netloc or "s3." in parsed.netloc:
+        # Try to extract bucket name (everything before .s3.)
+        parts = parsed.netloc.split(".s3.")
+        if len(parts) == 2:
+            bucket = parts[0]
+            return f"s3://{bucket}{parsed.path}"
 
     return None
 
 
-def rewrite_asset_hrefs(item: Item, old_base: str, new_base: str, s3_endpoint: str) -> None:
+def rewrite_asset_hrefs(item: Item, old_base: str, new_base: str) -> None:
     """Rewrite all asset hrefs from old_base to new_base (in place)."""
     old_base = old_base.rstrip("/") + "/"
     new_base = new_base.rstrip("/") + "/"
@@ -80,7 +109,7 @@ def rewrite_asset_hrefs(item: Item, old_base: str, new_base: str, s3_endpoint: s
         if asset.href and asset.href.startswith(old_base):
             new_href = new_base + asset.href[len(old_base) :]
             if new_href.startswith("s3://"):
-                new_href = s3_to_https(new_href, s3_endpoint)
+                new_href = s3_to_https(new_href)
             logger.debug(f"  {key}: {asset.href} -> {new_href}")
             asset.href = new_href
 
@@ -232,7 +261,7 @@ def add_thumbnail_asset(item: Item, raster_base: str, collection_id: str) -> Non
     logger.debug(f"Added thumbnail asset: {title}")
 
 
-def add_store_link(item: Item, geozarr_url: str, s3_endpoint: str) -> None:
+def add_store_link(item: Item, geozarr_url: str) -> None:
     """Add store link pointing to the root Zarr location.
 
     Following the Multiscale reflectance group representation best practices,
@@ -245,7 +274,7 @@ def add_store_link(item: Item, geozarr_url: str, s3_endpoint: str) -> None:
     # Convert S3 URL to HTTPS for the store link
     store_href = geozarr_url
     if store_href.startswith("s3://"):
-        store_href = s3_to_https(store_href, s3_endpoint)
+        store_href = s3_to_https(store_href)
 
     item.add_link(
         Link(
@@ -309,7 +338,7 @@ def add_alternate_s3_assets(item: Item, s3_endpoint: str) -> None:
 
     Args:
         item: STAC item to modify
-        s3_endpoint: S3 endpoint URL
+        s3_endpoint: S3 endpoint URL (used to extract region metadata)
     """
     # Add alternate and storage extensions to the item if not present
     extensions = [
@@ -350,7 +379,7 @@ def add_alternate_s3_assets(item: Item, s3_endpoint: str) -> None:
             continue
 
         # Convert HTTPS URL to S3 URL
-        s3_url = https_to_s3(asset.href, s3_endpoint)
+        s3_url = https_to_s3(asset.href)
         if not s3_url:
             continue
 
@@ -372,7 +401,7 @@ def add_alternate_s3_assets(item: Item, s3_endpoint: str) -> None:
         logger.info(f"   🔗 Added S3 alternates to {modified_count} asset(s)")
 
 
-def consolidate_reflectance_assets(item: Item, geozarr_url: str, s3_endpoint: str) -> None:
+def consolidate_reflectance_assets(item: Item, geozarr_url: str) -> None:
     """Consolidate multiple resolution/band assets into single reflectance asset.
 
     Transforms old structure (SR_10m, SR_20m, SR_60m, B01_20m, etc.) into new
@@ -508,7 +537,7 @@ def consolidate_reflectance_assets(item: Item, geozarr_url: str, s3_endpoint: st
     # Create new reflectance asset
     reflectance_href = f"{geozarr_url}/measurements/reflectance"
     if reflectance_href.startswith("s3://"):
-        reflectance_href = s3_to_https(reflectance_href, s3_endpoint)
+        reflectance_href = s3_to_https(reflectance_href)
 
     reflectance_asset = Asset(
         href=reflectance_href,
@@ -587,15 +616,15 @@ def run_registration(
         logger.info(f"   🔗 Rewriting {len(item.assets)} asset hrefs")
         logger.debug(f"      From: {source_zarr_base}")
         logger.debug(f"      To:   {geozarr_url}")
-        rewrite_asset_hrefs(item, source_zarr_base, geozarr_url, s3_endpoint)
+        rewrite_asset_hrefs(item, source_zarr_base, geozarr_url)
     else:
         logger.warning("   ⚠️  No source zarr found - assets not rewritten")
 
     # 3. Add store link to root Zarr location (best practice)
-    add_store_link(item, geozarr_url, s3_endpoint)
+    add_store_link(item, geozarr_url)
 
     # 4. Consolidate reflectance assets into single asset with bands/cube metadata
-    consolidate_reflectance_assets(item, geozarr_url, s3_endpoint)
+    consolidate_reflectance_assets(item, geozarr_url)
 
     # 5. Add projection metadata from zarr
     add_projection_from_zarr(item)
