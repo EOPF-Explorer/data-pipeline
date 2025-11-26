@@ -1,4 +1,4 @@
-# EOPF GeoZarr Data Pipeline
+# EOPF Explorer Samples Data Pipeline
 
 **Kubernetes pipeline: Sentinel Zarr → Cloud-Optimized GeoZarr + STAC Registration**
 
