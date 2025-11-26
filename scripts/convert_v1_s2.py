@@ -113,9 +113,7 @@ def run_conversion(
     except Exception as e:
         logger.warning(f"   ⚠️  Cleanup warning: {e}")
 
-    dask_client = setup_dask_cluster(
-        enable_dask=use_dask_cluster, verbose=True
-    )
+    setup_dask_cluster(enable_dask=use_dask_cluster, verbose=True)
 
     # Load input dataset
     logger.info(f"{'   📥 Loading input dataset '}{zarr_url}")

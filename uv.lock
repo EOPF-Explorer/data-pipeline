@@ -711,6 +711,7 @@ dependencies = [
     { name = "pika" },
     { name = "pystac" },
     { name = "pystac-client" },
+    { name = "requests" },
     { name = "s3fs" },
     { name = "tenacity" },
     { name = "xarray" },
@@ -723,6 +724,7 @@ dev = [
     { name = "pre-commit" },
     { name = "ruff" },
     { name = "types-boto3" },
+    { name = "types-requests" },
 ]
 notebooks = [
     { name = "ipykernel" },
@@ -750,6 +752,7 @@ requires-dist = [
     { name = "pika", specifier = ">=1.3.0" },
     { name = "pystac", specifier = ">=1.10.0" },
     { name = "pystac-client", specifier = ">=0.7.0" },
+    { name = "requests" },
     { name = "s3fs", specifier = ">=2024.0.0" },
     { name = "tenacity", specifier = ">=8.0.0" },
     { name = "xarray", specifier = ">=2024.0.0" },
@@ -762,6 +765,7 @@ dev = [
     { name = "pre-commit", specifier = ">=3.7.0" },
     { name = "ruff", specifier = ">=0.8.0" },
     { name = "types-boto3", specifier = ">=1.0.2" },
+    { name = "types-requests" },
 ]
 notebooks = [
     { name = "ipykernel", specifier = ">=7.1.0" },
@@ -3087,6 +3091,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/94/08/f7f4f630c5c6d43d37d734b45406eb614712387742f37c72fb10ee1d6f8e/types_boto3-1.41.0.tar.gz", hash = "sha256:824ca1833a5838d4c2da11c1d52f5aaaae922564dd56d27fd43483ae14da96a7", size = 100246 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/13/8f/6876540852f39dbfdea7f441493f32deabe2a2bc6e3f609e755ffaaf23fd/types_boto3-1.41.0-py3-none-any.whl", hash = "sha256:cd97ff6cfbf2680270cefb917c4846a0a3145b8257365a8c495bcb7ac97100a2", size = 69111 },
+]
+
+[[package]]
+name = "types-requests"
+version = "2.32.4.20250913"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "urllib3" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/36/27/489922f4505975b11de2b5ad07b4fe1dca0bca9be81a703f26c5f3acfce5/types_requests-2.32.4.20250913.tar.gz", hash = "sha256:abd6d4f9ce3a9383f269775a9835a4c24e5cd6b9f647d64f88aa4613c33def5d", size = 23113 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/2a/20/9a227ea57c1285986c4cf78400d0a91615d25b24e257fd9e2969606bdfae/types_requests-2.32.4.20250913-py3-none-any.whl", hash = "sha256:78c9c1fffebbe0fa487a418e0fa5252017e9c60d1a2da394077f1780f655d7e1", size = 20658 },
 ]
 
 [[package]]

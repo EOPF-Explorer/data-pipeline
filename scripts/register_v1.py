@@ -294,7 +294,7 @@ def consolidate_reflectance_assets(item: Item, geozarr_url: str, s3_endpoint: st
     # Gather all reflectance bands from old-style assets
     for key, asset in list(item.assets.items()):
         # Extract band info from individual band assets (e.g., B01_20m, B02_10m)
-        if key.startswith("B") and "_" in key and "reflectance" in asset.roles:
+        if key.startswith("B") and "_" in key and asset.roles and "reflectance" in asset.roles:
             # Parse resolution from key (e.g., B01_20m -> 20m)
             parts = key.split("_")
             if len(parts) == 2:
@@ -386,7 +386,7 @@ def consolidate_reflectance_assets(item: Item, geozarr_url: str, s3_endpoint: st
     }
 
     # Add extent if proj:bbox is available (assuming it's in projected coordinates)
-    if len(proj_bbox) >= 4 and isinstance(proj_bbox[0], (int, float)):
+    if len(proj_bbox) >= 4 and isinstance(proj_bbox[0], int | float):
         # proj:bbox might be in lat/lon, need to check if we have projected bbox
         # For now, we'll use proj:transform and proj:shape to compute extent
         proj_transform = item.properties.get("proj:transform")

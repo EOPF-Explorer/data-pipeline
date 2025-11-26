@@ -38,7 +38,7 @@ def has_old_format_assets(item: Item) -> bool:
             and "_" in key
             and any(key.endswith(f"_{res}") for res in ["10m", "20m", "60m"])
         )
-        for key in item.assets.keys()
+        for key in item.assets
     )
 
 
@@ -78,7 +78,7 @@ class TestConsolidateReflectanceAssets:
         )
 
         # Verify no old-format assets remain
-        for key in stac_item.assets.keys():
+        for key in stac_item.assets:
             assert not key.startswith("SR_"), f"SR_ asset {key} should be removed"
             assert not (
                 key.startswith("B")
