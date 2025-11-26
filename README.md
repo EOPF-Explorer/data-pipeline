@@ -22,8 +22,18 @@ Transforms Sentinel-1/2 satellite data into web-ready visualizations:
 
 ## Setup
 
-### Prerequisites:
-- Kubernetes cluster with [platform-deploy](https://github.com/EOPF-Explorer/platform-deploy) (Argo Workflows, RabbitMQ, STAC API, TiTiler)
+### Environments
+
+The data pipeline is deployed in two Kubernetes namespaces:
+
+- **`devseed-staging`** - Testing and validation environment
+- **`devseed`** - Production data pipeline
+
+This documentation uses `devseed-staging` in examples. For production, replace with `devseed`.
+
+### Prerequisites
+
+- Kubernetes cluster with [platform-deploy](https://github.com/EOPF-Explorer/platform-deploy) (Argo Workflows, STAC API, TiTiler)
 - Python 3.13+ with `uv`
 - `GDAL` installed (on MacOS: `brew install gdal`)
 - `kubectl` installed
@@ -40,30 +50,22 @@ kubectl get nodes  # Verify: should list several nodes
 
 #### Quick verification:
 ```bash
-kubectl get wf,sensor,eventsource -n devseed-staging
-```
-
-### Retrieve RABBITMQ_PASSWORD and store in .env file
-
-```bash
-# Check if RABBITMQ_PASSWORD already exists in .env
-if [ -f .env ] && grep -q "^RABBITMQ_PASSWORD=" .env; then
-  echo "RABBITMQ_PASSWORD already exists in .env"
-else
-  echo "RABBITMQ_PASSWORD=$(kubectl get secret rabbitmq-password -n core -o jsonpath='{.data.rabbitmq-password}' | base64 -d)" >> .env
-  echo "✅ RABBITMQ_PASSWORD added to .env"
-fi
+kubectl get wf -n devseed-staging
 ```
 
 ### Add Harbor Registry credentials to .env file
 
 Make sure you have an `HARBOR_USERNAME` and `HARBOR_PASSWORD` for OVH container registry added to the `.env` file.
 
+### Setup port forwarding for webhook access
 
-### Setup port forwarding from local machine to RabbitMQ service
+To submit workflows via the HTTP webhook endpoint, set up port forwarding:
+
 ```bash
-kubectl port-forward -n core svc/rabbitmq 5672:5672 &
+kubectl port-forward -n devseed-staging svc/eopf-explorer-webhook-eventsource-svc 12000:12000 &
 ```
+
+This makes the webhook endpoint available at `http://localhost:12000/samples`.
 
 ### For development
 
@@ -101,27 +103,33 @@ docker build -f docker/Dockerfile --network host -t w9mllyot.c1.de1.container-re
 docker push w9mllyot.c1.de1.container-registry.ovh.net/eopf-sentinel-zarr-explorer/data-pipeline:v0
 ```
 
-- Once the new image is pushed, run the example [Notebook](submit_stac_items_notebook.ipynb) and verify that worflows are running in [Argo Workflow server](https://workspace.devseed.hub-eopf-explorer.eox.at/argo-workflows-server)
-
-
+- Once the new image is pushed, run the example [Notebook](operator-tools/submit_stac_items_notebook.ipynb) and verify that workflows are running in [Argo Workflows](https://argo-workflows.hub-eopf-explorer.eox.at/workflows/devseed-staging)
 
 ---
 
 ## Submit Workflow
 
-### Method 1: RabbitMQ (Production - Event-Driven)
+### Method 1: HTTP Webhook (Production - Event-Driven)
 
-Triggers via EventSource → Sensor:
+Submit STAC items via the HTTP webhook endpoint.
 
-**Submit workflow from python script**
+**Using the interactive notebook (recommended):**
+
 ```bash
-python submit_test_workflow.py
+cd operator-tools
+jupyter notebook submit_stac_items_notebook.ipynb
 ```
 
-or using the example [Notebook](submit_stac_items_notebook.ipynb)
+**Using the Python script for single items:**
 
+```bash
+cd operator-tools
+python submit_test_workflow_wh.py
+```
 
-### Method 2: kubectl (Testing - Bypasses Event System)
+See [operator-tools/README.md](operator-tools/README.md) for detailed usage instructions.
+
+### Method 2: kubectl (Testing - Direct Workflow Submission)
 
 Direct workflow submission:
 
@@ -145,23 +153,14 @@ EOF
 kubectl get wf -n devseed-staging --watch
 ```
 
-**Monitor:** [Argo UI](https://argo.core.eopf.eodc.eu/workflows/devseed-staging)
+**Monitor:** [Argo Workflows UI](https://argo-workflows.hub-eopf-explorer.eox.at/workflows/devseed-staging)
 
----
+**View Results:**
 
-## Web Interfaces
+- [STAC Browser](https://api.explorer.eopf.copernicus.eu/stac) - Browse catalog
+- [TiTiler Viewer](https://api.explorer.eopf.copernicus.eu/raster) - View maps
 
-Access via **EOxHub workspace** (single sign-on): [workspace.devseed.hub-eopf-explorer.eox.at](https://workspace.devseed.hub-eopf-explorer.eox.at/)
-
-| Service | Purpose | URL |
-|---------|---------|-----|
-| **Argo Workflows** | Monitor pipelines | [argo.core.eopf.eodc.eu](https://argo.core.eopf.eodc.eu/workflows/devseed-staging) |
-| **STAC Browser** | Browse catalog | [api.explorer.eopf.copernicus.eu/stac](https://api.explorer.eopf.copernicus.eu/stac) |
-| **TiTiler Viewer** | View maps | [api.explorer.eopf.copernicus.eu/raster](https://api.explorer.eopf.copernicus.eu/raster) |
-
-💡 **Tip:** Login to EOxHub first for seamless authentication across all services.
-
-
+💡 **Tip:** Login to [EOxHub workspace](https://workspace.devseed.hub-eopf-explorer.eox.at/) for seamless authentication.
 
 ---
 
@@ -176,11 +175,12 @@ Access via **EOxHub workspace** (single sign-on): [workspace.devseed.hub-eopf-ex
 **Runtime:** ~15-20 minutes per item
 
 **Stack:**
-- Orchestration: Argo Workflows, Kustomize
+
 - Processing: eopf-geozarr, Dask, Python 3.13
 - Storage: S3 (OVH)
 - Catalog: pgSTAC, TiTiler
-- Events: RabbitMQ
+
+**Infrastructure:** Deployment configuration and infrastructure details are maintained in [platform-deploy](https://github.com/EOPF-Explorer/platform-deploy/tree/main/workspaces/devseed-staging/data-pipeline)
 
 ---
 
@@ -215,30 +215,15 @@ kubectl get wf -n devseed-staging --sort-by=.metadata.creationTimestamp \
 
 ```
 scripts/
-├── convert_v0.py               # Zarr → GeoZarr conversion for V0  and S3 upload
-└── register.py              # STAC item creation and catalog registration
+├── convert_v0.py     # Zarr → GeoZarr conversion and S3 upload
+└── register.py       # STAC item creation and catalog registration
 
-workflows/                   # Kubernetes manifests
-├── base/                    # WorkflowTemplate, EventSource, Sensor, RBAC
-└── overlays/staging/        # Environment configuration
-           /production/
-
-docker/Dockerfile            # Container image
-tests/unit/                  # Unit tests
-     /integration/           # Integration tests
+operator-tools/       # Tools for submitting workflows
+docker/Dockerfile     # Container image
+tests/                # Unit and integration tests
 ```
 
----
-
-## Configuration
-
-**📖 Full configuration:** See [workflows/README.md](workflows/README.md) for secrets setup and parameters.
-
-**Quick reference:**
-- S3: `s3.de.io.cloud.ovh.net` / `esa-zarr-sentinel-explorer-fra`
-- Staging collection: `sentinel-2-l2a-dp-test`
-- Production collection: `sentinel-2-l2a`
-- **Enable debug logs:** `export LOG_LEVEL=DEBUG` (or add to workflow env)
+**Deployment Configuration:** Kubernetes manifests and infrastructure are maintained in [platform-deploy](https://github.com/EOPF-Explorer/platform-deploy/tree/main/workspaces/devseed-staging/data-pipeline)
 
 ---
 
@@ -248,18 +233,14 @@ tests/unit/                  # Unit tests
 # Watch workflows
 kubectl get wf -n devseed-staging --watch
 
-# View logs
+# View workflow logs
 kubectl logs -n devseed-staging -l workflows.argoproj.io/workflow=<name> --tail=100
 
-# Running workflows
+# Running workflows only
 kubectl get wf -n devseed-staging --field-selector status.phase=Running
-
-# Sensor logs (RabbitMQ message processing)
-kubectl logs -n devseed-staging -l sensor-name=geozarr-sensor --tail=50
-
-# EventSource logs (RabbitMQ connection)
-kubectl logs -n devseed-staging -l eventsource-name=rabbitmq-geozarr --tail=50
 ```
+
+**Web UI:** [Argo Workflows](https://argo-workflows.hub-eopf-explorer.eox.at/workflows/devseed-staging)
 
 
 ---
@@ -269,30 +250,28 @@ kubectl logs -n devseed-staging -l eventsource-name=rabbitmq-geozarr --tail=50
 | Problem | Solution |
 |---------|----------|
 | **"No group found in store"** | Using direct zarr URL instead of STAC item URL |
-| **"Connection refused"** | RabbitMQ port-forward not active: `kubectl port-forward -n devseed-staging svc/rabbitmq 5672:5672` |
-| **Workflow not starting** | Check sensor/eventsource logs for connection errors |
-| **S3 access denied** | Verify secret `geozarr-s3-credentials` exists in `devseed-staging` namespace |
-| **Workflow stuck** | Check logs: `kubectl logs -n devseed-staging -l workflows.argoproj.io/workflow=<name>` |
+| **"Webhook not responding"** | Verify port-forward is active: `ps aux \| grep "port-forward.*12000"` |
+| **Workflow not starting** | Check webhook submission returned success, verify port-forward |
+| **S3 access denied** | Contact infrastructure team to verify S3 credentials |
+| **Workflow stuck/failed** | Check workflow logs: `kubectl logs -n devseed-staging -l workflows.argoproj.io/workflow=<name>` |
+
+For infrastructure issues, see platform-deploy troubleshooting: [staging](https://github.com/EOPF-Explorer/platform-deploy/tree/main/workspaces/devseed-staging/data-pipeline) | [production](https://github.com/EOPF-Explorer/platform-deploy/tree/main/workspaces/devseed/data-pipeline)
 
 
 
 ---
 
-## Resources
+## Related Projects
 
-**Container Image:** `w9mllyot.c1.de1.container-registry.ovh.net/eopf-sentinel-zarr-explorer/data-pipeline:latest`
-
-**Resource Limits:**
-- CPU: 2 cores (convert), 500m (register)
-- Memory: 8Gi (convert), 2Gi (register)
-- Timeout: 3600s (convert), 600s (register)
-
-**Related Projects:**
 - [data-model](https://github.com/EOPF-Explorer/data-model) - `eopf-geozarr` conversion library
-- [platform-deploy](https://github.com/EOPF-Explorer/platform-deploy) - Infrastructure (Argo, RabbitMQ, STAC, TiTiler)
+- [platform-deploy](https://github.com/EOPF-Explorer/platform-deploy) - Infrastructure deployment and configuration
 
-**Documentation:**
-- Workflow manifests: `workflows/README.md`
-- Tests: `tests/` (pytest unit and integration tests)
+## Documentation
 
-**License:** MIT
+- **Operator Tools:** [operator-tools/README.md](operator-tools/README.md)
+- **Tests:** `tests/` - pytest unit and integration tests
+- **Deployment:** [platform-deploy/workspaces/devseed-staging/data-pipeline](https://github.com/EOPF-Explorer/platform-deploy/tree/main/workspaces/devseed-staging/data-pipeline)
+
+## License
+
+MIT
