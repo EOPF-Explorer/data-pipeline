@@ -42,6 +42,35 @@ def s3_to_https(s3_url: str, endpoint: str) -> str:
     return f"https://{parsed.netloc}.{host}{parsed.path}"
 
 
+def https_to_s3(https_url: str, endpoint: str) -> str | None:
+    """Convert https:// URL back to s3:// URL if it matches the S3 endpoint pattern.
+
+    Args:
+        https_url: HTTPS URL potentially pointing to S3
+        endpoint: S3 endpoint URL
+
+    Returns:
+        S3 URL if conversion is possible, None otherwise
+    """
+    if not https_url.startswith("https://"):
+        return None
+
+    # Extract the host from the endpoint
+    endpoint_host = urlparse(endpoint).netloc or urlparse(endpoint).path
+
+    # Parse the HTTPS URL
+    parsed = urlparse(https_url)
+
+    # Check if URL matches the S3 endpoint pattern: bucket.endpoint_host/path
+    if endpoint_host in parsed.netloc:
+        # Extract bucket name (everything before the endpoint host)
+        bucket = parsed.netloc.replace(f".{endpoint_host}", "")
+        # Reconstruct S3 URL
+        return f"s3://{bucket}{parsed.path}"
+
+    return None
+
+
 def rewrite_asset_hrefs(item: Item, old_base: str, new_base: str, s3_endpoint: str) -> None:
     """Rewrite all asset hrefs from old_base to new_base (in place)."""
     old_base = old_base.rstrip("/") + "/"
@@ -270,6 +299,77 @@ def remove_xarray_integration(item: Item) -> None:
 
     if removed_count > 0:
         logger.debug(f"Removed {removed_count} XArray integration field(s)")
+
+
+def add_alternate_s3_assets(item: Item, s3_endpoint: str) -> None:
+    """Add alternate S3 URLs to assets using the alternate and storage extensions.
+
+    For each asset with an HTTPS URL pointing to S3, adds an alternate representation
+    with the S3 URI and storage extension metadata.
+
+    Args:
+        item: STAC item to modify
+        s3_endpoint: S3 endpoint URL
+    """
+    # Add alternate and storage extensions to the item if not present
+    extensions = [
+        "https://stac-extensions.github.io/alternate-assets/v1.2.0/schema.json",
+        "https://stac-extensions.github.io/storage/v2.0.0/schema.json",
+    ]
+
+    if not hasattr(item, "stac_extensions"):
+        item.stac_extensions = []
+
+    for ext in extensions:
+        if ext not in item.stac_extensions:
+            item.stac_extensions.append(ext)
+
+    # Parse endpoint to extract region info
+    # For OVHcloud endpoints like "s3.de.io.cloud.ovh.net", region is "de"
+    endpoint_host = urlparse(s3_endpoint).netloc or urlparse(s3_endpoint).path
+    region = "unknown"
+    if ".de." in endpoint_host:
+        region = "de"
+    elif ".gra." in endpoint_host:
+        region = "gra"
+    elif ".sbg." in endpoint_host:
+        region = "sbg"
+    elif ".uk." in endpoint_host:
+        region = "uk"
+    elif ".ca." in endpoint_host:
+        region = "ca"
+
+    # Add alternate to each asset with data role that has an HTTPS URL
+    modified_count = 0
+    for asset in item.assets.values():
+        if not asset.href or not asset.href.startswith("https://"):
+            continue
+
+        # Skip thumbnail and other non-data assets
+        if asset.roles and "thumbnail" in asset.roles:
+            continue
+
+        # Convert HTTPS URL to S3 URL
+        s3_url = https_to_s3(asset.href, s3_endpoint)
+        if not s3_url:
+            continue
+
+        # Add alternate with storage extension fields
+        if not hasattr(asset, "extra_fields"):
+            asset.extra_fields = {}
+
+        asset.extra_fields["alternate"] = {
+            "s3": {
+                "href": s3_url,
+                "storage:platform": "OVHcloud",
+                "storage:region": region,
+                "storage:requester_pays": False,
+            }
+        }
+        modified_count += 1
+
+    if modified_count > 0:
+        logger.info(f"   🔗 Added S3 alternates to {modified_count} asset(s)")
 
 
 def consolidate_reflectance_assets(item: Item, geozarr_url: str, s3_endpoint: str) -> None:
@@ -503,17 +603,20 @@ def run_registration(
     # 6. Remove XArray integration fields (ADR-111 compliance)
     remove_xarray_integration(item)
 
-    # 7. Add visualization links (viewer, xyz, tilejson)
+    # 7. Add alternate S3 URLs to assets (alternate-assets + storage extensions)
+    add_alternate_s3_assets(item, s3_endpoint)
+
+    # 8. Add visualization links (viewer, xyz, tilejson)
     add_visualization_links(item, raster_api_url, collection)
     logger.info("   🎨 Added visualization links")
 
-    # 8. Add thumbnail asset for STAC browsers
+    # 9. Add thumbnail asset for STAC browsers
     add_thumbnail_asset(item, raster_api_url, collection)
 
-    # 9. Add derived_from link to source item
+    # 10. Add derived_from link to source item
     add_derived_from_link(item, source_url)
 
-    # 10. Register to STAC API
+    # 11. Register to STAC API
     client = Client.open(stac_api_url)
     upsert_item(client, collection, item)
 
