@@ -51,7 +51,7 @@ Submits a single test STAC item via HTTP webhook endpoint.
 **Usage:**
 
 ```bash
-python submit_test_workflow_wh.py
+uv run submit_test_workflow_wh.py
 ```
 
 **Configuration:**
@@ -60,7 +60,7 @@ Edit the script to change:
 
 - `source_url`: STAC item URL to process
 - `collection`: Target collection name
-- `action`: Processing action (e.g., `convert-v1-s2-hp`)
+- `action`: Processing action (e.g., `convert-v1-s2-hp`, or `convert-v1-s2-hp`)
 
 ### 2. `submit_stac_items_notebook.ipynb` - Interactive STAC Search & Submit
 
@@ -78,7 +78,7 @@ Jupyter notebook for searching and batch submitting STAC items.
 **Usage:**
 
 ```bash
-jupyter notebook submit_stac_items_notebook.ipynb
+uv run jupyter notebook submit_stac_items_notebook.ipynb
 ```
 
 **Features:**
@@ -98,21 +98,13 @@ Common target collections for processing:
 
 ## Payload Format
 
-All tools submit payloads in this format:
+All tools submit payloads with these fields:
 
-```json
-{
-  "source_url": "https://stac.core.eopf.eodc.eu/collections/sentinel-2-l2a/items/ITEM_ID",
-  "collection": "target-collection-name",
-  "action": "convert-v1-s2"
-}
-```
-
-**Fields:**
-
-- `source_url`: Full STAC item URL (self link)
+- `source_url`: Full STAC item URL (self link) - Must be a STAC API URL, not direct zarr
 - `collection`: Target collection for processed data
 - `action`: (Optional) Processing action/trigger to use
+
+See [main README payload examples](../README.md#payload-format) for correct/incorrect formats.
 
 ## Common Actions
 

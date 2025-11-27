@@ -59,13 +59,7 @@ Make sure you have an `HARBOR_USERNAME` and `HARBOR_PASSWORD` for OVH container 
 
 ### Setup port forwarding for webhook access
 
-To submit workflows via the HTTP webhook endpoint, set up port forwarding:
-
-```bash
-kubectl port-forward -n devseed-staging svc/eopf-explorer-webhook-eventsource-svc 12000:12000 &
-```
-
-This makes the webhook endpoint available at `http://localhost:12000/samples`.
+See [operator-tools/README.md](operator-tools/README.md#port-forwarding) for webhook port forwarding setup.
 
 ### For development
 
@@ -109,25 +103,13 @@ docker push w9mllyot.c1.de1.container-registry.ovh.net/eopf-sentinel-zarr-explor
 
 ## Submit Workflow
 
-### Method 1: HTTP Webhook (Production - Event-Driven)
+### Method 1: HTTP Webhook (Recommended)
 
-Submit STAC items via the HTTP webhook endpoint.
-
-**Using the interactive notebook (recommended):**
-
-```bash
-cd operator-tools
-jupyter notebook submit_stac_items_notebook.ipynb
-```
-
-**Using the Python script for single items:**
-
-```bash
-cd operator-tools
-python submit_test_workflow_wh.py
-```
-
-See [operator-tools/README.md](operator-tools/README.md) for detailed usage instructions.
+Use the operator tools to submit STAC items via HTTP webhook. See [operator-tools/README.md](operator-tools/README.md) for:
+- Interactive notebook for batch submissions
+- Python script for single item testing
+- Port forwarding setup
+- Common actions and target collections
 
 ### Method 2: kubectl (Testing - Direct Workflow Submission)
 
@@ -250,7 +232,7 @@ kubectl get wf -n devseed-staging --field-selector status.phase=Running
 | Problem | Solution |
 |---------|----------|
 | **"No group found in store"** | Using direct zarr URL instead of STAC item URL |
-| **"Webhook not responding"** | Verify port-forward is active: `ps aux \| grep "port-forward.*12000"` |
+| **"Webhook not responding"** | See [operator-tools troubleshooting](operator-tools/README.md#troubleshooting) |
 | **Workflow not starting** | Check webhook submission returned success, verify port-forward |
 | **S3 access denied** | Contact infrastructure team to verify S3 credentials |
 | **Workflow stuck/failed** | Check workflow logs: `kubectl logs -n devseed-staging -l workflows.argoproj.io/workflow=<name>` |
