@@ -568,7 +568,24 @@ def run_registration(
     with httpx.Client(timeout=30.0, follow_redirects=True) as http:
         resp = http.get(source_url)
         resp.raise_for_status()
-        source_item = Item.from_dict(resp.json())
+        
+        # Filter out assets with missing href to handle malformed source items
+        source_data = resp.json()
+        if "assets" in source_data:
+            original_asset_count = len(source_data["assets"])
+            # Remove assets that don't have an href
+            source_data["assets"] = {
+                key: asset
+                for key, asset in source_data["assets"].items()
+                if "href" in asset
+            }
+            removed_count = original_asset_count - len(source_data["assets"])
+            if removed_count > 0:
+                logger.warning(
+                    f"   ⚠️  Removed {removed_count} asset(s) with missing href from source item"
+                )
+        
+        source_item = Item.from_dict(source_data)
 
     item = source_item.clone()
     item.collection_id = collection
