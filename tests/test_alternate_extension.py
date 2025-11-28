@@ -4,8 +4,6 @@
 import json
 from pathlib import Path
 
-from pystac import Item
-
 
 def https_to_s3(https_url: str, endpoint: str) -> str | None:
     """Convert https:// URL back to s3:// URL if it matches the S3 endpoint pattern."""
@@ -53,7 +51,7 @@ def add_alternate_s3_to_item(item_dict: dict, s3_endpoint: str) -> dict:
 
     # Add alternate to each asset
     modified_count = 0
-    for asset_key, asset in item_dict.get("assets", {}).items():
+    for _, asset in item_dict.get("assets", {}).items():
         href = asset.get("href", "")
 
         # Skip non-HTTPS URLs or thumbnails
@@ -85,7 +83,9 @@ def add_alternate_s3_to_item(item_dict: dict, s3_endpoint: str) -> dict:
 def main():
     """Test the alternate extension with the sample JSON."""
     # Read the sample JSON
-    sample_file = Path(__file__).parent / "S2A_MSIL2A_20250831T103701_N0511_R008_T31TFL_20250831T145420.json"
+    sample_file = (
+        Path(__file__).parent / "S2A_MSIL2A_20250831T103701_N0511_R008_T31TFL_20250831T145420.json"
+    )
 
     if not sample_file.exists():
         print(f"❌ Sample file not found: {sample_file}")
