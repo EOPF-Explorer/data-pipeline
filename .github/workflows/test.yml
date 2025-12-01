@@ -24,7 +24,7 @@ jobs:
         version: "latest"
 
     - name: Install dependencies
-      run: uv sync --group={dev,test,notebooks}
+      run: uv sync --all-groups
 
     - name: Set up pre-commit cache
       uses: actions/cache@v4
