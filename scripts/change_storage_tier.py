@@ -33,7 +33,7 @@ def extract_s3_urls(stac_item: dict) -> set[str]:
     """Extract S3 URLs from STAC item alternate.s3.href fields."""
     s3_urls = set()
 
-    for asset_key, asset in stac_item.get("assets", {}).items():
+    for _, asset in stac_item.get("assets", {}).items():
         if asset.get("roles") and "thumbnail" in asset.get("roles", []):
             continue
 
