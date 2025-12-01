@@ -56,7 +56,7 @@ def get_zarr_root(s3_urls: set[str]) -> str | None:
     return None
 
 
-def list_objects(s3_client, bucket: str, prefix: str) -> list[str]:
+def list_objects(s3_client, bucket: str, prefix: str) -> list[str]:  # type: ignore
     """List all objects under S3 prefix."""
     objects = []
     paginator = s3_client.get_paginator("list_objects_v2")
@@ -119,8 +119,12 @@ def filter_paths(
     return filtered, excluded
 
 
-def change_object_storage_class(
-    s3_client, bucket: str, key: str, storage_class: str, dry_run: bool
+def change_object_storage_class(  # type: ignore
+    s3_client,
+    bucket: str,
+    key: str,
+    storage_class: str,
+    dry_run: bool,
 ) -> bool:
     """Change storage class of single S3 object."""
     if dry_run:
@@ -195,9 +199,9 @@ def process_stac_item(
     if s3_endpoint:
         s3_config["endpoint_url"] = s3_endpoint
     elif os.getenv("AWS_ENDPOINT_URL"):
-        s3_config["endpoint_url"] = os.getenv("AWS_ENDPOINT_URL")
+        s3_config["endpoint_url"] = os.getenv("AWS_ENDPOINT_URL")  # type: ignore
 
-    s3_client = boto3.client("s3", **s3_config)
+    s3_client = boto3.client("s3", **s3_config)  # type: ignore
 
     # Parse bucket and prefix
     parsed = urlparse(zarr_root)
