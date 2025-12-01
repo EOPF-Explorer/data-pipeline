@@ -10,7 +10,7 @@ help:  ## Show this help message
 
 setup:  ## Install dependencies and pre-commit hooks
 	@echo "📦 Installing dependencies..."
-	uv sync --group={dev,test,notebooks}
+	uv sync --all-groups
 	@echo "🔧 Installing pre-commit hooks..."
 	uv run pre-commit install
 
