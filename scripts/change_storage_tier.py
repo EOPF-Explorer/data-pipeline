@@ -28,6 +28,21 @@ logger = logging.getLogger(__name__)
 for lib in ["botocore", "boto3", "urllib3", "httpx", "httpcore"]:
     logging.getLogger(lib).setLevel(logging.WARNING)
 
+# Valid S3 storage classes
+VALID_STORAGE_CLASSES = frozenset(["STANDARD", "GLACIER", "EXPRESS_ONEZONE"])
+
+
+def validate_storage_class(storage_class: str) -> bool:
+    """Validate that storage class is a supported S3 storage class.
+
+    Args:
+        storage_class: The storage class to validate
+
+    Returns:
+        True if valid, False otherwise
+    """
+    return storage_class in VALID_STORAGE_CLASSES
+
 
 def extract_s3_urls(stac_item: dict) -> set[str]:
     """Extract S3 URLs from STAC item alternate.s3.href fields."""
@@ -163,6 +178,14 @@ def process_stac_item(
     exclude_patterns: list[str] | None = None,
 ) -> dict[str, int]:
     """Process STAC item and change storage tier."""
+    # Validate storage class
+    if not validate_storage_class(storage_class):
+        logger.error(
+            f"Invalid storage class: {storage_class}. "
+            f"Valid options: {', '.join(sorted(VALID_STORAGE_CLASSES))}"
+        )
+        return {"processed": 0, "succeeded": 0, "failed": 0}
+
     item_id = urlparse(stac_item_url).path.split("/")[-1]
     logger.info(f"Processing: {item_id}")
     logger.info(f"Target storage class: {storage_class}")
