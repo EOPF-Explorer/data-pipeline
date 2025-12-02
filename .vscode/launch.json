@@ -1,0 +1,58 @@
+{
+  // Use IntelliSense to learn about possible attributes.
+  // Hover to view descriptions of existing attributes.
+  // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Python Debugger: Module",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "scripts.register_v1",
+      // --source-url "https://stac.core.eopf.eodc.eu/collections/sentinel-2-l2a/items/S2C_MSIL2A_20251117T090251_N0511_R007_T35SMA_20251117T124014" --collection "sentinel-2-l2a-dp-test" --stac-api-url https://api.explorer.eopf.copernicus.eu/stac --raster-api-url https://api.explorer.eopf.copernicus.eu/raster --s3-endpoint https://s3.de.io.cloud.ovh.net --s3-output-bucket esa-zarr-sentinel-explorer-fra --s3-output-prefix tests-output
+      "args": [
+        "--source-url",
+        "https://stac.core.eopf.eodc.eu/collections/sentinel-2-l2a/items/S2C_MSIL2A_20251117T090251_N0511_R007_T35SMA_20251117T124014",
+        "--collection",
+        "sentinel-2-l2a-dp-test",
+        "--stac-api-url",
+        "https://api.explorer.eopf.copernicus.eu/stac",
+        "--raster-api-url",
+        "https://api.explorer.eopf.copernicus.eu/raster",
+        "--s3-endpoint",
+        "https://s3.de.io.cloud.ovh.net",
+        "--s3-output-bucket",
+        "esa-zarr-sentinel-explorer-fra",
+        "--s3-output-prefix",
+        "tests-output"
+      ],
+      "justMyCode": false
+    },
+    {
+      "name": "Change Storage Tier Debugger: Module",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "scripts.change_storage_tier",
+      // --source-url "https://stac.core.eopf.eodc.eu/collections/sentinel-2-l2a/items/S2C_MSIL2A_20251117T090251_N0511_R007_T35SMA_20251117T124014" --collection "sentinel-2-l2a-dp-test" --stac-api-url https://api.explorer.eopf.copernicus.eu/stac --raster-api-url https://api.explorer.eopf.copernicus.eu/raster --s3-endpoint https://s3.de.io.cloud.ovh.net --s3-output-bucket esa-zarr-sentinel-explorer-fra --s3-output-prefix tests-output
+      "args": [
+        "--stac-item-url",
+        "https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/S2C_MSIL2A_20251127T104411_N0511_R008_T31TDH_20251127T142816",
+        "--storage-class",
+        "EXPRESS_ONEZONE",
+        "--s3-endpoint",
+        "https://s3.de.io.cloud.ovh.net",
+        "--include-pattern",
+        "measurements/reflectance/*",
+        "--include-pattern",
+        "zarr.json"
+      ],
+      "env": {
+        "AWS_PROFILE": "eopf-explorer",
+        "AWS_DEFAULT_REGION": "de",
+        "LOG_LEVEL": "DEBUG"
+        // "AWS_ENDPOINT_URL": "https://s3.de.io.cloud.ovh.net/"
+      },
+      "justMyCode": false
+    }
+  ]
+}

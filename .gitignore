@@ -34,7 +34,7 @@ ENV/
 *.local.yaml
 
 # IDE
-.vscode/
+.vscode/settings.json
 .idea/
 *.swp
 *.swo
