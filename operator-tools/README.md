@@ -37,7 +37,45 @@ This makes the webhook endpoint available at `http://localhost:12000/samples`.
 
 ## Available Tools
 
-### 1. `submit_test_workflow_wh.py` - HTTP Webhook Submission
+### 1. `manage_collections.py` - Collection Management Tool
+
+**NEW**: Comprehensive tool for managing STAC collections using the Transaction API.
+
+**Use cases:**
+- Clean collections (remove all items)
+- Create/update collections from templates
+- Batch operations on multiple collections
+- View collection information and statistics
+
+**Prerequisites:**
+
+- STAC API access to `https://api.explorer.eopf.copernicus.eu/stac`
+- Write permissions for collection management operations
+
+**Quick Start:**
+
+```bash
+# See all available commands
+uv run operator-tools/manage_collections.py --help
+
+# View collection info
+uv run operator-tools/manage_collections.py info sentinel-2-l2a-staging
+
+# Clean a collection (dry run first!)
+uv run operator-tools/manage_collections.py clean sentinel-2-l2a-staging --dry-run
+uv run operator-tools/manage_collections.py clean sentinel-2-l2a-staging
+
+# Create/update collection from template
+uv run operator-tools/manage_collections.py create stac/sentinel-2-l2a.json
+uv run operator-tools/manage_collections.py create stac/sentinel-2-l2a.json --update
+
+# Batch create collections
+uv run operator-tools/manage_collections.py batch-create stac/
+```
+
+**Documentation:** See [README_collections.md](./README_collections.md) for detailed usage and examples.
+
+### 2. `submit_test_workflow_wh.py` - HTTP Webhook Submission
 
 Submits a single test STAC item via HTTP webhook endpoint.
 
@@ -62,7 +100,7 @@ Edit the script to change:
 - `collection`: Target collection name
 - `action`: Processing action (e.g., `convert-v1-s2-hp`, or `convert-v1-s2-hp`)
 
-### 2. `submit_stac_items_notebook.ipynb` - Interactive STAC Search & Submit
+### 3. `submit_stac_items_notebook.ipynb` - Interactive STAC Search & Submit
 
 Jupyter notebook for searching and batch submitting STAC items.
 

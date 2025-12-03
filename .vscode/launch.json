@@ -36,7 +36,7 @@
       // --source-url "https://stac.core.eopf.eodc.eu/collections/sentinel-2-l2a/items/S2C_MSIL2A_20251117T090251_N0511_R007_T35SMA_20251117T124014" --collection "sentinel-2-l2a-dp-test" --stac-api-url https://api.explorer.eopf.copernicus.eu/stac --raster-api-url https://api.explorer.eopf.copernicus.eu/raster --s3-endpoint https://s3.de.io.cloud.ovh.net --s3-output-bucket esa-zarr-sentinel-explorer-fra --s3-output-prefix tests-output
       "args": [
         "--stac-item-url",
-        "https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/S2C_MSIL2A_20251127T104411_N0511_R008_T31TDH_20251127T142816",
+        "https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/S2C_MSIL2A_20250728T100051_N0511_R122_T32TQM_20250728T153115",
         "--storage-class",
         "EXPRESS_ONEZONE",
         "--s3-endpoint",

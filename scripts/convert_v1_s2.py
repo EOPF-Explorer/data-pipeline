@@ -30,10 +30,11 @@ for lib in ["botocore", "s3fs", "aiobotocore", "urllib3"]:
 # === S2 Optimized Conversion Parameters ===
 
 # Default parameters for S2 optimized conversion
-DEFAULT_SPATIAL_CHUNK = 512
+DEFAULT_SPATIAL_CHUNK = 256
 DEFAULT_COMPRESSION_LEVEL = 3
 DEFAULT_ENABLE_SHARDING = True
 DEFAULT_DASK_CLUSTER = True
+DEFAULT_VALIDATE_OUTPUT = True
 
 
 def get_zarr_url(stac_item_url: str) -> str:
@@ -66,6 +67,7 @@ def run_conversion(
     compression_level: int | None = None,
     enable_sharding: bool | None = None,
     use_dask_cluster: bool = False,
+    validate_output: bool | None = None,
 ) -> str:
     """Run S2 Optimized GeoZarr conversion workflow.
 
@@ -78,6 +80,7 @@ def run_conversion(
         compression_level: Compression level 1-9 (default: 3)
         enable_sharding: Enable sharding (default: True)
         use_dask_cluster: Use dask cluster for parallel processing
+        validate_output: Validate output after conversion (default: True)
 
     Returns:
         Output Zarr URL (s3://...)
@@ -95,9 +98,10 @@ def run_conversion(
     compression_level = compression_level or DEFAULT_COMPRESSION_LEVEL
     enable_sharding = enable_sharding if enable_sharding is not None else DEFAULT_ENABLE_SHARDING
     use_dask_cluster = use_dask_cluster if use_dask_cluster is not None else DEFAULT_DASK_CLUSTER
+    validate_output = validate_output if validate_output is not None else DEFAULT_VALIDATE_OUTPUT
 
     logger.info(
-        f"   Parameters: chunk={spatial_chunk}, compression={compression_level}, sharding={enable_sharding}, dask={use_dask_cluster}"
+        f"   Parameters: chunk={spatial_chunk}, compression={compression_level}, sharding={enable_sharding}, dask={use_dask_cluster}, validate={validate_output}"
     )
 
     # Construct output path and clean existing
@@ -132,6 +136,7 @@ def run_conversion(
         spatial_chunk=spatial_chunk,
         compression_level=compression_level,
         enable_sharding=enable_sharding,
+        validate_output=validate_output,
     )
 
     logger.info(f"✅ Conversion complete → {output_url}")
@@ -171,6 +176,12 @@ def main() -> None:
         default=DEFAULT_DASK_CLUSTER,
         help=f"Use dask cluster for parallel processing (default: {DEFAULT_DASK_CLUSTER})",
     )
+    parser.add_argument(
+        "--validate-output",
+        action="store_true",
+        default=DEFAULT_VALIDATE_OUTPUT,
+        help=f"Validate output after conversion (default: {DEFAULT_VALIDATE_OUTPUT})",
+    )
     args = parser.parse_args()
 
     run_conversion(
@@ -182,6 +193,7 @@ def main() -> None:
         compression_level=args.compression_level,
         enable_sharding=args.enable_sharding,
         use_dask_cluster=args.dask_cluster,
+        validate_output=args.validate_output,
     )
 
 
