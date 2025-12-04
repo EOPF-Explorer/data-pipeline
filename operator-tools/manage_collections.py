@@ -187,7 +187,7 @@ class STACCollectionManager:
         """
         try:
             with open(template_path) as f:
-                data = json.load(f)
+                data: dict[str, Any] = json.load(f)
 
             # Validate it has required fields
             if "id" not in data or "type" not in data:
@@ -260,7 +260,7 @@ def clean(ctx: click.Context, collection_id: str, dry_run: bool, yes: bool) -> N
         manager.clean_collection(collection_id, dry_run=dry_run)
     except Exception as e:
         click.echo(f"❌ Operation failed: {e}", err=True)
-        raise click.Abort()
+        raise click.Abort() from e
 
 
 @cli.command()
@@ -320,9 +320,7 @@ def create(ctx: click.Context, template_path: Path, update: bool) -> None:
     show_default=True,
 )
 @click.pass_context
-def batch_create(
-    ctx: click.Context, directory: Path, update: bool, pattern: str
-) -> None:
+def batch_create(ctx: click.Context, directory: Path, update: bool, pattern: str) -> None:
     """
     Create or update multiple collections from template files in a directory.
 
@@ -406,7 +404,7 @@ def info(ctx: click.Context, collection_id: str) -> None:
 
     except Exception as e:
         click.echo(f"❌ Error fetching collection info: {e}", err=True)
-        raise click.Abort()
+        raise click.Abort() from e
 
 
 if __name__ == "__main__":
