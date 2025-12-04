@@ -81,20 +81,20 @@ echo $HARBOR_PASSWORD | docker login w9mllyot.c1.de1.container-registry.ovh.net 
 
 On macOS, the linux architecture needs to be specified when building the image with the flag `--platform linux/amd64` :
 ```bash
-docker build -f docker/Dockerfile --network host -t w9mllyot.c1.de1.container-registry.ovh.net/eopf-sentinel-zarr-explorer/data-pipeline:v0 --platform linux/amd64 .
+docker build -f docker/Dockerfile --network host -t w9mllyot.c1.de1.container-registry.ovh.net/eopf-sentinel-zarr-explorer/data-pipeline:v1-staging --platform linux/amd64 .
 ```
 
 on linux:
 
 ```bash
-docker build -f docker/Dockerfile --network host -t w9mllyot.c1.de1.container-registry.ovh.net/eopf-sentinel-zarr-explorer/data-pipeline:v0  .
+docker build -f docker/Dockerfile --network host -t w9mllyot.c1.de1.container-registry.ovh.net/eopf-sentinel-zarr-explorer/data-pipeline:v1-staging  .
 ```
 
 
 
 - Push to container registry:
 ```bash
-docker push w9mllyot.c1.de1.container-registry.ovh.net/eopf-sentinel-zarr-explorer/data-pipeline:v0
+docker push w9mllyot.c1.de1.container-registry.ovh.net/eopf-sentinel-zarr-explorer/data-pipeline:v1-staging
 ```
 
 - Once the new image is pushed, run the example [Notebook](operator-tools/submit_stac_items_notebook.ipynb) and verify that workflows are running in [Argo Workflows](https://argo-workflows.hub-eopf-explorer.eox.at/workflows/devseed-staging)
