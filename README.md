@@ -148,21 +148,27 @@ kubectl get wf -n devseed-staging --watch
 
 ## Pipeline
 
-**Flow:** STAC item URL → Extract zarr → Convert to GeoZarr → Upload S3 → Register STAC item → Add visualization links
+**Flow:** STAC item URL → Extract zarr → Convert to GeoZarr → Upload S3 → Register STAC item → Optimize Storage → Add visualization links
 
-**Processing:**
-1. **convert_v0.py** - Fetch STAC item, extract zarr URL, convert to cloud-optimized GeoZarr, upload to S3
-2. **register.py** - Create STAC item with asset hrefs, add projection metadata and TiTiler links, register to catalog
+**Processing Steps:**
+
+**V0 Pipeline (2 steps):**
+1. **Convert** - Fetch STAC item, extract zarr URL, convert to cloud-optimized GeoZarr, upload to S3
+2. **Register** - Create STAC item with asset hrefs, add projection metadata and TiTiler links, register to catalog
+
+**V1 Pipeline (3 steps):**
+1. **Convert** - S2-optimized conversion with enhanced performance
+2. **Register** - Enhanced registration with alternate extension and consolidated assets
+3. **Change Storage Tier** - Optimize storage costs by moving data to appropriate S3 storage class (default: `EXPRESS_ONEZONE`)
 
 **Runtime:** ~15-20 minutes per item
 
 **Stack:**
-
 - Processing: eopf-geozarr, Dask, Python 3.13
 - Storage: S3 (OVH)
 - Catalog: pgSTAC, TiTiler
 
-**Infrastructure:** Deployment configuration and infrastructure details are maintained in [platform-deploy](https://github.com/EOPF-Explorer/platform-deploy/tree/main/workspaces/devseed-staging/data-pipeline)
+**Infrastructure & Workflow Details:** For complete workflow architecture, event flow, and deployment configuration, see [platform-deploy data-pipeline README](https://github.com/EOPF-Explorer/platform-deploy/tree/main/workspaces/devseed-staging/data-pipeline)
 
 ---
 
@@ -197,10 +203,22 @@ kubectl get wf -n devseed-staging --sort-by=.metadata.creationTimestamp \
 
 ```
 scripts/
-├── convert_v0.py     # Zarr → GeoZarr conversion and S3 upload
-└── register.py       # STAC item creation and catalog registration
+├── convert_v0.py              # Generic Zarr → GeoZarr converter (V0 pipeline)
+├── convert_v1_s2.py           # S2-optimized GeoZarr converter (V1 pipeline)
+├── register_v0.py             # Basic STAC registration (V0 pipeline)
+├── register_v1.py             # Enhanced STAC registration (V1 pipeline)
+├── change_storage_tier.py     # S3 storage tier optimization (V1 pipeline step 3)
+├── test_complete_workflow.py  # Workflow testing script
+├── test_gateway_format.py     # Gateway format testing
+└── README_storage_tier.md     # Storage tier management documentation
 
-operator-tools/       # Tools for submitting workflows
+operator-tools/
+├── manage_collections.py           # STAC collection management (create/clean/update)
+├── submit_test_workflow_wh.py      # HTTP webhook submission script
+├── submit_stac_items_notebook.ipynb # Batch submission notebook
+├── README.md                       # Operator tools documentation
+└── README_collections.md           # Collection management guide
+
 docker/Dockerfile     # Container image
 tests/                # Unit and integration tests
 ```
@@ -250,7 +268,8 @@ For infrastructure issues, see platform-deploy troubleshooting: [staging](https:
 
 ## Documentation
 
-- **Operator Tools:** [operator-tools/README.md](operator-tools/README.md)
+- **Operator Tools:** [operator-tools/README.md](operator-tools/README.md) - Workflow submission and collection management
+- **Storage Management:** [scripts/README_storage_tier.md](scripts/README_storage_tier.md) - S3 storage tier optimization
 - **Tests:** `tests/` - pytest unit and integration tests
 - **Deployment:** [platform-deploy/workspaces/devseed-staging/data-pipeline](https://github.com/EOPF-Explorer/platform-deploy/tree/main/workspaces/devseed-staging/data-pipeline)
 
