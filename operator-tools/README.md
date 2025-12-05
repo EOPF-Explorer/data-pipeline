@@ -25,15 +25,21 @@ Examples below use `devseed-staging`. For production, replace with `devseed`.
 
 Before using these tools, you need to set up port forwarding to access the webhook service:
 
+#### For staging environment:
 ```bash
 # Port forward from the webhook eventsource service (staging)
-kubectl port-forward -n devseed-staging svc/eopf-explorer-webhook-eventsource-svc 12000:12000 &
+kubectl port-forward -n devseed-staging svc/eopf-explorer-webhook-eventsource-svc 12001:12000 &
+```
+This makes the webhook endpoint available at `http://localhost:12001/samples`.
 
-# For production, use:
-# kubectl port-forward -n devseed svc/eopf-explorer-webhook-eventsource-svc 12000:12000 &
+#### For prod environment:
+```bash
+# Port forward from the webhook eventsource service (staging)
+kubectl port-forward -n devseed svc/eopf-explorer-webhook-eventsource-svc 12000:12000 &
 ```
 
 This makes the webhook endpoint available at `http://localhost:12000/samples`.
+
 
 ## Available Tools
 
