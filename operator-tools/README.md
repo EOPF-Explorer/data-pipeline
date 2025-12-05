@@ -34,7 +34,7 @@ This makes the webhook endpoint available at `http://localhost:12001/samples`.
 
 #### For prod environment:
 ```bash
-# Port forward from the webhook eventsource service (staging)
+# Port forward from the webhook eventsource service (production)
 kubectl port-forward -n devseed svc/eopf-explorer-webhook-eventsource-svc 12000:12000 &
 ```
 
