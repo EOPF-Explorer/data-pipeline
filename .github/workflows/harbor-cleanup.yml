@@ -1,0 +1,54 @@
+name: Harbor Registry Cleanup
+
+on:
+#   schedule:
+#     # Run daily at 2:00 AM UTC
+#     - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run mode (no actual deletions)'
+        required: false
+        default: true
+        type: boolean
+
+env:
+  HARBOR_URL: ${{ secrets.OVH_HARBOR_REGISTRY }}
+  HARBOR_USERNAME: ${{ secrets.OVH_HARBOR_USERNAME }}
+  HARBOR_PASSWORD: ${{ secrets.OVH_HARBOR_PASSWORD }}
+  PROJECT_NAME: eopf-sentinel-zarr-explorer
+  REPOSITORY_NAME: data-pipeline
+  # Retention periods in days
+  SHA_RETENTION_DAYS: 0 #7
+  PR_RETENTION_DAYS: 1 #90
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install requests python-dateutil
+
+      - name: Run cleanup script
+        env:
+          DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+        run: |
+          python3 .github/workflows/cleanup_harbor_registry.py
+
+      - name: Summary
+        run: |
+          echo "### Harbor Cleanup Complete 🧹" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Configuration:**" >> $GITHUB_STEP_SUMMARY
+          echo "- SHA tags retention: ${{ env.SHA_RETENTION_DAYS }} days" >> $GITHUB_STEP_SUMMARY
+          echo "- PR tags retention: ${{ env.PR_RETENTION_DAYS }} days" >> $GITHUB_STEP_SUMMARY
+          echo "- Version tags: Protected (never deleted)" >> $GITHUB_STEP_SUMMARY
