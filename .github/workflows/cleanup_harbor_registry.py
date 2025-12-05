@@ -97,7 +97,7 @@ def delete_tag(
 
 
 def should_delete_tag(
-    tag_name: str, push_time: Any, sha_retention_days: int, pr_retention_days: int
+    tag_name: str, push_time: str | datetime, sha_retention_days: int, pr_retention_days: int
 ) -> tuple[bool, str]:
     """Determine if a tag should be deleted based on retention policy."""
     now = datetime.now(UTC)
