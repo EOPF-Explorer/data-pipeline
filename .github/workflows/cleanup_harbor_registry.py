@@ -163,7 +163,7 @@ def main() -> int:
 
     tags_to_delete = []
     tags_to_keep = []
-    artifacts_to_check_deletion = []
+    artifacts_to_delete = []  # Artifacts where ALL tags should be deleted
 
     for artifact in artifacts:
         digest = artifact.get("digest", "unknown")
@@ -194,16 +194,17 @@ def main() -> int:
                 artifact_tags_to_keep.append(tag_name)
                 tags_to_keep.append(tag_name)
 
-        # If all tags are to be deleted, mark artifact for potential deletion
+        # If all tags are to be deleted, mark the entire artifact for deletion
         if artifact_tags_to_delete and not artifact_tags_to_keep:
-            artifacts_to_check_deletion.append(digest)
+            print("    🗑️  Entire artifact marked for deletion (all tags expired)")
+            artifacts_to_delete.append((digest, artifact_tags_to_delete))
 
     print("\n" + "=" * 60)
     print("SUMMARY")
     print("=" * 60)
     print(f"Tags to delete: {len(tags_to_delete)}")
     print(f"Tags to keep: {len(tags_to_keep)}")
-    print(f"Artifacts that may become untagged: {len(artifacts_to_check_deletion)}")
+    print(f"Artifacts to delete (entire image): {len(artifacts_to_delete)}")
 
     if not tags_to_delete:
         print("\nNo tags to delete. Exiting.")
@@ -211,37 +212,62 @@ def main() -> int:
 
     if dry_run:
         print("\n🔍 DRY RUN MODE - No changes made")
-        print("\nTags that would be deleted:")
-        for digest, tag_name in tags_to_delete:
-            print(f"  - {tag_name} (artifact: {digest[:20]}...)")
+        print("\nArtifacts (entire images) that would be deleted:")
+        for digest, tag_names in artifacts_to_delete:
+            print(f"  - {digest[:20]}... (tags: {', '.join(tag_names)})")
+
+        # Show tags that would be deleted individually (where artifact has other tags to keep)
+        artifact_digests_to_delete = {digest for digest, _ in artifacts_to_delete}
+        individual_tags = [(d, t) for d, t in tags_to_delete if d not in artifact_digests_to_delete]
+        if individual_tags:
+            print("\nTags that would be deleted (artifact kept due to other tags):")
+            for digest, tag_name in individual_tags:
+                print(f"  - {tag_name} (artifact: {digest[:20]}...)")
         return 0
 
     # Perform deletions
     print("\n🗑️  PERFORMING DELETIONS...")
-    deleted_count = 0
+    deleted_artifacts_count = 0
+    deleted_tags_count = 0
     error_count = 0
 
+    # First, delete entire artifacts where all tags are expired
+    artifact_digests_to_delete = {digest for digest, _ in artifacts_to_delete}
+
+    for digest, tag_names in artifacts_to_delete:
+        try:
+            print(
+                f"  Deleting artifact: {digest[:20]}...  (tags: {', '.join(tag_names)}).. .",
+                end=" ",
+            )
+            delete_artifact(harbor_url, username, password, project_name, repository_name, digest)
+            print("✓")
+            deleted_artifacts_count += 1
+        except requests.exceptions.RequestException as e:
+            print(f"✗ Error: {e}")
+            error_count += 1
+
+    # Then, delete individual tags where the artifact has other tags to keep
     for digest, tag_name in tags_to_delete:
+        # Skip if we already deleted the entire artifact
+        if digest in artifact_digests_to_delete:
+            continue
         try:
             print(f"  Deleting tag: {tag_name}...", end=" ")
             delete_tag(
                 harbor_url, username, password, project_name, repository_name, digest, tag_name
             )
             print("✓")
-            deleted_count += 1
+            deleted_tags_count += 1
         except requests.exceptions.RequestException as e:
             print(f"✗ Error: {e}")
             error_count += 1
 
     print("\n" + "=" * 60)
-    print(f"Deleted: {deleted_count} tags")
+    print(f"Deleted: {deleted_artifacts_count} artifacts (entire images)")
+    print(f"Deleted: {deleted_tags_count} individual tags")
     print(f"Errors: {error_count}")
     print("=" * 60)
-
-    # Note: Untagged artifacts can be cleaned up by Harbor's garbage collection
-    if artifacts_to_check_deletion:
-        print("\n⚠️  Some artifacts are now untagged.")
-        print("Run Harbor garbage collection to reclaim storage space.")
 
     return 0 if error_count == 0 else 1
 
