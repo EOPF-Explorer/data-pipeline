@@ -97,20 +97,19 @@ def delete_tag(
     response.raise_for_status()
 
 
+def parse_push_time(push_time: str | datetime) -> datetime:
+    """Parse and normalize push time to timezone-aware datetime."""
+    pushed_at: datetime = date_parser.parse(push_time) if isinstance(push_time, str) else push_time
+    if pushed_at.tzinfo is None:
+        pushed_at = pushed_at.replace(tzinfo=UTC)
+    return pushed_at
+
+
 def should_delete_tag(
     tag_name: str, push_time: str | datetime, sha_retention_days: int, pr_retention_days: int
 ) -> tuple[bool, str]:
     """Determine if a tag should be deleted based on retention policy."""
-    now = datetime.now(UTC)
-
-    # Parse push time
-    pushed_at = date_parser.parse(push_time) if isinstance(push_time, str) else push_time
-
-    # Ensure timezone aware
-    if pushed_at.tzinfo is None:
-        pushed_at = pushed_at.replace(tzinfo=UTC)
-
-    age_days = (now - pushed_at).days
+    age_days = (datetime.now(UTC) - parse_push_time(push_time)).days
 
     # Version tags (semver, latest, main) - NEVER delete
     if VERSION_PATTERN.match(tag_name):
@@ -136,18 +135,7 @@ def should_delete_untagged_artifact(
     push_time: str | datetime, sha_retention_days: int
 ) -> tuple[bool, str]:
     """Determine if an untagged artifact should be deleted based on retention policy."""
-    now = datetime.now(UTC)
-
-    # Parse push time
-    pushed_at = date_parser.parse(push_time) if isinstance(push_time, str) else push_time
-
-    # Ensure timezone aware
-    if pushed_at.tzinfo is None:
-        pushed_at = pushed_at.replace(tzinfo=UTC)
-
-    age_days = (now - pushed_at).days
-
-    # Untagged artifacts - delete after SHA_RETENTION_DAYS (same as SHA tags)
+    age_days = (datetime.now(UTC) - parse_push_time(push_time)).days
     if age_days > sha_retention_days:
         return True, f"untagged artifact older than {sha_retention_days} days ({age_days} days old)"
     return False, f"untagged artifact within retention ({age_days} days old)"
@@ -279,13 +267,12 @@ def main() -> int:
 
     for digest, tag_names, reason in artifacts_to_delete:
         try:
-            if reason == "untagged":
-                print(f"  Deleting untagged artifact: {digest[:20]}.. .", end=" ")
-            else:
-                print(
-                    f"  Deleting artifact: {digest[:20]}...  (tags: {', '.join(tag_names)}).. .",
-                    end=" ",
-                )
+            label = (
+                "untagged artifact"
+                if reason == "untagged"
+                else f"artifact (tags: {', '.join(tag_names)})"
+            )
+            print(f"  Deleting {label}: {digest[:20]}...", end=" ")
             delete_artifact(harbor_url, username, password, project_name, repository_name, digest)
             print("✓")
             deleted_artifacts_count += 1
@@ -295,19 +282,17 @@ def main() -> int:
 
     # Then, delete individual tags where the artifact has other tags to keep
     for digest, tag_name in tags_to_delete:
-        # Skip if we already deleted the entire artifact
-        if digest in artifact_digests_to_delete:
-            continue
-        try:
-            print(f"  Deleting tag: {tag_name}...", end=" ")
-            delete_tag(
-                harbor_url, username, password, project_name, repository_name, digest, tag_name
-            )
-            print("✓")
-            deleted_tags_count += 1
-        except requests.exceptions.RequestException as e:
-            print(f"✗ Error: {e}")
-            error_count += 1
+        if digest not in artifact_digests_to_delete:
+            try:
+                print(f"  Deleting tag: {tag_name}...", end=" ")
+                delete_tag(
+                    harbor_url, username, password, project_name, repository_name, digest, tag_name
+                )
+                print("✓")
+                deleted_tags_count += 1
+            except requests.exceptions.RequestException as e:
+                print(f"✗ Error: {e}")
+                error_count += 1
 
     print("\n" + "=" * 60)
     print(f"Deleted: {deleted_artifacts_count} artifacts (entire images)")
