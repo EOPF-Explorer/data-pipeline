@@ -7,7 +7,7 @@ allow-direct-references = true
 
 [project]
 name = "data-pipeline"
-version = "1.0.0"
+version = "1.1.1"
 description = "Minimal event-driven Argo Workflows pipeline for Sentinel-2 GeoZarr conversion and STAC registration"
 readme = "README.md"
 requires-python = ">=3.13"
