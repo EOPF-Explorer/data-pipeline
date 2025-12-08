@@ -1,9 +1,9 @@
 name: Harbor Registry Cleanup
 
 on:
-#   schedule:
-#     # Run daily at 2:00 AM UTC
-#     - cron: '0 2 * * *'
+  schedule:
+    # Run daily at 10:00 AM UTC
+    - cron: '0 10 * * *'
   workflow_dispatch:
     inputs:
       dry_run:
@@ -19,8 +19,8 @@ env:
   PROJECT_NAME: eopf-sentinel-zarr-explorer
   REPOSITORY_NAME: data-pipeline
   # Retention periods in days
-  SHA_RETENTION_DAYS: 0 #7
-  PR_RETENTION_DAYS: 1 #90
+  SHA_RETENTION_DAYS: 7
+  PR_RETENTION_DAYS: 60
 
 jobs:
   cleanup:
