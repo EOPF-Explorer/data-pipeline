@@ -239,3 +239,28 @@ class TestQueryStac:
         assert "datetime" in first_search["kwargs"]
         assert "bbox" in first_search["kwargs"]
         assert first_search["collections"] == [SOURCE_COLLECTION]
+
+    def test_datetime_format(self):
+        """Datetime parameter should be in correct ISO format with Z suffix."""
+        result = run_script([], [])
+
+        datetime_param = result["client"].searches[0]["kwargs"]["datetime"]
+
+        # Should be in format: "YYYY-MM-DDTHH:MM:SS.ffffffZ/YYYY-MM-DDTHH:MM:SS.ffffffZ"
+        assert "/" in datetime_param
+        start_str, end_str = datetime_param.split("/")
+
+        # Both parts should end with Z (not +00:00Z)
+        assert start_str.endswith("Z"), f"Start time should end with Z, got: {start_str}"
+        assert end_str.endswith("Z"), f"End time should end with Z, got: {end_str}"
+
+        # Should not have both timezone offset and Z
+        assert "+00:00Z" not in start_str, "Should not have both +00:00 and Z"
+        assert "+00:00Z" not in end_str, "Should not have both +00:00 and Z"
+
+        # Verify they're valid ISO format timestamps
+        from datetime import datetime
+
+        # Remove Z and parse
+        datetime.fromisoformat(start_str.rstrip("Z"))
+        datetime.fromisoformat(end_str.rstrip("Z"))

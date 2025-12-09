@@ -27,10 +27,14 @@ def main() -> None:
     end_time = datetime.now(UTC) - timedelta(hours=END_TIME_OFFSET_HOURS)
     start_time = end_time - timedelta(hours=LOOKBACK_HOURS)
 
+    # Format datetime for STAC API (replace +00:00 with Z)
+    start_time_str = start_time.isoformat().replace("+00:00", "Z")
+    end_time_str = end_time.isoformat().replace("+00:00", "Z")
+
     # ALL logs go to stderr (file=sys.stderr)
     sys.stderr.write(f"Querying STAC API: {STAC_API_URL}\n")
     sys.stderr.write(f"Collection: {SOURCE_COLLECTION}\n")
-    sys.stderr.write(f"Time range: {start_time.isoformat()}Z to {end_time.isoformat()}Z\n")
+    sys.stderr.write(f"Time range: {start_time_str} to {end_time_str}\n")
     sys.stderr.flush()
 
     # Connect to STAC catalog
@@ -39,7 +43,7 @@ def main() -> None:
     # Search for items
     search = catalog.search(
         collections=[SOURCE_COLLECTION],
-        datetime=f"{start_time.isoformat()}Z/{end_time.isoformat()}Z",
+        datetime=f"{start_time_str}/{end_time_str}",
         bbox=AOI_BBOX,
     )
 
