@@ -398,13 +398,16 @@ class TestChangeObjectStorageClass:
     OBJECT_KEY = "geozarr/S2A_test.zarr/measurements/reflectance/r10m/B02/0"
 
     def test_dry_run_mode(self) -> None:
-        """Test dry run doesn't make actual S3 API calls."""
+        """Test dry run queries storage class but doesn't modify objects."""
         mock_client = MagicMock()
-        result = change_object_storage_class(
+        mock_client.head_object.return_value = {"StorageClass": "STANDARD"}
+
+        success, current_class = change_object_storage_class(
             mock_client, self.BUCKET, self.OBJECT_KEY, "GLACIER", dry_run=True
         )
-        assert result is True
-        mock_client.head_object.assert_not_called()
+        assert success is True
+        assert current_class == "STANDARD"
+        mock_client.head_object.assert_called_once_with(Bucket=self.BUCKET, Key=self.OBJECT_KEY)
         mock_client.copy_object.assert_not_called()
 
     def test_already_correct_storage_class(self) -> None:
@@ -412,10 +415,11 @@ class TestChangeObjectStorageClass:
         mock_client = MagicMock()
         mock_client.head_object.return_value = {"StorageClass": "GLACIER"}
 
-        result = change_object_storage_class(
+        success, current_class = change_object_storage_class(
             mock_client, self.BUCKET, self.OBJECT_KEY, "GLACIER", dry_run=False
         )
-        assert result is True
+        assert success is True
+        assert current_class == "GLACIER"
         mock_client.head_object.assert_called_once_with(Bucket=self.BUCKET, Key=self.OBJECT_KEY)
         mock_client.copy_object.assert_not_called()
 
@@ -424,10 +428,11 @@ class TestChangeObjectStorageClass:
         mock_client = MagicMock()
         mock_client.head_object.return_value = {"StorageClass": "STANDARD"}
 
-        result = change_object_storage_class(
+        success, current_class = change_object_storage_class(
             mock_client, self.BUCKET, self.OBJECT_KEY, "GLACIER", dry_run=False
         )
-        assert result is True
+        assert success is True
+        assert current_class == "STANDARD"
         mock_client.copy_object.assert_called_once_with(
             Bucket=self.BUCKET,
             Key=self.OBJECT_KEY,
@@ -446,10 +451,11 @@ class TestChangeObjectStorageClass:
             "HeadObject",
         )
 
-        result = change_object_storage_class(
+        success, current_class = change_object_storage_class(
             mock_client, self.BUCKET, self.OBJECT_KEY, "GLACIER", dry_run=False
         )
-        assert result is False
+        assert success is False
+        assert current_class is None
 
 
 class TestProcessStacItem:
@@ -511,7 +517,7 @@ class TestProcessStacItem:
             "geozarr/S2A_MSIL2A.zarr/measurements/reflectance/r10m/B02/0",
             "geozarr/S2A_MSIL2A.zarr/measurements/reflectance/r10m/B02/.zarray",
         ]
-        mock_change.return_value = True
+        mock_change.return_value = (True, "STANDARD")
 
         stats = process_stac_item(
             self.STAC_API_URL,
