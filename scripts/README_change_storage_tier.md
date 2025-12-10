@@ -275,28 +275,36 @@ uv run python scripts/change_storage_tier.py \
 
 Output example:
 ```
-Processing 1500 objects...
-  300 already have target storage class STANDARD_IA
-  1200 need to be changed
-
-============================================================
-Summary for S2A_MSIL2A_20250831T103701_N0511_R008_T31TFL_20250831T145420:
-  Total objects: 1500
-  Skipped (filtered): 0
-  Already correct storage class: 300
-  Changed: 1200
-  Succeeded: 1500
-  Failed: 0
+Processing: S2A_MSIL2A_20251209T123131_N0511_R009_T26SPG_20251209T163109
+Target storage class: STANDARD
+Include patterns: */r60m/*
+Found 4 S3 URLs
+Zarr root: s3://esa-zarr-sentinel-explorer-fra/.../S2A_MSIL2A_20251209T123131_N0511_R009_T26SPG_20251209T163109.zarr
+Listing objects in s3://esa-zarr-sentinel-explorer-fra/.../S2A_MSIL2A_20251209T123131_N0511_R009_T26SPG_20251209T163109.zarr/
+Found 1058 total objects
+After filtering: 260 objects to process, 798 excluded
 
 Initial storage class distribution (before changes):
-  STANDARD_IA: 300 objects (20.0%)
-  STANDARD: 1200 objects (80.0%)
+  EXPRESS_ONEZONE: 260 objects (100.0%)
+  (DRY RUN)
 
-Expected storage class distribution (after changes):
-  STANDARD_IA: 1500 objects (100.0%)
+Processing 260 objects...
+  0 already have target storage class STANDARD
+  260 need to be changed
+  Progress: 100/260 objects (38%)
+  Progress: 200/260 objects (76%)
+  Progress: 260/260 objects (100%)
+============================================================
+Summary for S2A_MSIL2A_20251209T123131_N0511_R009_T26SPG_20251209T163109:
+  Total objects: 1058
+  Skipped (filtered): 798
+  Already correct storage class: 0
+  Changed: 260
+  Succeeded: 260
+  Failed: 0
 ```
 
-**Note**: The script shows the expected distribution after successful changes. To verify changes were applied, run the same command again - you should see all objects already at the target storage class.
+**Note**: The storage class distribution is shown before processing starts. When not in dry-run mode, an expected distribution after changes is also displayed. To verify changes were applied, run the same command again - you should see all objects already at the target storage class.
 
 ### Preview changes for specific data subset
 
