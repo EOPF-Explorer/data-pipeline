@@ -29,7 +29,8 @@ for lib in ["botocore", "boto3", "urllib3", "httpx", "httpcore"]:
     logging.getLogger(lib).setLevel(logging.WARNING)
 
 # Valid S3 storage classes
-VALID_STORAGE_CLASSES = frozenset(["STANDARD", "GLACIER", "EXPRESS_ONEZONE"])
+# Using OVH Cloud Storage naming: STANDARD_IA (Infrequent Access) instead of AWS GLACIER
+VALID_STORAGE_CLASSES = frozenset(["STANDARD", "STANDARD_IA", "EXPRESS_ONEZONE"])
 
 
 def validate_storage_class(storage_class: str) -> bool:
@@ -275,12 +276,32 @@ def process_stac_item(
     # Process objects
     stats = {"processed": 0, "succeeded": 0, "failed": 0, "skipped": len(excluded)}
     storage_class_counts: dict[str, int] = {}
+
+    # Separate objects that need changes from those that don't
+    objects_to_change = [(key, current) for key, current in objects if current != storage_class]
+    objects_already_correct = [
+        (key, current) for key, current in objects if current == storage_class
+    ]
+
     total_objects = len(objects)
 
-    logger.info(f"Processing {total_objects} objects...")
-    for i, (obj_key, current_class) in enumerate(objects, 1):
-        stats["processed"] += 1
+    # Count storage class distribution
+    for _, current_class in objects:
         storage_class_counts[current_class] = storage_class_counts.get(current_class, 0) + 1
+
+    logger.info(f"Processing {total_objects} objects...")
+    logger.info(
+        f"  {len(objects_already_correct)} already have target storage class {storage_class}"
+    )
+    logger.info(f"  {len(objects_to_change)} need to be changed")
+
+    # Count objects that already have correct storage class (no API calls needed)
+    stats["processed"] += len(objects_already_correct)
+    stats["succeeded"] += len(objects_already_correct)
+
+    # Process objects that need to change
+    for objects_changed, (obj_key, current_class) in enumerate(objects_to_change, start=1):
+        stats["processed"] += 1
 
         success, _ = change_object_storage_class(
             s3_client, bucket, obj_key, current_class, storage_class, dry_run
@@ -291,26 +312,50 @@ def process_stac_item(
             stats["failed"] += 1
 
         # Log progress every 100 objects or at the end
-        if i % 100 == 0 or i == total_objects:
-            logger.info(f"  Progress: {i}/{total_objects} objects ({i*100//total_objects}%)")
+        if objects_changed % 100 == 0 or objects_changed == len(objects_to_change):
+            logger.info(
+                f"  Progress: {stats['processed']}/{total_objects} objects ({stats['processed']*100//total_objects}%)"
+            )
 
     # Summary
     logger.info("=" * 60)
     logger.info(f"Summary for {item_id}:")
     logger.info(f"  Total objects: {len(all_objects)}")
     logger.info(f"  Skipped (filtered): {stats['skipped']}")
-    logger.info(f"  Processed: {stats['processed']}")
+    logger.info(f"  Already correct storage class: {len(objects_already_correct)}")
+    logger.info(f"  Changed: {len(objects_to_change)}")
     logger.info(f"  Succeeded: {stats['succeeded']}")
     logger.info(f"  Failed: {stats['failed']}")
 
-    if dry_run and storage_class_counts:
+    if storage_class_counts:
         logger.info("")
-        logger.info("Current storage class distribution:")
+        logger.info("Initial storage class distribution (before changes):")
         total = sum(storage_class_counts.values())
         for sc in sorted(storage_class_counts.keys()):
             count = storage_class_counts[sc]
             percentage = (count / total * 100) if total > 0 else 0
             logger.info(f"  {sc}: {count} objects ({percentage:.1f}%)")
+
+        # Show expected distribution after changes
+        if not dry_run and len(objects_to_change) > 0:
+            logger.info("")
+            logger.info("Expected storage class distribution (after changes):")
+            expected_counts = storage_class_counts.copy()
+            # Remove changed objects from their old classes
+            for _, old_class in objects_to_change:
+                expected_counts[old_class] = expected_counts.get(old_class, 0) - 1
+                if expected_counts[old_class] == 0:
+                    del expected_counts[old_class]
+            # Add changed objects to target class
+            expected_counts[storage_class] = expected_counts.get(storage_class, 0) + len(
+                objects_to_change
+            )
+
+            expected_total = sum(expected_counts.values())
+            for sc in sorted(expected_counts.keys()):
+                count = expected_counts[sc]
+                percentage = (count / expected_total * 100) if expected_total > 0 else 0
+                logger.info(f"  {sc}: {count} objects ({percentage:.1f}%)")
 
     if dry_run:
         logger.info("  (DRY RUN)")
@@ -325,7 +370,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--storage-class",
         default="STANDARD",
-        choices=["STANDARD", "GLACIER", "EXPRESS_ONEZONE"],
+        choices=["STANDARD", "STANDARD_IA", "EXPRESS_ONEZONE"],
         help="Target storage class",
     )
     parser.add_argument("--dry-run", action="store_true", help="Dry run mode")

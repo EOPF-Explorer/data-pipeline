@@ -26,8 +26,8 @@ class TestValidateStorageClass:
         assert validate_storage_class("STANDARD") is True
 
     def test_valid_glacier(self) -> None:
-        """Test GLACIER is valid."""
-        assert validate_storage_class("GLACIER") is True
+        """Test STANDARD_IA is valid."""
+        assert validate_storage_class("STANDARD_IA") is True
 
     def test_valid_express_onezone(self) -> None:
         """Test EXPRESS_ONEZONE is valid."""
@@ -41,7 +41,7 @@ class TestValidateStorageClass:
 
     def test_valid_storage_classes_list(self) -> None:
         """Test all valid storage classes."""
-        valid_classes = ["STANDARD", "GLACIER", "EXPRESS_ONEZONE"]
+        valid_classes = ["STANDARD", "STANDARD_IA", "EXPRESS_ONEZONE"]
         for sc in valid_classes:
             assert validate_storage_class(sc) is True
 
@@ -347,7 +347,7 @@ class TestListObjects:
                 "Contents": [
                     {
                         "Key": f"{self.PREFIX}measurements/reflectance/r10m/B03/0",
-                        "StorageClass": "GLACIER",
+                        "StorageClass": "STANDARD_IA",
                     },
                 ]
             },
@@ -389,7 +389,7 @@ class TestListObjects:
         assert objects == [
             (f"{self.PREFIX}measurements/reflectance/r10m/B02/0", "STANDARD"),
             (f"{self.PREFIX}measurements/reflectance/r10m/B02/.zarray", "STANDARD"),
-            (f"{self.PREFIX}measurements/reflectance/r10m/B03/0", "GLACIER"),
+            (f"{self.PREFIX}measurements/reflectance/r10m/B03/0", "STANDARD_IA"),
             (f"{self.PREFIX}measurements/reflectance/r20m/B05/0", "STANDARD"),
             (f"{self.PREFIX}measurements/reflectance/r20m/B05/.zarray", "STANDARD"),
         ]
@@ -425,7 +425,7 @@ class TestChangeObjectStorageClass:
         mock_client = MagicMock()
 
         success, current_class = change_object_storage_class(
-            mock_client, self.BUCKET, self.OBJECT_KEY, "STANDARD", "GLACIER", dry_run=True
+            mock_client, self.BUCKET, self.OBJECT_KEY, "STANDARD", "STANDARD_IA", dry_run=True
         )
         assert success is True
         assert current_class == "STANDARD"
@@ -434,24 +434,24 @@ class TestChangeObjectStorageClass:
         mock_client.copy_object.assert_not_called()
 
     def test_already_correct_storage_class(self) -> None:
-        """Test skipping objects already in GLACIER storage class."""
+        """Test skipping objects already in STANDARD_IA storage class."""
         mock_client = MagicMock()
 
         success, current_class = change_object_storage_class(
-            mock_client, self.BUCKET, self.OBJECT_KEY, "GLACIER", "GLACIER", dry_run=False
+            mock_client, self.BUCKET, self.OBJECT_KEY, "STANDARD_IA", "STANDARD_IA", dry_run=False
         )
         assert success is True
-        assert current_class == "GLACIER"
+        assert current_class == "STANDARD_IA"
         # No API calls needed - already correct storage class
         mock_client.head_object.assert_not_called()
         mock_client.copy_object.assert_not_called()
 
     def test_change_storage_class_success(self) -> None:
-        """Test successful storage class change from STANDARD to GLACIER."""
+        """Test successful storage class change from STANDARD to STANDARD_IA."""
         mock_client = MagicMock()
 
         success, current_class = change_object_storage_class(
-            mock_client, self.BUCKET, self.OBJECT_KEY, "STANDARD", "GLACIER", dry_run=False
+            mock_client, self.BUCKET, self.OBJECT_KEY, "STANDARD", "STANDARD_IA", dry_run=False
         )
         assert success is True
         assert current_class == "STANDARD"
@@ -461,7 +461,7 @@ class TestChangeObjectStorageClass:
             Bucket=self.BUCKET,
             Key=self.OBJECT_KEY,
             CopySource={"Bucket": self.BUCKET, "Key": self.OBJECT_KEY},
-            StorageClass="GLACIER",
+            StorageClass="STANDARD_IA",
             MetadataDirective="COPY",
         )
 
@@ -476,7 +476,7 @@ class TestChangeObjectStorageClass:
         )
 
         success, current_class = change_object_storage_class(
-            mock_client, self.BUCKET, self.OBJECT_KEY, "STANDARD", "GLACIER", dry_run=False
+            mock_client, self.BUCKET, self.OBJECT_KEY, "STANDARD", "STANDARD_IA", dry_run=False
         )
         assert success is False
         assert current_class == "STANDARD"  # Returns the known current class
@@ -502,7 +502,7 @@ class TestProcessStacItem:
 
         stats = process_stac_item(
             self.STAC_API_URL,
-            "GLACIER",
+            "STANDARD_IA",
             dry_run=False,
             s3_endpoint=None,
         )
@@ -545,7 +545,7 @@ class TestProcessStacItem:
 
         stats = process_stac_item(
             self.STAC_API_URL,
-            "GLACIER",
+            "STANDARD_IA",
             dry_run=False,
             s3_endpoint=self.S3_ENDPOINT,
         )
@@ -581,7 +581,7 @@ class TestMain:
                 "--stac-item-url",
                 self.STAC_API_URL,
                 "--storage-class",
-                "GLACIER",
+                "STANDARD_IA",
                 "--dry-run",
             ]
         )
@@ -597,7 +597,7 @@ class TestMain:
                 "--stac-item-url",
                 self.STAC_API_URL,
                 "--storage-class",
-                "GLACIER",
+                "STANDARD_IA",
             ]
         )
         assert result == 1
@@ -612,7 +612,7 @@ class TestMain:
                 "--stac-item-url",
                 self.STAC_API_URL,
                 "--storage-class",
-                "GLACIER",
+                "STANDARD_IA",
                 "--include-pattern",
                 "measurements/reflectance/r10m/*",
                 "--exclude-pattern",
@@ -627,7 +627,7 @@ class TestMain:
             call_args[0]
         )
         assert stac_item_url == self.STAC_API_URL
-        assert storage_class == "GLACIER"
+        assert storage_class == "STANDARD_IA"
         assert dry_run is False
         assert s3_endpoint is None
         assert include_patterns == ["measurements/reflectance/r10m/*"]
