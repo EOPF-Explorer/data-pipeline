@@ -4,23 +4,78 @@
 
 The `change_storage_tier.py` script allows you to change the storage tier (storage class) of S3 objects referenced in a STAC item. This is useful for optimizing storage costs by moving data to different storage tiers based on access patterns.
 
+## Requirements
+
+The script requires the following Python packages:
+- `boto3` - AWS SDK for Python (S3 operations)
+- `httpx` - HTTP client (fetching STAC items)
+- `botocore` - AWS core functionality
+- `uv` - Python package installer and runner
+
+All dependencies are managed via `uv` and will be automatically installed when running the script.
+
+## Environment Setup
+
+### Credentials for OVH Cloud Storage
+
+Configure your credentials to access OVH cloud storage using one of these methods:
+
+```bash
+# Option 1: Environment variables
+export AWS_ACCESS_KEY_ID="your-access-key"
+export AWS_SECRET_ACCESS_KEY="your-secret-key"
+
+# Option 2: AWS CLI configuration
+aws configure
+```
+
+### S3 Endpoint (Optional)
+
+If using a custom S3-compatible service:
+
+```bash
+export AWS_ENDPOINT_URL="https://s3.de.io.cloud.ovh.net"
+```
+
+Or specify via command line:
+
+```bash
+uv run python scripts/change_storage_tier.py \
+    --s3-endpoint https://s3.de.io.cloud.ovh.net \
+    ...
+```
+
+### Define STAC Item ID
+
+For easier command execution, define the STAC item ID as a variable:
+
+```bash
+ITEM_ID="S2B_MSIL2A_20250730T113319_N0511_R080_T29UQP_20250730T135754"
+```
+
 ## Usage
 
 ### Basic Usage
 
+Run the script using the STAC item ID variable defined in the setup:
+
 ```bash
-python scripts/change_storage_tier.py \
-    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/ITEM_ID \
+uv run python scripts/change_storage_tier.py \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
     --storage-class GLACIER
 ```
 
 ### Dry Run
 
-Test the script without making actual changes:
+Test the script without making actual changes. Dry-run mode will:
+- Query and display the current storage class of each object
+- Show what changes would be made
+- Display storage class distribution statistics
+- Not modify any objects
 
 ```bash
-python scripts/change_storage_tier.py \
-    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/ITEM_ID \
+uv run python scripts/change_storage_tier.py \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
     --storage-class GLACIER \
     --dry-run
 ```
@@ -28,8 +83,8 @@ python scripts/change_storage_tier.py \
 ### With Custom S3 Endpoint
 
 ```bash
-python scripts/change_storage_tier.py \
-    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/ITEM_ID \
+uv run python scripts/change_storage_tier.py \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
     --storage-class GLACIER \
     --s3-endpoint https://s3.de.io.cloud.ovh.net
 ```
@@ -40,28 +95,28 @@ Only change storage class for specific parts of the Zarr store:
 
 ```bash
 # Only process reflectance data
-python scripts/change_storage_tier.py \
-    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/ITEM_ID \
+uv run python scripts/change_storage_tier.py \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
     --storage-class GLACIER \
     --include-pattern "measurements/reflectance/*"
 
 # Process multiple subdirectories
-python scripts/change_storage_tier.py \
-    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/ITEM_ID \
+uv run python scripts/change_storage_tier.py \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
     --storage-class GLACIER \
     --include-pattern "measurements/*" \
     --include-pattern "quality/*"
 
 # Exclude metadata files
-python scripts/change_storage_tier.py \
-    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/ITEM_ID \
+uv run python scripts/change_storage_tier.py \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
     --storage-class GLACIER \
     --exclude-pattern "*.zattrs" \
     --exclude-pattern "*.zmetadata"
 
 # Only process 60m resolution data
-python scripts/change_storage_tier.py \
-    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/ITEM_ID \
+uv run python scripts/change_storage_tier.py \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
     --storage-class GLACIER \
     --include-pattern "*/r60m/*"
 ```
@@ -113,14 +168,14 @@ This script can be integrated into your data pipeline workflow after the registr
 
 ```bash
 # 1. Convert
-python scripts/convert_v1_s2.py \
+uv run python scripts/convert_v1_s2.py \
     --source-url SOURCE_URL \
     --collection COLLECTION \
     --s3-output-bucket BUCKET \
     --s3-output-prefix PREFIX
 
 # 2. Register
-python scripts/register_v1.py \
+uv run python scripts/register_v1.py \
     --source-url SOURCE_URL \
     --collection COLLECTION \
     --stac-api-url STAC_API \
@@ -130,27 +185,11 @@ python scripts/register_v1.py \
     --s3-output-prefix PREFIX
 
 # 3. Change storage tier (optional)
-python scripts/change_storage_tier.py \
-    --stac-item-url STAC_ITEM_URL \
+ITEM_ID="your-item-id"
+uv run python scripts/change_storage_tier.py \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
     --storage-class GLACIER
 ```
-
-## Environment Variables
-
-The script uses the following environment variables if set:
-
-- `AWS_ENDPOINT_URL` - S3 endpoint URL (if not provided via `--s3-endpoint`)
-- `AWS_ACCESS_KEY_ID` - AWS access key
-- `AWS_SECRET_ACCESS_KEY` - AWS secret key
-- `AWS_DEFAULT_REGION` - AWS region
-- `LOG_LEVEL` - Logging level (default: INFO)
-
-## Requirements
-
-The script requires the following Python packages:
-- `boto3` - AWS SDK for Python (S3 operations)
-- `httpx` - HTTP client (fetching STAC items)
-- `botocore` - AWS core functionality
 
 ## Error Handling
 
@@ -173,40 +212,93 @@ The script provides detailed logging at different levels:
 
 Set the `LOG_LEVEL` environment variable to control verbosity:
 ```bash
-LOG_LEVEL=DEBUG python scripts/change_storage_tier.py ...
+LOG_LEVEL=DEBUG uv run python scripts/change_storage_tier.py \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
+    --storage-class GLACIER
 ```
 
 ## Examples
 
-### Archive old data to GLACIER
+### Setup
+
+First, define the STAC item ID:
 
 ```bash
-python scripts/change_storage_tier.py \
-    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/S2A_MSIL2A_20250831T103701_N0511_R008_T31TFL_20250831T145420 \
-    --storage-class GLACIER
+ITEM_ID="S2A_MSIL2A_20250831T103701_N0511_R008_T31TFL_20250831T145420"
 ```
 
-### Restore data from GLACIER to STANDARD
+### Check current storage class distribution
+
+Use dry-run to see the current storage classes without making changes:
 
 ```bash
-python scripts/change_storage_tier.py \
-    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/S2A_MSIL2A_20250831T103701_N0511_R008_T31TFL_20250831T145420 \
-    --storage-class STANDARD
+uv run python scripts/change_storage_tier.py \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
+    --storage-class GLACIER \
+    --dry-run
 ```
 
-### Use high-performance storage
+Output example:
+```
+Summary for S2A_MSIL2A_20250831T103701_N0511_R008_T31TFL_20250831T145420:
+  Total objects: 1500
+  Skipped (filtered): 0
+  Processed: 1500
+  Succeeded: 1500
+  Failed: 0
+
+Current storage class distribution:
+  GLACIER: 300 objects (20.0%)
+  STANDARD: 1200 objects (80.0%)
+  (DRY RUN)
+```
+
+### Preview changes for specific data subset
+
+Test what would happen when archiving only 60m resolution data:
 
 ```bash
-python scripts/change_storage_tier.py \
-    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/S2A_MSIL2A_20250831T103701_N0511_R008_T31TFL_20250831T145420 \
-    --storage-class EXPRESS_ONEZONE
+uv run python scripts/change_storage_tier.py \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
+    --storage-class GLACIER \
+    --include-pattern "*/r60m/*" \
+    --dry-run
+```
+
+### Check storage distribution for reflectance data only
+
+```bash
+uv run python scripts/change_storage_tier.py \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
+    --storage-class GLACIER \
+    --include-pattern "measurements/reflectance/*" \
+    --dry-run
+```
+
+### Preview excluding metadata files
+
+```bash
+uv run python scripts/change_storage_tier.py \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
+    --storage-class GLACIER \
+    --exclude-pattern "*.zattrs" \
+    --exclude-pattern "*.zmetadata" \
+    --dry-run
 ```
 
 ### Archive only reflectance data to GLACIER
 
 ```bash
-python scripts/change_storage_tier.py \
-    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/S2A_MSIL2A_20250831T103701_N0511_R008_T31TFL_20250831T145420 \
+# First, preview the changes
+uv run python scripts/change_storage_tier.py \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
+    --storage-class GLACIER \
+    --include-pattern "measurements/reflectance/*" \
+    --dry-run
+
+# Then apply the changes
+uv run python scripts/change_storage_tier.py \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
     --storage-class GLACIER \
     --include-pattern "measurements/reflectance/*"
 ```
@@ -214,18 +306,63 @@ python scripts/change_storage_tier.py \
 ### Archive all measurement data except 10m resolution
 
 ```bash
-python scripts/change_storage_tier.py \
-    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/S2A_MSIL2A_20250831T103701_N0511_R008_T31TFL_20250831T145420 \
+# Preview first
+uv run python scripts/change_storage_tier.py \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
+    --storage-class GLACIER \
+    --include-pattern "measurements/*" \
+    --exclude-pattern "*/r10m/*" \
+    --dry-run
+
+# Apply changes
+uv run python scripts/change_storage_tier.py \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
     --storage-class GLACIER \
     --include-pattern "measurements/*" \
     --exclude-pattern "*/r10m/*"
 ```
 
-### Test filtering with dry-run
+### Archive old data to GLACIER
 
 ```bash
-python scripts/change_storage_tier.py \
-    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/S2A_MSIL2A_20250831T103701_N0511_R008_T31TFL_20250831T145420 \
+# Preview the changes
+uv run python scripts/change_storage_tier.py \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
     --storage-class GLACIER \
-    --include-pattern "measurements/reflectance/r60m/*" \
     --dry-run
+
+# Apply the changes
+uv run python scripts/change_storage_tier.py \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
+    --storage-class GLACIER
+```
+
+### Restore data from GLACIER to STANDARD
+
+```bash
+# Preview the changes
+uv run python scripts/change_storage_tier.py \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
+    --storage-class STANDARD \
+    --dry-run
+
+# Apply the changes
+uv run python scripts/change_storage_tier.py \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
+    --storage-class STANDARD
+```
+
+### Use high-performance storage
+
+```bash
+# Preview the changes
+uv run python scripts/change_storage_tier.py \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
+    --storage-class EXPRESS_ONEZONE \
+    --dry-run
+
+# Apply the changes
+uv run python scripts/change_storage_tier.py \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
+    --storage-class EXPRESS_ONEZONE
+```
