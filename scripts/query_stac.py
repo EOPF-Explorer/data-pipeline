@@ -2,8 +2,9 @@
 """
 Query STAC API for new items to process.
 
-This script searches for items in a source collection within a specified time window
-and checks if they already exist in the target collection to avoid reprocessing.
+This script searches for items in a source collection that were updated within 
+a specified time window and checks if they already exist in the target collection 
+to avoid reprocessing. Uses the 'updated' property for harvesting use cases.
 """
 
 import json
@@ -42,15 +43,23 @@ def main() -> None:
 
     logger.info(f"Querying STAC API: {STAC_API_URL}")
     logger.info(f"Collection: {SOURCE_COLLECTION}")
-    logger.info(f"Time range: {start_time_str} to {end_time_str}")
+    logger.info(f"Updated time range: {start_time_str} to {end_time_str}")
 
     # Connect to STAC catalog
     catalog = Client.open(STAC_API_URL)
 
-    # Search for items
+    # Search for items by updated time (for harvesting use case)
+    # Query items that were updated within the time window, not by acquisition date
     search = catalog.search(
         collections=[SOURCE_COLLECTION],
-        datetime=f"{start_time_str}/{end_time_str}",
+        filter={
+            "op": "t_intersects",
+            "args": [
+                {"property": "updated"},
+                {"interval": [start_time_str, end_time_str]}
+            ]
+        },
+        filter_lang="cql2-json",
         bbox=AOI_BBOX,
     )
 
