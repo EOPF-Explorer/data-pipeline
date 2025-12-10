@@ -306,5 +306,6 @@
     "https://stac-extensions.github.io/product/v0.1.0/schema.json",
     "https://stac-extensions.github.io/sat/v1.0.0/schema.json",
     "https://stac-extensions.github.io/scientific/v1.0.0/schema.json"
-  ]
+  ],
+  "eodash:rasterform": "https://raw.githubusercontent.com/EOPF-Explorer/eodash-assets/refs/heads/main/forms/bandsform.json"
 }
