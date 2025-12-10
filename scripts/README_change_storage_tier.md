@@ -171,12 +171,6 @@ The script has been optimized to minimize S3 API calls:
 - **Smart filtering**: Only makes `copy_object` API calls for objects that actually need to change storage class
 - **Progress tracking**: Shows how many objects need changes vs. already correct
 
-**Example performance**: For a Zarr store with 1,058 objects where 260 need changes:
-- Listing: ~1 second (unavoidable - must discover all objects)
-- Processing: ~100 seconds for 260 changes (~400ms per object)
-- **Objects already at target**: 0 API calls (instant)
-- **Total time**: ~1m 42s instead of 8+ minutes without optimization
-
 ## Path Filtering
 
 The script supports filtering which subpaths within the Zarr store should have their storage class changed:
