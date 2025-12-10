@@ -102,7 +102,31 @@ uv run operator-tools/manage_collections.py batch-create stac/ --pattern "*-stag
 - Reports success/failure for each file
 - Summary statistics at the end
 
-#### 4. `info` - Show Collection Information
+#### 4. `delete` - Delete a Collection
+
+Delete a collection from the STAC catalog. Some STAC servers require the collection to be empty before deletion.
+
+```bash
+# Delete a collection (will prompt for confirmation)
+uv run operator-tools/manage_collections.py delete sentinel-2-l2a-staging
+
+# Clean items first, then delete
+uv run operator-tools/manage_collections.py delete sentinel-2-l2a-staging --clean-first
+
+# Skip confirmation prompt
+uv run operator-tools/manage_collections.py delete sentinel-2-l2a-staging --clean-first -y
+```
+
+**Options:**
+- `--clean-first`: Remove all items from the collection before deleting it
+- `--yes, -y`: Skip confirmation prompt
+
+**Safety Features:**
+- Confirmation prompt before deletion (unless `--yes` is used)
+- Option to automatically clean items first
+- Handles already-deleted collections gracefully
+
+#### 5. `info` - Show Collection Information
 
 Display detailed information about a collection, including item count.
 
@@ -178,10 +202,11 @@ uv run operator-tools/manage_collections.py batch-create stac/
 
 The tool uses the following STAC Transaction API endpoints:
 
-- `GET /collections/{collection_id}/items` - List items (for cleaning)
+- `GET /collections/{collection_id}/items` - List items (for cleaning and info)
 - `DELETE /collections/{collection_id}/items/{item_id}` - Delete item
 - `POST /collections` - Create collection
 - `PUT /collections` - Update collection
+- `DELETE /collections/{collection_id}` - Delete collection
 
 ## Error Handling
 
@@ -243,6 +268,9 @@ uv run operator-tools/manage_collections.py clean sentinel-2-l2a-staging -y
 
 # 4. Update collection metadata
 uv run operator-tools/manage_collections.py create stac/sentinel-2-l2a.json --update
+
+# 5. (If needed) Delete collection
+uv run operator-tools/manage_collections.py delete sentinel-2-l2a-staging --clean-first -y
 ```
 
 ### Development Workflow
