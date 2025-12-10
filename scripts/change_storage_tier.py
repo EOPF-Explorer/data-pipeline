@@ -289,6 +289,41 @@ def process_stac_item(
     for _, current_class in objects:
         storage_class_counts[current_class] = storage_class_counts.get(current_class, 0) + 1
 
+    # Show initial distribution before processing
+    if storage_class_counts:
+        logger.info("")
+        logger.info("Initial storage class distribution (before changes):")
+        total = sum(storage_class_counts.values())
+        for sc in sorted(storage_class_counts.keys()):
+            count = storage_class_counts[sc]
+            percentage = (count / total * 100) if total > 0 else 0
+            logger.info(f"  {sc}: {count} objects ({percentage:.1f}%)")
+
+        # Show expected distribution after changes
+        if not dry_run and len(objects_to_change) > 0:
+            logger.info("")
+            logger.info("Expected storage class distribution (after changes):")
+            expected_counts = storage_class_counts.copy()
+            # Remove changed objects from their old classes
+            for _, old_class in objects_to_change:
+                expected_counts[old_class] = expected_counts.get(old_class, 0) - 1
+                if expected_counts[old_class] == 0:
+                    del expected_counts[old_class]
+            # Add changed objects to target class
+            expected_counts[storage_class] = expected_counts.get(storage_class, 0) + len(
+                objects_to_change
+            )
+
+            expected_total = sum(expected_counts.values())
+            for sc in sorted(expected_counts.keys()):
+                count = expected_counts[sc]
+                percentage = (count / expected_total * 100) if expected_total > 0 else 0
+                logger.info(f"  {sc}: {count} objects ({percentage:.1f}%)")
+
+        if dry_run:
+            logger.info("  (DRY RUN)")
+        logger.info("")
+
     logger.info(f"Processing {total_objects} objects...")
     logger.info(
         f"  {len(objects_already_correct)} already have target storage class {storage_class}"
@@ -326,39 +361,6 @@ def process_stac_item(
     logger.info(f"  Changed: {len(objects_to_change)}")
     logger.info(f"  Succeeded: {stats['succeeded']}")
     logger.info(f"  Failed: {stats['failed']}")
-
-    if storage_class_counts:
-        logger.info("")
-        logger.info("Initial storage class distribution (before changes):")
-        total = sum(storage_class_counts.values())
-        for sc in sorted(storage_class_counts.keys()):
-            count = storage_class_counts[sc]
-            percentage = (count / total * 100) if total > 0 else 0
-            logger.info(f"  {sc}: {count} objects ({percentage:.1f}%)")
-
-        # Show expected distribution after changes
-        if not dry_run and len(objects_to_change) > 0:
-            logger.info("")
-            logger.info("Expected storage class distribution (after changes):")
-            expected_counts = storage_class_counts.copy()
-            # Remove changed objects from their old classes
-            for _, old_class in objects_to_change:
-                expected_counts[old_class] = expected_counts.get(old_class, 0) - 1
-                if expected_counts[old_class] == 0:
-                    del expected_counts[old_class]
-            # Add changed objects to target class
-            expected_counts[storage_class] = expected_counts.get(storage_class, 0) + len(
-                objects_to_change
-            )
-
-            expected_total = sum(expected_counts.values())
-            for sc in sorted(expected_counts.keys()):
-                count = expected_counts[sc]
-                percentage = (count / expected_total * 100) if expected_total > 0 else 0
-                logger.info(f"  {sc}: {count} objects ({percentage:.1f}%)")
-
-    if dry_run:
-        logger.info("  (DRY RUN)")
 
     return stats
 
