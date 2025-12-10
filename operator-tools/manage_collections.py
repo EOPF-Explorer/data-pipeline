@@ -6,6 +6,7 @@ Manage collections in the EOPF STAC catalog using the Transaction API.
 Supports:
 - Cleaning collections (removing all items)
 - Creating/updating collections from templates
+- Deleting collections
 """
 
 import json
@@ -130,6 +131,36 @@ class STACCollectionManager:
             + (f" (failed: {failed_count})" if failed_count > 0 else "")
         )
         return deleted_count
+
+    def delete_collection(self, collection_id: str) -> bool:
+        """
+        Delete a collection using Transaction API.
+
+        Args:
+            collection_id: ID of the collection to delete
+
+        Returns:
+            True if successful, False otherwise
+        """
+        url = f"{self.api_url}/collections/{collection_id}"
+
+        try:
+            response = self.session.delete(url, timeout=30)
+            response.raise_for_status()
+            click.echo(f"✅ Collection {collection_id} deleted successfully")
+            return True
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 404:
+                click.echo(f"⚠️  Collection {collection_id} not found", err=True)
+                return False
+            click.echo(
+                f"❌ Failed to delete collection {collection_id}: {e.response.status_code} - {e.response.text}",
+                err=True,
+            )
+            return False
+        except Exception as e:
+            click.echo(f"❌ Error deleting collection {collection_id}: {e}", err=True)
+            return False
 
     def create_or_update_collection(
         self, collection_data: dict[str, Any], update: bool = False
@@ -366,6 +397,58 @@ def batch_create(ctx: click.Context, directory: Path, update: bool, pattern: str
     click.echo(f"✅ Successfully processed: {success_count}")
     if failed_count > 0:
         click.echo(f"❌ Failed: {failed_count}")
+
+
+@cli.command()
+@click.argument("collection_id")
+@click.option(
+    "--clean-first",
+    is_flag=True,
+    help="Remove all items from the collection before deleting it",
+)
+@click.option(
+    "--yes",
+    "-y",
+    is_flag=True,
+    help="Skip confirmation prompt",
+)
+@click.pass_context
+def delete(ctx: click.Context, collection_id: str, clean_first: bool, yes: bool) -> None:
+    """
+    Delete a collection.
+
+    Note: Some STAC servers require the collection to be empty before deletion.
+    Use --clean-first to automatically remove all items first.
+
+    Examples:
+        manage_collections.py delete sentinel-2-l2a-staging
+        manage_collections.py delete sentinel-2-l2a-staging --clean-first
+        manage_collections.py delete sentinel-2-l2a-staging --clean-first --yes
+    """
+    manager: STACCollectionManager = ctx.obj["manager"]
+
+    if not yes:
+        click.confirm(
+            f"⚠️  This will permanently delete collection '{collection_id}'. Continue?",
+            abort=True,
+        )
+
+    try:
+        # Clean collection first if requested
+        if clean_first:
+            click.echo(f"\n📋 Cleaning collection before deletion...")
+            manager.clean_collection(collection_id, dry_run=False)
+
+        # Delete the collection
+        click.echo(f"\n🗑️  Deleting collection: {collection_id}")
+        success = manager.delete_collection(collection_id)
+
+        if not success:
+            raise click.Abort()
+
+    except Exception as e:
+        click.echo(f"❌ Operation failed: {e}", err=True)
+        raise click.Abort() from e
 
 
 @cli.command()
