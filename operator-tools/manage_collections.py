@@ -436,7 +436,7 @@ def delete(ctx: click.Context, collection_id: str, clean_first: bool, yes: bool)
     try:
         # Clean collection first if requested
         if clean_first:
-            click.echo(f"\n📋 Cleaning collection before deletion...")
+            click.echo("\n📋 Cleaning collection before deletion...")
             manager.clean_collection(collection_id, dry_run=False)
 
         # Delete the collection
