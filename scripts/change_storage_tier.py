@@ -140,19 +140,28 @@ def change_object_storage_class(  # type: ignore
     key: str,
     storage_class: str,
     dry_run: bool,
-) -> bool:
-    """Change storage class of single S3 object."""
-    if dry_run:
-        logger.debug(f"[DRY RUN] Would change s3://{bucket}/{key} to {storage_class}")
-        return True
+) -> tuple[bool, str | None]:
+    """Change storage class of single S3 object.
 
+    Returns:
+        Tuple of (success: bool, current_storage_class: str | None)
+    """
     try:
         head = s3_client.head_object(Bucket=bucket, Key=key)
         current = head.get("StorageClass", "STANDARD")
 
+        if dry_run:
+            if current == storage_class:
+                logger.debug(f"[DRY RUN] Already {storage_class}: s3://{bucket}/{key}")
+            else:
+                logger.debug(
+                    f"[DRY RUN] Would change {current} -> {storage_class}: s3://{bucket}/{key}"
+                )
+            return True, current
+
         if current == storage_class:
             logger.debug(f"Already {storage_class}: s3://{bucket}/{key}")
-            return True
+            return True, current
 
         s3_client.copy_object(
             Bucket=bucket,
@@ -162,11 +171,11 @@ def change_object_storage_class(  # type: ignore
             MetadataDirective="COPY",
         )
         logger.debug(f"Changed {current} -> {storage_class}: s3://{bucket}/{key}")
-        return True
+        return True, current
 
     except ClientError as e:
         logger.error(f"Failed to change s3://{bucket}/{key}: {e}")
-        return False
+        return False, None
 
 
 def process_stac_item(
@@ -243,11 +252,17 @@ def process_stac_item(
 
     # Process objects
     stats = {"processed": 0, "succeeded": 0, "failed": 0, "skipped": len(excluded)}
+    storage_class_counts: dict[str, int] = {}
 
     for obj_key in objects:
         stats["processed"] += 1
-        if change_object_storage_class(s3_client, bucket, obj_key, storage_class, dry_run):
+        success, current_class = change_object_storage_class(
+            s3_client, bucket, obj_key, storage_class, dry_run
+        )
+        if success:
             stats["succeeded"] += 1
+            if current_class:
+                storage_class_counts[current_class] = storage_class_counts.get(current_class, 0) + 1
         else:
             stats["failed"] += 1
 
@@ -259,6 +274,16 @@ def process_stac_item(
     logger.info(f"  Processed: {stats['processed']}")
     logger.info(f"  Succeeded: {stats['succeeded']}")
     logger.info(f"  Failed: {stats['failed']}")
+
+    if dry_run and storage_class_counts:
+        logger.info("")
+        logger.info("Current storage class distribution:")
+        total = sum(storage_class_counts.values())
+        for sc in sorted(storage_class_counts.keys()):
+            count = storage_class_counts[sc]
+            percentage = (count / total * 100) if total > 0 else 0
+            logger.info(f"  {sc}: {count} objects ({percentage:.1f}%)")
+
     if dry_run:
         logger.info("  (DRY RUN)")
 
@@ -301,7 +326,7 @@ def main(argv: list[str] | None = None) -> int:
             args.include_patterns,
             args.exclude_patterns,
         )
-        return 1 if stats["failed"] > 0 else 0
+        return 1 if stats.get("failed", 0) > 0 else 0
     except Exception as e:
         logger.error(f"Failed: {e}", exc_info=True)
         return 1
