@@ -148,7 +148,10 @@ def run_script(
 class TestQueryStac:
     """Test suite for query_stac.py script."""
 
-    def test_returns_all_items_when_target_empty(self):
+    def test_returns_all_items_when_target_empty(self, caplog):
+        import logging
+
+        caplog.set_level(logging.INFO)
         """All source items should be returned when target collection is empty."""
         source, _ = load_fixtures()
         target = []
@@ -161,23 +164,27 @@ class TestQueryStac:
             "item-002",
             "item-003",
         }
-        assert "Checked: 3 items" in result["stderr"]
-        assert "To process: 3 items" in result["stderr"]
+        assert "Checked 3 items, 3 to process" in caplog.text
 
-    def test_excludes_items_already_in_target(self):
+    def test_excludes_items_already_in_target(self, caplog):
         """Items already in target collection should be excluded."""
+        import logging
+
+        caplog.set_level(logging.INFO)
         source, target = load_fixtures()
 
         result = run_script(source, target)
 
         assert len(result["output"]) == 2
         assert {item["item_id"] for item in result["output"]} == {"item-001", "item-003"}
-        assert "Already converted" in result["stderr"]
-        assert "Checked: 3 items" in result["stderr"]
-        assert "To process: 2 items" in result["stderr"]
+        assert "Already converted" in caplog.text
+        assert "Checked 3 items, 2 to process" in caplog.text
 
-    def test_skips_items_without_self_link(self):
+    def test_skips_items_without_self_link(self, caplog):
         """Items without a self link should be skipped."""
+        import logging
+
+        caplog.set_level(logging.INFO)
         source = [
             create_stac_item("item-001", SOURCE_COLLECTION, has_self_link=True),
             create_stac_item("item-002", SOURCE_COLLECTION, has_self_link=False),
@@ -189,18 +196,23 @@ class TestQueryStac:
 
         assert len(result["output"]) == 2
         assert {item["item_id"] for item in result["output"]} == {"item-001", "item-003"}
-        assert "No self link" in result["stderr"]
+        assert "No self link" in caplog.text
 
-    def test_handles_empty_source_collection(self):
+    def test_handles_empty_source_collection(self, caplog):
         """Empty source collection should return empty result."""
+        import logging
+
+        caplog.set_level(logging.INFO)
         result = run_script([], [])
 
         assert result["output"] == []
-        assert "Checked: 0 items" in result["stderr"]
-        assert "To process: 0 items" in result["stderr"]
+        assert "Checked 0 items, 0 to process" in caplog.text
 
-    def test_handles_error_checking_target(self):
+    def test_handles_error_checking_target(self, caplog):
         """When target check fails, item should still be processed (safe default)."""
+        import logging
+
+        caplog.set_level(logging.INFO)
         source = [create_stac_item("item-001", SOURCE_COLLECTION)]
         target = []
 
@@ -208,8 +220,8 @@ class TestQueryStac:
 
         assert len(result["output"]) == 1
         assert result["output"][0]["item_id"] == "item-001"
-        assert "Could not check" in result["stderr"]
-        assert "Simulated API error" in result["stderr"]
+        assert "Could not check" in caplog.text
+        assert "Simulated API error" in caplog.text
 
     def test_output_format(self):
         """Output should have correct structure for Argo workflow."""

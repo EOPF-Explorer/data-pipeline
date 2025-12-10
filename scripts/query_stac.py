@@ -7,10 +7,19 @@ and checks if they already exist in the target collection to avoid reprocessing.
 """
 
 import json
+import logging
+import os
 import sys
 from datetime import UTC, datetime, timedelta
 
 from pystac_client import Client
+
+# Configure logging
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 
 def main() -> None:
@@ -31,11 +40,9 @@ def main() -> None:
     start_time_str = start_time.isoformat().replace("+00:00", "Z")
     end_time_str = end_time.isoformat().replace("+00:00", "Z")
 
-    # ALL logs go to stderr (file=sys.stderr)
-    sys.stderr.write(f"Querying STAC API: {STAC_API_URL}\n")
-    sys.stderr.write(f"Collection: {SOURCE_COLLECTION}\n")
-    sys.stderr.write(f"Time range: {start_time_str} to {end_time_str}\n")
-    sys.stderr.flush()
+    logger.info(f"Querying STAC API: {STAC_API_URL}")
+    logger.info(f"Collection: {SOURCE_COLLECTION}")
+    logger.info(f"Time range: {start_time_str} to {end_time_str}")
 
     # Connect to STAC catalog
     catalog = Client.open(STAC_API_URL)
@@ -62,7 +69,7 @@ def main() -> None:
             )
 
             if not item_url:
-                sys.stderr.write(f"⚠️  Skipping {item.id}: No self link\n")
+                logger.warning(f"Skipping {item.id}: No self link")
                 continue
 
             # Check if already converted (prevent wasteful reprocessing)
@@ -74,10 +81,10 @@ def main() -> None:
                 existing_items = list(target_search.items())
 
                 if existing_items:
-                    sys.stderr.write(f"⏭️  Skipping {item.id}: Already converted\n")
+                    logger.info(f"Skipping {item.id}: Already converted")
                     continue
             except Exception as e:
-                sys.stderr.write(f"⚠️  Could not check {item.id}: {e}\n")
+                logger.warning(f"Could not check {item.id}: {e}")
                 # On error, process it to be safe
 
             # Add to processing queue
@@ -89,10 +96,7 @@ def main() -> None:
                 }
             )
 
-    sys.stderr.write("\n📊 Summary:\n")
-    sys.stderr.write(f"  Checked: {checked_count} items\n")
-    sys.stderr.write(f"  To process: {len(items_to_process)} items\n\n")
-    sys.stderr.flush()
+    logger.info(f"📊 Summary: Checked {checked_count} items, {len(items_to_process)} to process")
 
     # Output ONLY JSON to stdout (for Argo withParam)
     sys.stdout.write(json.dumps(items_to_process))
