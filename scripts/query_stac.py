@@ -2,8 +2,8 @@
 """
 Query STAC API for new items to process.
 
-This script searches for items in a source collection that were updated within 
-a specified time window and checks if they already exist in the target collection 
+This script searches for items in a source collection that were updated within
+a specified time window and checks if they already exist in the target collection
 to avoid reprocessing. Uses the 'updated' property for harvesting use cases.
 """
 
@@ -54,10 +54,7 @@ def main() -> None:
         collections=[SOURCE_COLLECTION],
         filter={
             "op": "t_intersects",
-            "args": [
-                {"property": "updated"},
-                {"interval": [start_time_str, end_time_str]}
-            ]
+            "args": [{"property": "updated"}, {"interval": [start_time_str, end_time_str]}],
         },
         filter_lang="cql2-json",
         bbox=AOI_BBOX,

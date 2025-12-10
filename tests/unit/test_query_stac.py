@@ -87,8 +87,23 @@ class FakeStacClient:
         self.raise_error_on_target = raise_error_on_target
         self.searches = []
 
-    def search(self, collections: list[str] | None = None, ids: list[str] | None = None, **kwargs):
-        self.searches.append({"collections": collections, "ids": ids, "kwargs": kwargs})
+    def search(
+        self,
+        collections: list[str] | None = None,
+        ids: list[str] | None = None,
+        filter=None,
+        filter_lang=None,
+        **kwargs,
+    ):
+        self.searches.append(
+            {
+                "collections": collections,
+                "ids": ids,
+                "filter": filter,
+                "filter_lang": filter_lang,
+                "kwargs": kwargs,
+            }
+        )
 
         if collections and self.source_collection in collections:
             return FakeItemSearch(self.source_items)
@@ -248,31 +263,50 @@ class TestQueryStac:
 
         assert len(result["client"].searches) > 0
         first_search = result["client"].searches[0]
-        assert "datetime" in first_search["kwargs"]
+        assert first_search["filter"] is not None
+        assert first_search["filter_lang"] == "cql2-json"
         assert "bbox" in first_search["kwargs"]
         assert first_search["collections"] == [SOURCE_COLLECTION]
 
-    def test_datetime_format(self):
-        """Datetime parameter should be in correct ISO format with Z suffix."""
+    def test_cql2_filter_format(self):
+        """CQL2 filter should have correct structure for updated property query."""
         result = run_script([], [])
 
-        datetime_param = result["client"].searches[0]["kwargs"]["datetime"]
+        filter_param = result["client"].searches[0]["filter"]
 
-        # Should be in format: "YYYY-MM-DDTHH:MM:SS.ffffffZ/YYYY-MM-DDTHH:MM:SS.ffffffZ"
-        assert "/" in datetime_param
-        start_str, end_str = datetime_param.split("/")
+        # Should be a CQL2 t_intersects filter
+        assert filter_param["op"] == "t_intersects"
+        assert len(filter_param["args"]) == 2
 
-        # Both parts should end with Z (not +00:00Z)
+        # First arg should be the property
+        assert filter_param["args"][0] == {"property": "updated"}
+
+        # Second arg should be the interval
+        interval = filter_param["args"][1]["interval"]
+        assert len(interval) == 2
+
+        # Both timestamps should end with Z
+        start_str, end_str = interval[0], interval[1]
         assert start_str.endswith("Z"), f"Start time should end with Z, got: {start_str}"
         assert end_str.endswith("Z"), f"End time should end with Z, got: {end_str}"
-
-        # Should not have both timezone offset and Z
-        assert "+00:00Z" not in start_str, "Should not have both +00:00 and Z"
-        assert "+00:00Z" not in end_str, "Should not have both +00:00 and Z"
 
         # Verify they're valid ISO format timestamps
         from datetime import datetime
 
-        # Remove Z and parse
         datetime.fromisoformat(start_str.rstrip("Z"))
         datetime.fromisoformat(end_str.rstrip("Z"))
+
+    def test_queries_updated_property_not_datetime(self):
+        """Verify that we query the 'updated' property for harvesting, not acquisition datetime."""
+        result = run_script([], [])
+
+        filter_param = result["client"].searches[0]["filter"]
+
+        # Should target the 'updated' property specifically
+        assert filter_param["args"][0]["property"] == "updated"
+
+        # Should NOT use datetime parameter (which queries acquisition date)
+        assert "datetime" not in result["client"].searches[0]["kwargs"]
+
+        # Should use CQL2 filter language
+        assert result["client"].searches[0]["filter_lang"] == "cql2-json"
