@@ -50,20 +50,10 @@ uv run python scripts/change_storage_tier.py \
 For easier command execution, define the STAC item ID as a variable:
 
 ```bash
-ITEM_ID="S2B_MSIL2A_20250730T113319_N0511_R080_T29UQP_20250730T135754"
+ITEM_ID="S2A_MSIL2A_20251209T123131_N0511_R009_T26SPG_20251209T163109"
 ```
 
 ## Usage
-
-### Basic Usage
-
-Run the script using the STAC item ID variable defined in the setup:
-
-```bash
-uv run python scripts/change_storage_tier.py \
-    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
-    --storage-class GLACIER
-```
 
 ### Dry Run
 
@@ -75,16 +65,26 @@ Test the script without making actual changes. Dry-run mode will:
 
 ```bash
 uv run python scripts/change_storage_tier.py \
-    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a-staging/items/$ITEM_ID \
     --storage-class GLACIER \
     --dry-run
+```
+
+### Basic Usage
+
+Run the script using the STAC item ID variable defined in the setup:
+
+```bash
+uv run python scripts/change_storage_tier.py \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a-staging/items/$ITEM_ID \
+    --storage-class GLACIER
 ```
 
 ### With Custom S3 Endpoint
 
 ```bash
 uv run python scripts/change_storage_tier.py \
-    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a-staging/items/$ITEM_ID \
     --storage-class GLACIER \
     --s3-endpoint https://s3.de.io.cloud.ovh.net
 ```
@@ -96,27 +96,27 @@ Only change storage class for specific parts of the Zarr store:
 ```bash
 # Only process reflectance data
 uv run python scripts/change_storage_tier.py \
-    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a-staging/items/$ITEM_ID \
     --storage-class GLACIER \
     --include-pattern "measurements/reflectance/*"
 
 # Process multiple subdirectories
 uv run python scripts/change_storage_tier.py \
-    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a-staging/items/$ITEM_ID \
     --storage-class GLACIER \
     --include-pattern "measurements/*" \
     --include-pattern "quality/*"
 
 # Exclude metadata files
 uv run python scripts/change_storage_tier.py \
-    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a-staging/items/$ITEM_ID \
     --storage-class GLACIER \
     --exclude-pattern "*.zattrs" \
     --exclude-pattern "*.zmetadata"
 
 # Only process 60m resolution data
 uv run python scripts/change_storage_tier.py \
-    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a-staging/items/$ITEM_ID \
     --storage-class GLACIER \
     --include-pattern "*/r60m/*"
 ```
@@ -187,7 +187,7 @@ uv run python scripts/register_v1.py \
 # 3. Change storage tier (optional)
 ITEM_ID="your-item-id"
 uv run python scripts/change_storage_tier.py \
-    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a-staging/items/$ITEM_ID \
     --storage-class GLACIER
 ```
 
@@ -213,7 +213,7 @@ The script provides detailed logging at different levels:
 Set the `LOG_LEVEL` environment variable to control verbosity:
 ```bash
 LOG_LEVEL=DEBUG uv run python scripts/change_storage_tier.py \
-    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a-staging/items/$ITEM_ID \
     --storage-class GLACIER
 ```
 
@@ -233,7 +233,7 @@ Use dry-run to see the current storage classes without making changes:
 
 ```bash
 uv run python scripts/change_storage_tier.py \
-    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a-staging/items/$ITEM_ID \
     --storage-class GLACIER \
     --dry-run
 ```
@@ -259,7 +259,7 @@ Test what would happen when archiving only 60m resolution data:
 
 ```bash
 uv run python scripts/change_storage_tier.py \
-    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a-staging/items/$ITEM_ID \
     --storage-class GLACIER \
     --include-pattern "*/r60m/*" \
     --dry-run
@@ -269,7 +269,7 @@ uv run python scripts/change_storage_tier.py \
 
 ```bash
 uv run python scripts/change_storage_tier.py \
-    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a-staging/items/$ITEM_ID \
     --storage-class GLACIER \
     --include-pattern "measurements/reflectance/*" \
     --dry-run
@@ -279,7 +279,7 @@ uv run python scripts/change_storage_tier.py \
 
 ```bash
 uv run python scripts/change_storage_tier.py \
-    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a-staging/items/$ITEM_ID \
     --storage-class GLACIER \
     --exclude-pattern "*.zattrs" \
     --exclude-pattern "*.zmetadata" \
@@ -291,14 +291,14 @@ uv run python scripts/change_storage_tier.py \
 ```bash
 # First, preview the changes
 uv run python scripts/change_storage_tier.py \
-    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a-staging/items/$ITEM_ID \
     --storage-class GLACIER \
     --include-pattern "measurements/reflectance/*" \
     --dry-run
 
 # Then apply the changes
 uv run python scripts/change_storage_tier.py \
-    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a-staging/items/$ITEM_ID \
     --storage-class GLACIER \
     --include-pattern "measurements/reflectance/*"
 ```
@@ -308,7 +308,7 @@ uv run python scripts/change_storage_tier.py \
 ```bash
 # Preview first
 uv run python scripts/change_storage_tier.py \
-    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a-staging/items/$ITEM_ID \
     --storage-class GLACIER \
     --include-pattern "measurements/*" \
     --exclude-pattern "*/r10m/*" \
@@ -316,7 +316,7 @@ uv run python scripts/change_storage_tier.py \
 
 # Apply changes
 uv run python scripts/change_storage_tier.py \
-    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a-staging/items/$ITEM_ID \
     --storage-class GLACIER \
     --include-pattern "measurements/*" \
     --exclude-pattern "*/r10m/*"
@@ -327,13 +327,13 @@ uv run python scripts/change_storage_tier.py \
 ```bash
 # Preview the changes
 uv run python scripts/change_storage_tier.py \
-    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a-staging/items/$ITEM_ID \
     --storage-class GLACIER \
     --dry-run
 
 # Apply the changes
 uv run python scripts/change_storage_tier.py \
-    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a-staging/items/$ITEM_ID \
     --storage-class GLACIER
 ```
 
@@ -342,13 +342,13 @@ uv run python scripts/change_storage_tier.py \
 ```bash
 # Preview the changes
 uv run python scripts/change_storage_tier.py \
-    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a-staging/items/$ITEM_ID \
     --storage-class STANDARD \
     --dry-run
 
 # Apply the changes
 uv run python scripts/change_storage_tier.py \
-    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a-staging/items/$ITEM_ID \
     --storage-class STANDARD
 ```
 
@@ -357,12 +357,12 @@ uv run python scripts/change_storage_tier.py \
 ```bash
 # Preview the changes
 uv run python scripts/change_storage_tier.py \
-    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a-staging/items/$ITEM_ID \
     --storage-class EXPRESS_ONEZONE \
     --dry-run
 
 # Apply the changes
 uv run python scripts/change_storage_tier.py \
-    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/$ITEM_ID \
+    --stac-item-url https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a-staging/items/$ITEM_ID \
     --storage-class EXPRESS_ONEZONE
 ```
