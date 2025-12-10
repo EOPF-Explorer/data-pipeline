@@ -149,7 +149,11 @@ class STACCollectionManager:
             click.echo("❌ Collection data missing 'id' field", err=True)
             return False
 
-        url = f"{self.api_url}/collections"
+        url = (
+            f"{self.api_url}/collections/{collection_id}"
+            if update
+            else f"{self.api_url}/collections"
+        )
         method = "PUT" if update else "POST"
 
         try:
