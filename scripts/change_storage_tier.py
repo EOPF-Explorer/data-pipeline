@@ -349,7 +349,7 @@ def process_stac_item(
         # Log progress every 100 objects or at the end
         if objects_changed % 100 == 0 or objects_changed == len(objects_to_change):
             logger.info(
-                f"  Progress: {stats['processed']}/{total_objects} objects ({stats['processed']*100//total_objects}%)"
+                f"  Progress: {stats['processed']}/{total_objects} objects ({stats['processed']*100//max(total_objects, 1)}%)"
             )
 
     # Summary
