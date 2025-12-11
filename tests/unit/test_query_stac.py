@@ -74,17 +74,13 @@ class FakeStacClient:
 
     def __init__(
         self,
-        source_items: list[Item],
-        target_items: list[Item],
-        source_collection: str,
-        target_collection: str,
-        raise_error_on_target: bool = False,
+        items: list[Item],
+        collection: str,
+        raise_error: bool = False,
     ):
-        self.source_items = source_items
-        self.target_items = target_items
-        self.source_collection = source_collection
-        self.target_collection = target_collection
-        self.raise_error_on_target = raise_error_on_target
+        self.items = items
+        self.collection = collection
+        self.raise_error = raise_error
         self.searches = []
 
     def search(
@@ -105,17 +101,14 @@ class FakeStacClient:
             }
         )
 
-        if collections and self.source_collection in collections:
-            return FakeItemSearch(self.source_items)
+        if self.raise_error:
+            raise Exception("Simulated API error")
 
-        if collections and self.target_collection in collections:
-            if self.raise_error_on_target:
-                raise Exception("Simulated API error")
-
+        if collections and self.collection in collections:
             if ids:
-                matching = [item for item in self.target_items if item.id in ids]
+                matching = [item for item in self.items if item.id in ids]
                 return FakeItemSearch(matching)
-            return FakeItemSearch(self.target_items)
+            return FakeItemSearch(self.items)
 
         return FakeItemSearch([])
 
@@ -124,22 +117,33 @@ def run_script(
     source_items: list[Item], target_items: list[Item], raise_error_on_target: bool = False
 ) -> dict:
     """Helper to run the script with test data."""
-    fake_client = FakeStacClient(
-        source_items=source_items,
-        target_items=target_items,
-        source_collection=SOURCE_COLLECTION,
-        target_collection=TARGET_COLLECTION,
-        raise_error_on_target=raise_error_on_target,
+    source_client = FakeStacClient(
+        items=source_items,
+        collection=SOURCE_COLLECTION,
+        raise_error=False,
     )
 
+    target_client = FakeStacClient(
+        items=target_items,
+        collection=TARGET_COLLECTION,
+        raise_error=raise_error_on_target,
+    )
+
+    def mock_client_open(url: str):
+        """Return appropriate client based on URL."""
+        if "source" in url:
+            return source_client
+        return target_client
+
     with (
-        patch("scripts.query_stac.Client.open", return_value=fake_client),
+        patch("scripts.query_stac.Client.open", side_effect=mock_client_open),
         patch(
             "sys.argv",
             [
                 "query_stac.py",
-                "https://stac.example.com/",
+                "https://source-stac.example.com/",
                 SOURCE_COLLECTION,
+                "https://target-stac.example.com/",
                 TARGET_COLLECTION,
                 "0",
                 "3",
@@ -156,7 +160,8 @@ def run_script(
         return {
             "output": json.loads(stdout.getvalue()),
             "stderr": stderr.getvalue(),
-            "client": fake_client,
+            "source_client": source_client,
+            "target_client": target_client,
         }
 
 
@@ -261,8 +266,8 @@ class TestQueryStac:
 
         result = run_script(source, target)
 
-        assert len(result["client"].searches) > 0
-        first_search = result["client"].searches[0]
+        assert len(result["source_client"].searches) > 0
+        first_search = result["source_client"].searches[0]
         assert first_search["filter"] is not None
         assert first_search["filter_lang"] == "cql2-json"
         assert "bbox" in first_search["kwargs"]
@@ -272,7 +277,7 @@ class TestQueryStac:
         """CQL2 filter should have correct structure for updated property query."""
         result = run_script([], [])
 
-        filter_param = result["client"].searches[0]["filter"]
+        filter_param = result["source_client"].searches[0]["filter"]
 
         # Should be a CQL2 t_intersects filter
         assert filter_param["op"] == "t_intersects"
@@ -300,13 +305,13 @@ class TestQueryStac:
         """Verify that we query the 'updated' property for harvesting, not acquisition datetime."""
         result = run_script([], [])
 
-        filter_param = result["client"].searches[0]["filter"]
+        filter_param = result["source_client"].searches[0]["filter"]
 
         # Should target the 'updated' property specifically
         assert filter_param["args"][0]["property"] == "updated"
 
         # Should NOT use datetime parameter (which queries acquisition date)
-        assert "datetime" not in result["client"].searches[0]["kwargs"]
+        assert "datetime" not in result["source_client"].searches[0]["kwargs"]
 
         # Should use CQL2 filter language
-        assert result["client"].searches[0]["filter_lang"] == "cql2-json"
+        assert result["source_client"].searches[0]["filter_lang"] == "cql2-json"
