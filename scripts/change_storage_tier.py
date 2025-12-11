@@ -335,7 +335,7 @@ def process_stac_item(
     stats["succeeded"] += len(objects_already_correct)
 
     # Process objects that need to change
-    for objects_changed, (obj_key, current_class) in enumerate(objects_to_change, start=1):
+    for processed_count, (obj_key, current_class) in enumerate(objects_to_change, start=1):
         stats["processed"] += 1
 
         success, _ = change_object_storage_class(
@@ -347,7 +347,7 @@ def process_stac_item(
             stats["failed"] += 1
 
         # Log progress every 100 objects or at the end
-        if objects_changed % 100 == 0 or objects_changed == len(objects_to_change):
+        if processed_count % 100 == 0 or processed_count == len(objects_to_change):
             logger.info(
                 f"  Progress: {stats['processed']}/{total_objects} objects ({stats['processed']*100//total_objects}%)"
             )
