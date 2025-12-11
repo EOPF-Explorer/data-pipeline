@@ -26,12 +26,13 @@ logger = logging.getLogger(__name__)
 def main() -> None:
     """Main entry point for STAC query script."""
     # Configuration from Argo workflow parameters
-    STAC_API_URL = sys.argv[1]
+    SOURCE_STAC_API_URL = sys.argv[1]
     SOURCE_COLLECTION = sys.argv[2]
-    TARGET_COLLECTION = sys.argv[3]
-    END_TIME_OFFSET_HOURS = int(sys.argv[4])
-    LOOKBACK_HOURS = int(sys.argv[5])
-    AOI_BBOX = json.loads(sys.argv[6])
+    TARGET_STAC_API_URL = sys.argv[3]
+    TARGET_COLLECTION = sys.argv[4]
+    END_TIME_OFFSET_HOURS = int(sys.argv[5])
+    LOOKBACK_HOURS = int(sys.argv[6])
+    AOI_BBOX = json.loads(sys.argv[7])
 
     # Calculate time window
     end_time = datetime.now(UTC) - timedelta(hours=END_TIME_OFFSET_HOURS)
@@ -41,16 +42,21 @@ def main() -> None:
     start_time_str = start_time.isoformat().replace("+00:00", "Z")
     end_time_str = end_time.isoformat().replace("+00:00", "Z")
 
-    logger.info(f"Querying STAC API: {STAC_API_URL}")
-    logger.info(f"Collection: {SOURCE_COLLECTION}")
+    logger.info(f"Querying source STAC API: {SOURCE_STAC_API_URL}")
+    logger.info(f"Source collection: {SOURCE_COLLECTION}")
+    logger.info(f"Target STAC API: {TARGET_STAC_API_URL}")
+    logger.info(f"Target collection: {TARGET_COLLECTION}")
     logger.info(f"Updated time range: {start_time_str} to {end_time_str}")
 
-    # Connect to STAC catalog
-    catalog = Client.open(STAC_API_URL)
+    # Connect to source STAC catalog
+    source_catalog = Client.open(SOURCE_STAC_API_URL)
+
+    # Connect to target STAC catalog (may be different)
+    target_catalog = Client.open(TARGET_STAC_API_URL)
 
     # Search for items by updated time (for harvesting use case)
     # Query items that were updated within the time window, not by acquisition date
-    search = catalog.search(
+    search = source_catalog.search(
         collections=[SOURCE_COLLECTION],
         filter={
             "op": "t_intersects",
@@ -80,7 +86,7 @@ def main() -> None:
 
             # Check if already converted (prevent wasteful reprocessing)
             try:
-                target_search = catalog.search(
+                target_search = target_catalog.search(
                     collections=[TARGET_COLLECTION],
                     ids=[item.id],
                 )
