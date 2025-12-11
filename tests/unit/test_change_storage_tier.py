@@ -25,7 +25,7 @@ class TestValidateStorageClass:
         """Test STANDARD is valid."""
         assert validate_storage_class("STANDARD") is True
 
-    def test_valid_glacier(self) -> None:
+    def test_valid_standard_ia(self) -> None:
         """Test STANDARD_IA is valid."""
         assert validate_storage_class("STANDARD_IA") is True
 
