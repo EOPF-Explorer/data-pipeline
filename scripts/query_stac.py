@@ -11,7 +11,7 @@ import json
 import logging
 import os
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 
 from pystac_client import Client
 
@@ -30,13 +30,13 @@ def main() -> None:
     SOURCE_COLLECTION = sys.argv[2]
     TARGET_STAC_API_URL = sys.argv[3]
     TARGET_COLLECTION = sys.argv[4]
-    END_TIME_OFFSET_HOURS = int(sys.argv[5])
-    LOOKBACK_HOURS = int(sys.argv[6])
+    SCHEDULED_END_TIME = sys.argv[5]  # ISO timestamp from workflow.scheduledTime
+    WINDOW_HOURS = int(sys.argv[6])  # Duration of time window to look back
     AOI_BBOX = json.loads(sys.argv[7])
 
-    # Calculate time window
-    end_time = datetime.now(UTC) - timedelta(hours=END_TIME_OFFSET_HOURS)
-    start_time = end_time - timedelta(hours=LOOKBACK_HOURS)
+    # Parse scheduled end time and calculate start time
+    end_time = datetime.fromisoformat(SCHEDULED_END_TIME.replace("Z", "+00:00"))
+    start_time = end_time - timedelta(hours=WINDOW_HOURS)
 
     # Format datetime for STAC API (replace +00:00 with Z)
     start_time_str = start_time.isoformat().replace("+00:00", "Z")
@@ -46,7 +46,9 @@ def main() -> None:
     logger.info(f"Source collection: {SOURCE_COLLECTION}")
     logger.info(f"Target STAC API: {TARGET_STAC_API_URL}")
     logger.info(f"Target collection: {TARGET_COLLECTION}")
-    logger.info(f"Updated time range: {start_time_str} to {end_time_str}")
+    logger.info(f"Scheduled end time: {SCHEDULED_END_TIME}")
+    logger.info(f"Time window: {WINDOW_HOURS} hours")
+    logger.info(f"Query time range: {start_time_str} to {end_time_str}")
 
     # Connect to source STAC catalog
     source_catalog = Client.open(SOURCE_STAC_API_URL)
@@ -64,14 +66,28 @@ def main() -> None:
         },
         filter_lang="cql2-json",
         bbox=AOI_BBOX,
+        limit=100,  # Items per page for efficient pagination
     )
 
     # Collect items to process
     items_to_process = []
     checked_count = 0
+    page_count = 0
 
+    logger.info("Starting pagination through search results...")
     for page in search.pages():
-        for item in page.items:
+        page_count += 1
+        page_items = list(page.items)
+        logger.info(f"Processing page {page_count} with {len(page_items)} items")
+
+        # Safety check: if we get an empty page, log it but continue
+        if not page_items:
+            logger.warning(
+                f"Empty page {page_count} encountered - this may indicate pagination issues"
+            )
+            continue
+
+        for item in page_items:
             checked_count += 1
 
             # Get item URL
@@ -108,7 +124,9 @@ def main() -> None:
                 }
             )
 
-    logger.info(f"📊 Summary: Checked {checked_count} items, {len(items_to_process)} to process")
+    logger.info(
+        f"📊 Summary: Processed {page_count} pages, checked {checked_count} items, {len(items_to_process)} to process"
+    )
 
     # Output ONLY JSON to stdout (for Argo withParam)
     sys.stdout.write(json.dumps(items_to_process))

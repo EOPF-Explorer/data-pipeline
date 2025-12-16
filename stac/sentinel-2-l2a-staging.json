@@ -1,5 +1,5 @@
 {
-  "id": "sentinel-2-l2a",
+  "id": "sentinel-2-l2a-staging",
   "type": "Collection",
   "links": [
     {
@@ -42,7 +42,7 @@
       "title": "EOxCloudless 2024"
     }
   ],
-  "title": "Sentinel-2 Level-2A",
+  "title": "Sentinel-2 Level-2A [V1 staging]",
   "assets": {
     "thumbnail": {
       "href": "https://raw.githubusercontent.com/EOPF-Sample-Service/eopf-stac/main/thumbnails/sentinel-2-l2a.png",
@@ -59,7 +59,7 @@
     },
     "temporal": {
       "interval": [
-        ["2015-01-01T00:00:00.000+00:00", "2026-12-31T14:09:01.024+00:00"]
+        ["2015-10-22T10:10:52.027+00:00", "2025-09-21T14:09:01.024+00:00"]
       ]
     }
   },
@@ -95,95 +95,95 @@
     "gsd": [10, 20, 60],
     "bands": [
       {
-        "name": "b01",
-        "eo:common_name": "coastal",
+        "name": "reflectance|b01",
+        "common_name": "coastal",
         "description": "Coastal aerosol (band 1)",
-        "eo:center_wavelength": 0.443,
-        "eo:full_width_half_max": 0.027
+        "center_wavelength": 0.443,
+        "full_width_half_max": 0.027
       },
       {
-        "name": "b02",
-        "eo:common_name": "blue",
+        "name": "reflectance|b02",
+        "common_name": "blue",
         "description": "Blue (band 2)",
-        "eo:center_wavelength": 0.49,
-        "eo:full_width_half_max": 0.098
+        "center_wavelength": 0.49,
+        "full_width_half_max": 0.098
       },
       {
-        "name": "b03",
-        "eo:common_name": "green",
+        "name": "reflectance|b03",
+        "common_name": "green",
         "description": "Green (band 3)",
-        "eo:center_wavelength": 0.56,
-        "eo:full_width_half_max": 0.045
+        "center_wavelength": 0.56,
+        "full_width_half_max": 0.045
       },
       {
-        "name": "b04",
-        "eo:common_name": "red",
+        "name": "reflectance|b04",
+        "common_name": "red",
         "description": "Red (band 4)",
-        "eo:center_wavelength": 0.665,
-        "eo:full_width_half_max": 0.038
+        "center_wavelength": 0.665,
+        "full_width_half_max": 0.038
       },
       {
-        "name": "b05",
-        "eo:common_name": "rededge",
+        "name": "reflectance|b05",
+        "common_name": "rededge",
         "description": "Red edge 1 (band 5)",
-        "eo:center_wavelength": 0.704,
-        "eo:full_width_half_max": 0.019
+        "center_wavelength": 0.704,
+        "full_width_half_max": 0.019
       },
       {
-        "name": "b06",
-        "eo:common_name": "rededge",
+        "name": "reflectance|b06",
+        "common_name": "rededge",
         "description": "Red edge 2 (band 6)",
-        "eo:center_wavelength": 0.74,
-        "eo:full_width_half_max": 0.018
+        "center_wavelength": 0.74,
+        "full_width_half_max": 0.018
       },
       {
-        "name": "b07",
-        "eo:common_name": "rededge",
+        "name": "reflectance|b07",
+        "common_name": "rededge",
         "description": "Red edge 3 (band 7)",
-        "eo:center_wavelength": 0.783,
-        "eo:full_width_half_max": 0.028
+        "center_wavelength": 0.783,
+        "full_width_half_max": 0.028
       },
       {
-        "name": "b08",
-        "eo:common_name": "nir",
+        "name": "reflectance|b08",
+        "common_name": "nir",
         "description": "NIR 1 (band 8)",
-        "eo:center_wavelength": 0.842,
-        "eo:full_width_half_max": 0.145
+        "center_wavelength": 0.842,
+        "full_width_half_max": 0.145
       },
       {
-        "name": "b8a",
-        "eo:common_name": "nir08",
+        "name": "reflectance|b8A",
+        "common_name": "nir08",
         "description": "NIR 2 (band 8A)",
-        "eo:center_wavelength": 0.865,
-        "eo:full_width_half_max": 0.033
+        "center_wavelength": 0.865,
+        "full_width_half_max": 0.033
       },
       {
-        "name": "b09",
-        "eo:common_name": "nir09",
+        "name": "reflectance|b09",
+        "common_name": "nir09",
         "description": "NIR 3 (band 9)",
-        "eo:center_wavelength": 0.945,
-        "eo:full_width_half_max": 0.026
+        "center_wavelength": 0.945,
+        "full_width_half_max": 0.026
       },
       {
-        "name": "b10",
-        "eo:common_name": "cirrus",
+        "name": "reflectance|b10",
+        "common_name": "cirrus",
         "description": "Cirrus",
-        "eo:center_wavelength": 1.3735,
-        "eo:full_width_half_max": 0.075
+        "center_wavelength": 1.3735,
+        "full_width_half_max": 0.075
       },
       {
-        "name": "b11",
-        "eo:common_name": "swir16",
+        "name": "reflectance|b11",
+        "common_name": "swir16",
         "description": "SWIR 1 (band 11)",
-        "eo:center_wavelength": 1.61,
-        "eo:full_width_half_max": 0.143
+        "center_wavelength": 1.61,
+        "full_width_half_max": 0.143
       },
       {
-        "name": "b12",
-        "eo:common_name": "swir22",
+        "name": "reflectance|b12",
+        "common_name": "swir22",
         "description": "SWIR 2 (band 12)",
-        "eo:center_wavelength": 2.19,
-        "eo:full_width_half_max": 0.242
+        "center_wavelength": 2.19,
+        "full_width_half_max": 0.242
       }
     ],
     "sci:doi": ["10.5270/S2_-znk9xsj"],
@@ -200,19 +200,19 @@
   },
   "description": "The Sentinel-2 Level-2A Collection 1 product provides orthorectified Surface Reflectance (Bottom-Of-Atmosphere: BOA), with sub-pixel multispectral and multitemporal registration accuracy. Scene Classification (including Clouds and Cloud Shadows), AOT (Aerosol Optical Thickness) and WV (Water Vapour) maps are included in the product.",
   "item_assets": {
-    "AOT_10m": {
+    "AOT": {
       "gsd": 10,
       "type": "application/vnd.zarr; version=3",
       "roles": ["data"],
       "title": "Aerosol optical thickness (AOT)"
     },
-    "SCL_20m": {
+    "SCL": {
       "gsd": 20,
       "type": "application/vnd.zarr; version=3",
       "roles": ["data"],
       "title": "Scene classification map (SCL)"
     },
-    "WVP_10m": {
+    "WVP": {
       "gsd": 10,
       "type": "application/vnd.zarr; version=3",
       "roles": ["data"],
@@ -223,99 +223,6 @@
       "type": "application/vnd.zarr; version=3; profile=multiscales",
       "roles": ["data", "reflectance"],
       "title": "Surface reflectance measurements",
-      "bands": [
-        {
-          "name": "b01",
-          "eo:common_name": "coastal",
-          "description": "Coastal aerosol (band 1)",
-          "eo:center_wavelength": 0.443,
-          "eo:full_width_half_max": 0.027
-        },
-        {
-          "name": "b02",
-          "eo:common_name": "blue",
-          "description": "Blue (band 2)",
-          "eo:center_wavelength": 0.49,
-          "eo:full_width_half_max": 0.098
-        },
-        {
-          "name": "b03",
-          "eo:common_name": "green",
-          "description": "Green (band 3)",
-          "eo:center_wavelength": 0.56,
-          "eo:full_width_half_max": 0.045
-        },
-        {
-          "name": "b04",
-          "eo:common_name": "red",
-          "description": "Red (band 4)",
-          "eo:center_wavelength": 0.665,
-          "eo:full_width_half_max": 0.038
-        },
-        {
-          "name": "b05",
-          "eo:common_name": "rededge",
-          "description": "Red edge 1 (band 5)",
-          "eo:center_wavelength": 0.704,
-          "eo:full_width_half_max": 0.019
-        },
-        {
-          "name": "b06",
-          "eo:common_name": "rededge",
-          "description": "Red edge 2 (band 6)",
-          "eo:center_wavelength": 0.74,
-          "eo:full_width_half_max": 0.018
-        },
-        {
-          "name": "b07",
-          "eo:common_name": "rededge",
-          "description": "Red edge 3 (band 7)",
-          "eo:center_wavelength": 0.783,
-          "eo:full_width_half_max": 0.028
-        },
-        {
-          "name": "b08",
-          "eo:common_name": "nir",
-          "description": "NIR 1 (band 8)",
-          "eo:center_wavelength": 0.842,
-          "eo:full_width_half_max": 0.145
-        },
-        {
-          "name": "b8a",
-          "eo:common_name": "nir08",
-          "description": "NIR 2 (band 8A)",
-          "eo:center_wavelength": 0.865,
-          "eo:full_width_half_max": 0.033
-        },
-        {
-          "name": "b09",
-          "eo:common_name": "nir09",
-          "description": "NIR 3 (band 9)",
-          "eo:center_wavelength": 0.945,
-          "eo:full_width_half_max": 0.026
-        },
-        {
-          "name": "b10",
-          "eo:common_name": "cirrus",
-          "description": "Cirrus",
-          "eo:center_wavelength": 1.3735,
-          "eo:full_width_half_max": 0.075
-        },
-        {
-          "name": "b11",
-          "eo:common_name": "swir16",
-          "description": "SWIR 1 (band 11)",
-          "eo:center_wavelength": 1.61,
-          "eo:full_width_half_max": 0.143
-        },
-        {
-          "name": "b12",
-          "eo:common_name": "swir22",
-          "description": "SWIR 2 (band 12)",
-          "eo:center_wavelength": 2.19,
-          "eo:full_width_half_max": 0.242
-        }
-      ],
       "cube:dimensions": {
         "x": {
           "type": "spatial",
