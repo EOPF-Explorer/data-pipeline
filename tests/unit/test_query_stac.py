@@ -145,7 +145,7 @@ def run_script(
                 SOURCE_COLLECTION,
                 "https://target-stac.example.com/",
                 TARGET_COLLECTION,
-                "0",
+                "2024-01-01T12:00:00Z",  # ISO timestamp instead of "0"
                 "3",
                 "[-5.14, 41.33, 9.56, 51.09]",
             ],
@@ -184,7 +184,7 @@ class TestQueryStac:
             "item-002",
             "item-003",
         }
-        assert "Checked 3 items, 3 to process" in caplog.text
+        assert "Processed 1 pages, checked 3 items, 3 to process" in caplog.text
 
     def test_excludes_items_already_in_target(self, caplog):
         """Items already in target collection should be excluded."""
@@ -198,7 +198,7 @@ class TestQueryStac:
         assert len(result["output"]) == 2
         assert {item["item_id"] for item in result["output"]} == {"item-001", "item-003"}
         assert "Already converted" in caplog.text
-        assert "Checked 3 items, 2 to process" in caplog.text
+        assert "Processed 1 pages, checked 3 items, 2 to process" in caplog.text
 
     def test_skips_items_without_self_link(self, caplog):
         """Items without a self link should be skipped."""
@@ -226,7 +226,11 @@ class TestQueryStac:
         result = run_script([], [])
 
         assert result["output"] == []
-        assert "Checked 0 items, 0 to process" in caplog.text
+        # Allow for either 0 or 1 pages depending on STAC client behavior
+        assert (
+            "Processed 0 pages, checked 0 items, 0 to process" in caplog.text
+            or "Processed 1 pages, checked 0 items, 0 to process" in caplog.text
+        )
 
     def test_handles_error_checking_target(self, caplog):
         """When target check fails, item should still be processed (safe default)."""
