@@ -36,7 +36,6 @@ dependencies = [
     "cf-xarray>=0.9.0",
     "eopf-geozarr @ git+https://github.com/EOPF-Explorer/data-model.git@align-zarr-conv",
     "requests",
-
 ]
 
 [dependency-groups]
