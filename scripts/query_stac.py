@@ -49,6 +49,7 @@ def main() -> None:
     logger.info(f"Scheduled end time: {SCHEDULED_END_TIME}")
     logger.info(f"Time window: {WINDOW_HOURS} hours")
     logger.info(f"Query time range: {start_time_str} to {end_time_str}")
+    logger.info(f"Area of Interest (bbox): {AOI_BBOX}")
 
     # Connect to source STAC catalog
     source_catalog = Client.open(SOURCE_STAC_API_URL)
