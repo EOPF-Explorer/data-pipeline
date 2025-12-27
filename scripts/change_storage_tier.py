@@ -29,7 +29,8 @@ for lib in ["botocore", "boto3", "urllib3", "httpx", "httpcore"]:
     logging.getLogger(lib).setLevel(logging.WARNING)
 
 # Valid S3 storage classes
-VALID_STORAGE_CLASSES = frozenset(["STANDARD", "GLACIER", "EXPRESS_ONEZONE"])
+# Using OVH Cloud Storage naming: STANDARD_IA (Infrequent Access) instead of AWS GLACIER
+VALID_STORAGE_CLASSES = frozenset(["STANDARD", "STANDARD_IA", "EXPRESS_ONEZONE"])
 
 
 def validate_storage_class(storage_class: str) -> bool:
@@ -71,53 +72,66 @@ def get_zarr_root(s3_urls: set[str]) -> str | None:
     return None
 
 
-def list_objects(s3_client, bucket: str, prefix: str) -> list[str]:  # type: ignore
-    """List all objects under S3 prefix."""
+def list_objects(s3_client, bucket: str, prefix: str) -> list[tuple[str, str]]:  # type: ignore
+    """List all objects under S3 prefix with their storage class.
+
+    Returns:
+        List of tuples (key, storage_class)
+    """
     objects = []
     paginator = s3_client.get_paginator("list_objects_v2")
 
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-        for obj in page.get("Contents", []):
-            objects.append(obj["Key"])
+    for page_count, page in enumerate(paginator.paginate(Bucket=bucket, Prefix=prefix), start=1):
+        page_objects = page.get("Contents", [])
+        for obj in page_objects:
+            # Storage class is included in list_objects response
+            # Note: S3 returns "STANDARD" implicitly when StorageClass is not present
+            # (objects in STANDARD tier don't always have the field set)
+            storage_class = obj.get("StorageClass", "STANDARD")
+            objects.append((obj["Key"], storage_class))
+
+        # Log progress every 10 pages (typically 10,000 objects)
+        if page_count % 10 == 0:
+            logger.info(f"  Listed {len(objects)} objects so far ({page_count} pages)...")
 
     return objects
 
 
 def filter_paths(
-    paths: list[str],
+    objects: list[tuple[str, str]],
     include_patterns: list[str] | None = None,
     exclude_patterns: list[str] | None = None,
     zarr_prefix: str = "",
-) -> tuple[list[str], list[str]]:
-    """Filter paths based on include/exclude patterns.
+) -> tuple[list[tuple[str, str]], list[str]]:
+    """Filter objects based on include/exclude patterns.
 
     Args:
-        paths: List of object keys to filter
-        include_patterns: List of fnmatch patterns to include (relative to Zarr root)
-        exclude_patterns: List of fnmatch patterns to exclude (relative to Zarr root)
-        zarr_prefix: The Zarr root prefix to strip when matching patterns
+        objects: List of (key, storage_class) tuples
+        include_patterns: Patterns to include (relative to Zarr root)
+        exclude_patterns: Patterns to exclude (relative to Zarr root)
+        zarr_prefix: Prefix to remove from paths for pattern matching
 
     Returns:
-        Tuple of (filtered_paths, excluded_paths)
+        Tuple of (filtered_objects, excluded_keys)
     """
     if not include_patterns and not exclude_patterns:
-        return paths, []
+        return objects, []
 
     filtered = []
     excluded = []
 
-    for path in paths:
+    for key, storage_class in objects:
         # Get relative path from Zarr root for pattern matching
-        if zarr_prefix and path.startswith(zarr_prefix):
-            relative_path = path[len(zarr_prefix) :]
+        if zarr_prefix and key.startswith(zarr_prefix):
+            relative_path = key[len(zarr_prefix) :]
         else:
-            relative_path = path
+            relative_path = key
 
         # Apply include patterns
         if include_patterns:
             included = any(fnmatch.fnmatch(relative_path, pattern) for pattern in include_patterns)
             if not included:
-                excluded.append(path)
+                excluded.append(key)
                 continue
 
         # Apply exclude patterns
@@ -126,10 +140,10 @@ def filter_paths(
                 fnmatch.fnmatch(relative_path, pattern) for pattern in exclude_patterns
             )
             if excluded_match:
-                excluded.append(path)
+                excluded.append(key)
                 continue
 
-        filtered.append(path)
+        filtered.append((key, storage_class))
 
     return filtered, excluded
 
@@ -138,44 +152,53 @@ def change_object_storage_class(  # type: ignore
     s3_client,
     bucket: str,
     key: str,
-    storage_class: str,
+    current_storage_class: str,
+    target_storage_class: str,
     dry_run: bool,
-) -> tuple[bool, str | None]:
+) -> tuple[bool, str]:
     """Change storage class of single S3 object.
 
+    Args:
+        s3_client: Boto3 S3 client
+        bucket: S3 bucket name
+        key: S3 object key
+        current_storage_class: Current storage class (from list_objects)
+        target_storage_class: Desired storage class
+        dry_run: If True, don't make actual changes
+
     Returns:
-        Tuple of (success: bool, current_storage_class: str | None)
+        Tuple of (success: bool, current_storage_class: str)
     """
     try:
-        head = s3_client.head_object(Bucket=bucket, Key=key)
-        current = head.get("StorageClass", "STANDARD")
-
         if dry_run:
-            if current == storage_class:
-                logger.debug(f"[DRY RUN] Already {storage_class}: s3://{bucket}/{key}")
+            if current_storage_class == target_storage_class:
+                logger.debug(f"[DRY RUN] Already {target_storage_class}: s3://{bucket}/{key}")
             else:
                 logger.debug(
-                    f"[DRY RUN] Would change {current} -> {storage_class}: s3://{bucket}/{key}"
+                    f"[DRY RUN] Would change {current_storage_class} -> {target_storage_class}: s3://{bucket}/{key}"
                 )
-            return True, current
+            return True, current_storage_class
 
-        if current == storage_class:
-            logger.debug(f"Already {storage_class}: s3://{bucket}/{key}")
-            return True, current
+        if current_storage_class == target_storage_class:
+            logger.debug(f"Already {target_storage_class}: s3://{bucket}/{key}")
+            return True, current_storage_class
 
+        # Only make API call when actually changing storage class
         s3_client.copy_object(
             Bucket=bucket,
             Key=key,
             CopySource={"Bucket": bucket, "Key": key},
-            StorageClass=storage_class,
+            StorageClass=target_storage_class,
             MetadataDirective="COPY",
         )
-        logger.debug(f"Changed {current} -> {storage_class}: s3://{bucket}/{key}")
-        return True, current
+        logger.debug(
+            f"Changed {current_storage_class} -> {target_storage_class}: s3://{bucket}/{key}"
+        )
+        return True, current_storage_class
 
     except ClientError as e:
         logger.error(f"Failed to change s3://{bucket}/{key}: {e}")
-        return False, None
+        return False, current_storage_class
 
 
 def process_stac_item(
@@ -254,38 +277,90 @@ def process_stac_item(
     stats = {"processed": 0, "succeeded": 0, "failed": 0, "skipped": len(excluded)}
     storage_class_counts: dict[str, int] = {}
 
-    for obj_key in objects:
-        stats["processed"] += 1
-        success, current_class = change_object_storage_class(
-            s3_client, bucket, obj_key, storage_class, dry_run
-        )
-        if success:
-            stats["succeeded"] += 1
-            if current_class:
-                storage_class_counts[current_class] = storage_class_counts.get(current_class, 0) + 1
-        else:
-            stats["failed"] += 1
+    # Separate objects that need changes from those that don't
+    objects_to_change = [(key, current) for key, current in objects if current != storage_class]
+    objects_already_correct = [
+        (key, current) for key, current in objects if current == storage_class
+    ]
 
-    # Summary
-    logger.info("=" * 60)
-    logger.info(f"Summary for {item_id}:")
-    logger.info(f"  Total objects: {len(all_objects)}")
-    logger.info(f"  Skipped (filtered): {stats['skipped']}")
-    logger.info(f"  Processed: {stats['processed']}")
-    logger.info(f"  Succeeded: {stats['succeeded']}")
-    logger.info(f"  Failed: {stats['failed']}")
+    total_objects = len(objects)
 
-    if dry_run and storage_class_counts:
+    # Count storage class distribution
+    for _, current_class in objects:
+        storage_class_counts[current_class] = storage_class_counts.get(current_class, 0) + 1
+
+    # Show initial distribution before processing
+    if storage_class_counts:
         logger.info("")
-        logger.info("Current storage class distribution:")
+        logger.info("Initial storage class distribution (before changes):")
         total = sum(storage_class_counts.values())
         for sc in sorted(storage_class_counts.keys()):
             count = storage_class_counts[sc]
             percentage = (count / total * 100) if total > 0 else 0
             logger.info(f"  {sc}: {count} objects ({percentage:.1f}%)")
 
-    if dry_run:
-        logger.info("  (DRY RUN)")
+        # Show expected distribution after changes
+        if not dry_run and len(objects_to_change) > 0:
+            logger.info("")
+            logger.info("Expected storage class distribution (after changes):")
+            expected_counts = storage_class_counts.copy()
+            # Remove changed objects from their old classes
+            for _, old_class in objects_to_change:
+                expected_counts[old_class] = expected_counts.get(old_class, 0) - 1
+                if expected_counts[old_class] == 0:
+                    del expected_counts[old_class]
+            # Add changed objects to target class
+            expected_counts[storage_class] = expected_counts.get(storage_class, 0) + len(
+                objects_to_change
+            )
+
+            expected_total = sum(expected_counts.values())
+            for sc in sorted(expected_counts.keys()):
+                count = expected_counts[sc]
+                percentage = (count / expected_total * 100) if expected_total > 0 else 0
+                logger.info(f"  {sc}: {count} objects ({percentage:.1f}%)")
+
+        if dry_run:
+            logger.info("  (DRY RUN)")
+        logger.info("")
+
+    logger.info(f"Processing {total_objects} objects...")
+    logger.info(
+        f"  {len(objects_already_correct)} already have target storage class {storage_class}"
+    )
+    logger.info(f"  {len(objects_to_change)} need to be changed")
+
+    # Count objects that already have correct storage class (no API calls needed)
+    stats["processed"] += len(objects_already_correct)
+    stats["succeeded"] += len(objects_already_correct)
+
+    # Process objects that need to change
+    for processed_count, (obj_key, current_class) in enumerate(objects_to_change, start=1):
+        stats["processed"] += 1
+
+        success, _ = change_object_storage_class(
+            s3_client, bucket, obj_key, current_class, storage_class, dry_run
+        )
+        if success:
+            stats["succeeded"] += 1
+        else:
+            stats["failed"] += 1
+
+        # Log progress every 100 objects or at the end
+        if processed_count % 100 == 0 or processed_count == len(objects_to_change):
+            logger.info(
+                f"  Progress: {stats['processed']}/{total_objects} objects ({stats['processed']*100//max(total_objects, 1)}%)"
+            )
+
+    # Summary
+    logger.info("=" * 60)
+    logger.info(f"Summary for {item_id}:")
+    logger.info(f"  Total objects: {len(all_objects)}")
+    logger.info(f"  Skipped (filtered): {stats['skipped']}")
+    logger.info(f"  Already correct storage class: {len(objects_already_correct)}")
+    logger.info(f"  Changed: {len(objects_to_change)}")
+    logger.info(f"  Succeeded: {stats['succeeded']}")
+    logger.info(f"  Failed: {stats['failed']}")
 
     return stats
 
@@ -297,7 +372,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--storage-class",
         default="STANDARD",
-        choices=["STANDARD", "GLACIER", "EXPRESS_ONEZONE"],
+        choices=["STANDARD", "STANDARD_IA", "EXPRESS_ONEZONE"],
         help="Target storage class",
     )
     parser.add_argument("--dry-run", action="store_true", help="Dry run mode")
