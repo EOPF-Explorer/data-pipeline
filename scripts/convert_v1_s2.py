@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 import fsspec
 import httpx
 import xarray as xr
+import zarr
 from eopf_geozarr.conversion.fs_utils import (
     get_storage_options,
 )
@@ -148,8 +149,12 @@ def run_conversion(
     return output_url
 
 
-def main() -> None:
-    """CLI entry point for S2 Optimized GeoZarr conversion."""
+def main() -> int:
+    """CLI entry point for S2 Optimized GeoZarr conversion.
+
+    Returns:
+        Exit code: 0 for success, non-zero for error
+    """
     parser = argparse.ArgumentParser(
         description="Convert EOPF Sentinel-2 Zarr to GeoZarr format using S2-optimized converter"
     )
@@ -201,19 +206,25 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    run_conversion(
-        source_url=args.source_url,
-        collection=args.collection,
-        s3_output_bucket=args.s3_output_bucket,
-        s3_output_prefix=args.s3_output_prefix,
-        spatial_chunk=args.spatial_chunk,
-        compression_level=args.compression_level,
-        enable_sharding=args.enable_sharding,
-        use_dask_cluster=args.dask_cluster,
-        validate_output=args.validate_output,
-        n_workers=args.n_workers,
-        memory_limit=args.memory_limit,
-    )
+    try:
+        run_conversion(
+            source_url=args.source_url,
+            collection=args.collection,
+            s3_output_bucket=args.s3_output_bucket,
+            s3_output_prefix=args.s3_output_prefix,
+            spatial_chunk=args.spatial_chunk,
+            compression_level=args.compression_level,
+            enable_sharding=args.enable_sharding,
+            use_dask_cluster=args.dask_cluster,
+            validate_output=args.validate_output,
+            n_workers=args.n_workers,
+            memory_limit=args.memory_limit,
+        )
+    except zarr.errors.GroupNotFoundError as e:
+        logger.error(f"Source dataset not found: {args.source_url} - {e}")
+        return 2
+
+    return 0
 
 
 def setup_dask_cluster(
@@ -266,4 +277,4 @@ def setup_dask_cluster(
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
