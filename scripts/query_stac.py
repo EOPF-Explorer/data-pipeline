@@ -62,8 +62,8 @@ def main() -> None:
     search = source_catalog.search(
         collections=[SOURCE_COLLECTION],
         filter={
-            "op": "t_intersects",
-            "args": [{"property": "updated"}, {"interval": [start_time_str, end_time_str]}],
+            "op": "between",
+            "args": [{"property": "updated"}, start_time_str, end_time_str],
         },
         filter_lang="cql2-json",
         bbox=AOI_BBOX,
