@@ -2,15 +2,16 @@
 """
 Query STAC API for new items to process.
 
-This script searches for items in a source collection within a specified time window
-and checks if they already exist in the target collection to avoid reprocessing.
+This script searches for items in a source collection that were updated within
+a specified time window and checks if they already exist in the target collection
+to avoid reprocessing. Uses the 'updated' property for harvesting use cases.
 """
 
 import json
 import logging
 import os
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 
 from pystac_client import Client
 
@@ -25,41 +26,69 @@ logger = logging.getLogger(__name__)
 def main() -> None:
     """Main entry point for STAC query script."""
     # Configuration from Argo workflow parameters
-    STAC_API_URL = sys.argv[1]
+    SOURCE_STAC_API_URL = sys.argv[1]
     SOURCE_COLLECTION = sys.argv[2]
-    TARGET_COLLECTION = sys.argv[3]
-    END_TIME_OFFSET_HOURS = int(sys.argv[4])
-    LOOKBACK_HOURS = int(sys.argv[5])
-    AOI_BBOX = json.loads(sys.argv[6])
+    TARGET_STAC_API_URL = sys.argv[3]
+    TARGET_COLLECTION = sys.argv[4]
+    SCHEDULED_END_TIME = sys.argv[5]  # ISO timestamp from workflow.scheduledTime
+    WINDOW_HOURS = int(sys.argv[6])  # Duration of time window to look back
+    AOI_BBOX = json.loads(sys.argv[7])
 
-    # Calculate time window
-    end_time = datetime.now(UTC) - timedelta(hours=END_TIME_OFFSET_HOURS)
-    start_time = end_time - timedelta(hours=LOOKBACK_HOURS)
+    # Parse scheduled end time and calculate start time
+    end_time = datetime.fromisoformat(SCHEDULED_END_TIME.replace("Z", "+00:00"))
+    start_time = end_time - timedelta(hours=WINDOW_HOURS)
 
     # Format datetime for STAC API (replace +00:00 with Z)
     start_time_str = start_time.isoformat().replace("+00:00", "Z")
     end_time_str = end_time.isoformat().replace("+00:00", "Z")
 
-    logger.info(f"Querying STAC API: {STAC_API_URL}")
-    logger.info(f"Collection: {SOURCE_COLLECTION}")
-    logger.info(f"Time range: {start_time_str} to {end_time_str}")
+    logger.info(f"Querying source STAC API: {SOURCE_STAC_API_URL}")
+    logger.info(f"Source collection: {SOURCE_COLLECTION}")
+    logger.info(f"Target STAC API: {TARGET_STAC_API_URL}")
+    logger.info(f"Target collection: {TARGET_COLLECTION}")
+    logger.info(f"Scheduled end time: {SCHEDULED_END_TIME}")
+    logger.info(f"Time window: {WINDOW_HOURS} hours")
+    logger.info(f"Query time range: {start_time_str} to {end_time_str}")
+    logger.info(f"Area of Interest (bbox): {AOI_BBOX}")
 
-    # Connect to STAC catalog
-    catalog = Client.open(STAC_API_URL)
+    # Connect to source STAC catalog
+    source_catalog = Client.open(SOURCE_STAC_API_URL)
 
-    # Search for items
-    search = catalog.search(
+    # Connect to target STAC catalog (may be different)
+    target_catalog = Client.open(TARGET_STAC_API_URL)
+
+    # Search for items by updated time (for harvesting use case)
+    # Query items that were updated within the time window, not by acquisition date
+    search = source_catalog.search(
         collections=[SOURCE_COLLECTION],
-        datetime=f"{start_time_str}/{end_time_str}",
+        filter={
+            "op": "between",
+            "args": [{"property": "updated"}, start_time_str, end_time_str],
+        },
+        filter_lang="cql2-json",
         bbox=AOI_BBOX,
+        limit=100,  # Items per page for efficient pagination
     )
 
     # Collect items to process
     items_to_process = []
     checked_count = 0
+    page_count = 0
 
+    logger.info("Starting pagination through search results...")
     for page in search.pages():
-        for item in page.items:
+        page_count += 1
+        page_items = list(page.items)
+        logger.info(f"Processing page {page_count} with {len(page_items)} items")
+
+        # Safety check: if we get an empty page, log it but continue
+        if not page_items:
+            logger.warning(
+                f"Empty page {page_count} encountered - this may indicate pagination issues"
+            )
+            continue
+
+        for item in page_items:
             checked_count += 1
 
             # Get item URL
@@ -74,7 +103,7 @@ def main() -> None:
 
             # Check if already converted (prevent wasteful reprocessing)
             try:
-                target_search = catalog.search(
+                target_search = target_catalog.search(
                     collections=[TARGET_COLLECTION],
                     ids=[item.id],
                 )
@@ -96,7 +125,9 @@ def main() -> None:
                 }
             )
 
-    logger.info(f"📊 Summary: Checked {checked_count} items, {len(items_to_process)} to process")
+    logger.info(
+        f"📊 Summary: Processed {page_count} pages, checked {checked_count} items, {len(items_to_process)} to process"
+    )
 
     # Output ONLY JSON to stdout (for Argo withParam)
     sys.stdout.write(json.dumps(items_to_process))

@@ -6,12 +6,14 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import sys
+from typing import Any
 from urllib.parse import urlparse
 
 import fsspec
 import httpx
 import xarray as xr
-from eopf_geozarr.cli import setup_dask_cluster
+import zarr
 from eopf_geozarr.conversion.fs_utils import (
     get_storage_options,
 )
@@ -68,6 +70,8 @@ def run_conversion(
     enable_sharding: bool | None = None,
     use_dask_cluster: bool = False,
     validate_output: bool | None = None,
+    n_workers: int = 3,
+    memory_limit: str = "8GB",
 ) -> str:
     """Run S2 Optimized GeoZarr conversion workflow.
 
@@ -117,7 +121,9 @@ def run_conversion(
     except Exception as e:
         logger.warning(f"   ⚠️  Cleanup warning: {e}")
 
-    setup_dask_cluster(enable_dask=use_dask_cluster, verbose=True)
+    setup_dask_cluster(
+        enable_dask=use_dask_cluster, verbose=True, n_workers=n_workers, memory_limit=memory_limit
+    )
 
     # Load input dataset
     logger.info(f"{'   📥 Loading input dataset '}{zarr_url}")
@@ -143,8 +149,12 @@ def run_conversion(
     return output_url
 
 
-def main() -> None:
-    """CLI entry point for S2 Optimized GeoZarr conversion."""
+def main() -> int:
+    """CLI entry point for S2 Optimized GeoZarr conversion.
+
+    Returns:
+        Exit code: 0 for success, non-zero for error
+    """
     parser = argparse.ArgumentParser(
         description="Convert EOPF Sentinel-2 Zarr to GeoZarr format using S2-optimized converter"
     )
@@ -182,20 +192,89 @@ def main() -> None:
         default=DEFAULT_VALIDATE_OUTPUT,
         help=f"Validate output after conversion (default: {DEFAULT_VALIDATE_OUTPUT})",
     )
+    parser.add_argument(
+        "--n-workers",
+        type=int,
+        default=3,
+        help="Number of Dask workers (default: 3)",
+    )
+    parser.add_argument(
+        "--memory-limit",
+        type=str,
+        default="8GB",
+        help="Memory limit per Dask worker (default: 8GB)",
+    )
     args = parser.parse_args()
 
-    run_conversion(
-        source_url=args.source_url,
-        collection=args.collection,
-        s3_output_bucket=args.s3_output_bucket,
-        s3_output_prefix=args.s3_output_prefix,
-        spatial_chunk=args.spatial_chunk,
-        compression_level=args.compression_level,
-        enable_sharding=args.enable_sharding,
-        use_dask_cluster=args.dask_cluster,
-        validate_output=args.validate_output,
-    )
+    try:
+        run_conversion(
+            source_url=args.source_url,
+            collection=args.collection,
+            s3_output_bucket=args.s3_output_bucket,
+            s3_output_prefix=args.s3_output_prefix,
+            spatial_chunk=args.spatial_chunk,
+            compression_level=args.compression_level,
+            enable_sharding=args.enable_sharding,
+            use_dask_cluster=args.dask_cluster,
+            validate_output=args.validate_output,
+            n_workers=args.n_workers,
+            memory_limit=args.memory_limit,
+        )
+    except zarr.errors.GroupNotFoundError as e:
+        logger.error(f"Source dataset not found: {args.source_url} - {e}")
+        return 2
+
+    return 0
+
+
+def setup_dask_cluster(
+    enable_dask: bool, verbose: bool = False, n_workers: int = 3, memory_limit: str = "8GB"
+) -> Any | None:
+    """
+    Set up a dask cluster for parallel processing.
+
+    Parameters
+    ----------
+    enable_dask : bool
+        Whether to enable dask cluster
+    verbose : bool, default False
+        Enable verbose output
+
+    Returns
+    -------
+    dask.distributed.Client or None
+        Dask client if enabled, None otherwise
+    """
+    if not enable_dask:
+        return None
+
+    try:
+        from dask.distributed import Client
+
+        # Set up local cluster with high memory limits
+        client = Client(
+            n_workers=n_workers,
+            memory_limit=memory_limit,
+        )
+
+        if verbose:
+            logger.info(f"🚀 Dask cluster started: {str(client)}")
+            logger.info(f"   Dashboard: {client.dashboard_link}")
+            logger.info(f"   Workers: {len(client.scheduler_info()['workers'])}")
+            logger.info(f"   Memory limit per worker: {memory_limit}")
+        else:
+            logger.info("🚀 Dask cluster started for parallel processing")
+        return client
+
+    except ImportError:
+        logger.error(
+            "dask.distributed not available. Install with: pip install 'dask[distributed]'"
+        )
+        sys.exit(1)
+    except Exception as e:
+        logger.error("Error starting dask cluster: %s", e)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

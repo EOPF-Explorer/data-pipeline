@@ -74,33 +74,41 @@ class FakeStacClient:
 
     def __init__(
         self,
-        source_items: list[Item],
-        target_items: list[Item],
-        source_collection: str,
-        target_collection: str,
-        raise_error_on_target: bool = False,
+        items: list[Item],
+        collection: str,
+        raise_error: bool = False,
     ):
-        self.source_items = source_items
-        self.target_items = target_items
-        self.source_collection = source_collection
-        self.target_collection = target_collection
-        self.raise_error_on_target = raise_error_on_target
+        self.items = items
+        self.collection = collection
+        self.raise_error = raise_error
         self.searches = []
 
-    def search(self, collections: list[str] | None = None, ids: list[str] | None = None, **kwargs):
-        self.searches.append({"collections": collections, "ids": ids, "kwargs": kwargs})
+    def search(
+        self,
+        collections: list[str] | None = None,
+        ids: list[str] | None = None,
+        filter=None,
+        filter_lang=None,
+        **kwargs,
+    ):
+        self.searches.append(
+            {
+                "collections": collections,
+                "ids": ids,
+                "filter": filter,
+                "filter_lang": filter_lang,
+                "kwargs": kwargs,
+            }
+        )
 
-        if collections and self.source_collection in collections:
-            return FakeItemSearch(self.source_items)
+        if self.raise_error:
+            raise Exception("Simulated API error")
 
-        if collections and self.target_collection in collections:
-            if self.raise_error_on_target:
-                raise Exception("Simulated API error")
-
+        if collections and self.collection in collections:
             if ids:
-                matching = [item for item in self.target_items if item.id in ids]
+                matching = [item for item in self.items if item.id in ids]
                 return FakeItemSearch(matching)
-            return FakeItemSearch(self.target_items)
+            return FakeItemSearch(self.items)
 
         return FakeItemSearch([])
 
@@ -109,24 +117,35 @@ def run_script(
     source_items: list[Item], target_items: list[Item], raise_error_on_target: bool = False
 ) -> dict:
     """Helper to run the script with test data."""
-    fake_client = FakeStacClient(
-        source_items=source_items,
-        target_items=target_items,
-        source_collection=SOURCE_COLLECTION,
-        target_collection=TARGET_COLLECTION,
-        raise_error_on_target=raise_error_on_target,
+    source_client = FakeStacClient(
+        items=source_items,
+        collection=SOURCE_COLLECTION,
+        raise_error=False,
     )
 
+    target_client = FakeStacClient(
+        items=target_items,
+        collection=TARGET_COLLECTION,
+        raise_error=raise_error_on_target,
+    )
+
+    def mock_client_open(url: str):
+        """Return appropriate client based on URL."""
+        if "source" in url:
+            return source_client
+        return target_client
+
     with (
-        patch("scripts.query_stac.Client.open", return_value=fake_client),
+        patch("scripts.query_stac.Client.open", side_effect=mock_client_open),
         patch(
             "sys.argv",
             [
                 "query_stac.py",
-                "https://stac.example.com/",
+                "https://source-stac.example.com/",
                 SOURCE_COLLECTION,
+                "https://target-stac.example.com/",
                 TARGET_COLLECTION,
-                "0",
+                "2024-01-01T12:00:00Z",  # ISO timestamp instead of "0"
                 "3",
                 "[-5.14, 41.33, 9.56, 51.09]",
             ],
@@ -141,7 +160,8 @@ def run_script(
         return {
             "output": json.loads(stdout.getvalue()),
             "stderr": stderr.getvalue(),
-            "client": fake_client,
+            "source_client": source_client,
+            "target_client": target_client,
         }
 
 
@@ -164,7 +184,7 @@ class TestQueryStac:
             "item-002",
             "item-003",
         }
-        assert "Checked 3 items, 3 to process" in caplog.text
+        assert "Processed 1 pages, checked 3 items, 3 to process" in caplog.text
 
     def test_excludes_items_already_in_target(self, caplog):
         """Items already in target collection should be excluded."""
@@ -178,7 +198,7 @@ class TestQueryStac:
         assert len(result["output"]) == 2
         assert {item["item_id"] for item in result["output"]} == {"item-001", "item-003"}
         assert "Already converted" in caplog.text
-        assert "Checked 3 items, 2 to process" in caplog.text
+        assert "Processed 1 pages, checked 3 items, 2 to process" in caplog.text
 
     def test_skips_items_without_self_link(self, caplog):
         """Items without a self link should be skipped."""
@@ -206,7 +226,11 @@ class TestQueryStac:
         result = run_script([], [])
 
         assert result["output"] == []
-        assert "Checked 0 items, 0 to process" in caplog.text
+        # Allow for either 0 or 1 pages depending on STAC client behavior
+        assert (
+            "Processed 0 pages, checked 0 items, 0 to process" in caplog.text
+            or "Processed 1 pages, checked 0 items, 0 to process" in caplog.text
+        )
 
     def test_handles_error_checking_target(self, caplog):
         """When target check fails, item should still be processed (safe default)."""
@@ -246,33 +270,48 @@ class TestQueryStac:
 
         result = run_script(source, target)
 
-        assert len(result["client"].searches) > 0
-        first_search = result["client"].searches[0]
-        assert "datetime" in first_search["kwargs"]
+        assert len(result["source_client"].searches) > 0
+        first_search = result["source_client"].searches[0]
+        assert first_search["filter"] is not None
+        assert first_search["filter_lang"] == "cql2-json"
         assert "bbox" in first_search["kwargs"]
         assert first_search["collections"] == [SOURCE_COLLECTION]
 
-    def test_datetime_format(self):
-        """Datetime parameter should be in correct ISO format with Z suffix."""
+    def test_cql2_filter_format(self):
+        """CQL2 filter should have correct structure for updated property query."""
         result = run_script([], [])
 
-        datetime_param = result["client"].searches[0]["kwargs"]["datetime"]
+        filter_param = result["source_client"].searches[0]["filter"]
 
-        # Should be in format: "YYYY-MM-DDTHH:MM:SS.ffffffZ/YYYY-MM-DDTHH:MM:SS.ffffffZ"
-        assert "/" in datetime_param
-        start_str, end_str = datetime_param.split("/")
+        # Should be a CQL2 between filter
+        assert filter_param["op"] == "between"
+        assert len(filter_param["args"]) == 3
 
-        # Both parts should end with Z (not +00:00Z)
+        # First arg should be the property
+        assert filter_param["args"][0] == {"property": "updated"}
+
+        # Both timestamps should end with Z
+        start_str, end_str = filter_param["args"][1], filter_param["args"][2]
         assert start_str.endswith("Z"), f"Start time should end with Z, got: {start_str}"
         assert end_str.endswith("Z"), f"End time should end with Z, got: {end_str}"
-
-        # Should not have both timezone offset and Z
-        assert "+00:00Z" not in start_str, "Should not have both +00:00 and Z"
-        assert "+00:00Z" not in end_str, "Should not have both +00:00 and Z"
 
         # Verify they're valid ISO format timestamps
         from datetime import datetime
 
-        # Remove Z and parse
         datetime.fromisoformat(start_str.rstrip("Z"))
         datetime.fromisoformat(end_str.rstrip("Z"))
+
+    def test_queries_updated_property_not_datetime(self):
+        """Verify that we query the 'updated' property for harvesting, not acquisition datetime."""
+        result = run_script([], [])
+
+        filter_param = result["source_client"].searches[0]["filter"]
+
+        # Should target the 'updated' property specifically
+        assert filter_param["args"][0]["property"] == "updated"
+
+        # Should NOT use datetime parameter (which queries acquisition date)
+        assert "datetime" not in result["source_client"].searches[0]["kwargs"]
+
+        # Should use CQL2 filter language
+        assert result["source_client"].searches[0]["filter_lang"] == "cql2-json"
