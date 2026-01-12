@@ -283,19 +283,15 @@ class TestQueryStac:
 
         filter_param = result["source_client"].searches[0]["filter"]
 
-        # Should be a CQL2 t_intersects filter
-        assert filter_param["op"] == "t_intersects"
-        assert len(filter_param["args"]) == 2
+        # Should be a CQL2 between filter
+        assert filter_param["op"] == "between"
+        assert len(filter_param["args"]) == 3
 
         # First arg should be the property
         assert filter_param["args"][0] == {"property": "updated"}
 
-        # Second arg should be the interval
-        interval = filter_param["args"][1]["interval"]
-        assert len(interval) == 2
-
         # Both timestamps should end with Z
-        start_str, end_str = interval[0], interval[1]
+        start_str, end_str = filter_param["args"][1], filter_param["args"][2]
         assert start_str.endswith("Z"), f"Start time should end with Z, got: {start_str}"
         assert end_str.endswith("Z"), f"End time should end with Z, got: {end_str}"
 
