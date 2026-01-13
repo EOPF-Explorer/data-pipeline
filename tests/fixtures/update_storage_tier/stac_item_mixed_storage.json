@@ -21,7 +21,7 @@
           "ovh:storage_tier": "MIXED",
           "ovh:storage_tier_distribution": {
             "STANDARD": 450,
-            "GLACIER": 608
+            "STANDARD_IA": 608
           }
         }
       }

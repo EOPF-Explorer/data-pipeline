@@ -18,7 +18,7 @@
           "storage:platform": "OVHcloud",
           "storage:region": "de",
           "storage:requester_pays": false,
-          "ovh:storage_tier": "GLACIER"
+          "ovh:storage_tier": "STANDARD_IA"
         }
       }
     },

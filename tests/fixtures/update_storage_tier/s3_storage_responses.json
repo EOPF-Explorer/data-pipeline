@@ -1,6 +1,6 @@
 {
   "s3://bucket/data.zarr/measurements/reflectance": {
-    "tier": "GLACIER",
+    "tier": "STANDARD_IA",
     "distribution": null
   },
   "s3://bucket/data.zarr/quality/atmosphere": {
@@ -9,6 +9,6 @@
   },
   "s3://bucket/mixed.zarr/reflectance": {
     "tier": "MIXED",
-    "distribution": {"STANDARD": 450, "GLACIER": 608}
+    "distribution": {"STANDARD": 450, "STANDARD_IA": 608}
   }
 }

@@ -6,7 +6,7 @@ This directory contains JSON fixtures used by `test_update_stac_storage_tier.py`
 
 - **stac_item_before.json**: STAC item with existing `alternate.s3` (STANDARD tier)
 - **stac_item_legacy.json**: Legacy STAC item without `alternate.s3`
-- **stac_item_after_tier_change.json**: Expected result after tier change to GLACIER
+- **stac_item_after_tier_change.json**: Expected result after tier change to STANDARD_IA
 - **stac_item_mixed_storage.json**: STAC item with mixed storage tier distribution
 - **s3_storage_responses.json**: Mock S3 storage tier responses for different URLs
 
