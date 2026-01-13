@@ -10,8 +10,8 @@ Updates existing STAC items with current S3 storage tier metadata.
 
 ## Storage Tier Detection
 
-- **Single file**: Returns tier directly (e.g., `"GLACIER"`)
-- **Uniform Zarr**: All files same tier (e.g., `"GLACIER"` + distribution)
+- **Single file**: Returns tier directly (e.g., `"STANDARD_IA"`)
+- **Uniform Zarr**: All files same tier (e.g., `"STANDARD_IA"` + distribution)
 - **Mixed Zarr**: Different tiers detected (tier: `"MIXED"` + distribution breakdown)
 
 Distribution shows file counts per tier, based on sample of up to 100 files.
@@ -22,7 +22,7 @@ Distribution shows file counts per tier, based on sample of up to 100 files.
   "ovh:storage_tier": "MIXED",
   "ovh:storage_tier_distribution": {
     "STANDARD": 450,
-    "GLACIER": 608
+    "STANDARD_IA": 608
   }
 }
 ```
@@ -43,7 +43,7 @@ uv sync
 export AWS_ACCESS_KEY_ID="your-access-key"
 export AWS_SECRET_ACCESS_KEY="your-secret-key"
 export S3_ENDPOINT="https://s3.de.io.cloud.ovh.net"
-export STAC_API_URL="https://api.explorer.eopf.copernicus.eu/stac/"
+export STAC_API_URL="https://api.explorer.eopf.copernicus.eu/stac"
 export ITEM_URL="${STAC_API_URL}/collections/sentinel-2-l2a/items/ITEM_ID"
 ```
 
@@ -85,7 +85,7 @@ Processing: S2A_MSIL2A_20251008T100041_N0511_R122_T32TQM_20251008T122613
 **Mixed storage detected:**
 ```
 Processing: S2A_MSIL2A_20251208T100431_N0511_R122_T32TQQ_20251208T121910
-  reflectance: Mixed storage detected - {'STANDARD': 450, 'GLACIER': 608}
+  reflectance: Mixed storage detected - {'STANDARD': 450, 'STANDARD_IA': 608}
   Assets updated: 1
   ✅ Updated item (HTTP 201)
 ```
