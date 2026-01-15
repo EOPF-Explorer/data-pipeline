@@ -147,6 +147,7 @@ def run_conversion(
         compression_level=compression_level,
         enable_sharding=enable_sharding,
         validate_output=validate_output,
+        keep_scale_offset=False,  # Add missing required parameter
     )
 
     logger.info(f"✅ Conversion complete → {output_url}")
