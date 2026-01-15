@@ -195,7 +195,7 @@ def process_stac_item(
         )
         return {"processed": 0, "succeeded": 0, "failed": 0}
 
-    item_id = urlparse(stac_item_url).path.split("/")[-1]
+    item_id = urlparse(stac_item_url).path.split("/")[-1].replace(".json", "")
     logger.info(f"Processing: {item_id}")
     logger.info(f"Target storage class: {storage_class}")
 

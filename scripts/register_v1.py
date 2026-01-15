@@ -587,7 +587,8 @@ def run_registration(
     Raises:
         RuntimeError: If registration fails
     """
-    item_id = urlparse(source_url).path.rstrip("/").split("/")[-1]
+    path_segment = urlparse(source_url).path.rstrip("/").split("/")[-1]
+    item_id = os.path.splitext(path_segment)[0]
     geozarr_url = f"s3://{s3_output_bucket}/{s3_output_prefix}/{collection}/{item_id}.zarr"
 
     logger.info(f"📝 Registering: {item_id}")
