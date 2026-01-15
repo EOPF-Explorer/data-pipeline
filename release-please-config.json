@@ -17,7 +17,7 @@
         { "type": "build", "section": "Build System", "hidden": true },
         { "type": "ci", "section": "Continuous Integration", "hidden": true }
       ],
-      "group-pull-request-title-pattern": "chore:  release${component} ${version}",
+      "group-pull-request-title-pattern": "chore: release${component} ${version}",
       "pull-request-title-pattern": "chore: release${component} ${version}",
       "separate-pull-requests": false,
       "bump-minor-pre-major": true,
