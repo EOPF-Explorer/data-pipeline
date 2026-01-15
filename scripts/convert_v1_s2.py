@@ -89,12 +89,16 @@ def run_conversion(
     Returns:
         Output Zarr URL (s3://...)
     """
-    item_id = urlparse(source_url).path.rstrip("/").split("/")[-1]
+    item_id = urlparse(source_url).path.rstrip("/").split("/")[-1].replace(".json", "")
     logger.info(f"🔄 Converting (S2 Optimized): {item_id}")
     logger.info(f"   Collection: {collection}")
 
     # Resolve source: STAC item or direct Zarr URL
-    zarr_url = get_zarr_url(source_url) if "/items/" in source_url else source_url
+    zarr_url = (
+        get_zarr_url(source_url)
+        if ("/items/" in source_url or source_url.endswith(".json"))
+        else source_url
+    )
     logger.info(f"   Source: {zarr_url}")
 
     # Apply defaults
