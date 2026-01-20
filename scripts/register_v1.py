@@ -261,6 +261,41 @@ def add_thumbnail_asset(item: Item, raster_base: str, collection_id: str) -> Non
     logger.debug(f"Added thumbnail asset: {title}")
 
 
+def warm_thumbnail_cache(item: Item) -> None:
+    """Request thumbnail URL to warm the cache.
+
+    This makes a single request to the thumbnail asset URL, which triggers
+    titiler to generate and cache the thumbnail in Redis. Subsequent requests
+    will get instant responses from the cache.
+
+    Failures are logged but don't stop registration - cache warming is best-effort.
+    """
+    thumbnail = item.assets.get("thumbnail")
+    if not thumbnail or not thumbnail.href:
+        logger.debug("No thumbnail asset to warm cache")
+        return
+
+    thumbnail_url = thumbnail.href
+    logger.info(f"   🔥 Warming cache: {thumbnail_url}")
+
+    try:
+        # Make request with generous timeout (first generation can be slow)
+        with httpx.Client(timeout=60.0, follow_redirects=True) as http:
+            resp = http.get(thumbnail_url)
+            resp.raise_for_status()
+
+            # Log success with response size
+            size_kb = len(resp.content) / 1024
+            logger.info(f"   ✅ Cache warmed: {size_kb:.1f} KB thumbnail generated")
+
+    except httpx.TimeoutException:
+        logger.warning("   ⚠️  Cache warming timed out (thumbnail may be very large)")
+    except httpx.HTTPError as e:
+        logger.warning(f"   ⚠️  Cache warming failed: {e}")
+    except Exception as e:
+        logger.warning(f"   ⚠️  Cache warming error: {e}")
+
+
 def add_store_link(item: Item, geozarr_url: str) -> None:
     """Add store link pointing to the root Zarr location.
 
@@ -658,10 +693,13 @@ def run_registration(
     # 9. Add thumbnail asset for STAC browsers
     add_thumbnail_asset(item, raster_api_url, collection)
 
-    # 10. Add derived_from link to source item
+    # 10. Warm the thumbnail cache (best-effort, doesn't fail registration)
+    warm_thumbnail_cache(item)
+
+    # 11. Add derived_from link to source item
     add_derived_from_link(item, source_url)
 
-    # 11. Register to STAC API
+    # 12. Register to STAC API
     client = Client.open(stac_api_url)
     upsert_item(client, collection, item)
 
