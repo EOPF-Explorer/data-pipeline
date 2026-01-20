@@ -35,29 +35,55 @@ class STACCollectionManager:
 
     def get_collection_items(self, collection_id: str) -> list[dict[str, Any]]:
         """
-        Get all items from a collection.
+        Get all items from a collection by directly querying the STAC /search endpoint.
 
         Args:
             collection_id: ID of the collection
 
         Returns:
-            List of item dictionaries
+            List of item dictionaries (with at least 'id')
         """
+        import traceback
+
         click.echo(f"Fetching items from collection: {collection_id}")
         items = []
+        error_count = 0
 
         try:
-            catalog = Client.open(self.api_url)
-            search = catalog.search(collections=[collection_id], max_items=None)
+            # Use POST /search endpoint directly
+            url = f"{self.api_url}/search"
+            params = {
+                "collections": [collection_id],
+                "limit": 10000,  # adjust as needed for your server's max page size
+            }
+            response = self.session.post(url, json=params, timeout=60)
+            response.raise_for_status()
+            data = response.json()
+            features = data.get("features", [])
 
-            for item in search.items():
-                items.append(item.to_dict())
+            for item in features:
+                try:
+                    item_info = {
+                        "id": item.get("id"),
+                        "collection": item.get("collection"),
+                        "bbox": item.get("bbox"),
+                        "geometry": item.get("geometry"),
+                        "properties": item.get("properties"),
+                    }
+                    items.append(item_info)
+                except Exception as e:
+                    click.echo(f"⚠️  Skipping item due to error: {e}", err=True)
+                    traceback.print_exc()
+                    error_count += 1
 
             click.echo(f"Found {len(items)} items in collection {collection_id}")
+            if error_count > 0:
+                click.echo(f"⚠️  Skipped {error_count} items due to errors.", err=True)
             return items
 
         except Exception as e:
             click.echo(f"❌ Error fetching items: {e}", err=True)
+            traceback.print_exc()
             raise
 
     def delete_item(self, collection_id: str, item_id: str) -> bool:
