@@ -2,6 +2,24 @@
 
 A comprehensive CLI tool for managing STAC collections in the EOPF Explorer catalog using the Transaction API.
 
+## 🔄 Recent Improvements
+
+**Refactored Architecture**: This tool has been refactored for better maintainability and debugging. It now uses a separate `manage_item.py` module for all item-level operations, providing:
+
+- **Better debugging**: Test single items with `manage_item.py` before batch operations
+- **Code reuse**: All item operations in one place, shared between tools
+- **Easier testing**: Unit test item operations independently
+- **Same functionality**: All existing features preserved and enhanced
+
+**Recommended Workflow**: Always start with `manage_item.py` to debug individual items before using `manage_collections.py` for batch operations.
+
+## Tools Overview
+
+This package includes two complementary tools:
+
+1. **`manage_item.py`** - Single item management (debug, inspect, delete individual items)
+2. **`manage_collections.py`** - Collection management (batch operations, collection lifecycle)
+
 ## Features
 
 - **Clean Collections**: Remove all items from a collection
@@ -37,15 +55,104 @@ aws configure
 
 **Note**: S3 features (`--clean-s3`, `--s3-stats`) require these credentials. Other features work without them.
 
+## Quick Start
+
+### Working with Single Items (`manage_item.py`) 🆕
+
+Use `manage_item.py` to debug and manage individual items:
+
+```bash
+# View detailed item information
+uv run operator-tools/manage_item.py info sentinel-2-l2a-staging ITEM_ID
+
+# View item with S3 statistics
+uv run operator-tools/manage_item.py info sentinel-2-l2a-staging ITEM_ID --s3-stats
+
+# Debug S3 URL extraction (shows exact URLs found)
+uv run operator-tools/manage_item.py info sentinel-2-l2a-staging ITEM_ID --s3-stats --debug
+
+# Delete a single item (dry run)
+uv run operator-tools/manage_item.py delete sentinel-2-l2a-staging ITEM_ID --dry-run
+
+# Delete item with S3 cleanup
+uv run operator-tools/manage_item.py delete sentinel-2-l2a-staging ITEM_ID --clean-s3 -y
+```
+
+**Available Commands:**
+- `info` - Show detailed information about a specific item (with optional S3 stats and debug mode)
+- `delete` - Delete a single item (with optional S3 cleanup and validation)
+
+**Options:**
+- `--s3-stats` - Include S3 storage statistics
+- `--debug` - Show detailed debug information (S3 URL extraction, validation steps)
+- `--clean-s3` - Delete S3 data along with the STAC item
+- `--dry-run` - Preview what would be deleted
+- `--yes, -y` - Skip confirmation prompt
+
+**When to use `manage_item.py`:**
+- Debugging issues with specific items
+- Testing S3 operations before scaling to collections
+- Investigating S3 URL extraction problems
+- Examining detailed item metadata and S3 statistics
+
+### Working with Collections (`manage_collections.py`)
+
+Use `manage_collections.py` for batch operations and collection lifecycle management:
+
+```bash
+# View collection information
+uv run operator-tools/manage_collections.py info sentinel-2-l2a-staging
+
+# Clean collection (dry run)
+uv run operator-tools/manage_collections.py clean sentinel-2-l2a-staging --dry-run
+
+# Clean with S3 data deletion
+uv run operator-tools/manage_collections.py clean sentinel-2-l2a-staging --clean-s3 -y
+```
+
+**When to use `manage_collections.py`:**
+- Batch operations on all items in a collection
+- Collection creation, updates, and deletion
+- Viewing collection-wide statistics
+- Managing multiple collections
+
 ## Usage
 
 ### Basic Syntax
 
 ```bash
+# For single item operations
+uv run operator-tools/manage_item.py [OPTIONS] COMMAND [ARGS]
+
+# For collection operations
 uv run operator-tools/manage_collections.py [OPTIONS] COMMAND [ARGS]
 ```
 
+### Debugging Workflow
+
+**Recommended approach**: Debug single items before batch operations
+
+1. **Start with single item inspection:**
+   ```bash
+   uv run operator-tools/manage_item.py info collection-id item-id --s3-stats --debug
+   ```
+
+2. **Test operation on single item:**
+   ```bash
+   uv run operator-tools/manage_item.py delete collection-id item-id --clean-s3 --dry-run
+   ```
+
+3. **Once working, scale to collection:**
+   ```bash
+   uv run operator-tools/manage_collections.py clean collection-id --clean-s3 --dry-run
+   uv run operator-tools/manage_collections.py clean collection-id --clean-s3 -y
+   ```
+
+This workflow helps identify and fix issues at the item level before processing entire collections.
+
 ### Available Commands
+
+## Collection Operations (`manage_collections.py`)
 
 #### 1. `clean` - Remove All Items from a Collection
 
@@ -320,6 +427,91 @@ uv run operator-tools/manage_collections.py --api-url https://custom.stac.api/st
 
 **Default:** `https://api.explorer.eopf.copernicus.eu/stac`
 
+## Item Operations (`manage_item.py`) 🆕
+
+The `manage_item.py` tool provides commands for working with individual STAC items. Use this for debugging before batch operations.
+
+### `info` - Show Item Information
+
+Display detailed information about a specific STAC item, including optional S3 statistics.
+
+```bash
+# Basic item info
+uv run operator-tools/manage_item.py info sentinel-2-l2a-staging ITEM_ID
+
+# Include S3 storage statistics
+uv run operator-tools/manage_item.py info sentinel-2-l2a-staging ITEM_ID --s3-stats
+
+# With debug output (shows detailed URL extraction)
+uv run operator-tools/manage_item.py info sentinel-2-l2a-staging ITEM_ID --s3-stats --debug
+```
+
+**Output includes:**
+- Item ID and collection
+- Platform and instrument information
+- Assets list
+- **With `--s3-stats`:**
+  - S3 URLs extracted from assets
+  - Object count
+  - Total size in GB
+- **With `--debug`:**
+  - Exact S3 URLs found in each asset
+  - Which fields contain S3 URLs (`alternate.s3.href` vs main `href`)
+  - Detailed validation information
+
+**Use cases:**
+- Debugging why an item's S3 data isn't being found
+- Verifying S3 URLs are correctly formatted
+- Understanding how much S3 storage an item uses
+- Investigating issues before batch operations
+
+### `delete` - Delete a Single Item
+
+Delete a single STAC item, optionally cleaning up its S3 data with validation.
+
+```bash
+# Dry run (see what would be deleted)
+uv run operator-tools/manage_item.py delete sentinel-2-l2a-staging ITEM_ID --dry-run
+
+# Actually delete the item (prompts for confirmation)
+uv run operator-tools/manage_item.py delete sentinel-2-l2a-staging ITEM_ID
+
+# Delete item with S3 cleanup (validated)
+uv run operator-tools/manage_item.py delete sentinel-2-l2a-staging ITEM_ID --clean-s3 --dry-run
+uv run operator-tools/manage_item.py delete sentinel-2-l2a-staging ITEM_ID --clean-s3 -y
+```
+
+**Options:**
+- `--dry-run`: Show what would be deleted (including S3 object counts)
+- `--yes, -y`: Skip confirmation prompt
+- `--clean-s3`: Also delete S3 data with validation
+- `--s3-endpoint`: S3 endpoint URL (optional)
+
+**How it works (with `--clean-s3`):**
+1. Extracts all S3 URLs from the item's assets
+2. Deletes all S3 objects
+3. **Validates** - verifies all S3 objects were removed
+4. **Only if validation succeeds** - deletes the STAC item
+5. **If validation fails** - preserves the STAC item and shows warning
+
+**Example output:**
+```
+Deleting item: S2A_MSIL2A_20210917T115221_N0500_R123_T28RBS_20230110T165456
+  Deleting S3 data for S2A_MSIL2A_20210917T115221_N0500_R123_T28RBS_20230110T165456...
+    ✅ Deleted 1,247 S3 objects
+  ✅ Deleted STAC item S2A_MSIL2A_20210917T115221_N0500_R123_T28RBS_20230110T165456
+
+DELETION SUMMARY:
+✅ STAC item deleted successfully
+✅ S3 objects deleted: 1,247
+```
+
+**Use cases:**
+- Testing deletion on a single problematic item
+- Removing specific test items
+- Verifying S3 cleanup works before scaling to collection
+- Debugging deletion issues
+
 ## Common Workflows
 
 ### Create a New Collection
@@ -336,11 +528,30 @@ uv run operator-tools/manage_collections.py --api-url https://custom.stac.api/st
 
 ### Clean Up Test Data
 
-1. Check what would be deleted:
+**Recommended approach**: Debug with single items first, then scale to collection.
+
+1. **Identify a sample item to test:**
    ```bash
+   # List items in collection
+   uv run operator-tools/manage_collections.py info sentinel-2-l2a-staging
+   ```
+
+2. **Debug the single item:**
+   ```bash
+   # Check item details and S3 data
+   uv run operator-tools/manage_item.py info sentinel-2-l2a-staging ITEM_ID --s3-stats --debug
+
+   # Test deletion on single item
+   uv run operator-tools/manage_item.py delete sentinel-2-l2a-staging ITEM_ID --clean-s3 --dry-run
+   ```
+
+3. **If single item works, scale to collection:**
+   ```bash
+   # Check what would be deleted
    uv run operator-tools/manage_collections.py clean sentinel-2-l2a-staging --dry-run
    ```
-2. If satisfied, proceed with deletion:
+
+4. **If satisfied, proceed with deletion:**
    ```bash
    uv run operator-tools/manage_collections.py clean sentinel-2-l2a-staging
    ```
@@ -653,6 +864,56 @@ uv run operator-tools/manage_collections.py info sentinel-2-l2a-staging --s3-sta
 #      Objects: 1,247, Size: 2.34 GB
 ```
 
+### Debug Problematic Item with manage_item.py 🆕
+
+**Scenario**: Collection clean shows some items failing. Debug those specific items.
+
+```bash
+# Step 1: Try cleaning collection
+uv run operator-tools/manage_collections.py clean test-coll --clean-s3 -y
+
+# Output shows:
+# ⚠️  Item S2A_MSIL2A_... skipped due to S3 failures
+# ✅ Deleted 40 STAC items (3 skipped)
+
+# Step 2: Debug a specific failed item
+uv run operator-tools/manage_item.py info test-coll S2A_MSIL2A_... --s3-stats --debug
+
+# This shows:
+#   📄 Item: S2A_MSIL2A_...
+#      Found 4 S3 URLs
+#        • s3://bucket/product.zarr/measurements/reflectance
+#        • s3://bucket/product.zarr/quality/atmosphere
+#      ⚠️  No S3 URLs found
+# OR
+#      Objects: 1,247, Size: 2.34 GB
+
+# Step 3: Test deletion on this single item
+uv run operator-tools/manage_item.py delete test-coll S2A_MSIL2A_... --clean-s3 --dry-run
+
+# Step 4: Fix any issues (permissions, URLs, etc.)
+# Then delete the item
+uv run operator-tools/manage_item.py delete test-coll S2A_MSIL2A_... --clean-s3 -y
+
+# Step 5: Re-run collection clean for remaining items
+uv run operator-tools/manage_collections.py clean test-coll --clean-s3 -y
+```
+
+### Debug S3 URL Extraction (Collection Level)
+
+```bash
+# If S3 stats aren't showing up, use debug mode
+uv run operator-tools/manage_collections.py info sentinel-2-l2a-staging --s3-stats --debug
+
+# Shows per-item details:
+#   📄 Item: S2A_MSIL2A_20250831T103701...
+#      Found 4 S3 URLs
+#        • s3://bucket/product.zarr/measurements/reflectance
+#        • s3://bucket/product.zarr/quality/atmosphere
+#        ...
+#      Objects: 1,247, Size: 2.34 GB
+```
+
 ### Handle Partial Cleanup Failures
 
 ```bash
@@ -683,5 +944,6 @@ For issues or questions:
 
 ## Related Tools
 
+- `manage_item.py` - Single item management (debug and manage individual STAC items)
 - `submit_test_workflow_wh.py` - Submit STAC items for processing
 - `submit_stac_items_notebook.ipynb` - Interactive batch item submission

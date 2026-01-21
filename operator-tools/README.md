@@ -61,15 +61,50 @@ This makes the webhook endpoint available at `http://localhost:12000/samples`.
 
 ## Available Tools
 
-### 1. `manage_collections.py` - Collection Management Tool
+### 1. `manage_item.py` - Single Item Management Tool 🆕
 
-**NEW**: Comprehensive tool for managing STAC collections using the Transaction API, **now with validated S3 data cleanup and comprehensive storage statistics**.
+**Purpose**: Manage individual STAC items with full S3 operation support.
+
+**Use cases:**
+- Debug problematic items before processing collections
+- View detailed S3 statistics for a specific item
+- Delete single items with S3 cleanup and validation
+- Test item operations before scaling to collections
+
+**Quick Examples:**
+```bash
+# View item details with S3 stats
+uv run operator-tools/manage_item.py info sentinel-2-l2a-staging ITEM_ID --s3-stats
+
+# Debug S3 URL extraction
+uv run operator-tools/manage_item.py info sentinel-2-l2a-staging ITEM_ID --s3-stats --debug
+
+# Delete single item with S3 cleanup (dry run)
+uv run operator-tools/manage_item.py delete sentinel-2-l2a-staging ITEM_ID --clean-s3 --dry-run
+
+# Actually delete the item
+uv run operator-tools/manage_item.py delete sentinel-2-l2a-staging ITEM_ID --clean-s3 -y
+```
+
+**Key Features:**
+- Detailed item inspection with S3 statistics
+- Debug mode for S3 URL extraction troubleshooting
+- Delete with automatic S3 validation
+- Dry-run mode for safe testing
+
+**When to use**: Always start with `manage_item.py` to debug individual items before running batch operations with `manage_collections.py`.
+
+### 2. `manage_collections.py` - Collection Management Tool
+
+Comprehensive tool for managing STAC collections using the Transaction API, **now with validated S3 data cleanup and comprehensive storage statistics**.
+
+**🔄 Refactored**: Now uses `manage_item.py` for all item-level operations, making the code more maintainable and easier to debug.
 
 **Use cases:**
 - Clean collections (remove all items)
-- **[NEW]** Clean collections with validated S3 data deletion (removes items AND all S3 objects)
-- **[NEW]** View comprehensive S3 storage statistics (works with any S3 asset structure)
-- **[NEW]** Automatic validation ensures S3 cleanup succeeds before removing STAC items
+- Clean collections with validated S3 data deletion (removes items AND all S3 objects)
+- View comprehensive S3 storage statistics (works with any S3 asset structure)
+- Automatic validation ensures S3 cleanup succeeds before removing STAC items
 - Create/update collections from templates
 - Batch operations on multiple collections
 - View collection information and statistics
@@ -119,7 +154,7 @@ uv run operator-tools/manage_collections.py batch-create stac/
 
 **Documentation:** See [README_collections.md](./README_collections.md) for detailed usage and examples.
 
-### 2. `submit_test_workflow_wh.py` - HTTP Webhook Submission
+### 3. `submit_test_workflow_wh.py` - HTTP Webhook Submission
 
 Submits a single test STAC item via HTTP webhook endpoint.
 
@@ -144,7 +179,7 @@ Edit the script to change:
 - `collection`: Target collection name
 - `action`: Processing action (e.g., `convert-v1-s2-hp`, or `convert-v1-s2-hp`)
 
-### 3. `submit_stac_items_notebook.ipynb` - Interactive STAC Search & Submit
+### 4. `submit_stac_items_notebook.ipynb` - Interactive STAC Search & Submit
 
 Jupyter notebook for searching and batch submitting STAC items.
 
@@ -170,6 +205,65 @@ uv run jupyter notebook submit_stac_items_notebook.ipynb
 - Search and preview matching items
 - Submit all or selected items to the pipeline via HTTP webhook
 - Track submission success/failure
+
+## Debugging Workflow: When to Use Which Tool 🔍
+
+The refactored tools follow a "single item → collection" debugging workflow:
+
+### Step 1: Debug with `manage_item.py`
+
+When you encounter issues with collection operations, **always start by examining individual items**:
+
+```bash
+# 1. Identify a problematic item from collection operation output
+python manage_collections.py clean test-coll --clean-s3 -y
+# Output shows: "⚠️  Item S2A_MSIL2A_... skipped due to S3 failures"
+
+# 2. Debug that specific item
+python manage_item.py info test-coll S2A_MSIL2A_... --s3-stats --debug
+
+# This shows:
+# - Exact S3 URLs extracted from the item
+# - Which asset fields contain S3 URLs
+# - Object counts and sizes
+# - Any extraction or access issues
+
+# 3. Test deletion on single item
+python manage_item.py delete test-coll S2A_MSIL2A_... --clean-s3 --dry-run
+
+# 4. If dry-run looks good, actually delete
+python manage_item.py delete test-coll S2A_MSIL2A_... --clean-s3 -y
+```
+
+### Step 2: Scale to Collection
+
+Once individual items work correctly, apply to the entire collection:
+
+```bash
+# Preview collection operation
+python manage_collections.py clean test-coll --clean-s3 --dry-run
+
+# Execute if preview looks good
+python manage_collections.py clean test-coll --clean-s3 -y
+```
+
+### When to Use Each Tool
+
+| Tool | Use When | Example |
+|------|----------|---------|
+| `manage_item.py` | Debugging single items | `python manage_item.py info coll-id item-id --debug` |
+| `manage_item.py` | Testing operations on one item | `python manage_item.py delete coll-id item-id --dry-run` |
+| `manage_item.py` | Investigating S3 issues | `python manage_item.py info coll-id item-id --s3-stats` |
+| `manage_collections.py` | Viewing collection statistics | `python manage_collections.py info coll-id --s3-stats` |
+| `manage_collections.py` | Batch operations on all items | `python manage_collections.py clean coll-id --clean-s3 -y` |
+| `manage_collections.py` | Collection lifecycle management | `python manage_collections.py create/delete` |
+
+### Benefits of This Workflow
+
+✅ **Faster debugging** - Test on single items instead of entire collections
+✅ **Less risk** - Validate operations work before scaling
+✅ **Better visibility** - Debug mode shows exactly what's happening
+✅ **Easier fixes** - Fix item-level issues before batch processing
 
 ## S3 Data Management
 
@@ -409,17 +503,18 @@ If `--s3-stats` shows "No S3 data found":
 
 ## Best Practices
 
-1. **Test with single items first** - Use `submit_test_workflow_wh.py` before bulk submissions
-2. **Monitor processing** - Check pipeline logs/dashboards after submitting
-3. **Use appropriate collections** - Use test/staging collections for validation
-4. **Validate STAC URLs** - Ensure source URLs are accessible before submitting
-5. **Check webhook service** - Ensure the webhook service is running before submitting items
-6. **Always use `--dry-run` for S3 operations** - Preview deletions with object counts before executing
-7. **Check S3 statistics before cleanup** - Understand storage impact with `--s3-stats`
-8. **Review validation warnings** - Pay attention to items skipped due to S3 failures
-9. **Use debug mode when troubleshooting** - `--debug` shows detailed S3 URL extraction
-10. **Set AWS credentials** - Required for S3 features (cleanup and statistics)
-11. **Trust the validation** - If items are skipped, fix S3 issues before retrying
+1. **Debug with single items first** - Use `manage_item.py` to test and debug operations on individual items before using `manage_collections.py` on entire collections
+2. **Always use `--dry-run` for S3 operations** - Preview deletions with object counts before executing
+3. **Use `--debug` flag when troubleshooting** - Shows detailed S3 URL extraction and validation steps
+4. **Test with single items first** - Use `submit_test_workflow_wh.py` or `manage_item.py` before bulk submissions
+5. **Monitor processing** - Check pipeline logs/dashboards after submitting
+6. **Use appropriate collections** - Use test/staging collections for validation
+7. **Validate STAC URLs** - Ensure source URLs are accessible before submitting
+8. **Check webhook service** - Ensure the webhook service is running before submitting items
+9. **Check S3 statistics before cleanup** - Understand storage impact with `--s3-stats`
+10. **Review validation warnings** - Pay attention to items skipped due to S3 failures
+11. **Set AWS credentials** - Required for S3 features (cleanup and statistics)
+12. **Trust the validation** - If items are skipped, fix S3 issues before retrying
 
 ## Support
 
