@@ -9,6 +9,8 @@ The data pipeline processes STAC items from the EOPF STAC catalog. These tools a
 - Submit individual test items for debugging/validation
 - Search for STAC items by area and time range
 - Batch submit multiple items for processing
+- **[NEW]** Manage STAC collections with S3 data cleanup
+- **[NEW]** Monitor S3 storage usage across collections
 
 ## Setup
 
@@ -20,6 +22,22 @@ The data pipeline operates in two Kubernetes namespaces:
 - **`devseed`** - Production data pipeline
 
 Examples below use `devseed-staging`. For production, replace with `devseed`.
+
+### AWS/S3 Credentials (Required for S3 Features)
+
+For S3 cleanup and statistics features, configure AWS credentials:
+
+```bash
+# Option 1: Environment variables
+export AWS_ACCESS_KEY_ID="your-access-key"
+export AWS_SECRET_ACCESS_KEY="your-secret-key"
+export AWS_ENDPOINT_URL="https://s3.de.io.cloud.ovh.net"
+
+# Option 2: AWS CLI configuration
+aws configure
+```
+
+**Note**: S3 features (`--clean-s3`, `--s3-stats`) require these credentials. Other features work without them.
 
 ### Port Forwarding
 
@@ -45,10 +63,13 @@ This makes the webhook endpoint available at `http://localhost:12000/samples`.
 
 ### 1. `manage_collections.py` - Collection Management Tool
 
-**NEW**: Comprehensive tool for managing STAC collections using the Transaction API.
+**NEW**: Comprehensive tool for managing STAC collections using the Transaction API, **now with validated S3 data cleanup and comprehensive storage statistics**.
 
 **Use cases:**
 - Clean collections (remove all items)
+- **[NEW]** Clean collections with validated S3 data deletion (removes items AND all S3 objects)
+- **[NEW]** View comprehensive S3 storage statistics (works with any S3 asset structure)
+- **[NEW]** Automatic validation ensures S3 cleanup succeeds before removing STAC items
 - Create/update collections from templates
 - Batch operations on multiple collections
 - View collection information and statistics
@@ -57,6 +78,7 @@ This makes the webhook endpoint available at `http://localhost:12000/samples`.
 
 - STAC API access to `https://api.explorer.eopf.copernicus.eu/stac`
 - Write permissions for collection management operations
+- **[NEW]** AWS credentials for S3 features (cleanup and statistics)
 
 **Quick Start:**
 
@@ -67,9 +89,19 @@ uv run operator-tools/manage_collections.py --help
 # View collection info
 uv run operator-tools/manage_collections.py info sentinel-2-l2a-staging
 
+# View collection with S3 storage statistics
+uv run operator-tools/manage_collections.py info sentinel-2-l2a-staging --s3-stats
+
+# Debug S3 URL extraction
+uv run operator-tools/manage_collections.py info sentinel-2-l2a-staging --s3-stats --debug
+
 # Clean a collection (dry run first!)
 uv run operator-tools/manage_collections.py clean sentinel-2-l2a-staging --dry-run
 uv run operator-tools/manage_collections.py clean sentinel-2-l2a-staging
+
+# Clean collection AND delete S3 data (with validation)
+uv run operator-tools/manage_collections.py clean sentinel-2-l2a-staging --clean-s3 --dry-run
+uv run operator-tools/manage_collections.py clean sentinel-2-l2a-staging --clean-s3 -y
 
 # Create/update collection from template
 uv run operator-tools/manage_collections.py create stac/sentinel-2-l2a.json
@@ -78,6 +110,12 @@ uv run operator-tools/manage_collections.py create stac/sentinel-2-l2a.json --up
 # Batch create collections
 uv run operator-tools/manage_collections.py batch-create stac/
 ```
+
+**Key Features:**
+- **Validated S3 cleanup** - Verifies all S3 objects deleted before removing STAC items
+- **Comprehensive S3 support** - Handles individual files, directories, and Zarr stores
+- **Debug mode** - Detailed S3 URL extraction and validation info
+- **Safety first** - STAC items preserved if S3 cleanup fails
 
 **Documentation:** See [README_collections.md](./README_collections.md) for detailed usage and examples.
 
@@ -133,6 +171,120 @@ uv run jupyter notebook submit_stac_items_notebook.ipynb
 - Submit all or selected items to the pipeline via HTTP webhook
 - Track submission success/failure
 
+## S3 Data Management
+
+The collection management tool can now interact with S3 storage with comprehensive deletion and validation:
+
+### View S3 Storage Statistics
+
+Check how much S3 storage a collection is using:
+
+```bash
+# View collection info with S3 statistics
+uv run operator-tools/manage_collections.py info sentinel-2-l2a-staging --s3-stats
+
+# With debug output (shows detailed URL extraction)
+uv run operator-tools/manage_collections.py info sentinel-2-l2a-staging --s3-stats --debug
+```
+
+**Output includes:**
+- Sample S3 URLs from item assets
+- Object count and total size for sampled items
+- Estimated total storage across all items
+- Works with **any S3 asset structure** (individual files, Zarr stores, directories)
+
+**Example:**
+```
+S3 Storage Statistics:
+Sampling 5 of 43 items...
+
+  Sample S3 URLs:
+    • s3://bucket/product.zarr/measurements/reflectance
+    • s3://bucket/product.zarr/quality/atmosphere
+    ...
+
+  Sample statistics:
+    Objects: 6,235
+    Size: 11.7 GB
+
+  Estimated total (all 43 items):
+    Objects: ~53,621
+    Size: ~100.5 GB
+```
+
+### Clean S3 Data (with Validation)
+
+Remove both STAC items and their associated S3 data with automatic validation:
+
+```bash
+# Preview what would be deleted (RECOMMENDED FIRST STEP)
+uv run operator-tools/manage_collections.py clean sentinel-2-l2a-staging --clean-s3 --dry-run
+
+# Delete items and S3 data (with validation)
+uv run operator-tools/manage_collections.py clean sentinel-2-l2a-staging --clean-s3 -y
+```
+
+**⚠️ CRITICAL WARNING:**
+- S3 data deletion is **permanent** and **cannot be undone**
+- Each item may reference thousands of S3 objects
+- Always use `--dry-run` first to verify what will be deleted
+- Consider checking S3 statistics before cleanup to understand impact
+
+**How it works:**
+1. Extracts S3 URLs from each item's assets (`alternate.s3.href` or main `href`)
+2. Deletes all S3 objects (handles individual files, directories, and Zarr stores)
+3. **Validates deletion** - verifies all S3 objects were removed
+4. **Only if validation succeeds** - removes the STAC item from catalog
+5. **If validation fails** - preserves STAC item and shows warning
+
+**Validation & Safety:**
+- Counts S3 objects before and after deletion
+- Only removes STAC item if all S3 objects were deleted
+- Preserves STAC metadata if S3 cleanup fails
+- Reports skipped items with detailed warnings
+
+**Typical workflow:**
+```bash
+# 1. Check current storage
+uv run operator-tools/manage_collections.py info test-collection --s3-stats
+
+# 2. Preview deletion (see object counts)
+uv run operator-tools/manage_collections.py clean test-collection --clean-s3 --dry-run
+
+# Review output:
+#   Would delete 10 items
+#   S3 objects to delete: ~12,470
+#   Sample URLs shown for verification
+
+# 3. Proceed if safe
+uv run operator-tools/manage_collections.py clean test-collection --clean-s3 -y
+
+# Output:
+#   Deleting items and S3 data  [####################################]  10/10
+#   ✅ Deleted 10 STAC items
+#   ✅ Deleted 12,470 S3 objects
+
+# 4. Verify
+uv run operator-tools/manage_collections.py info test-collection
+```
+
+**When S3 Cleanup Fails:**
+
+If some items encounter S3 deletion failures:
+
+```
+⚠️  Item S2A_...: Failed to delete 3 S3 objects
+⚠️  Skipping STAC item deletion for S2A_... due to S3 cleanup failures
+
+✅ Deleted 8 STAC items (2 skipped due to S3 failures)
+✅ Deleted 10,123 S3 objects (3 failed)
+
+⚠️  WARNING: 2 items were NOT deleted from STAC catalog because
+    their S3 data could not be fully removed.
+```
+
+Fix the S3 access issues and re-run cleanup to process skipped items.
+
 ## Target Collections
 
 Common target collections for processing:
@@ -178,6 +330,83 @@ If issues persist, check the [platform-deploy troubleshooting guide](https://git
 - Check the date range format (`YYYY-MM-DDTHH:MM:SSZ`)
 - Confirm the collection exists: <https://stac.core.eopf.eodc.eu/>
 
+### S3 Access Errors
+
+```bash
+# Verify AWS credentials are set
+echo $AWS_ACCESS_KEY_ID
+echo $AWS_SECRET_ACCESS_KEY
+echo $AWS_ENDPOINT_URL
+
+# Or check AWS CLI configuration
+aws configure list
+
+# Set credentials if missing
+export AWS_ACCESS_KEY_ID="your-access-key"
+export AWS_SECRET_ACCESS_KEY="your-secret-key"
+export AWS_ENDPOINT_URL="https://s3.de.io.cloud.ovh.net"
+```
+
+### S3 Cleanup Taking Too Long
+
+If S3 cleanup is slow:
+- Each item can reference thousands of S3 objects
+- Large collections take time (progress bar shows status)
+- Consider using `--dry-run` first to estimate total objects
+- Typical deletion speed: ~100-500 objects/second
+- Large collections (100+ items) may take several minutes
+
+### Items Skipped Due to S3 Failures
+
+If cleanup shows "items skipped due to S3 failures":
+
+**Why this happens:**
+The script validates that all S3 objects are deleted before removing STAC items. If any S3 objects remain or deletion fails, the STAC item is preserved to prevent orphaned metadata.
+
+**Common causes:**
+- S3 permission issues (need `s3:DeleteObject`)
+- Network connectivity problems
+- Objects locked or with retention policies
+- Bucket access restrictions
+
+**How to fix:**
+1. Review specific error messages in the output
+2. Check AWS credentials and permissions
+3. Test bucket access: `aws s3 ls s3://bucket-name/`
+4. Fix the underlying S3 issue
+5. Re-run cleanup to process previously skipped items
+
+### No S3 Data Found
+
+If `--s3-stats` shows "No S3 data found":
+
+1. **Use debug mode to diagnose:**
+   ```bash
+   uv run operator-tools/manage_collections.py info collection-id --s3-stats --debug
+   ```
+
+   This shows:
+   - Exact S3 URLs extracted from each item
+   - Which asset fields contain S3 URLs
+   - Whether URLs are found in `alternate.s3.href` or main `href`
+
+2. **Verify assets have S3 URLs:**
+   ```bash
+   # Check a sample item manually
+   curl https://api.explorer.eopf.copernicus.eu/stac/collections/your-collection/items/item-id | jq '.assets'
+   ```
+
+   Look for S3 URLs in:
+   - `assets[*].alternate.s3.href` (preferred)
+   - `assets[*].href` starting with `s3://`
+
+3. **Check AWS credentials:**
+   ```bash
+   echo $AWS_ACCESS_KEY_ID
+   echo $AWS_SECRET_ACCESS_KEY
+   aws s3 ls  # Test AWS CLI access
+   ```
+
 ## Best Practices
 
 1. **Test with single items first** - Use `submit_test_workflow_wh.py` before bulk submissions
@@ -185,6 +414,12 @@ If issues persist, check the [platform-deploy troubleshooting guide](https://git
 3. **Use appropriate collections** - Use test/staging collections for validation
 4. **Validate STAC URLs** - Ensure source URLs are accessible before submitting
 5. **Check webhook service** - Ensure the webhook service is running before submitting items
+6. **Always use `--dry-run` for S3 operations** - Preview deletions with object counts before executing
+7. **Check S3 statistics before cleanup** - Understand storage impact with `--s3-stats`
+8. **Review validation warnings** - Pay attention to items skipped due to S3 failures
+9. **Use debug mode when troubleshooting** - `--debug` shows detailed S3 URL extraction
+10. **Set AWS credentials** - Required for S3 features (cleanup and statistics)
+11. **Trust the validation** - If items are skipped, fix S3 issues before retrying
 
 ## Support
 
