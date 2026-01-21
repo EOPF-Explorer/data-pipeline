@@ -25,9 +25,9 @@ class TestValidateStorageClass:
         """Test STANDARD is valid."""
         assert validate_storage_class("STANDARD") is True
 
-    def test_valid_glacier(self) -> None:
-        """Test GLACIER is valid."""
-        assert validate_storage_class("GLACIER") is True
+    def test_valid_standard_ia(self) -> None:
+        """Test STANDARD_IA is valid."""
+        assert validate_storage_class("STANDARD_IA") is True
 
     def test_valid_express_onezone(self) -> None:
         """Test EXPRESS_ONEZONE is valid."""
@@ -41,7 +41,7 @@ class TestValidateStorageClass:
 
     def test_valid_storage_classes_list(self) -> None:
         """Test all valid storage classes."""
-        valid_classes = ["STANDARD", "GLACIER", "EXPRESS_ONEZONE"]
+        valid_classes = ["STANDARD", "STANDARD_IA", "EXPRESS_ONEZONE"]
         for sc in valid_classes:
             assert validate_storage_class(sc) is True
 
@@ -234,32 +234,36 @@ class TestFilterPaths:
 
     def test_filter_paths_no_patterns(self, sample_zarr_paths: list[str]) -> None:
         """Test that all paths pass when no patterns specified."""
-        filtered, excluded = filter_paths(sample_zarr_paths)
-        assert filtered == sample_zarr_paths
+        # Convert paths to (key, storage_class) tuples
+        objects = [(path, "STANDARD") for path in sample_zarr_paths]
+        filtered, excluded = filter_paths(objects)
+        assert filtered == objects
         assert excluded == []
 
     def test_filter_paths_include_pattern(self, sample_zarr_paths: list[str]) -> None:
         """Test include pattern to select only 10m resolution bands."""
         zarr_prefix = "geozarr/S2A_test.zarr/"
+        objects = [(path, "STANDARD") for path in sample_zarr_paths]
         filtered, excluded = filter_paths(
-            sample_zarr_paths,
+            objects,
             include_patterns=["measurements/reflectance/r10m/*"],
             zarr_prefix=zarr_prefix,
         )
         assert len(filtered) == 3
-        assert all("r10m" in p for p in filtered)
+        assert all("r10m" in key for key, _ in filtered)
         assert len(excluded) == 6
 
     def test_filter_paths_exclude_pattern(self, sample_zarr_paths: list[str]) -> None:
         """Test exclude pattern to skip Zarr metadata files."""
         zarr_prefix = "geozarr/S2A_test.zarr/"
+        objects = [(path, "STANDARD") for path in sample_zarr_paths]
         filtered, excluded = filter_paths(
-            sample_zarr_paths,
+            objects,
             exclude_patterns=["*.zattrs", "*.zgroup", "*.zarray"],
             zarr_prefix=zarr_prefix,
         )
         assert len(filtered) == 5
-        assert all(not p.endswith((".zattrs", ".zgroup", ".zarray")) for p in filtered)
+        assert all(not key.endswith((".zattrs", ".zgroup", ".zarray")) for key, _ in filtered)
 
     def test_filter_paths_include_and_exclude(self, sample_zarr_paths: list[str]) -> None:
         """Test combined include (10m bands) and exclude (60m resolution)."""
@@ -270,14 +274,15 @@ class TestFilterPaths:
             f"{zarr_prefix}measurements/reflectance/r20m/B05/0",
             f"{zarr_prefix}measurements/reflectance/r60m/B01/0",
         ]
+        objects = [(path, "STANDARD") for path in paths]
         filtered, excluded = filter_paths(
-            paths,
+            objects,
             include_patterns=["measurements/reflectance/*"],
             exclude_patterns=["*/r60m/*"],
             zarr_prefix=zarr_prefix,
         )
         assert len(filtered) == 3
-        assert all("r60m" not in p for p in filtered)
+        assert all("r60m" not in key for key, _ in filtered)
 
     def test_filter_paths_multiple_include_patterns(self) -> None:
         """Test multiple include patterns (OR logic) for reflectance and quality."""
@@ -287,8 +292,9 @@ class TestFilterPaths:
             f"{zarr_prefix}measurements/quality/cloud_mask/0",
             f"{zarr_prefix}metadata/product_info/data",
         ]
+        objects = [(path, "STANDARD") for path in paths]
         filtered, excluded = filter_paths(
-            paths,
+            objects,
             include_patterns=["measurements/reflectance/*", "measurements/quality/*"],
             zarr_prefix=zarr_prefix,
         )
@@ -303,8 +309,9 @@ class TestFilterPaths:
             f"{zarr_prefix}measurements/reflectance/r20m/B05/0",
             f"{zarr_prefix}measurements/reflectance/r60m/B01/0",
         ]
+        objects = [(path, "STANDARD") for path in paths]
         filtered, excluded = filter_paths(
-            paths, include_patterns=["measurements/reflectance/r?0m/*"], zarr_prefix=zarr_prefix
+            objects, include_patterns=["measurements/reflectance/r?0m/*"], zarr_prefix=zarr_prefix
         )
         assert len(filtered) == 3  # All match r?0m pattern
 
@@ -322,22 +329,38 @@ class TestListObjects:
         mock_paginator = MagicMock()
         mock_client.get_paginator.return_value = mock_paginator
         # Default response simulating realistic S3 listing with multiple pages
+        # StorageClass is included in list_objects_v2 response
         mock_paginator.paginate.return_value = [
             {
                 "Contents": [
-                    {"Key": f"{self.PREFIX}measurements/reflectance/r10m/B02/0"},
-                    {"Key": f"{self.PREFIX}measurements/reflectance/r10m/B02/.zarray"},
+                    {
+                        "Key": f"{self.PREFIX}measurements/reflectance/r10m/B02/0",
+                        "StorageClass": "STANDARD",
+                    },
+                    {
+                        "Key": f"{self.PREFIX}measurements/reflectance/r10m/B02/.zarray",
+                        "StorageClass": "STANDARD",
+                    },
                 ]
             },
             {
                 "Contents": [
-                    {"Key": f"{self.PREFIX}measurements/reflectance/r10m/B03/0"},
+                    {
+                        "Key": f"{self.PREFIX}measurements/reflectance/r10m/B03/0",
+                        "StorageClass": "STANDARD_IA",
+                    },
                 ]
             },
             {
                 "Contents": [
-                    {"Key": f"{self.PREFIX}measurements/reflectance/r20m/B05/0"},
-                    {"Key": f"{self.PREFIX}measurements/reflectance/r20m/B05/.zarray"},
+                    {
+                        "Key": f"{self.PREFIX}measurements/reflectance/r20m/B05/0",
+                        "StorageClass": "STANDARD",
+                    },
+                    {
+                        "Key": f"{self.PREFIX}measurements/reflectance/r20m/B05/.zarray",
+                        "StorageClass": "STANDARD",
+                    },
                 ]
             },
         ]
@@ -364,11 +387,11 @@ class TestListObjects:
 
         assert len(objects) == 5
         assert objects == [
-            f"{self.PREFIX}measurements/reflectance/r10m/B02/0",
-            f"{self.PREFIX}measurements/reflectance/r10m/B02/.zarray",
-            f"{self.PREFIX}measurements/reflectance/r10m/B03/0",
-            f"{self.PREFIX}measurements/reflectance/r20m/B05/0",
-            f"{self.PREFIX}measurements/reflectance/r20m/B05/.zarray",
+            (f"{self.PREFIX}measurements/reflectance/r10m/B02/0", "STANDARD"),
+            (f"{self.PREFIX}measurements/reflectance/r10m/B02/.zarray", "STANDARD"),
+            (f"{self.PREFIX}measurements/reflectance/r10m/B03/0", "STANDARD_IA"),
+            (f"{self.PREFIX}measurements/reflectance/r20m/B05/0", "STANDARD"),
+            (f"{self.PREFIX}measurements/reflectance/r20m/B05/.zarray", "STANDARD"),
         ]
 
     def test_list_objects_handles_empty_prefix(self, mock_s3_client: MagicMock) -> None:
@@ -398,64 +421,65 @@ class TestChangeObjectStorageClass:
     OBJECT_KEY = "geozarr/S2A_test.zarr/measurements/reflectance/r10m/B02/0"
 
     def test_dry_run_mode(self) -> None:
-        """Test dry run queries storage class but doesn't modify objects."""
+        """Test dry run doesn't modify objects (no API calls needed)."""
         mock_client = MagicMock()
-        mock_client.head_object.return_value = {"StorageClass": "STANDARD"}
 
         success, current_class = change_object_storage_class(
-            mock_client, self.BUCKET, self.OBJECT_KEY, "GLACIER", dry_run=True
+            mock_client, self.BUCKET, self.OBJECT_KEY, "STANDARD", "STANDARD_IA", dry_run=True
         )
         assert success is True
         assert current_class == "STANDARD"
-        mock_client.head_object.assert_called_once_with(Bucket=self.BUCKET, Key=self.OBJECT_KEY)
+        # No head_object call needed - storage class already known from list_objects
+        mock_client.head_object.assert_not_called()
         mock_client.copy_object.assert_not_called()
 
     def test_already_correct_storage_class(self) -> None:
-        """Test skipping objects already in GLACIER storage class."""
+        """Test skipping objects already in STANDARD_IA storage class."""
         mock_client = MagicMock()
-        mock_client.head_object.return_value = {"StorageClass": "GLACIER"}
 
         success, current_class = change_object_storage_class(
-            mock_client, self.BUCKET, self.OBJECT_KEY, "GLACIER", dry_run=False
+            mock_client, self.BUCKET, self.OBJECT_KEY, "STANDARD_IA", "STANDARD_IA", dry_run=False
         )
         assert success is True
-        assert current_class == "GLACIER"
-        mock_client.head_object.assert_called_once_with(Bucket=self.BUCKET, Key=self.OBJECT_KEY)
+        assert current_class == "STANDARD_IA"
+        # No API calls needed - already correct storage class
+        mock_client.head_object.assert_not_called()
         mock_client.copy_object.assert_not_called()
 
     def test_change_storage_class_success(self) -> None:
-        """Test successful storage class change from STANDARD to GLACIER."""
+        """Test successful storage class change from STANDARD to STANDARD_IA."""
         mock_client = MagicMock()
-        mock_client.head_object.return_value = {"StorageClass": "STANDARD"}
 
         success, current_class = change_object_storage_class(
-            mock_client, self.BUCKET, self.OBJECT_KEY, "GLACIER", dry_run=False
+            mock_client, self.BUCKET, self.OBJECT_KEY, "STANDARD", "STANDARD_IA", dry_run=False
         )
         assert success is True
         assert current_class == "STANDARD"
+        # Only copy_object call needed to change storage class
+        mock_client.head_object.assert_not_called()
         mock_client.copy_object.assert_called_once_with(
             Bucket=self.BUCKET,
             Key=self.OBJECT_KEY,
             CopySource={"Bucket": self.BUCKET, "Key": self.OBJECT_KEY},
-            StorageClass="GLACIER",
+            StorageClass="STANDARD_IA",
             MetadataDirective="COPY",
         )
 
     def test_change_storage_class_error(self) -> None:
-        """Test handling S3 AccessDenied error."""
+        """Test handling S3 AccessDenied error during copy_object."""
         from botocore.exceptions import ClientError
 
         mock_client = MagicMock()
-        mock_client.head_object.side_effect = ClientError(
+        mock_client.copy_object.side_effect = ClientError(
             {"Error": {"Code": "AccessDenied", "Message": "Access Denied"}},
-            "HeadObject",
+            "CopyObject",
         )
 
         success, current_class = change_object_storage_class(
-            mock_client, self.BUCKET, self.OBJECT_KEY, "GLACIER", dry_run=False
+            mock_client, self.BUCKET, self.OBJECT_KEY, "STANDARD", "STANDARD_IA", dry_run=False
         )
         assert success is False
-        assert current_class is None
+        assert current_class == "STANDARD"  # Returns the known current class
 
 
 class TestProcessStacItem:
@@ -478,7 +502,7 @@ class TestProcessStacItem:
 
         stats = process_stac_item(
             self.STAC_API_URL,
-            "GLACIER",
+            "STANDARD_IA",
             dry_run=False,
             s3_endpoint=None,
         )
@@ -514,14 +538,14 @@ class TestProcessStacItem:
         }
         mock_httpx_client.return_value.__enter__.return_value.get.return_value = mock_response
         mock_list.return_value = [
-            "geozarr/S2A_MSIL2A.zarr/measurements/reflectance/r10m/B02/0",
-            "geozarr/S2A_MSIL2A.zarr/measurements/reflectance/r10m/B02/.zarray",
+            ("geozarr/S2A_MSIL2A.zarr/measurements/reflectance/r10m/B02/0", "STANDARD"),
+            ("geozarr/S2A_MSIL2A.zarr/measurements/reflectance/r10m/B02/.zarray", "STANDARD"),
         ]
         mock_change.return_value = (True, "STANDARD")
 
         stats = process_stac_item(
             self.STAC_API_URL,
-            "GLACIER",
+            "STANDARD_IA",
             dry_run=False,
             s3_endpoint=self.S3_ENDPOINT,
         )
@@ -557,7 +581,7 @@ class TestMain:
                 "--stac-item-url",
                 self.STAC_API_URL,
                 "--storage-class",
-                "GLACIER",
+                "STANDARD_IA",
                 "--dry-run",
             ]
         )
@@ -573,7 +597,7 @@ class TestMain:
                 "--stac-item-url",
                 self.STAC_API_URL,
                 "--storage-class",
-                "GLACIER",
+                "STANDARD_IA",
             ]
         )
         assert result == 1
@@ -588,7 +612,7 @@ class TestMain:
                 "--stac-item-url",
                 self.STAC_API_URL,
                 "--storage-class",
-                "GLACIER",
+                "STANDARD_IA",
                 "--include-pattern",
                 "measurements/reflectance/r10m/*",
                 "--exclude-pattern",
@@ -603,7 +627,7 @@ class TestMain:
             call_args[0]
         )
         assert stac_item_url == self.STAC_API_URL
-        assert storage_class == "GLACIER"
+        assert storage_class == "STANDARD_IA"
         assert dry_run is False
         assert s3_endpoint is None
         assert include_patterns == ["measurements/reflectance/r10m/*"]
