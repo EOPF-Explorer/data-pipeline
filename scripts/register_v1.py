@@ -131,7 +131,8 @@ def upsert_item(client: Client, collection_id: str, item: Item) -> None:
     if exists:
         # DELETE then POST (pgstac doesn't support PUT for items)
         delete_url = f"{base_url}/collections/{collection_id}/items/{item.id}"
-        client._stac_io.session.delete(delete_url, timeout=30)
+        delete_resp = client._stac_io.session.delete(delete_url, timeout=30)
+        delete_resp.raise_for_status()
         logger.info(f"Deleted existing {item.id}")
 
     # POST new/updated item
