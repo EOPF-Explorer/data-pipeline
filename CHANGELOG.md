@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.4.0 (2026-01-22)
+
+## What's Changed
+* feat(cache): add tile cache warming by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/87
+* fix: use the correct OVH Cloud storage class STANDARD_IA instead of GLacier and improve performance by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/62
+* feat: add s3 object cleanup while cleaning a STAC collection by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/89
+* feat: release datamodel v0.8.0 by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/90
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.3.0...v1.4.0
+
 ## 1.3.0 (2026-01-15)
 
 ## What's Changed
