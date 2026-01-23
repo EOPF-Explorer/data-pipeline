@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.4.1 (2026-01-23)
+
+## What's Changed
+* ci: remove publish and publish-docker jobs by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/91
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.4.0...v1.4.1
+
 ## 1.4.0 (2026-01-22)
 
 ## What's Changed
