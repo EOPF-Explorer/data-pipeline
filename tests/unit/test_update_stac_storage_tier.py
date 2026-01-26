@@ -148,7 +148,7 @@ class TestUpdateItemStorageTiers:
         assert updated == 1
         s3_info = stac_item_before.assets["reflectance"].extra_fields["alternate"]["s3"]
         assert s3_info["storage:scheme"]["tier"] == "MIXED"
-        assert s3_info["ovh:storage_tier_distribution"] == {"STANDARD": 450, "GLACIER": 608}
+        assert s3_info["storage:scheme"]["tier_distribution"] == {"STANDARD": 450, "GLACIER": 608}
 
     @patch("update_stac_storage_tier.get_s3_storage_info")
     def test_uniform_zarr_adds_distribution(self, mock_get_info, stac_item_before):
@@ -164,7 +164,7 @@ class TestUpdateItemStorageTiers:
         assert updated == 1
         s3_info = stac_item_before.assets["reflectance"].extra_fields["alternate"]["s3"]
         assert s3_info["storage:scheme"]["tier"] == "GLACIER"
-        assert s3_info["ovh:storage_tier_distribution"] == {"GLACIER": 100}
+        assert s3_info["storage:scheme"]["tier_distribution"] == {"GLACIER": 100}
 
     @patch("update_stac_storage_tier.get_s3_storage_info")
     def test_single_file_no_distribution(self, mock_get_info, stac_item_before):
@@ -180,7 +180,7 @@ class TestUpdateItemStorageTiers:
         assert updated == 1
         s3_info = stac_item_before.assets["reflectance"].extra_fields["alternate"]["s3"]
         assert s3_info["storage:scheme"]["tier"] == "GLACIER"
-        assert "ovh:storage_tier_distribution" not in s3_info
+        assert "tier_distribution" not in s3_info["storage:scheme"]
 
     @patch("update_stac_storage_tier.get_s3_storage_info")
     def test_removes_distribution_when_becomes_single_file(self, mock_get_info, stac_item_before):
@@ -192,7 +192,7 @@ class TestUpdateItemStorageTiers:
         if "storage:scheme" not in s3_info:
             s3_info["storage:scheme"] = {}
         s3_info["storage:scheme"]["tier"] = "MIXED"
-        s3_info["ovh:storage_tier_distribution"] = {"STANDARD": 450, "GLACIER": 608}
+        s3_info["storage:scheme"]["tier_distribution"] = {"STANDARD": 450, "GLACIER": 608}
 
         mock_get_info.return_value = {"tier": "GLACIER", "distribution": None}
 
@@ -203,7 +203,7 @@ class TestUpdateItemStorageTiers:
         assert updated == 1
         s3_info = stac_item_before.assets["reflectance"].extra_fields["alternate"]["s3"]
         assert s3_info["storage:scheme"]["tier"] == "GLACIER"
-        assert "ovh:storage_tier_distribution" not in s3_info
+        assert "tier_distribution" not in s3_info["storage:scheme"]
 
     @patch("update_stac_storage_tier.get_s3_storage_info")
     def test_skips_thumbnail_assets(self, mock_get_info, stac_item_before):

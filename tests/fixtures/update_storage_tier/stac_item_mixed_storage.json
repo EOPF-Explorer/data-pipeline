@@ -19,11 +19,11 @@
             "platform": "OVHcloud",
             "region": "de",
             "requester_pays": false,
-            "tier": "MIXED"
-          },
-          "ovh:storage_tier_distribution": {
-            "STANDARD": 450,
-            "STANDARD_IA": 608
+            "tier": "MIXED",
+            "tier_distribution": {
+              "STANDARD": 450,
+              "STANDARD_IA": 608
+            }
           }
         }
       }

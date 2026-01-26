@@ -103,7 +103,8 @@ def get_s3_storage_class(s3_url: str, s3_endpoint: str) -> str | None:
                 # Extract storage classes from list response (no need for additional head_object calls)
                 storage_classes = []
                 for obj in list_response["Contents"]:
-                    # StorageClass field is included in list_objects_v2 response
+                    # StorageClass field is included in list_objects_v2 response.
+                    # If not present for STANDARD tier, default to STANDARD
                     obj_class = obj.get("StorageClass", "STANDARD")
                     storage_classes.append(obj_class)
 

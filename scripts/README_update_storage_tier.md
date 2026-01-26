@@ -4,7 +4,7 @@ Updates existing STAC items with current S3 storage tier metadata.
 
 ## Modes
 
-**Update (default)**: Updates `ovh:storage_tier` for assets with existing `alternate.s3`
+**Update (default)**: Updates `storage:scheme.tier` for assets with existing `alternate.s3`
 
 **Add Missing (`--add-missing`)**: Creates `alternate.s3` structure for legacy items without it
 
@@ -19,10 +19,15 @@ Distribution shows file counts per tier, based on sample of up to 100 files.
 ### Example: Mixed Storage
 ```json
 {
-  "ovh:storage_tier": "MIXED",
-  "ovh:storage_tier_distribution": {
-    "STANDARD": 450,
-    "STANDARD_IA": 608
+  "storage:scheme": {
+    "platform": "OVHcloud",
+    "region": "de",
+    "requester_pays": false,
+    "tier": "MIXED",
+    "tier_distribution": {
+      "STANDARD": 450,
+      "STANDARD_IA": 608
+    }
   }
 }
 ```
@@ -30,8 +35,8 @@ Distribution shows file counts per tier, based on sample of up to 100 files.
 ## Notes
 
 - Thumbnail assets automatically skipped
-- Failed S3 queries remove existing `ovh:storage_tier` field
-- Distribution metadata only for Zarr directories
+- Failed S3 queries remove existing `storage:scheme.tier` field
+- Distribution metadata only for Zarr directories (stored in `storage:scheme.tier_distribution`)
 
 ## Setup
 

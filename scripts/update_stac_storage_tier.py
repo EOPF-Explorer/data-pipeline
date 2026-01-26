@@ -135,15 +135,15 @@ def update_item_storage_tiers(
             if tier:
                 storage_scheme["tier"] = tier
 
+            # Add distribution to scheme if storage is mixed or multiple files sampled
+            if storage_info["distribution"] is not None:
+                storage_scheme["tier_distribution"] = storage_info["distribution"]
+
             # Create alternate.s3 object
             s3_alternate = {
                 "href": s3_url,
                 "storage:scheme": storage_scheme,
             }
-
-            # Add distribution if storage is mixed or multiple files sampled
-            if storage_info["distribution"] is not None:
-                s3_alternate["ovh:storage_tier_distribution"] = storage_info["distribution"]
 
             # Preserve other alternate formats (e.g., alternate.xarray if it exists)
             existing_alternate["s3"] = s3_alternate
@@ -210,18 +210,20 @@ def update_item_storage_tiers(
                 scheme_changed = True
             assets_with_tier += 1
 
-            # Add or update distribution if available
+            # Add or update distribution in scheme if available
             if storage_info and storage_info.get("distribution") is not None:
-                s3_info["ovh:storage_tier_distribution"] = storage_info["distribution"]
+                if storage_scheme.get("tier_distribution") != storage_info["distribution"]:
+                    storage_scheme["tier_distribution"] = storage_info["distribution"]
+                    scheme_changed = True
                 if storage_tier == "MIXED":
                     logger.info(
                         f"  {asset_key}: Mixed storage detected - {storage_info['distribution']}"
                     )
             else:
-                # Remove distribution if no longer mixed
-                if "ovh:storage_tier_distribution" in s3_info:
-                    del s3_info["ovh:storage_tier_distribution"]
-                    asset_changed = True
+                # Remove distribution from scheme if no longer mixed
+                if "tier_distribution" in storage_scheme:
+                    del storage_scheme["tier_distribution"]
+                    scheme_changed = True
 
             if old_tier != storage_tier:
                 asset_changed = True
@@ -232,10 +234,10 @@ def update_item_storage_tiers(
                 del storage_scheme["tier"]
                 scheme_changed = True
                 logger.debug(f"  {asset_key}: removed tier (not available)")
-            # Also remove distribution if present
-            if "ovh:storage_tier_distribution" in s3_info:
-                del s3_info["ovh:storage_tier_distribution"]
-                asset_changed = True
+            # Also remove distribution from scheme if present
+            if "tier_distribution" in storage_scheme:
+                del storage_scheme["tier_distribution"]
+                scheme_changed = True
 
         # Update storage:scheme in s3_info if changed
         if scheme_changed:
