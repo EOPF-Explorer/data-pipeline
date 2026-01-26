@@ -5,16 +5,29 @@ STAC Collection Management Tool
 Manage collections in the EOPF STAC catalog using the Transaction API.
 Supports:
 - Cleaning collections (removing all items)
+- Cleaning collections with S3 data deletion
 - Creating/updating collections from templates
 - Deleting collections
+- Viewing S3 storage statistics
+
+This tool uses manage_item.py for all item-level operations.
 """
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
+import boto3
 import click
 import requests
+
+# Import item management functionality
+from manage_item import (
+    STACItemManager,
+    count_s3_objects_for_item,
+    extract_s3_urls_from_item,
+)
 from pystac import Collection
 from pystac_client import Client
 
@@ -32,6 +45,7 @@ class STACCollectionManager:
         self.api_url = api_url.rstrip("/")
         self.session = requests.Session()
         self.session.headers.update({"Content-Type": "application/json"})
+        self.item_manager = STACItemManager(api_url)
 
     def get_collection_items(self, collection_id: str) -> list[dict[str, Any]]:
         """
@@ -60,77 +74,153 @@ class STACCollectionManager:
             click.echo(f"❌ Error fetching items: {e}", err=True)
             raise
 
-    def delete_item(self, collection_id: str, item_id: str) -> bool:
+    def clean_collection(
+        self,
+        collection_id: str,
+        dry_run: bool = False,
+        clean_s3: bool = False,
+        s3_client: Any = None,
+    ) -> tuple[int, int, int]:
         """
-        Delete a single item from a collection using Transaction API.
-
-        Args:
-            collection_id: ID of the collection
-            item_id: ID of the item to delete
-
-        Returns:
-            True if successful, False otherwise
-        """
-        url = f"{self.api_url}/collections/{collection_id}/items/{item_id}"
-
-        try:
-            response = self.session.delete(url)
-            response.raise_for_status()
-            return True
-        except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 404:
-                click.echo(f"⚠️  Item {item_id} not found (already deleted?)", err=True)
-                return True  # Consider it success if already gone
-            click.echo(f"❌ Failed to delete item {item_id}: {e}", err=True)
-            return False
-        except Exception as e:
-            click.echo(f"❌ Error deleting item {item_id}: {e}", err=True)
-            return False
-
-    def clean_collection(self, collection_id: str, dry_run: bool = False) -> int:
-        """
-        Remove all items from a collection.
+        Remove all items from a collection, optionally cleaning S3 data.
 
         Args:
             collection_id: ID of the collection to clean
-            dry_run: If True, only show what would be deleted without actually deleting
+            dry_run: If True, only show what would be deleted
+            clean_s3: If True, also delete S3 data
+            s3_client: Boto3 S3 client (required if clean_s3=True)
 
         Returns:
-            Number of items deleted
+            Tuple of (items_deleted, s3_objects_deleted, s3_objects_failed)
         """
         click.echo(f"\n{'DRY RUN: ' if dry_run else ''}Cleaning collection: {collection_id}")
+        if clean_s3:
+            click.echo("  📦 S3 data will also be deleted")
 
         items = self.get_collection_items(collection_id)
 
         if not items:
             click.echo("✅ Collection is already empty")
-            return 0
+            return 0, 0, 0
 
         if dry_run:
-            click.echo(f"\nWould delete {len(items)} items:")
-            for item in items[:10]:  # Show first 10
+            click.echo(f"\nWould delete {len(items)} STAC items:")
+            for item in items[:10]:
                 click.echo(f"  - {item['id']}")
             if len(items) > 10:
                 click.echo(f"  ... and {len(items) - 10} more")
-            return 0
 
-        deleted_count = 0
-        failed_count = 0
+            if clean_s3 and s3_client:
+                click.echo(
+                    f"\nS3 data that would be deleted (sampling {min(5, len(items))} of {len(items)} items for preview):"
+                )
+                click.echo("NOTE: Actual deletion will process ALL items in the collection")
+
+                # Sample a few items to show S3 paths and count objects
+                total_preview_objects = 0
+                sample_size = min(5, len(items))
+
+                for idx, item in enumerate(items[:sample_size], 1):
+                    s3_urls = extract_s3_urls_from_item(item)
+                    if s3_urls:
+                        click.echo(f"\n  Sample item {idx}/{len(items)}: {item['id']}")
+                        # Count objects for this item
+                        item_objects = count_s3_objects_for_item(s3_client, s3_urls)
+                        total_preview_objects += item_objects
+                        click.echo(f"    S3 objects: {item_objects:,}")
+                        click.echo(f"    Asset URLs ({len(s3_urls)}):")
+                        for url in list(s3_urls)[:5]:
+                            click.echo(f"      • {url}")
+                        if len(s3_urls) > 5:
+                            click.echo(f"      ... and {len(s3_urls) - 5} more")
+
+                if sample_size > 0 and total_preview_objects > 0:
+                    click.echo(f"\n  {'─'*60}")
+                    click.echo(
+                        f"  Sample total: {total_preview_objects:,} S3 objects from {sample_size} items"
+                    )
+
+                    if len(items) > sample_size:
+                        # Estimate total for ALL items
+                        avg_objects = total_preview_objects / sample_size
+                        estimated_total = int(avg_objects * len(items))
+                        click.echo(
+                            f"  Estimated total for ALL {len(items)} items: ~{estimated_total:,} S3 objects"
+                        )
+                        click.echo(f"  {'─'*60}")
+                        click.echo(
+                            f"\n  ⚠️  IMPORTANT: Actual deletion will process ALL {len(items)} items"
+                        )
+                        click.echo(
+                            f"  ⚠️  This will delete approximately {estimated_total:,} S3 objects"
+                        )
+
+            return 0, 0, 0
+
+        # Actual deletion
+        items_deleted = 0
+        items_skipped = 0
+        s3_objects_deleted = 0
+        s3_objects_failed = 0
+
+        click.echo(f"\nProcessing ALL {len(items)} items in collection...")
+        if clean_s3:
+            click.echo("  • Deleting S3 objects for each item")
+            click.echo("  • Validating S3 deletion succeeded")
+            click.echo("  • Removing STAC item only if S3 cleanup succeeded")
+            click.echo("")
 
         with click.progressbar(
-            items, label="Deleting items", show_pos=True, show_percent=True
+            items,
+            label="Deleting items and S3 data" if clean_s3 else "Deleting items",
+            show_pos=True,
+            show_percent=True,
         ) as bar:
             for item in bar:
-                if self.delete_item(collection_id, item["id"]):
-                    deleted_count += 1
-                else:
-                    failed_count += 1
+                item_id = item["id"]
 
-        click.echo(
-            f"\n✅ Deleted {deleted_count} items"
-            + (f" (failed: {failed_count})" if failed_count > 0 else "")
-        )
-        return deleted_count
+                # Use item manager's delete_item method
+                success, s3_deleted, s3_failed = self.item_manager.delete_item(
+                    collection_id=collection_id,
+                    item_id=item_id,
+                    clean_s3=clean_s3,
+                    s3_client=s3_client,
+                    item_dict=item,
+                    validate_s3=True,
+                )
+
+                if success:
+                    items_deleted += 1
+                else:
+                    items_skipped += 1
+
+                s3_objects_deleted += s3_deleted
+                s3_objects_failed += s3_failed
+
+        # Summary
+        click.echo("\n" + "=" * 60)
+        click.echo("CLEANUP SUMMARY")
+        click.echo("=" * 60)
+        click.echo(f"Total items processed: {len(items)}")
+        click.echo(f"✅ STAC items deleted: {items_deleted}")
+        if items_skipped > 0:
+            click.echo(f"⏭️  STAC items skipped: {items_skipped} (due to S3 failures)")
+
+        if clean_s3:
+            click.echo(f"\n✅ S3 objects deleted: {s3_objects_deleted:,}")
+            if s3_objects_failed > 0:
+                click.echo(f"❌ S3 objects failed: {s3_objects_failed:,}")
+
+            if items_skipped > 0:
+                click.echo(
+                    f"\n⚠️  WARNING: {items_skipped} items were NOT deleted from STAC catalog"
+                )
+                click.echo("    because their S3 data could not be fully removed.")
+                click.echo("    Fix S3 access issues and re-run to process these items.")
+
+        click.echo("=" * 60)
+
+        return items_deleted, s3_objects_deleted, s3_objects_failed
 
     def delete_collection(self, collection_id: str) -> bool:
         """
@@ -246,6 +336,9 @@ class STACCollectionManager:
             return None
 
 
+# === CLI Commands ===
+
+
 @click.group()
 @click.option(
     "--api-url",
@@ -274,25 +367,68 @@ def cli(ctx: click.Context, api_url: str) -> None:
     is_flag=True,
     help="Skip confirmation prompt",
 )
+@click.option(
+    "--clean-s3",
+    is_flag=True,
+    help="Also delete S3 data (Zarr stores) referenced by items",
+)
+@click.option(
+    "--s3-endpoint",
+    help="S3 endpoint URL (optional, uses AWS_ENDPOINT_URL env var if not specified)",
+)
 @click.pass_context
-def clean(ctx: click.Context, collection_id: str, dry_run: bool, yes: bool) -> None:
+def clean(
+    ctx: click.Context,
+    collection_id: str,
+    dry_run: bool,
+    yes: bool,
+    clean_s3: bool,
+    s3_endpoint: str | None,
+) -> None:
     """
     Remove all items from a collection.
 
     Example:
-        manage_collections.py clean sentinel-2-l2a-staging
         manage_collections.py clean sentinel-2-l2a-staging --dry-run
+        manage_collections.py clean sentinel-2-l2a-staging
+        manage_collections.py clean sentinel-2-l2a-staging --clean-s3
     """
     manager: STACCollectionManager = ctx.obj["manager"]
 
+    # Confirmation prompt
     if not dry_run and not yes:
-        click.confirm(
-            f"⚠️  This will delete ALL items from collection '{collection_id}'. Continue?",
-            abort=True,
-        )
+        warning = f"⚠️  This will delete ALL items from collection '{collection_id}'."
+        if clean_s3:
+            warning += (
+                "\n⚠️  This will also DELETE ALL S3 DATA (Zarr stores) referenced by these items!"
+            )
+            warning += "\n⚠️  This action CANNOT be undone!"
+        click.confirm(f"{warning}\n\nContinue?", abort=True)
 
     try:
-        manager.clean_collection(collection_id, dry_run=dry_run)
+        # Initialize S3 client if needed
+        s3_client = None
+        if clean_s3:
+            s3_config = {}
+            if s3_endpoint:
+                s3_config["endpoint_url"] = s3_endpoint
+            elif os.getenv("AWS_ENDPOINT_URL"):
+                endpoint = os.getenv("AWS_ENDPOINT_URL")
+                if endpoint is not None:
+                    s3_config["endpoint_url"] = endpoint
+
+            if "endpoint_url" in s3_config:
+                s3_client = boto3.client("s3", endpoint_url=s3_config["endpoint_url"])
+            else:
+                s3_client = boto3.client("s3")
+            click.echo(
+                f"📦 S3 client initialized (endpoint: {s3_config.get('endpoint_url', 'default')})"
+            )
+
+        manager.clean_collection(
+            collection_id, dry_run=dry_run, clean_s3=clean_s3, s3_client=s3_client
+        )
+
     except Exception as e:
         click.echo(f"❌ Operation failed: {e}", err=True)
         raise click.Abort() from e
@@ -331,9 +467,10 @@ def create(ctx: click.Context, template_path: Path, update: bool) -> None:
     click.echo(f"Title: {collection_data.get('title', 'N/A')}")
     click.echo(f"Action: {action}")
 
-    if not click.confirm(f"\nProceed to {action} collection?"):
-        click.echo("Aborted.")
-        return
+    if not update:
+        click.confirm("\nCreate this collection?", abort=True)
+    else:
+        click.confirm("\nUpdate this collection?", abort=True)
 
     success = manager.create_or_update_collection(collection_data, update=update)
 
@@ -348,59 +485,53 @@ def create(ctx: click.Context, template_path: Path, update: bool) -> None:
     is_flag=True,
     help="Update existing collections instead of creating new",
 )
-@click.option(
-    "--pattern",
-    default="*.json",
-    help="File pattern to match",
-    show_default=True,
-)
 @click.pass_context
-def batch_create(ctx: click.Context, directory: Path, update: bool, pattern: str) -> None:
+def batch_create(ctx: click.Context, directory: Path, update: bool) -> None:
     """
-    Create or update multiple collections from template files in a directory.
+    Create or update multiple collections from a directory of templates.
 
-    Example:
+    DIRECTORY should contain JSON files with STAC Collections.
+
+    Examples:
         manage_collections.py batch-create stac/
         manage_collections.py batch-create stac/ --update
     """
     manager: STACCollectionManager = ctx.obj["manager"]
 
-    template_files = list(directory.glob(pattern))
+    # Find all JSON files
+    json_files = list(directory.glob("*.json"))
 
-    if not template_files:
-        click.echo(f"❌ No template files found matching '{pattern}' in {directory}")
-        return
+    if not json_files:
+        click.echo(f"❌ No JSON files found in {directory}", err=True)
+        raise click.Abort()
 
-    click.echo(f"Found {len(template_files)} template files:")
-    for template_file in template_files:
-        click.echo(f"  - {template_file.name}")
-
-    action = "update" if update else "create"
-    if not click.confirm(f"\nProceed to {action} {len(template_files)} collections?"):
-        click.echo("Aborted.")
-        return
+    click.echo(f"Found {len(json_files)} JSON files in {directory}")
+    click.confirm("\nProcess all files?", abort=True)
 
     success_count = 0
-    failed_count = 0
+    fail_count = 0
 
-    for template_file in template_files:
+    for json_file in json_files:
         click.echo(f"\n{'='*60}")
-        click.echo(f"Processing: {template_file.name}")
+        click.echo(f"Processing: {json_file.name}")
 
-        collection_data = manager.load_collection_from_template(template_file)
+        collection_data = manager.load_collection_from_template(json_file)
         if not collection_data:
-            failed_count += 1
+            fail_count += 1
             continue
+
+        collection_id = collection_data["id"]
+        click.echo(f"Collection ID: {collection_id}")
 
         if manager.create_or_update_collection(collection_data, update=update):
             success_count += 1
         else:
-            failed_count += 1
+            fail_count += 1
 
     click.echo(f"\n{'='*60}")
-    click.echo(f"✅ Successfully processed: {success_count}")
-    if failed_count > 0:
-        click.echo(f"❌ Failed: {failed_count}")
+    click.echo(f"✅ Success: {success_count}")
+    if fail_count > 0:
+        click.echo(f"❌ Failed: {fail_count}")
 
 
 @cli.command()
@@ -408,36 +539,28 @@ def batch_create(ctx: click.Context, directory: Path, update: bool, pattern: str
 @click.option(
     "--clean-first",
     is_flag=True,
-    help="Remove all items from the collection before deleting it",
-)
-@click.option(
-    "--yes",
-    "-y",
-    is_flag=True,
-    help="Skip confirmation prompt",
+    help="Clean all items from collection before deleting it",
 )
 @click.pass_context
-def delete(ctx: click.Context, collection_id: str, clean_first: bool, yes: bool) -> None:
+def delete(ctx: click.Context, collection_id: str, clean_first: bool) -> None:
     """
     Delete a collection.
 
-    Note: Some STAC servers require the collection to be empty before deletion.
-    Use --clean-first to automatically remove all items first.
-
-    Examples:
+    Example:
         manage_collections.py delete sentinel-2-l2a-staging
         manage_collections.py delete sentinel-2-l2a-staging --clean-first
-        manage_collections.py delete sentinel-2-l2a-staging --clean-first --yes
     """
     manager: STACCollectionManager = ctx.obj["manager"]
 
-    if not yes:
-        click.confirm(
-            f"⚠️  This will permanently delete collection '{collection_id}'. Continue?",
-            abort=True,
-        )
-
     try:
+        # Confirmation prompt
+        warning = f"⚠️  This will DELETE collection '{collection_id}'."
+        if clean_first:
+            warning += "\n⚠️  This will first remove all items from the collection."
+        warning += "\n⚠️  This action CANNOT be undone!"
+
+        click.confirm(f"{warning}\n\nContinue?", abort=True)
+
         # Clean collection first if requested
         if clean_first:
             click.echo("\n📋 Cleaning collection before deletion...")
@@ -457,13 +580,35 @@ def delete(ctx: click.Context, collection_id: str, clean_first: bool, yes: bool)
 
 @cli.command()
 @click.argument("collection_id")
+@click.option(
+    "--s3-stats",
+    is_flag=True,
+    help="Include S3 storage statistics (samples first 5 items)",
+)
+@click.option(
+    "--s3-endpoint",
+    help="S3 endpoint URL (optional, uses AWS_ENDPOINT_URL env var if not specified)",
+)
+@click.option(
+    "--debug",
+    is_flag=True,
+    help="Show detailed debug information about S3 URL extraction",
+)
 @click.pass_context
-def info(ctx: click.Context, collection_id: str) -> None:
+def info(
+    ctx: click.Context,
+    collection_id: str,
+    s3_stats: bool,
+    s3_endpoint: str | None,
+    debug: bool,
+) -> None:
     """
     Show information about a collection.
 
     Example:
         manage_collections.py info sentinel-2-l2a-staging
+        manage_collections.py info sentinel-2-l2a-staging --s3-stats
+        manage_collections.py info sentinel-2-l2a-staging --s3-stats --debug
     """
     manager: STACCollectionManager = ctx.obj["manager"]
     api_url: str = ctx.obj["api_url"]
@@ -486,6 +631,88 @@ def info(ctx: click.Context, collection_id: str) -> None:
             click.echo(f"Spatial extent: {collection.extent.spatial.bboxes}")
         if collection.extent and collection.extent.temporal:
             click.echo(f"Temporal extent: {collection.extent.temporal.intervals}")
+
+        # S3 storage statistics
+        if s3_stats and items:
+            click.echo(f"\n{'─'*60}")
+            click.echo("S3 Storage Statistics:")
+
+            # Initialize S3 client
+            s3_config = {}
+            if s3_endpoint:
+                s3_config["endpoint_url"] = s3_endpoint
+            elif os.getenv("AWS_ENDPOINT_URL"):
+                endpoint = os.getenv("AWS_ENDPOINT_URL")
+                if endpoint is not None:
+                    s3_config["endpoint_url"] = endpoint
+
+            try:
+                if "endpoint_url" in s3_config:
+                    s3_client = boto3.client("s3", endpoint_url=s3_config["endpoint_url"])
+                else:
+                    s3_client = boto3.client("s3")
+
+                # Sample first few items
+                sample_size = min(5, len(items))
+                sample_items = items[:sample_size]
+
+                total_objects = 0
+                total_size = 0
+                items_with_s3 = 0
+                items_without_s3 = 0
+                sample_urls = []
+
+                click.echo(f"Sampling {sample_size} of {len(items)} items...")
+
+                for item in sample_items:
+                    # Use item manager's method to get S3 stats
+                    obj_count, size, urls = manager.item_manager.get_item_s3_stats(
+                        item, s3_client, debug=debug
+                    )
+
+                    if obj_count > 0:
+                        items_with_s3 += 1
+                        total_objects += obj_count
+                        total_size += size
+                        sample_urls.extend(urls[:2])  # Keep a few sample URLs
+                    else:
+                        items_without_s3 += 1
+
+                if debug:
+                    click.echo("\n  Summary of sampled items:")
+                    click.echo(f"    Items with S3 data: {items_with_s3}")
+                    click.echo(f"    Items without S3 data: {items_without_s3}")
+
+                if items_with_s3 > 0:
+                    click.echo("\n  Sample S3 URLs:")
+                    for url in sample_urls[:5]:
+                        click.echo(f"    • {url}")
+                    if len(sample_urls) > 5:
+                        click.echo(f"    ... and {len(sample_urls) - 5} more")
+
+                    click.echo("\n  Sample statistics:")
+                    click.echo(f"    Objects: {total_objects:,}")
+                    click.echo(f"    Size: {total_size / (1024**3):.2f} GB")
+
+                    # Estimate total
+                    if len(items) > sample_size:
+                        avg_objects = total_objects / items_with_s3
+                        avg_size = total_size / items_with_s3
+                        est_objects = int(avg_objects * len(items))
+                        est_size = avg_size * len(items)
+                        click.echo(f"\n  Estimated total (all {len(items)} items):")
+                        click.echo(f"    Objects: ~{est_objects:,}")
+                        click.echo(f"    Size: ~{est_size / (1024**3):.2f} GB")
+                else:
+                    click.echo("  ⚠️  No S3 data found in sampled items")
+                    if debug:
+                        click.echo("\n  Troubleshooting tips:")
+                        click.echo("    • Check if items have 'alternate.s3.href' in their assets")
+                        click.echo("    • Verify that main asset 'href' fields contain s3:// URLs")
+                        click.echo("    • Run with --debug flag for detailed URL extraction info")
+
+            except Exception as e:
+                click.echo(f"  ⚠️  Could not fetch S3 statistics: {e}", err=True)
 
         click.echo(f"{'='*60}\n")
 

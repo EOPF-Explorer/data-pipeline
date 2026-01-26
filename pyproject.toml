@@ -7,7 +7,7 @@ allow-direct-references = true
 
 [project]
 name = "data-pipeline"
-version = "1.2.3"
+version = "1.4.0"
 description = "Minimal event-driven Argo Workflows pipeline for Sentinel-2 GeoZarr conversion and STAC registration"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -34,7 +34,7 @@ dependencies = [
     "tenacity>=8.0.0",
     "morecantile>=5.0.0",
     "cf-xarray>=0.9.0",
-    "eopf-geozarr @ git+https://github.com/EOPF-Explorer/data-model.git@v0.6.1",
+    "eopf-geozarr @ git+https://github.com/EOPF-Explorer/data-model.git@v0.8.0",
     "requests",
 ]
 

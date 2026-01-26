@@ -8,6 +8,10 @@ on:
       - '*'
   pull_request:
   workflow_dispatch:
+  workflow_run:
+    workflows: ["release-please"]
+    types:
+      - completed
 
 permissions:
   contents: read
