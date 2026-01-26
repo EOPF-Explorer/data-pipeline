@@ -65,13 +65,16 @@ def add_alternate_s3_to_item(item_dict: dict, s3_endpoint: str) -> dict:
         if not s3_url:
             continue
 
-        # Add alternate
+        # Add alternate (v2.0 format)
+        storage_scheme = {
+            "platform": "OVHcloud",
+            "region": region,
+            "requester_pays": False,
+        }
         asset["alternate"] = {
             "s3": {
                 "href": s3_url,
-                "storage:platform": "OVHcloud",
-                "storage:region": region,
-                "storage:requester_pays": False,
+                "storage:scheme": storage_scheme,
             }
         }
         modified_count += 1
@@ -110,8 +113,10 @@ def main():
             if "alternate" in asset:
                 s3_alt = asset["alternate"]["s3"]
                 print(f"  S3 href: {s3_alt['href']}")
-                print(f"  Storage platform: {s3_alt['storage:platform']}")
-                print(f"  Storage region: {s3_alt['storage:region']}")
+                if "storage:scheme" in s3_alt:
+                    scheme = s3_alt["storage:scheme"]
+                    print(f"  Storage platform: {scheme.get('platform', 'N/A')}")
+                    print(f"  Storage region: {scheme.get('region', 'N/A')}")
             break
 
     # Show extensions

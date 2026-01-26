@@ -15,10 +15,12 @@
       "alternate": {
         "s3": {
           "href": "s3://bucket/data.zarr/measurements/reflectance",
-          "storage:platform": "OVHcloud",
-          "storage:region": "de",
-          "storage:requester_pays": false,
-          "ovh:storage_tier": "MIXED",
+          "storage:scheme": {
+            "platform": "OVHcloud",
+            "region": "de",
+            "requester_pays": false,
+            "tier": "MIXED"
+          },
           "ovh:storage_tier_distribution": {
             "STANDARD": 450,
             "STANDARD_IA": 608

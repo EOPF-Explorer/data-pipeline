@@ -375,7 +375,7 @@ def add_alternate_s3_assets(item: Item, s3_endpoint: str) -> None:
         # Query storage class for this asset
         storage_tier = get_s3_storage_class(s3_url, s3_endpoint)
 
-        # Add alternate with storage extension fields
+        # Add alternate with storage extension fields (v2.0 format)
         if not hasattr(asset, "extra_fields"):
             asset.extra_fields = {}
 
@@ -389,19 +389,26 @@ def add_alternate_s3_assets(item: Item, s3_endpoint: str) -> None:
         if not isinstance(existing_s3, dict):
             existing_s3 = {}
 
+        # Get or create storage:scheme object (v2.0 format)
+        storage_scheme = existing_s3.get("storage:scheme", {})
+        if not isinstance(storage_scheme, dict):
+            storage_scheme = {}
+
+        # Update scheme fields
+        storage_scheme["platform"] = "OVHcloud"
+        storage_scheme["region"] = region
+        storage_scheme["requester_pays"] = False
+
+        # Add tier to scheme (standard field in v2.0)
+        if storage_tier:
+            storage_scheme["tier"] = storage_tier
+
         # Update s3 alternate (preserving any existing fields)
         s3_alternate = {
             **existing_s3,  # Preserve existing fields
             "href": s3_url,
-            "storage:platform": "OVHcloud",
-            "storage:region": region,
-            "storage:requester_pays": False,
+            "storage:scheme": storage_scheme,
         }
-
-        # Add storage tier as a custom field (not part of storage extension spec)
-        # Using ovh: prefix to indicate vendor-specific extension
-        if storage_tier:
-            s3_alternate["ovh:storage_tier"] = storage_tier
 
         # Preserve other alternate formats (e.g., alternate.xarray if it exists)
         existing_alternate["s3"] = s3_alternate

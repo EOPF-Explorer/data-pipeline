@@ -55,12 +55,8 @@ class TestUpdateItemStorageTiers:
         assert updated == 1
         assert with_alt == 1
         assert with_tier == 1
-        assert (
-            stac_item_before.assets["reflectance"].extra_fields["alternate"]["s3"][
-                "ovh:storage_tier"
-            ]
-            == "GLACIER"
-        )
+        s3_info = stac_item_before.assets["reflectance"].extra_fields["alternate"]["s3"]
+        assert s3_info["storage:scheme"]["tier"] == "GLACIER"
 
     @patch("update_stac_storage_tier.get_s3_storage_info")
     def test_no_update_when_tier_unchanged(self, mock_get_info, stac_item_before):
@@ -89,10 +85,9 @@ class TestUpdateItemStorageTiers:
 
         assert updated == 1
         assert failed == 1
-        assert (
-            "ovh:storage_tier"
-            not in stac_item_before.assets["reflectance"].extra_fields["alternate"]["s3"]
-        )
+        s3_info = stac_item_before.assets["reflectance"].extra_fields["alternate"]["s3"]
+        assert "storage:scheme" in s3_info
+        assert "tier" not in s3_info["storage:scheme"]
 
     @patch("update_stac_storage_tier.get_s3_storage_info")
     @patch("update_stac_storage_tier.https_to_s3")
@@ -113,8 +108,8 @@ class TestUpdateItemStorageTiers:
         assert added == 1
         s3_info = stac_item_legacy.assets["reflectance"].extra_fields["alternate"]["s3"]
         assert s3_info["href"] == "s3://bucket/data.zarr/measurements/reflectance"
-        assert s3_info["ovh:storage_tier"] == "STANDARD"
-        assert s3_info["storage:platform"] == "OVHcloud"
+        assert s3_info["storage:scheme"]["tier"] == "STANDARD"
+        assert s3_info["storage:scheme"]["platform"] == "OVHcloud"
 
     @patch("update_stac_storage_tier.get_s3_storage_info")
     @patch("update_stac_storage_tier.https_to_s3")
@@ -152,7 +147,7 @@ class TestUpdateItemStorageTiers:
 
         assert updated == 1
         s3_info = stac_item_before.assets["reflectance"].extra_fields["alternate"]["s3"]
-        assert s3_info["ovh:storage_tier"] == "MIXED"
+        assert s3_info["storage:scheme"]["tier"] == "MIXED"
         assert s3_info["ovh:storage_tier_distribution"] == {"STANDARD": 450, "GLACIER": 608}
 
     @patch("update_stac_storage_tier.get_s3_storage_info")
@@ -168,7 +163,7 @@ class TestUpdateItemStorageTiers:
 
         assert updated == 1
         s3_info = stac_item_before.assets["reflectance"].extra_fields["alternate"]["s3"]
-        assert s3_info["ovh:storage_tier"] == "GLACIER"
+        assert s3_info["storage:scheme"]["tier"] == "GLACIER"
         assert s3_info["ovh:storage_tier_distribution"] == {"GLACIER": 100}
 
     @patch("update_stac_storage_tier.get_s3_storage_info")
@@ -184,7 +179,7 @@ class TestUpdateItemStorageTiers:
 
         assert updated == 1
         s3_info = stac_item_before.assets["reflectance"].extra_fields["alternate"]["s3"]
-        assert s3_info["ovh:storage_tier"] == "GLACIER"
+        assert s3_info["storage:scheme"]["tier"] == "GLACIER"
         assert "ovh:storage_tier_distribution" not in s3_info
 
     @patch("update_stac_storage_tier.get_s3_storage_info")
@@ -193,12 +188,11 @@ class TestUpdateItemStorageTiers:
         from update_stac_storage_tier import update_item_storage_tiers
 
         # Add existing distribution
-        stac_item_before.assets["reflectance"].extra_fields["alternate"]["s3"][
-            "ovh:storage_tier"
-        ] = "MIXED"
-        stac_item_before.assets["reflectance"].extra_fields["alternate"]["s3"][
-            "ovh:storage_tier_distribution"
-        ] = {"STANDARD": 450, "GLACIER": 608}
+        s3_info = stac_item_before.assets["reflectance"].extra_fields["alternate"]["s3"]
+        if "storage:scheme" not in s3_info:
+            s3_info["storage:scheme"] = {}
+        s3_info["storage:scheme"]["tier"] = "MIXED"
+        s3_info["ovh:storage_tier_distribution"] = {"STANDARD": 450, "GLACIER": 608}
 
         mock_get_info.return_value = {"tier": "GLACIER", "distribution": None}
 
@@ -208,7 +202,7 @@ class TestUpdateItemStorageTiers:
 
         assert updated == 1
         s3_info = stac_item_before.assets["reflectance"].extra_fields["alternate"]["s3"]
-        assert s3_info["ovh:storage_tier"] == "GLACIER"
+        assert s3_info["storage:scheme"]["tier"] == "GLACIER"
         assert "ovh:storage_tier_distribution" not in s3_info
 
     @patch("update_stac_storage_tier.get_s3_storage_info")

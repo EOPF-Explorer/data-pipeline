@@ -124,13 +124,21 @@ def update_item_storage_tiers(
             if not isinstance(existing_alternate, dict):
                 existing_alternate = {}
 
+            # Create storage scheme object following v2.0 spec
+            storage_scheme = {
+                "platform": "OVHcloud",
+                "region": region,
+                "requester_pays": False,
+            }
+
+            # Add tier to scheme (standard field in v2.0)
+            if tier:
+                storage_scheme["tier"] = tier
+
             # Create alternate.s3 object
             s3_alternate = {
                 "href": s3_url,
-                "storage:platform": "OVHcloud",
-                "storage:region": region,
-                "storage:requester_pays": False,
-                "ovh:storage_tier": tier,
+                "storage:scheme": storage_scheme,
             }
 
             # Add distribution if storage is mixed or multiple files sampled
@@ -174,24 +182,32 @@ def update_item_storage_tiers(
         else:
             storage_tier = storage_info["tier"]
 
+        # Get or create storage:scheme object (v2.0 format)
+        storage_scheme = s3_info.get("storage:scheme", {})
+        if not isinstance(storage_scheme, dict):
+            storage_scheme = {}
+
         # Track if anything changed
         asset_changed = False
-        old_tier = s3_info.get("ovh:storage_tier")
+        old_tier = storage_scheme.get("tier")
 
-        # Update or add storage extension fields (only if missing)
-        if "storage:platform" not in s3_info:
-            s3_info["storage:platform"] = "OVHcloud"
-            asset_changed = True
-        if "storage:region" not in s3_info:
-            s3_info["storage:region"] = region
-            asset_changed = True
-        if "storage:requester_pays" not in s3_info:
-            s3_info["storage:requester_pays"] = False
-            asset_changed = True
+        # Update scheme fields (only if missing)
+        scheme_changed = False
+        if "platform" not in storage_scheme:
+            storage_scheme["platform"] = "OVHcloud"
+            scheme_changed = True
+        if "region" not in storage_scheme:
+            storage_scheme["region"] = region
+            scheme_changed = True
+        if "requester_pays" not in storage_scheme:
+            storage_scheme["requester_pays"] = False
+            scheme_changed = True
 
-        # Add/update storage tier if available
+        # Add/update tier in scheme (standard v2.0 field)
         if storage_tier:
-            s3_info["ovh:storage_tier"] = storage_tier
+            if storage_scheme.get("tier") != storage_tier:
+                storage_scheme["tier"] = storage_tier
+                scheme_changed = True
             assets_with_tier += 1
 
             # Add or update distribution if available
@@ -212,14 +228,19 @@ def update_item_storage_tiers(
                 logger.debug(f"  {asset_key}: {old_tier or 'none'} -> {storage_tier}")
         else:
             # Remove tier if it cannot be determined
-            if "ovh:storage_tier" in s3_info:
-                del s3_info["ovh:storage_tier"]
-                asset_changed = True
+            if "tier" in storage_scheme:
+                del storage_scheme["tier"]
+                scheme_changed = True
                 logger.debug(f"  {asset_key}: removed tier (not available)")
             # Also remove distribution if present
             if "ovh:storage_tier_distribution" in s3_info:
                 del s3_info["ovh:storage_tier_distribution"]
                 asset_changed = True
+
+        # Update storage:scheme in s3_info if changed
+        if scheme_changed:
+            s3_info["storage:scheme"] = storage_scheme
+            asset_changed = True
 
         if asset_changed:
             assets_updated += 1
