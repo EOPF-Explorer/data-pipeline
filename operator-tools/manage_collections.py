@@ -27,7 +27,9 @@ import requests
 from manage_item import (
     STACItemManager,
     count_s3_objects_for_item,
+    extract_s3_object_counts,
     extract_s3_urls_from_item,
+    extract_stac_object_counts,
 )
 from pystac import Collection, Item
 from pystac_client import Client
@@ -38,66 +40,6 @@ if str(scripts_dir) not in sys.path:
     sys.path.insert(0, str(scripts_dir))
 
 from storage_tier_utils import get_s3_storage_info  # noqa: E402
-
-# === Helper Functions for Storage Tier Sync ===
-
-
-def extract_stac_object_counts(
-    storage_scheme: dict[str, Any] | None,
-) -> dict[str, int]:
-    """Extract object counts from STAC storage:scheme metadata.
-
-    Args:
-        storage_scheme: storage:scheme dictionary from STAC metadata
-
-    Returns:
-        Dictionary mapping tier to object count
-    """
-    if not isinstance(storage_scheme, dict):
-        return {}
-
-    stac_distribution = storage_scheme.get("tier_distribution")
-    stac_tier = storage_scheme.get("tier")
-
-    if stac_distribution and isinstance(stac_distribution, dict):
-        # Explicitly construct dict[str, int] to satisfy type checker
-        result: dict[str, int] = {}
-        for tier, count in stac_distribution.items():
-            if isinstance(tier, str) and isinstance(count, int):
-                result[tier] = count
-        return result
-    elif stac_tier and isinstance(stac_tier, str):
-        return {stac_tier: 1}
-    return {}
-
-
-def extract_s3_object_counts(
-    storage_info: dict[str, Any] | None,
-) -> dict[str, int]:
-    """Extract object counts from S3 storage_info.
-
-    Args:
-        storage_info: StorageTierInfo dictionary from get_s3_storage_info
-
-    Returns:
-        Dictionary mapping tier to object count
-    """
-    if not storage_info:
-        return {}
-
-    s3_distribution = storage_info.get("distribution")
-    s3_tier = storage_info.get("tier")
-
-    if s3_distribution and isinstance(s3_distribution, dict):
-        # Explicitly construct dict[str, int] to satisfy type checker
-        result: dict[str, int] = {}
-        for tier, count in s3_distribution.items():
-            if isinstance(tier, str) and isinstance(count, int):
-                result[tier] = count
-        return result
-    elif s3_tier and isinstance(s3_tier, str):
-        return {s3_tier: 1}
-    return {}
 
 
 class STACCollectionManager:
@@ -384,8 +326,8 @@ class STACCollectionManager:
                         )
                         stac_objects = extract_stac_object_counts(storage_scheme)
 
-                        # Query S3 once for current distribution
-                        s3_storage_info = get_s3_storage_info(s3_url, s3_endpoint)
+                        # Query S3 for current distribution (query all objects for accurate sync)
+                        s3_storage_info = get_s3_storage_info(s3_url, s3_endpoint, query_all=True)
                         s3_objects = extract_s3_object_counts(s3_storage_info)
 
                         # Check for mismatches and aggregate object counts in one pass
@@ -1192,8 +1134,9 @@ def sync_storage_tiers(
 
             # S3 object counts
             if s3_object_counts:
-                click.echo("\n  S3 (current storage):")
+                click.echo("\n  S3 (current storage - ALL OBJECTS QUERIED):")
                 click.echo(f"    Total objects: {total_s3_objects:,}")
+                click.echo("    ✅ All objects were queried for accurate storage tier detection")
                 for tier in sorted(s3_object_counts.keys()):
                     count = s3_object_counts[tier]
                     percentage = (count / total_s3_objects * 100) if total_s3_objects > 0 else 0
@@ -1230,6 +1173,7 @@ def sync_storage_tiers(
                             for tier, count in sorted(mismatch["s3_objects"].items())
                         )
                         click.echo(f"      S3 objects: {s3_str}")
+                        click.echo("        ✅ All objects queried for accurate comparison")
                     else:
                         click.echo("      S3 objects: (not available)")
                     if mismatch["stac_objects"]:

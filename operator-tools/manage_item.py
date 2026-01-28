@@ -26,7 +26,7 @@ scripts_dir = Path(__file__).parent.parent / "scripts"
 if str(scripts_dir) not in sys.path:
     sys.path.insert(0, str(scripts_dir))
 
-from storage_tier_utils import get_s3_storage_info  # noqa: E402
+from storage_tier_utils import StorageTierInfo, get_s3_storage_info  # noqa: E402
 
 # === Helper Functions for Storage Tier Sync ===
 
@@ -61,9 +61,15 @@ def extract_stac_object_counts(
 
 
 def extract_s3_object_counts(
-    storage_info: dict[str, Any] | None,
+    storage_info: StorageTierInfo | None,
 ) -> dict[str, int]:
     """Extract object counts from S3 storage_info.
+
+    Note: The accuracy depends on how get_s3_storage_info was called:
+    - If query_all=True: Returns accurate counts from all objects
+    - If query_all=False (sampling): Returns sample-based counts (up to 100 files)
+
+    For sync operations, query_all=True is used to ensure accuracy.
 
     Args:
         storage_info: StorageTierInfo dictionary from get_s3_storage_info
@@ -77,6 +83,8 @@ def extract_s3_object_counts(
     s3_distribution = storage_info.get("distribution")
     s3_tier = storage_info.get("tier")
 
+    # For uniform storage (not MIXED), distribution is just a sample
+    # We should use it, but understand it's approximate
     if s3_distribution and isinstance(s3_distribution, dict):
         # Explicitly construct dict[str, int] to satisfy type checker
         result: dict[str, int] = {}
@@ -85,6 +93,7 @@ def extract_s3_object_counts(
                 result[tier] = count
         return result
     elif s3_tier and isinstance(s3_tier, str):
+        # Single file or uniform Zarr (no distribution available)
         return {s3_tier: 1}
     return {}
 
@@ -985,8 +994,8 @@ def sync_storage_tiers(
             storage_scheme = s3_info.get("storage:scheme") if isinstance(s3_info, dict) else None
             stac_objects = extract_stac_object_counts(storage_scheme)
 
-            # Query S3 once for current distribution
-            s3_storage_info = get_s3_storage_info(s3_url, s3_endpoint)
+            # Query S3 for current distribution (query all objects for accurate sync)
+            s3_storage_info = get_s3_storage_info(s3_url, s3_endpoint, query_all=True)
             s3_objects = extract_s3_object_counts(s3_storage_info)
 
             # Aggregate object counts and check for mismatches in one pass
@@ -1053,8 +1062,9 @@ def sync_storage_tiers(
 
             # S3 object counts
             if s3_object_counts:
-                click.echo("\n  S3 (current storage):")
+                click.echo("\n  S3 (current storage - ALL OBJECTS QUERIED):")
                 click.echo(f"    Total objects: {total_s3_objects:,}")
+                click.echo("    ✅ All objects were queried for accurate storage tier detection")
                 for tier in sorted(s3_object_counts.keys()):
                     count = s3_object_counts[tier]
                     percentage = (count / total_s3_objects * 100) if total_s3_objects > 0 else 0
@@ -1088,6 +1098,7 @@ def sync_storage_tiers(
                         f"{tier}: {count}" for tier, count in sorted(mismatch["s3_objects"].items())
                     )
                     click.echo(f"    S3 objects: {s3_str}")
+                    click.echo("      ✅ All objects queried for accurate comparison")
                 else:
                     click.echo("    S3 objects: (not available)")
                 if mismatch["stac_objects"]:
