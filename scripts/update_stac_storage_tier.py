@@ -105,8 +105,8 @@ def update_item_storage_tiers(
                 assets_skipped += 1
                 continue
 
-            # Query storage tier from S3 (s3_url is guaranteed to be str here)
-            storage_info = get_s3_storage_info(s3_url, s3_endpoint)
+            # Query storage tier from S3 (query all objects for accuracy)
+            storage_info = get_s3_storage_info(s3_url, s3_endpoint, query_all=True)
 
             if storage_info is None:
                 logger.warning(
@@ -135,7 +135,8 @@ def update_item_storage_tiers(
             if tier:
                 storage_scheme["tier"] = tier
 
-            # Add distribution to scheme if storage is mixed or multiple files sampled
+            # Add distribution to scheme (contains object counts per tier)
+            # With query_all=True, distribution always includes accurate counts for Zarr directories
             if storage_info["distribution"] is not None:
                 storage_scheme["tier_distribution"] = storage_info["distribution"]
 
@@ -170,8 +171,8 @@ def update_item_storage_tiers(
         if not isinstance(s3_url, str):
             continue
 
-        # Query current storage tier from S3
-        storage_info = get_s3_storage_info(s3_url, s3_endpoint)
+        # Query current storage tier from S3 (query all objects for accuracy)
+        storage_info = get_s3_storage_info(s3_url, s3_endpoint, query_all=True)
 
         if storage_info is None:
             logger.warning(
@@ -210,7 +211,8 @@ def update_item_storage_tiers(
                 scheme_changed = True
             assets_with_tier += 1
 
-            # Add or update distribution in scheme if available
+            # Add or update distribution in scheme (contains object counts per tier)
+            # With query_all=True, distribution always includes accurate counts for Zarr directories
             if storage_info and storage_info.get("distribution") is not None:
                 if storage_scheme.get("tier_distribution") != storage_info["distribution"]:
                     storage_scheme["tier_distribution"] = storage_info["distribution"]

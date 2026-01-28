@@ -76,8 +76,18 @@ This makes the webhook endpoint available at `http://localhost:12000/samples`.
 # View item details with S3 stats
 uv run operator-tools/manage_item.py info sentinel-2-l2a-staging ITEM_ID --s3-stats
 
+# View storage tier statistics from STAC metadata
+uv run operator-tools/manage_item.py info sentinel-2-l2a-staging ITEM_ID --s3-stac-info
+
+# Combine both statistics
+uv run operator-tools/manage_item.py info sentinel-2-l2a-staging ITEM_ID --s3-stats --s3-stac-info
+
 # Debug S3 URL extraction
 uv run operator-tools/manage_item.py info sentinel-2-l2a-staging ITEM_ID --s3-stats --debug
+
+# Sync storage tiers for a single item (dry run)
+uv run operator-tools/manage_item.py sync-storage-tiers sentinel-2-l2a-staging ITEM_ID \
+    --s3-endpoint https://s3.de.io.cloud.ovh.net --dry-run
 
 # Delete single item with S3 cleanup (dry run)
 uv run operator-tools/manage_item.py delete sentinel-2-l2a-staging ITEM_ID --clean-s3 --dry-run
@@ -88,6 +98,8 @@ uv run operator-tools/manage_item.py delete sentinel-2-l2a-staging ITEM_ID --cle
 
 **Key Features:**
 - Detailed item inspection with S3 statistics
+- Storage tier statistics from STAC metadata
+- Sync storage tiers with S3 (single item)
 - Debug mode for S3 URL extraction troubleshooting
 - Delete with automatic S3 validation
 - Dry-run mode for safe testing
@@ -104,6 +116,7 @@ Comprehensive tool for managing STAC collections using the Transaction API, **no
 - Clean collections (remove all items)
 - Clean collections with validated S3 data deletion (removes items AND all S3 objects)
 - View comprehensive S3 storage statistics (works with any S3 asset structure)
+- View storage tier statistics from STAC metadata (all items processed)
 - Automatic validation ensures S3 cleanup succeeds before removing STAC items
 - Create/update collections from templates
 - Batch operations on multiple collections
@@ -127,8 +140,18 @@ uv run operator-tools/manage_collections.py info sentinel-2-l2a-staging
 # View collection with S3 storage statistics
 uv run operator-tools/manage_collections.py info sentinel-2-l2a-staging --s3-stats
 
+# View storage tier statistics from STAC metadata
+uv run operator-tools/manage_collections.py info sentinel-2-l2a-staging --s3-stac-info
+
+# Combine both statistics
+uv run operator-tools/manage_collections.py info sentinel-2-l2a-staging --s3-stats --s3-stac-info
+
 # Debug S3 URL extraction
 uv run operator-tools/manage_collections.py info sentinel-2-l2a-staging --s3-stats --debug
+
+# Sync storage tiers for entire collection (dry run)
+uv run operator-tools/manage_collections.py sync-storage-tiers sentinel-2-l2a-staging \
+    --s3-endpoint https://s3.de.io.cloud.ovh.net --dry-run
 
 # Clean a collection (dry run first!)
 uv run operator-tools/manage_collections.py clean sentinel-2-l2a-staging --dry-run
@@ -149,6 +172,7 @@ uv run operator-tools/manage_collections.py batch-create stac/
 **Key Features:**
 - **Validated S3 cleanup** - Verifies all S3 objects deleted before removing STAC items
 - **Comprehensive S3 support** - Handles individual files, directories, and Zarr stores
+- **Sync storage tiers** - Keep STAC metadata in sync with S3 storage classes
 - **Debug mode** - Detailed S3 URL extraction and validation info
 - **Safety first** - STAC items preserved if S3 cleanup fails
 
@@ -277,6 +301,12 @@ Check how much S3 storage a collection is using:
 # View collection info with S3 statistics
 uv run operator-tools/manage_collections.py info sentinel-2-l2a-staging --s3-stats
 
+# View storage tier statistics from STAC metadata
+uv run operator-tools/manage_collections.py info sentinel-2-l2a-staging --s3-stac-info
+
+# Combine both statistics
+uv run operator-tools/manage_collections.py info sentinel-2-l2a-staging --s3-stats --s3-stac-info
+
 # With debug output (shows detailed URL extraction)
 uv run operator-tools/manage_collections.py info sentinel-2-l2a-staging --s3-stats --debug
 ```
@@ -286,6 +316,12 @@ uv run operator-tools/manage_collections.py info sentinel-2-l2a-staging --s3-sta
 - Object count and total size for sampled items
 - Estimated total storage across all items
 - Works with **any S3 asset structure** (individual files, Zarr stores, directories)
+
+**Storage Tier Statistics (`--s3-stac-info`):**
+- Processes all items in the collection
+- Shows distribution of storage tiers (STANDARD, STANDARD_IA, EXPRESS_ONEZONE, MIXED)
+- Detailed breakdowns for mixed storage tiers
+- Reads from STAC metadata (no S3 queries required)
 
 **Example:**
 ```

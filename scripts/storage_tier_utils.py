@@ -156,18 +156,21 @@ def get_s3_storage_class(s3_url: str, s3_endpoint: str) -> str | None:
 
 
 def get_s3_storage_info(
-    s3_url: str, s3_endpoint: str, max_samples: int = 100
+    s3_url: str, s3_endpoint: str, max_samples: int = 100, query_all: bool = False
 ) -> StorageTierInfo | None:
     """Get detailed storage tier information for an S3 object or Zarr directory.
 
-    For single files, returns the storage class. For Zarr directories, samples up to
-    max_samples files and returns distribution information. If storage classes are
-    mixed, returns "MIXED" with a distribution dictionary.
+    For single files, returns the storage class. For Zarr directories, either samples
+    up to max_samples files (fast) or queries all objects (accurate but slower).
+    If storage classes are mixed, returns "MIXED" with a distribution dictionary.
 
     Args:
         s3_url: S3 URL (s3://bucket/key)
         s3_endpoint: S3 endpoint URL
         max_samples: Maximum number of files to sample for Zarr directories (default: 100)
+                    Only used if query_all=False
+        query_all: If True, query all objects using pagination (accurate but slower).
+                   If False, sample up to max_samples files (fast but may miss changes).
 
     Returns:
         StorageTierInfo dict with 'tier' and 'distribution' keys, or None if unavailable
@@ -213,21 +216,33 @@ def get_s3_storage_info(
             # If 404, this might be a Zarr directory path
             if e.response.get("Error", {}).get("Code") == "404":
                 prefix = key if key.endswith("/") else key + "/"
-                list_response = s3_client.list_objects_v2(
-                    Bucket=bucket, Prefix=prefix, MaxKeys=max_samples
-                )
-                if "Contents" not in list_response or len(list_response["Contents"]) == 0:
-                    logger.debug(f"No objects found under prefix {s3_url}")
-                    return None
 
-                # Extract storage classes from list response
+                # Extract storage classes from objects
                 storage_classes = []
-                for obj in list_response["Contents"]:
-                    obj_class = obj.get("StorageClass", "STANDARD")
-                    storage_classes.append(obj_class)
+
+                if query_all:
+                    # Query all objects using pagination (accurate but slower)
+                    paginator = s3_client.get_paginator("list_objects_v2")
+                    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+                        page_objects = page.get("Contents", [])
+                        for obj in page_objects:
+                            obj_class = obj.get("StorageClass", "STANDARD")
+                            storage_classes.append(obj_class)
+                else:
+                    # Sample up to max_samples files (fast but may miss changes)
+                    list_response = s3_client.list_objects_v2(
+                        Bucket=bucket, Prefix=prefix, MaxKeys=max_samples
+                    )
+                    if "Contents" not in list_response or len(list_response["Contents"]) == 0:
+                        logger.debug(f"No objects found under prefix {s3_url}")
+                        return None
+
+                    for obj in list_response["Contents"]:
+                        obj_class = obj.get("StorageClass", "STANDARD")
+                        storage_classes.append(obj_class)
 
                 if not storage_classes:
-                    logger.debug(f"Could not determine storage class for any object under {s3_url}")
+                    logger.debug(f"No objects found under prefix {s3_url}")
                     return None
 
                 # Count occurrences of each storage class
@@ -249,10 +264,16 @@ def get_s3_storage_info(
                 else:
                     # Uniform storage class
                     storage_class = list(unique_classes)[0]
-                    logger.debug(
-                        f"Sampled {len(storage_classes)} files under {s3_url}, "
-                        f"uniform storage class: {storage_class}"
-                    )
+                    if query_all:
+                        logger.debug(
+                            f"Queried {len(storage_classes)} files under {s3_url}, "
+                            f"uniform storage class: {storage_class}"
+                        )
+                    else:
+                        logger.debug(
+                            f"Sampled {len(storage_classes)} files under {s3_url}, "
+                            f"uniform storage class: {storage_class}"
+                        )
                     return {"tier": storage_class, "distribution": storage_class_counts}
             else:
                 raise
