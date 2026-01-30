@@ -308,9 +308,11 @@ class TestAddAlternateS3Assets:
 
         s3_alt = asset.extra_fields["alternate"]["s3"]
         assert s3_alt["href"] == "s3://my-bucket/path/file.zarr"
-        assert s3_alt["storage:platform"] == "OVHcloud"
-        assert s3_alt["storage:region"] == "de"
-        assert s3_alt["storage:requester_pays"] is False
+        assert "storage:scheme" in s3_alt
+        scheme = s3_alt["storage:scheme"]
+        assert scheme["platform"] == "OVHcloud"
+        assert scheme["region"] == "de"
+        assert scheme["requester_pays"] is False
 
     def test_add_alternate_to_old_s3_url(self):
         """Test adding alternate S3 URL to asset with old S3 format URL."""
@@ -336,7 +338,8 @@ class TestAddAlternateS3Assets:
         asset = item.assets["data"]
         s3_alt = asset.extra_fields["alternate"]["s3"]
         assert s3_alt["href"] == "s3://my-bucket/path/file.zarr"
-        assert s3_alt["storage:region"] == "gra"
+        assert "storage:scheme" in s3_alt
+        assert s3_alt["storage:scheme"]["region"] == "gra"
 
     def test_skip_thumbnail_asset(self):
         """Test that thumbnail assets are skipped."""
@@ -426,8 +429,14 @@ class TestAddAlternateS3Assets:
         # Data assets should have alternates
         assert "alternate" in item.assets["data1"].extra_fields
         assert "alternate" in item.assets["data2"].extra_fields
-        assert item.assets["data1"].extra_fields["alternate"]["s3"]["storage:region"] == "sbg"
-        assert item.assets["data2"].extra_fields["alternate"]["s3"]["storage:region"] == "sbg"
+        assert (
+            item.assets["data1"].extra_fields["alternate"]["s3"]["storage:scheme"]["region"]
+            == "sbg"
+        )
+        assert (
+            item.assets["data2"].extra_fields["alternate"]["s3"]["storage:scheme"]["region"]
+            == "sbg"
+        )
 
         # Thumbnail should not
         assert "alternate" not in item.assets["thumbnail"].extra_fields
@@ -451,7 +460,9 @@ class TestAddAlternateS3Assets:
         )
 
         add_alternate_s3_assets(item, "https://s3.de.io.cloud.ovh.net")
-        assert item.assets["data"].extra_fields["alternate"]["s3"]["storage:region"] == "de"
+        assert (
+            item.assets["data"].extra_fields["alternate"]["s3"]["storage:scheme"]["region"] == "de"
+        )
 
     def test_region_detection_gra(self):
         """Test region detection for GRA region."""
@@ -472,7 +483,9 @@ class TestAddAlternateS3Assets:
         )
 
         add_alternate_s3_assets(item, "https://s3.gra.io.cloud.ovh.net")
-        assert item.assets["data"].extra_fields["alternate"]["s3"]["storage:region"] == "gra"
+        assert (
+            item.assets["data"].extra_fields["alternate"]["s3"]["storage:scheme"]["region"] == "gra"
+        )
 
     def test_region_detection_unknown(self):
         """Test region detection for unknown region."""
@@ -493,7 +506,10 @@ class TestAddAlternateS3Assets:
         )
 
         add_alternate_s3_assets(item, "https://s3.amazonaws.com")
-        assert item.assets["data"].extra_fields["alternate"]["s3"]["storage:region"] == "unknown"
+        assert (
+            item.assets["data"].extra_fields["alternate"]["s3"]["storage:scheme"]["region"]
+            == "unknown"
+        )
 
     def test_extensions_not_duplicated(self):
         """Test that extensions are not duplicated if already present."""

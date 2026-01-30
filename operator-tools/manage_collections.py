@@ -15,6 +15,7 @@ This tool uses manage_item.py for all item-level operations.
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -26,10 +27,19 @@ import requests
 from manage_item import (
     STACItemManager,
     count_s3_objects_for_item,
+    extract_s3_object_counts,
     extract_s3_urls_from_item,
+    extract_stac_object_counts,
 )
-from pystac import Collection
+from pystac import Collection, Item
 from pystac_client import Client
+
+# Add scripts directory to path for storage tier utilities
+scripts_dir = Path(__file__).parent.parent / "scripts"
+if str(scripts_dir) not in sys.path:
+    sys.path.insert(0, str(scripts_dir))
+
+from storage_tier_utils import get_s3_storage_info  # noqa: E402
 
 
 class STACCollectionManager:
@@ -221,6 +231,213 @@ class STACCollectionManager:
         click.echo("=" * 60)
 
         return items_deleted, s3_objects_deleted, s3_objects_failed
+
+    def sync_storage_tiers(
+        self,
+        collection_id: str,
+        s3_endpoint: str,
+        add_missing: bool = False,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """
+        Sync storage tier metadata for all items in a collection with S3.
+
+        Args:
+            collection_id: ID of the collection
+            s3_endpoint: S3 endpoint URL
+            add_missing: If True, add alternate.s3 to assets that don't have it
+            dry_run: If True, show changes without updating
+
+        Returns:
+            Dictionary with sync statistics including problems and corrections
+        """
+        from update_stac_storage_tier import update_item_storage_tiers  # noqa: E402
+
+        items = self.get_collection_items(collection_id)
+
+        if not items:
+            click.echo("✅ Collection is empty - nothing to sync")
+            return {
+                "items_processed": 0,
+                "items_updated": 0,
+                "items_no_changes": 0,
+                "items_failed": 0,
+                "total_assets_updated": 0,
+                "total_assets_added": 0,
+                "total_assets_failed": 0,
+                "problems": [],
+                "corrections": [],
+            }
+
+        # Statistics tracking
+        items_updated = 0
+        items_no_changes = 0
+        items_failed = 0
+        total_assets_updated = 0
+        total_assets_added = 0
+        total_assets_failed = 0
+        problems: list[dict[str, Any]] = []
+        corrections: list[dict[str, Any]] = []
+        total_s3_object_counts: dict[str, int] = {}
+        total_stac_object_counts: dict[str, int] = {}
+
+        click.echo(
+            f"\n{'DRY RUN: ' if dry_run else ''}Syncing storage tiers for collection: {collection_id}"
+        )
+        click.echo(f"Processing {len(items)} items...")
+
+        with click.progressbar(
+            items,
+            label="Syncing storage tiers" if not dry_run else "Analyzing storage tiers",
+            show_pos=True,
+            show_percent=True,
+        ) as bar:
+            for item_dict in bar:
+                item_id = item_dict.get("id", "unknown")
+                try:
+                    # Convert dict to pystac Item
+                    item = Item.from_dict(item_dict)
+
+                    # Track object-level mismatches for this item
+                    item_mismatches: list[dict[str, Any]] = []
+                    item_s3_objects: dict[str, int] = {}
+                    item_stac_objects: dict[str, int] = {}
+
+                    # Process each asset to compare STAC vs S3
+                    for asset_key, asset in item.assets.items():
+                        if asset.roles and "thumbnail" in asset.roles:
+                            continue
+
+                        # Extract STAC metadata
+                        alternate = getattr(asset, "extra_fields", {}).get("alternate", {})
+                        if not isinstance(alternate, dict) or "s3" not in alternate:
+                            continue
+
+                        s3_info = alternate["s3"]
+                        if not isinstance(s3_info, dict) or "href" not in s3_info:
+                            continue
+
+                        s3_url = s3_info.get("href", "")
+                        if not isinstance(s3_url, str) or not s3_url.startswith("s3://"):
+                            continue
+
+                        storage_scheme = (
+                            s3_info.get("storage:scheme") if isinstance(s3_info, dict) else None
+                        )
+                        stac_objects = extract_stac_object_counts(storage_scheme)
+
+                        # Query S3 for current distribution (query all objects for accurate sync)
+                        s3_storage_info = get_s3_storage_info(s3_url, s3_endpoint, query_all=True)
+                        s3_objects = extract_s3_object_counts(s3_storage_info)
+
+                        # Check for mismatches and aggregate object counts in one pass
+                        has_mismatch = s3_objects != stac_objects
+                        if has_mismatch:
+                            item_mismatches.append(
+                                {
+                                    "asset": asset_key,
+                                    "s3_url": s3_url,
+                                    "s3_tier": s3_storage_info.get("tier")
+                                    if s3_storage_info
+                                    else None,
+                                    "s3_objects": s3_objects,
+                                    "stac_tier": storage_scheme.get("tier")
+                                    if isinstance(storage_scheme, dict)
+                                    else None,
+                                    "stac_objects": stac_objects,
+                                }
+                            )
+
+                        # Aggregate object counts
+                        for tier, count in s3_objects.items():
+                            item_s3_objects[tier] = item_s3_objects.get(tier, 0) + count
+                            total_s3_object_counts[tier] = (
+                                total_s3_object_counts.get(tier, 0) + count
+                            )
+                        for tier, count in stac_objects.items():
+                            item_stac_objects[tier] = item_stac_objects.get(tier, 0) + count
+                            total_stac_object_counts[tier] = (
+                                total_stac_object_counts.get(tier, 0) + count
+                            )
+
+                    # Update storage tiers
+                    (
+                        assets_updated,
+                        assets_with_alternate_s3,
+                        assets_with_tier,
+                        assets_added,
+                        assets_skipped,
+                        assets_s3_failed,
+                    ) = update_item_storage_tiers(item, s3_endpoint, add_missing)
+
+                    # Track problems (mismatches found)
+                    if item_mismatches:
+                        problems.append(
+                            {
+                                "item_id": item_id,
+                                "mismatches": item_mismatches,
+                                "s3_objects": item_s3_objects,
+                                "stac_objects": item_stac_objects,
+                            }
+                        )
+
+                    # Track corrections (items that were updated)
+                    if assets_updated > 0:
+                        corrections.append(
+                            {
+                                "item_id": item_id,
+                                "assets_updated": assets_updated,
+                                "assets_added": assets_added,
+                            }
+                        )
+
+                    total_assets_updated += assets_updated
+                    total_assets_added += assets_added
+                    total_assets_failed += assets_s3_failed
+
+                    # Update STAC item if changes were made and not dry run
+                    if assets_updated > 0 and not dry_run:
+                        try:
+                            # Use DELETE then POST (pgstac doesn't support PUT)
+                            delete_url = (
+                                f"{self.api_url}/collections/{collection_id}/items/{item_id}"
+                            )
+                            self.session.delete(delete_url, timeout=30)
+
+                            create_url = f"{self.api_url}/collections/{collection_id}/items"
+                            self.session.post(
+                                create_url,
+                                json=item.to_dict(),
+                                headers={"Content-Type": "application/json"},
+                                timeout=30,
+                            )
+                            items_updated += 1
+                        except Exception as e:
+                            click.echo(f"\n  ⚠️  Failed to update item {item_id}: {e}", err=True)
+                            items_failed += 1
+                    elif assets_updated > 0:
+                        # Dry run - just count as would-be updated
+                        items_updated += 1
+                    else:
+                        items_no_changes += 1
+
+                except Exception as e:
+                    click.echo(f"\n  ⚠️  Error processing item {item_id}: {e}", err=True)
+                    items_failed += 1
+
+        return {
+            "items_processed": len(items),
+            "items_updated": items_updated,
+            "items_no_changes": items_no_changes,
+            "items_failed": items_failed,
+            "total_assets_updated": total_assets_updated,
+            "total_assets_added": total_assets_added,
+            "total_assets_failed": total_assets_failed,
+            "problems": problems,
+            "corrections": corrections,
+            "s3_object_counts": total_s3_object_counts,
+            "stac_object_counts": total_stac_object_counts,
+        }
 
     def delete_collection(self, collection_id: str) -> bool:
         """
@@ -586,6 +803,11 @@ def delete(ctx: click.Context, collection_id: str, clean_first: bool) -> None:
     help="Include S3 storage statistics (samples first 5 items)",
 )
 @click.option(
+    "--s3-stac-info",
+    is_flag=True,
+    help="Query STAC API and compute storage tier statistics for all assets of all items",
+)
+@click.option(
     "--s3-endpoint",
     help="S3 endpoint URL (optional, uses AWS_ENDPOINT_URL env var if not specified)",
 )
@@ -599,6 +821,7 @@ def info(
     ctx: click.Context,
     collection_id: str,
     s3_stats: bool,
+    s3_stac_info: bool,
     s3_endpoint: str | None,
     debug: bool,
 ) -> None:
@@ -609,6 +832,7 @@ def info(
         manage_collections.py info sentinel-2-l2a-staging
         manage_collections.py info sentinel-2-l2a-staging --s3-stats
         manage_collections.py info sentinel-2-l2a-staging --s3-stats --debug
+        manage_collections.py info sentinel-2-l2a-staging --s3-stac-info
     """
     manager: STACCollectionManager = ctx.obj["manager"]
     api_url: str = ctx.obj["api_url"]
@@ -631,6 +855,94 @@ def info(
             click.echo(f"Spatial extent: {collection.extent.spatial.bboxes}")
         if collection.extent and collection.extent.temporal:
             click.echo(f"Temporal extent: {collection.extent.temporal.intervals}")
+
+        # Storage tier statistics from STAC metadata
+        if s3_stac_info and items:
+            click.echo(f"\n{'─'*60}")
+            click.echo("Storage Tier Statistics (from STAC metadata):")
+
+            # Aggregate statistics across all items
+            total_tier_object_counts: dict[str, int] = {}
+            total_tier_distributions: dict[str, dict[str, int]] = {}
+            total_assets_with_tier = 0
+            total_assets_without_tier = 0
+            total_assets = 0
+            total_objects = 0
+            items_with_tier_info = 0
+            items_without_tier_info = 0
+
+            click.echo(f"Processing {len(items)} items...")
+
+            with click.progressbar(
+                items,
+                label="Analyzing storage tiers",
+                show_pos=True,
+                show_percent=True,
+            ) as bar:
+                for item in bar:
+                    stats = manager.item_manager.get_item_storage_tier_stats(item)
+
+                    # Aggregate object counts per tier
+                    for tier, count in stats["tier_object_counts"].items():
+                        total_tier_object_counts[tier] = (
+                            total_tier_object_counts.get(tier, 0) + count
+                        )
+
+                    # Aggregate tier distributions (for mixed storage display)
+                    for tier, distribution in stats["tier_distributions"].items():
+                        if tier not in total_tier_distributions:
+                            total_tier_distributions[tier] = {}
+                        for sub_tier, count in distribution.items():
+                            total_tier_distributions[tier][sub_tier] = (
+                                total_tier_distributions[tier].get(sub_tier, 0) + count
+                            )
+
+                    total_assets_with_tier += stats["assets_with_tier"]
+                    total_assets_without_tier += stats["assets_without_tier"]
+                    total_assets += stats["total_assets"]
+                    total_objects += stats["total_objects"]
+
+                    if stats["assets_with_tier"] > 0:
+                        items_with_tier_info += 1
+                    else:
+                        items_without_tier_info += 1
+
+            # Display aggregated statistics
+            click.echo("\n  Summary:")
+            click.echo(f"    Items with tier info: {items_with_tier_info}")
+            click.echo(f"    Items without tier info: {items_without_tier_info}")
+            click.echo(f"    Total assets: {total_assets}\n")
+            click.echo(f"    Assets with tier info: {total_assets_with_tier}")
+            click.echo(f"    Assets without tier info: {total_assets_without_tier}")
+            click.echo(f"    Total objects (with tier info): {total_objects:,}")
+
+            if total_tier_object_counts:
+                click.echo("\n  Storage Tier Distribution (by object count):")
+                # Sort tiers for consistent output
+                sorted_tiers = sorted(
+                    total_tier_object_counts.items(), key=lambda x: x[1], reverse=True
+                )
+                for tier, count in sorted_tiers:
+                    percentage = (count / total_objects * 100) if total_objects > 0 else 0
+                    click.echo(f"    {tier}: {count:,} objects ({percentage:.1f}%)")
+
+                    # Show distribution breakdown if this tier has mixed storage
+                    if tier in total_tier_distributions and total_tier_distributions[tier]:
+                        dist = total_tier_distributions[tier]
+                        total_dist_count = sum(dist.values())
+                        click.echo("      Distribution:")
+                        for sub_tier, sub_count in sorted(
+                            dist.items(), key=lambda x: x[1], reverse=True
+                        ):
+                            sub_percentage = (
+                                (sub_count / total_dist_count * 100) if total_dist_count > 0 else 0
+                            )
+                            click.echo(
+                                f"        {sub_tier}: {sub_count:,} objects ({sub_percentage:.1f}%)"
+                            )
+            else:
+                click.echo("\n  ⚠️  No storage tier information found in STAC metadata")
+                click.echo("      Items may need to be updated with storage tier metadata")
 
         # S3 storage statistics
         if s3_stats and items:
@@ -718,6 +1030,186 @@ def info(
 
     except Exception as e:
         click.echo(f"❌ Error fetching collection info: {e}", err=True)
+        raise click.Abort() from e
+
+
+@cli.command()
+@click.argument("collection_id")
+@click.option(
+    "--s3-endpoint",
+    help="S3 endpoint URL (required, uses AWS_ENDPOINT_URL env var if not specified)",
+)
+@click.option(
+    "--add-missing",
+    is_flag=True,
+    help="Add alternate.s3 to assets that don't have it (for legacy items)",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show what would be updated without actually updating",
+)
+@click.option(
+    "--yes",
+    "-y",
+    is_flag=True,
+    help="Skip confirmation prompt",
+)
+@click.pass_context
+def sync_storage_tiers(
+    ctx: click.Context,
+    collection_id: str,
+    s3_endpoint: str | None,
+    add_missing: bool,
+    dry_run: bool,
+    yes: bool,
+) -> None:
+    """
+    Sync storage tier metadata for all items in a collection with S3.
+
+    This command queries S3 for current storage classes and updates STAC item metadata
+    to match. It identifies mismatches and shows a detailed summary of problems found
+    and corrections made.
+
+    Example:
+        manage_collections.py sync-storage-tiers sentinel-2-l2a-staging --s3-endpoint https://s3.de.io.cloud.ovh.net --dry-run
+        manage_collections.py sync-storage-tiers sentinel-2-l2a-staging --s3-endpoint https://s3.de.io.cloud.ovh.net
+        manage_collections.py sync-storage-tiers sentinel-2-l2a-staging --s3-endpoint https://s3.de.io.cloud.ovh.net --add-missing
+    """
+    manager: STACCollectionManager = ctx.obj["manager"]
+
+    # Get S3 endpoint
+    if not s3_endpoint:
+        s3_endpoint = os.getenv("AWS_ENDPOINT_URL")
+        if not s3_endpoint:
+            click.echo(
+                "❌ S3 endpoint required. Use --s3-endpoint or set AWS_ENDPOINT_URL", err=True
+            )
+            raise click.Abort()
+
+    # Confirmation prompt
+    if not dry_run and not yes:
+        warning = f"⚠️  This will update storage tier metadata for ALL items in collection '{collection_id}'."
+        if add_missing:
+            warning += "\n⚠️  This will also ADD alternate.s3 to assets that don't have it."
+        warning += "\n⚠️  This will sync STAC metadata with current S3 storage classes."
+        click.confirm(f"{warning}\n\nContinue?", abort=True)
+
+    try:
+        # Sync storage tiers
+        stats = manager.sync_storage_tiers(
+            collection_id=collection_id,
+            s3_endpoint=s3_endpoint,
+            add_missing=add_missing,
+            dry_run=dry_run,
+        )
+
+        # Display summary
+        click.echo("\n" + "=" * 60)
+        click.echo("SYNC SUMMARY")
+        click.echo("=" * 60)
+        click.echo(f"Items processed: {stats['items_processed']}")
+        click.echo(f"✅ Items updated: {stats['items_updated']}")
+        click.echo(f"✓ Items with no changes: {stats['items_no_changes']}")
+        if stats["items_failed"] > 0:
+            click.echo(f"❌ Items failed: {stats['items_failed']}")
+
+        click.echo("\nAssets:")
+        click.echo(f"  Updated: {stats['total_assets_updated']}")
+        if stats["total_assets_added"] > 0:
+            click.echo(f"  Added (alternate.s3): {stats['total_assets_added']}")
+        if stats["total_assets_failed"] > 0:
+            click.echo(f"  ⚠️  Failed to query S3: {stats['total_assets_failed']}")
+
+        # Display object-level statistics
+        s3_object_counts = stats.get("s3_object_counts", {})
+        stac_object_counts = stats.get("stac_object_counts", {})
+        total_s3_objects = sum(s3_object_counts.values())
+        total_stac_objects = sum(stac_object_counts.values())
+
+        if total_s3_objects > 0 or total_stac_objects > 0:
+            click.echo(f"\n{'─'*60}")
+            click.echo("OBJECT-LEVEL STATISTICS")
+            click.echo(f"{'─'*60}")
+
+            # S3 object counts
+            if s3_object_counts:
+                click.echo("\n  S3 (current storage - ALL OBJECTS QUERIED):")
+                click.echo(f"    Total objects: {total_s3_objects:,}")
+                click.echo("    ✅ All objects were queried for accurate storage tier detection")
+                for tier in sorted(s3_object_counts.keys()):
+                    count = s3_object_counts[tier]
+                    percentage = (count / total_s3_objects * 100) if total_s3_objects > 0 else 0
+                    click.echo(f"      {tier}: {count:,} objects ({percentage:.1f}%)")
+            else:
+                click.echo("\n  S3 (current storage):")
+                click.echo("    No objects found or failed to query")
+
+            # STAC object counts
+            if stac_object_counts:
+                click.echo("\n  STAC (metadata):")
+                click.echo(f"    Total objects: {total_stac_objects:,}")
+                for tier in sorted(stac_object_counts.keys()):
+                    count = stac_object_counts[tier]
+                    percentage = (count / total_stac_objects * 100) if total_stac_objects > 0 else 0
+                    click.echo(f"      {tier}: {count:,} objects ({percentage:.1f}%)")
+            else:
+                click.echo("\n  STAC (metadata):")
+                click.echo("    No tier information in metadata")
+
+        # Display problems (mismatches)
+        if stats["problems"]:
+            click.echo(f"\n{'─'*60}")
+            click.echo(f"🔍 MISMATCHES FOUND: {len(stats['problems'])} item(s)")
+            click.echo(f"{'─'*60}")
+            for problem in stats["problems"]:
+                item_id = problem["item_id"]
+                click.echo(f"\n  Item: {item_id}")
+                for mismatch in problem["mismatches"]:
+                    click.echo(f"    Asset: {mismatch['asset']}")
+                    if mismatch["s3_objects"]:
+                        s3_str = ", ".join(
+                            f"{tier}: {count}"
+                            for tier, count in sorted(mismatch["s3_objects"].items())
+                        )
+                        click.echo(f"      S3 objects: {s3_str}")
+                        click.echo("        ✅ All objects queried for accurate comparison")
+                    else:
+                        click.echo("      S3 objects: (not available)")
+                    if mismatch["stac_objects"]:
+                        stac_str = ", ".join(
+                            f"{tier}: {count}"
+                            for tier, count in sorted(mismatch["stac_objects"].items())
+                        )
+                        click.echo(f"      STAC objects: {stac_str}")
+                    else:
+                        click.echo("      STAC objects: (not in metadata)")
+
+        # Display corrections
+        if stats["corrections"]:
+            click.echo(f"\n{'─'*60}")
+            click.echo(f"✅ CORRECTIONS MADE: {len(stats['corrections'])} item(s) updated")
+            click.echo(f"{'─'*60}")
+            for correction in stats["corrections"][:10]:  # Show first 10
+                item_id = correction["item_id"]
+                assets_updated = correction["assets_updated"]
+                assets_added = correction.get("assets_added", 0)
+                click.echo(f"  {item_id}: {assets_updated} asset(s) updated", nl=False)
+                if assets_added > 0:
+                    click.echo(f", {assets_added} asset(s) added", nl=False)
+                click.echo()
+            if len(stats["corrections"]) > 10:
+                click.echo(f"  ... and {len(stats['corrections']) - 10} more item(s)")
+
+        if dry_run:
+            click.echo(f"\n{'─'*60}")
+            click.echo("DRY RUN - No changes were made")
+            click.echo(f"{'─'*60}")
+
+        click.echo("=" * 60)
+
+    except Exception as e:
+        click.echo(f"❌ Operation failed: {e}", err=True)
         raise click.Abort() from e
 
 

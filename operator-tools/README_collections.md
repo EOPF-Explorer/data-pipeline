@@ -325,7 +325,7 @@ uv run operator-tools/manage_collections.py delete sentinel-2-l2a-staging --clea
 
 #### 5. `info` - Show Collection Information
 
-Display detailed information about a collection, including item count. **NEW**: Optionally include comprehensive S3 storage statistics.
+Display detailed information about a collection, including item count. **NEW**: Optionally include comprehensive S3 storage statistics and storage tier statistics from STAC metadata.
 
 ```bash
 # Basic collection info
@@ -333,6 +333,12 @@ uv run operator-tools/manage_collections.py info sentinel-2-l2a-staging
 
 # Include S3 storage statistics (samples first 5 items)
 uv run operator-tools/manage_collections.py info sentinel-2-l2a-staging --s3-stats
+
+# Include storage tier statistics from STAC metadata (all items)
+uv run operator-tools/manage_collections.py info sentinel-2-l2a-staging --s3-stac-info
+
+# Combine both statistics
+uv run operator-tools/manage_collections.py info sentinel-2-l2a-staging --s3-stats --s3-stac-info
 
 # With debug output (shows detailed URL extraction)
 uv run operator-tools/manage_collections.py info sentinel-2-l2a-staging --s3-stats --debug
@@ -344,6 +350,7 @@ uv run operator-tools/manage_collections.py info sentinel-2-l2a-staging --s3-sta
 
 **Options:**
 - `--s3-stats`: **[NEW]** Include S3 storage statistics (object count, total size)
+- `--s3-stac-info`: **[NEW]** Query STAC API and compute storage tier statistics for all assets of all items
 - `--debug`: **[NEW]** Show detailed debug information about S3 URL extraction
 - `--s3-endpoint`: S3 endpoint URL (optional, uses `AWS_ENDPOINT_URL` env var if not specified)
 
@@ -358,6 +365,11 @@ uv run operator-tools/manage_collections.py info sentinel-2-l2a-staging --s3-sta
   - Object count and total size for sampled items
   - Estimated total storage for all items in collection
   - Works with **any S3 asset structure** (individual files, Zarr stores, directories)
+- **[NEW]** Storage tier statistics (when `--s3-stac-info` is used):
+  - Items/assets with tier info vs without tier info
+  - Distribution of storage tiers (STANDARD, STANDARD_IA, EXPRESS_ONEZONE, MIXED)
+  - Detailed breakdowns for mixed storage tiers
+  - Reads from STAC metadata (no S3 queries required)
 
 **S3 Statistics Behavior:**
 - Samples the first 5 items to avoid long wait times on large collections
@@ -366,6 +378,16 @@ uv run operator-tools/manage_collections.py info sentinel-2-l2a-staging --s3-sta
 - Shows actual count/size for sampled items
 - Provides estimated total based on sample average
 - Requires AWS credentials to access S3
+
+**Storage Tier Statistics Behavior (`--s3-stac-info`):**
+- Processes **all items** in the collection (with progress bar)
+- Reads storage tier information from STAC metadata (`assets[*].alternate.s3.storage:scheme.tier`)
+- No S3 queries required - reads directly from STAC item metadata
+- Aggregates statistics across all items:
+  - Total asset counts per tier
+  - Combined tier distributions for mixed storage
+  - Summary statistics (items/assets with/without tier info)
+- Shows distribution breakdowns for mixed storage tiers
 
 **Example Output:**
 
@@ -415,6 +437,164 @@ Shows detailed per-item information:
      Objects: 1,247, Size: 2.34 GB (cumulative)
 ```
 
+**Storage Tier Statistics Output (`--s3-stac-info`):**
+
+```bash
+uv run operator-tools/manage_collections.py info sentinel-2-l2a-staging --s3-stac-info
+```
+
+```
+============================================================
+Collection: sentinel-2-l2a-staging
+Title: Sentinel-2 Level-2A [V1 staging]
+...
+Items: 43
+────────────────────────────────────────────────────────────
+Storage Tier Statistics (from STAC metadata):
+Processing 43 items...
+Analyzing storage tiers  [####################################]  43/43
+
+  Summary:
+    Items with tier info: 43
+    Items without tier info: 0
+    Total assets: 645
+    Assets with tier info: 645
+    Assets without tier info: 0
+
+  Storage Tier Distribution (by asset count):
+    STANDARD_IA: 430 assets (66.7%)
+    STANDARD: 215 assets (33.3%)
+      Distribution:
+        STANDARD: 215 objects (100.0%)
+```
+
+#### 6. `sync-storage-tiers` - Sync Storage Tier Metadata for Collection
+
+Sync storage tier metadata for all items in a collection with S3. This command queries S3 for current storage classes at the **object level** and updates STAC item metadata to match. It compares object-level distributions (not just asset-level tiers) and shows a detailed summary of mismatches found and corrections made.
+
+```bash
+# Dry run (preview changes)
+uv run operator-tools/manage_collections.py sync-storage-tiers sentinel-2-l2a-staging \
+    --s3-endpoint https://s3.de.io.cloud.ovh.net --dry-run
+
+# Actually sync (with confirmation)
+uv run operator-tools/manage_collections.py sync-storage-tiers sentinel-2-l2a-staging \
+    --s3-endpoint https://s3.de.io.cloud.ovh.net
+
+# Add missing alternate.s3 for legacy items
+uv run operator-tools/manage_collections.py sync-storage-tiers sentinel-2-l2a-staging \
+    --s3-endpoint https://s3.de.io.cloud.ovh.net --add-missing
+
+# Skip confirmation prompt
+uv run operator-tools/manage_collections.py sync-storage-tiers sentinel-2-l2a-staging \
+    --s3-endpoint https://s3.de.io.cloud.ovh.net -y
+```
+
+**Options:**
+- `--s3-endpoint`: S3 endpoint URL (required, or set `AWS_ENDPOINT_URL` env var)
+- `--add-missing`: Add `alternate.s3` to assets that don't have it (for legacy items)
+- `--dry-run`: Show what would be updated without actually updating
+- `--yes, -y`: Skip confirmation prompt
+
+**Output includes:**
+- Progress bar showing sync progress
+- Summary statistics:
+  - Items processed, updated, unchanged, failed
+  - Assets updated, added, failed
+- **Object-level statistics**: Shows object counts per tier from both S3 and STAC
+- **Problems section**: Lists items/assets with mismatches showing object-level differences
+- **Corrections section**: Shows what was fixed (first 10 items, then summary)
+
+**How it works:**
+1. Fetches all items from the collection
+2. For each item and asset:
+   - Queries S3 to get **object-level distribution** (counts per tier)
+   - Reads STAC metadata to get **object-level distribution** from `tier_distribution`
+   - Compares object counts per tier (not just the tier name)
+   - Identifies mismatches at the object level
+3. Updates STAC metadata to match S3 object-level distribution
+4. Optionally adds `alternate.s3` for legacy items (if `--add-missing`)
+5. Updates STAC items via Transaction API (DELETE + POST)
+6. Reports summary with object-level statistics, problems, and corrections
+
+**Example Output:**
+
+```bash
+uv run operator-tools/manage_collections.py sync-storage-tiers sentinel-2-l2a-staging \
+    --s3-endpoint https://s3.de.io.cloud.ovh.net --dry-run
+```
+
+```
+DRY RUN: Syncing storage tiers for collection: sentinel-2-l2a-staging
+Processing 43 items...
+Syncing storage tiers  [####################################]  43/43
+
+============================================================
+SYNC SUMMARY
+============================================================
+Items processed: 43
+✅ Items updated: 5
+✓ Items with no changes: 38
+❌ Items failed: 0
+
+Assets:
+  Updated: 12
+  Added (alternate.s3): 0
+  ⚠️  Failed to query S3: 0
+
+────────────────────────────────────────────────────────────
+OBJECT-LEVEL STATISTICS
+────────────────────────────────────────────────────────────
+
+  S3 (current storage):
+    Total objects: 12,450
+      STANDARD: 5,245 objects (42.1%)
+      STANDARD_IA: 7,205 objects (57.9%)
+
+  STAC (metadata):
+    Total objects: 12,450
+      STANDARD: 5,500 objects (44.2%)
+      STANDARD_IA: 6,950 objects (55.8%)
+
+────────────────────────────────────────────────────────────
+🔍 MISMATCHES FOUND: 3 item(s)
+────────────────────────────────────────────────────────────
+
+  Item: S2A_MSIL2A_20250831T103701_N0511_R008_T31TFL_20250831T145420
+    Asset: reflectance
+      S3 objects: STANDARD: 450, STANDARD_IA: 608
+      STAC objects: STANDARD: 500, STANDARD_IA: 558
+
+  Item: S2A_MSIL2A_20251008T100041_N0511_R122_T32TQM_20251008T122613
+    Asset: reflectance
+      S3 objects: STANDARD: 1
+      STAC objects: STANDARD_IA: 1
+
+────────────────────────────────────────────────────────────
+✅ CORRECTIONS MADE: 5 item(s) updated
+────────────────────────────────────────────────────────────
+  S2A_MSIL2A_20250831T103701_N0511_R008_T31TFL_20250831T145420: 2 asset(s) updated
+  S2A_MSIL2A_20251008T100041_N0511_R122_T32TQM_20251008T122613: 1 asset(s) updated
+  ... and 3 more item(s)
+
+────────────────────────────────────────────────────────────
+DRY RUN - No changes were made
+────────────────────────────────────────────────────────────
+============================================================
+```
+
+**Use cases:**
+- Keeping STAC metadata in sync with actual S3 storage classes
+- Finding and fixing storage tier mismatches across collections
+- Adding storage tier metadata to legacy items
+- Auditing storage tier accuracy before reporting
+
+**Best practices:**
+- Always use `--dry-run` first to preview changes
+- Review the problems section to understand mismatches
+- Use `--add-missing` for legacy items that don't have `alternate.s3`
+- Test on a single item with `manage_item.py sync-storage-tiers` before running on entire collection
+
 ### Global Options
 
 #### `--api-url`
@@ -433,7 +613,7 @@ The `manage_item.py` tool provides commands for working with individual STAC ite
 
 ### `info` - Show Item Information
 
-Display detailed information about a specific STAC item, including optional S3 statistics.
+Display detailed information about a specific STAC item, including optional S3 statistics and storage tier statistics.
 
 ```bash
 # Basic item info
@@ -441,6 +621,12 @@ uv run operator-tools/manage_item.py info sentinel-2-l2a-staging ITEM_ID
 
 # Include S3 storage statistics
 uv run operator-tools/manage_item.py info sentinel-2-l2a-staging ITEM_ID --s3-stats
+
+# Include storage tier statistics from STAC metadata
+uv run operator-tools/manage_item.py info sentinel-2-l2a-staging ITEM_ID --s3-stac-info
+
+# Combine both statistics
+uv run operator-tools/manage_item.py info sentinel-2-l2a-staging ITEM_ID --s3-stats --s3-stac-info
 
 # With debug output (shows detailed URL extraction)
 uv run operator-tools/manage_item.py info sentinel-2-l2a-staging ITEM_ID --s3-stats --debug
@@ -454,6 +640,11 @@ uv run operator-tools/manage_item.py info sentinel-2-l2a-staging ITEM_ID --s3-st
   - S3 URLs extracted from assets
   - Object count
   - Total size in GB
+- **With `--s3-stac-info`:**
+  - Total assets and tier coverage statistics
+  - Storage tier distribution by asset count
+  - Distribution breakdowns for mixed storage tiers
+  - Reads from STAC metadata (no S3 queries required)
 - **With `--debug`:**
   - Exact S3 URLs found in each asset
   - Which fields contain S3 URLs (`alternate.s3.href` vs main `href`)
@@ -463,6 +654,7 @@ uv run operator-tools/manage_item.py info sentinel-2-l2a-staging ITEM_ID --s3-st
 - Debugging why an item's S3 data isn't being found
 - Verifying S3 URLs are correctly formatted
 - Understanding how much S3 storage an item uses
+- Checking storage tier distribution for an item
 - Investigating issues before batch operations
 
 ### `delete` - Delete a Single Item
@@ -511,6 +703,42 @@ DELETION SUMMARY:
 - Removing specific test items
 - Verifying S3 cleanup works before scaling to collection
 - Debugging deletion issues
+
+### `sync-storage-tiers` - Sync Storage Tier Metadata for a Single Item
+
+Sync storage tier metadata for a single STAC item with S3. This command queries S3 for current storage classes at the **object level** and updates STAC item metadata to match. It compares object-level distributions (not just asset-level tiers) and shows detailed mismatches.
+
+```bash
+# Dry run (preview changes)
+uv run operator-tools/manage_item.py sync-storage-tiers sentinel-2-l2a-staging ITEM_ID \
+    --s3-endpoint https://s3.de.io.cloud.ovh.net --dry-run
+
+# Actually sync (with confirmation)
+uv run operator-tools/manage_item.py sync-storage-tiers sentinel-2-l2a-staging ITEM_ID \
+    --s3-endpoint https://s3.de.io.cloud.ovh.net
+
+# Add missing alternate.s3 for legacy items
+uv run operator-tools/manage_item.py sync-storage-tiers sentinel-2-l2a-staging ITEM_ID \
+    --s3-endpoint https://s3.de.io.cloud.ovh.net --add-missing
+```
+
+**Options:**
+- `--s3-endpoint`: S3 endpoint URL (required, or set `AWS_ENDPOINT_URL` env var)
+- `--add-missing`: Add `alternate.s3` to assets that don't have it (for legacy items)
+- `--dry-run`: Show what would be updated without actually updating
+
+**Output includes:**
+- Summary of assets with alternate.s3, tier info, and updates
+- **Object-level statistics**: Shows object counts per tier from both S3 and STAC
+- **Problems section**: Lists mismatches showing object-level differences (S3 objects vs STAC objects)
+- **Corrections section**: Shows what was fixed
+- Confirmation of STAC item update (if not dry-run)
+
+**Use cases:**
+- Testing sync on a single item before running on entire collection
+- Fixing storage tier mismatches for specific items
+- Adding missing storage tier metadata to legacy items
+- Debugging storage tier sync issues
 
 ## Common Workflows
 
