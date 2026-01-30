@@ -1,32 +1,46 @@
 # Update STAC Storage Tier Metadata
 
-Updates existing STAC items with current S3 storage tier metadata.
+Updates existing STAC items with current S3 storage metadata following the [storage extension v2.0](https://github.com/stac-extensions/storage) pattern: schemes at item properties, refs at asset alternate.
 
 ## Modes
 
-**Update (default)**: Updates `storage:scheme.tier` for assets with existing `alternate.s3`
+**Update (default)**: Updates `storage:refs` and `objects_per_storage_class` for assets with existing `alternate.s3`, and ensures item `properties["storage:schemes"]` is set.
 
-**Add Missing (`--add-missing`)**: Creates `alternate.s3` structure for legacy items without it
+**Add Missing (`--add-missing`)**: Creates `alternate.s3` structure for legacy items without it (with `storage:refs` and optional `objects_per_storage_class`).
 
-## Storage Tier Detection
+## Output structure
 
-- **Single file**: Returns tier directly (e.g., `"STANDARD_IA"`)
-- **Uniform Zarr**: All files same tier (e.g., `"STANDARD_IA"` + distribution)
-- **Mixed Zarr**: Different tiers detected (tier: `"MIXED"` + distribution breakdown)
+- **Item level** – `properties["storage:schemes"]`: defines schemes `standard`, `performance`, `glacier`, `mixed` (custom-s3, platform, bucket, region, storage_class).
+- **Asset level** – each `alternate.s3` has:
+  - `storage:refs`: array of scheme keys (e.g. `["performance"]`, `["mixed"]`) linking to `properties["storage:schemes"]`
+  - `objects_per_storage_class`: optional object with object counts per storage class (e.g. `{"STANDARD": 4}`), for Zarr directories
 
-Distribution shows file counts per tier, based on sample of up to 100 files.
+## Storage tier detection
 
-### Example: Mixed Storage
+- **Single file**: One tier (e.g. `STANDARD_IA` → ref `glacier`)
+- **Uniform Zarr**: All files same tier + `objects_per_storage_class` with counts
+- **Mixed Zarr**: ref `mixed` + `objects_per_storage_class` breakdown
+
+Distribution is computed with full pagination when updating (accurate for Zarr).
+
+### Example: item properties and asset alternate
 ```json
-{
-  "storage:scheme": {
-    "platform": "OVHcloud",
-    "region": "de",
-    "requester_pays": false,
-    "tier": "MIXED",
-    "tier_distribution": {
-      "STANDARD": 450,
-      "STANDARD_IA": 608
+"properties": {
+  "storage:schemes": {
+    "standard": { "type": "custom-s3", "platform": "https://s3.de.io.cloud.ovh.net/", "bucket": "esa-zarr-sentinel-explorer-fra", "region": "de", "storage_class": "STANDARD" },
+    "performance": { "type": "custom-s3", "platform": "https://s3.de.io.cloud.ovh.net/", "bucket": "esa-zarr-sentinel-explorer-fra", "region": "de", "storage_class": "EXPRESS_ONEZONE" },
+    "glacier": { "type": "custom-s3", "platform": "https://s3.de.io.cloud.ovh.net/", "bucket": "esa-zarr-sentinel-explorer-fra", "region": "de", "storage_class": "STANDARD_IA" },
+    "mixed": { "type": "custom-s3", "platform": "https://s3.de.io.cloud.ovh.net/", "bucket": "esa-zarr-sentinel-explorer-fra", "region": "de", "storage_class": "MIXED" }
+  }
+},
+"assets": {
+  "reflectance": {
+    "alternate": {
+      "s3": {
+        "href": "s3://bucket/data.zarr/...",
+        "storage:refs": ["mixed"],
+        "objects_per_storage_class": { "STANDARD": 450, "STANDARD_IA": 608 }
+      }
     }
   }
 }
@@ -34,9 +48,8 @@ Distribution shows file counts per tier, based on sample of up to 100 files.
 
 ## Notes
 
-- Thumbnail assets automatically skipped
-- Failed S3 queries remove existing `storage:scheme.tier` field
-- Distribution metadata only for Zarr directories (stored in `storage:scheme.tier_distribution`)
+- Thumbnail assets are skipped
+- Failed S3 queries set `storage:refs` to `["standard"]`
 
 ## Setup
 

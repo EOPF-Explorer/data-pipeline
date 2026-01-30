@@ -32,6 +32,20 @@ def stac_item_legacy():
 
 
 @pytest.fixture
+def stac_item_legacy_storage_scheme():
+    """Legacy STAC item with alternate.s3 in old format (storage:scheme, tier, tier_distribution)."""
+    with open(FIXTURES_DIR / "stac_item_legacy_storage_scheme.json") as f:
+        return Item.from_dict(json.load(f))
+
+
+@pytest.fixture
+def stac_item_legacy_storage_scheme_expected():
+    """Expected STAC item after migrating legacy storage:scheme to new format."""
+    with open(FIXTURES_DIR / "stac_item_legacy_storage_scheme_after_update.json") as f:
+        return Item.from_dict(json.load(f))
+
+
+@pytest.fixture
 def s3_responses():
     """Mock S3 storage tier responses."""
     with open(FIXTURES_DIR / "s3_storage_responses.json") as f:
@@ -39,14 +53,18 @@ def s3_responses():
 
 
 class TestUpdateItemStorageTiers:
-    """Tests for update_item_storage_tiers function."""
+    """Tests for update_item_storage_tiers function.
+
+    Patches are applied where the script uses the functions (update_stac_storage_tier
+    module): get_s3_storage_info (from storage_tier_utils), https_to_s3 (from register_v1).
+    """
 
     @patch("update_stac_storage_tier.get_s3_storage_info")
     def test_tier_change_updates_asset(self, mock_get_info, stac_item_before):
         """Test updating storage tier when it changes."""
         from update_stac_storage_tier import update_item_storage_tiers
 
-        mock_get_info.return_value = {"tier": "GLACIER", "distribution": None}
+        mock_get_info.return_value = {"tier": "STANDARD_IA", "distribution": None}
 
         updated, with_alt, with_tier, added, skipped, failed = update_item_storage_tiers(
             stac_item_before, "https://s3.endpoint.com", add_missing=False
@@ -56,7 +74,7 @@ class TestUpdateItemStorageTiers:
         assert with_alt == 1
         assert with_tier == 1
         s3_info = stac_item_before.assets["reflectance"].extra_fields["alternate"]["s3"]
-        assert s3_info["storage:scheme"]["tier"] == "GLACIER"
+        assert s3_info["storage:refs"] == ["glacier"]
 
     @patch("update_stac_storage_tier.get_s3_storage_info")
     def test_no_update_when_tier_unchanged(self, mock_get_info, stac_item_before):
@@ -74,10 +92,13 @@ class TestUpdateItemStorageTiers:
 
     @patch("update_stac_storage_tier.get_s3_storage_info")
     def test_removes_tier_on_s3_query_failure(self, mock_get_info, stac_item_before):
-        """Test tier removal when S3 query fails."""
+        """Test ref set to standard and legacy storage:scheme removed when S3 query fails."""
         from update_stac_storage_tier import update_item_storage_tiers
 
         mock_get_info.return_value = None
+        # Simulate legacy item with storage:scheme (script will remove it)
+        s3_info = stac_item_before.assets["reflectance"].extra_fields["alternate"]["s3"]
+        s3_info["storage:scheme"] = {"tier": "STANDARD", "platform": "OVHcloud"}
 
         updated, with_alt, with_tier, added, skipped, failed = update_item_storage_tiers(
             stac_item_before, "https://s3.endpoint.com", add_missing=False
@@ -86,8 +107,51 @@ class TestUpdateItemStorageTiers:
         assert updated == 1
         assert failed == 1
         s3_info = stac_item_before.assets["reflectance"].extra_fields["alternate"]["s3"]
-        assert "storage:scheme" in s3_info
-        assert "tier" not in s3_info["storage:scheme"]
+        assert s3_info["storage:refs"] == ["standard"]
+        assert "storage:scheme" not in s3_info
+
+    @patch("update_stac_storage_tier.get_s3_storage_info")
+    def test_legacy_storage_scheme_migrates_to_new_format(
+        self,
+        mock_get_info,
+        stac_item_legacy_storage_scheme,
+        stac_item_legacy_storage_scheme_expected,
+    ):
+        """Test legacy item with storage:scheme (tier, tier_distribution) migrates to new format."""
+        from update_stac_storage_tier import update_item_storage_tiers
+
+        # Match legacy fixture: tier STANDARD, uniform Zarr with distribution
+        mock_get_info.return_value = {
+            "tier": "STANDARD",
+            "distribution": {"STANDARD": 450},
+        }
+
+        updated, with_alt, with_tier, added, skipped, failed = update_item_storage_tiers(
+            stac_item_legacy_storage_scheme, "https://s3.de.io.cloud.ovh.net", add_missing=False
+        )
+
+        assert updated == 1
+        assert with_alt == 1
+        assert with_tier == 1
+        assert failed == 0
+        # Item-level: new format has storage:schemes
+        assert "storage:schemes" in stac_item_legacy_storage_scheme.properties
+        expected_props = stac_item_legacy_storage_scheme_expected.properties
+        assert (
+            stac_item_legacy_storage_scheme.properties["storage:schemes"]
+            == expected_props["storage:schemes"]
+        )
+        # Asset-level: storage:refs, objects_per_storage_class, no legacy storage:scheme
+        s3_info = stac_item_legacy_storage_scheme.assets["reflectance"].extra_fields["alternate"][
+            "s3"
+        ]
+        expected_s3 = stac_item_legacy_storage_scheme_expected.assets["reflectance"].extra_fields[
+            "alternate"
+        ]["s3"]
+        assert s3_info["storage:refs"] == expected_s3["storage:refs"]
+        assert s3_info["objects_per_storage_class"] == expected_s3["objects_per_storage_class"]
+        assert "storage:scheme" not in s3_info
+        assert s3_info["href"] == expected_s3["href"]
 
     @patch("update_stac_storage_tier.get_s3_storage_info")
     @patch("update_stac_storage_tier.https_to_s3")
@@ -108,8 +172,8 @@ class TestUpdateItemStorageTiers:
         assert added == 1
         s3_info = stac_item_legacy.assets["reflectance"].extra_fields["alternate"]["s3"]
         assert s3_info["href"] == "s3://bucket/data.zarr/measurements/reflectance"
-        assert s3_info["storage:scheme"]["tier"] == "STANDARD"
-        assert s3_info["storage:scheme"]["platform"] == "OVHcloud"
+        assert s3_info["storage:refs"] == ["standard"]
+        assert "storage:schemes" in stac_item_legacy.properties
 
     @patch("update_stac_storage_tier.get_s3_storage_info")
     @patch("update_stac_storage_tier.https_to_s3")
@@ -133,12 +197,13 @@ class TestUpdateItemStorageTiers:
 
     @patch("update_stac_storage_tier.get_s3_storage_info")
     def test_mixed_storage_adds_distribution(self, mock_get_info, stac_item_before):
-        """Test mixed storage adds distribution metadata."""
+        """Test mixed storage adds objects_per_storage_class and mixed ref."""
         from update_stac_storage_tier import update_item_storage_tiers
 
+        # Per storage_tier_utils.get_s3_storage_info: tier must be MIXED when distribution has multiple storage classes
         mock_get_info.return_value = {
             "tier": "MIXED",
-            "distribution": {"STANDARD": 450, "GLACIER": 608},
+            "distribution": {"STANDARD": 450, "STANDARD_IA": 608},
         }
 
         updated, with_alt, with_tier, added, skipped, failed = update_item_storage_tiers(
@@ -147,15 +212,16 @@ class TestUpdateItemStorageTiers:
 
         assert updated == 1
         s3_info = stac_item_before.assets["reflectance"].extra_fields["alternate"]["s3"]
-        assert s3_info["storage:scheme"]["tier"] == "MIXED"
-        assert s3_info["storage:scheme"]["tier_distribution"] == {"STANDARD": 450, "GLACIER": 608}
+        assert s3_info["storage:refs"] == ["mixed"]
+        assert s3_info["objects_per_storage_class"] == {"STANDARD": 450, "STANDARD_IA": 608}
 
     @patch("update_stac_storage_tier.get_s3_storage_info")
     def test_uniform_zarr_adds_distribution(self, mock_get_info, stac_item_before):
-        """Test uniform Zarr includes distribution."""
+        """Test uniform Zarr includes objects_per_storage_class."""
         from update_stac_storage_tier import update_item_storage_tiers
 
-        mock_get_info.return_value = {"tier": "GLACIER", "distribution": {"GLACIER": 100}}
+        # Per get_s3_storage_info: uniform Zarr has one class in distribution, tier is that class
+        mock_get_info.return_value = {"tier": "STANDARD_IA", "distribution": {"STANDARD_IA": 100}}
 
         updated, with_alt, with_tier, added, skipped, failed = update_item_storage_tiers(
             stac_item_before, "https://s3.endpoint.com", add_missing=False
@@ -163,15 +229,15 @@ class TestUpdateItemStorageTiers:
 
         assert updated == 1
         s3_info = stac_item_before.assets["reflectance"].extra_fields["alternate"]["s3"]
-        assert s3_info["storage:scheme"]["tier"] == "GLACIER"
-        assert s3_info["storage:scheme"]["tier_distribution"] == {"GLACIER": 100}
+        assert s3_info["storage:refs"] == ["glacier"]
+        assert s3_info["objects_per_storage_class"] == {"STANDARD_IA": 100}
 
     @patch("update_stac_storage_tier.get_s3_storage_info")
     def test_single_file_no_distribution(self, mock_get_info, stac_item_before):
-        """Test single file doesn't add distribution."""
+        """Test single file doesn't add objects_per_storage_class."""
         from update_stac_storage_tier import update_item_storage_tiers
 
-        mock_get_info.return_value = {"tier": "GLACIER", "distribution": None}
+        mock_get_info.return_value = {"tier": "STANDARD_IA", "distribution": None}
 
         updated, with_alt, with_tier, added, skipped, failed = update_item_storage_tiers(
             stac_item_before, "https://s3.endpoint.com", add_missing=False
@@ -179,31 +245,8 @@ class TestUpdateItemStorageTiers:
 
         assert updated == 1
         s3_info = stac_item_before.assets["reflectance"].extra_fields["alternate"]["s3"]
-        assert s3_info["storage:scheme"]["tier"] == "GLACIER"
-        assert "tier_distribution" not in s3_info["storage:scheme"]
-
-    @patch("update_stac_storage_tier.get_s3_storage_info")
-    def test_removes_distribution_when_becomes_single_file(self, mock_get_info, stac_item_before):
-        """Test distribution removal when Zarr becomes single file."""
-        from update_stac_storage_tier import update_item_storage_tiers
-
-        # Add existing distribution
-        s3_info = stac_item_before.assets["reflectance"].extra_fields["alternate"]["s3"]
-        if "storage:scheme" not in s3_info:
-            s3_info["storage:scheme"] = {}
-        s3_info["storage:scheme"]["tier"] = "MIXED"
-        s3_info["storage:scheme"]["tier_distribution"] = {"STANDARD": 450, "GLACIER": 608}
-
-        mock_get_info.return_value = {"tier": "GLACIER", "distribution": None}
-
-        updated, with_alt, with_tier, added, skipped, failed = update_item_storage_tiers(
-            stac_item_before, "https://s3.endpoint.com", add_missing=False
-        )
-
-        assert updated == 1
-        s3_info = stac_item_before.assets["reflectance"].extra_fields["alternate"]["s3"]
-        assert s3_info["storage:scheme"]["tier"] == "GLACIER"
-        assert "tier_distribution" not in s3_info["storage:scheme"]
+        assert s3_info["storage:refs"] == ["glacier"]
+        assert "objects_per_storage_class" not in s3_info
 
     @patch("update_stac_storage_tier.get_s3_storage_info")
     def test_skips_thumbnail_assets(self, mock_get_info, stac_item_before):

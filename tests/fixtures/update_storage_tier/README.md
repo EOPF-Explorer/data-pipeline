@@ -4,10 +4,12 @@ This directory contains JSON fixtures used by `test_update_stac_storage_tier.py`
 
 ## Fixtures
 
-- **stac_item_before.json**: STAC item with existing `alternate.s3` (STANDARD tier)
+- **stac_item_before.json**: STAC item with existing `alternate.s3` in new format (STANDARD tier)
 - **stac_item_legacy.json**: Legacy STAC item without `alternate.s3`
-- **stac_item_after_tier_change.json**: Expected result after tier change to STANDARD_IA
-- **stac_item_mixed_storage.json**: STAC item with mixed storage tier distribution
+- **stac_item_legacy_storage_scheme.json**: Legacy STAC item with `alternate.s3` in old format (storage:scheme, tier, tier_distribution)
+- **stac_item_legacy_storage_scheme_after_update.json**: Expected result after migrating legacy storage:scheme to new format (storage:schemes, storage:refs, objects_per_storage_class)
+- **stac_item_after_tier_change.json**: Expected result after tier change to STANDARD_IA (new format)
+- **stac_item_mixed_storage.json**: Example new-format item for mixed storage (storage:schemes, storage:refs = mixed, objects_per_storage_class)
 - **s3_storage_responses.json**: Mock S3 storage tier responses for different URLs
 
 ## Usage

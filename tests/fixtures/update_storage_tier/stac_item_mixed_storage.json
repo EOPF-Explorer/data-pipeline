@@ -5,7 +5,37 @@
   "geometry": {"type": "Polygon", "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]]},
   "bbox": [0, 0, 1, 1],
   "properties": {
-    "datetime": "2023-12-08T10:00:00Z"
+    "datetime": "2023-12-08T10:00:00Z",
+    "storage:schemes": {
+      "standard": {
+        "type": "custom-s3",
+        "platform": "https://s3.de.io.cloud.ovh.net/",
+        "bucket": "esa-zarr-sentinel-explorer-fra",
+        "region": "de",
+        "storage_class": "STANDARD"
+      },
+      "performance": {
+        "type": "custom-s3",
+        "platform": "https://s3.de.io.cloud.ovh.net/",
+        "bucket": "esa-zarr-sentinel-explorer-fra",
+        "region": "de",
+        "storage_class": "EXPRESS_ONEZONE"
+      },
+      "glacier": {
+        "type": "custom-s3",
+        "platform": "https://s3.de.io.cloud.ovh.net/",
+        "bucket": "esa-zarr-sentinel-explorer-fra",
+        "region": "de",
+        "storage_class": "STANDARD_IA"
+      },
+      "mixed": {
+        "type": "custom-s3",
+        "platform": "https://s3.de.io.cloud.ovh.net/",
+        "bucket": "esa-zarr-sentinel-explorer-fra",
+        "region": "de",
+        "storage_class": "MIXED"
+      }
+    }
   },
   "assets": {
     "reflectance": {
@@ -15,15 +45,10 @@
       "alternate": {
         "s3": {
           "href": "s3://bucket/data.zarr/measurements/reflectance",
-          "storage:scheme": {
-            "platform": "OVHcloud",
-            "region": "de",
-            "requester_pays": false,
-            "tier": "MIXED",
-            "tier_distribution": {
-              "STANDARD": 450,
-              "STANDARD_IA": 608
-            }
+          "storage:refs": ["mixed"],
+          "objects_per_storage_class": {
+            "STANDARD": 450,
+            "STANDARD_IA": 608
           }
         }
       }

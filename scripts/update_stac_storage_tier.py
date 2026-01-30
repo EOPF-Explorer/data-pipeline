@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Update STAC items with current S3 storage tier metadata.
 
-This script fetches STAC items and updates their alternate.s3 objects with
-current storage tier information from S3. It can also be use for updating existing items
-that were registered before storage tier tracking was implemented.
+This script fetches STAC items and updates storage metadata to follow the
+storage extension v2.0 pattern: item-level properties["storage:schemes"] with
+standard/performance/glacier schemes, and at each asset alternate.s3 it sets
+storage:refs (linking to a scheme) and objects_per_storage_class (object counts per
+storage class). It can also add alternate.s3 for legacy items that lack it.
 """
 
 from __future__ import annotations
@@ -38,11 +40,70 @@ logger = logging.getLogger(__name__)
 for lib in ["botocore", "boto3", "urllib3", "httpx", "httpcore"]:
     logging.getLogger(lib).setLevel(logging.WARNING)
 
+# Default OVH S3 platform and bucket for storage schemes (item-level)
+STORAGE_SCHEMES_PLATFORM = "https://s3.de.io.cloud.ovh.net/"
+STORAGE_SCHEMES_BUCKET = "esa-zarr-sentinel-explorer-fra"
+
+# Map S3 storage class (from API) to scheme key in properties["storage:schemes"]
+# OVH returns STANDARD, EXPRESS_ONEZONE, STANDARD_IA only
+TIER_TO_SCHEME: dict[str, str] = {
+    "STANDARD": "standard",
+    "EXPRESS_ONEZONE": "performance",
+    "STANDARD_IA": "glacier",
+    "MIXED": "mixed",
+}
+
+
+def _build_storage_schemes(region: str) -> dict:
+    """Build item-level storage:schemes (storage extension v2) for OVH S3."""
+    return {
+        "standard": {
+            "type": "custom-s3",
+            "platform": STORAGE_SCHEMES_PLATFORM,
+            "bucket": STORAGE_SCHEMES_BUCKET,
+            "region": region,
+            "storage_class": "STANDARD",
+        },
+        "performance": {
+            "type": "custom-s3",
+            "platform": STORAGE_SCHEMES_PLATFORM,
+            "bucket": STORAGE_SCHEMES_BUCKET,
+            "region": region,
+            "storage_class": "EXPRESS_ONEZONE",
+        },
+        "glacier": {
+            "type": "custom-s3",
+            "platform": STORAGE_SCHEMES_PLATFORM,
+            "bucket": STORAGE_SCHEMES_BUCKET,
+            "region": region,
+            "storage_class": "STANDARD_IA",
+        },
+        "mixed": {
+            "type": "custom-s3",
+            "platform": STORAGE_SCHEMES_PLATFORM,
+            "bucket": STORAGE_SCHEMES_BUCKET,
+            "region": region,
+            "storage_class": "MIXED",  # mixed storage class that contains objects with different storage classes
+        },
+    }
+
+
+def _tier_to_scheme_ref(tier: str | None, distribution: dict[str, int] | None) -> str:
+    """Return scheme key for storage:refs from S3 tier."""
+    if not tier:
+        return "standard"
+    if tier == "MIXED":
+        return "mixed"
+    return TIER_TO_SCHEME.get(tier, "standard")
+
 
 def update_item_storage_tiers(
     item: Item, s3_endpoint: str, add_missing: bool = False
 ) -> tuple[int, int, int, int, int, int]:
-    """Update storage tier metadata for all assets in a STAC item.
+    """Update storage metadata for all assets in a STAC item.
+
+    Sets item.properties["storage:schemes"] (standard/performance/glacier) and
+    each asset alternate.s3 with storage:refs and optional objects_per_storage_class.
 
     Args:
         item: STAC item to update
@@ -67,6 +128,12 @@ def update_item_storage_tiers(
             item.stac_extensions.append(ext)
 
     region = extract_region_from_endpoint(s3_endpoint)
+
+    # Ensure item-level storage:schemes (storage extension v2 - schemes at properties)
+    if not hasattr(item, "properties"):
+        item.properties = {}
+    if "storage:schemes" not in item.properties or not item.properties["storage:schemes"]:
+        item.properties["storage:schemes"] = _build_storage_schemes(region)
 
     assets_updated = 0
     assets_with_alternate_s3 = 0
@@ -118,33 +185,23 @@ def update_item_storage_tiers(
                 continue
 
             tier = storage_info["tier"]
+            distribution = storage_info.get("distribution")
 
             # Preserve existing alternate structure if present
             existing_alternate = asset.extra_fields.get("alternate", {})
             if not isinstance(existing_alternate, dict):
                 existing_alternate = {}
 
-            # Create storage scheme object following v2.0 spec
-            storage_scheme = {
-                "platform": "OVHcloud",
-                "region": region,
-                "requester_pays": False,
-            }
+            # Scheme ref from tier (links to item properties["storage:schemes"])
+            scheme_ref = _tier_to_scheme_ref(tier, distribution)
 
-            # Add tier to scheme (standard field in v2.0)
-            if tier:
-                storage_scheme["tier"] = tier
-
-            # Add distribution to scheme (contains object counts per tier)
-            # With query_all=True, distribution always includes accurate counts for Zarr directories
-            if storage_info["distribution"] is not None:
-                storage_scheme["tier_distribution"] = storage_info["distribution"]
-
-            # Create alternate.s3 object
-            s3_alternate = {
+            # Create alternate.s3: href, storage:refs, optional objects_per_storage_class
+            s3_alternate: dict = {
                 "href": s3_url,
-                "storage:scheme": storage_scheme,
+                "storage:refs": [scheme_ref],
             }
+            if distribution is not None:
+                s3_alternate["objects_per_storage_class"] = distribution
 
             # Preserve other alternate formats (e.g., alternate.xarray if it exists)
             existing_alternate["s3"] = s3_alternate
@@ -152,7 +209,7 @@ def update_item_storage_tiers(
             assets_added += 1
             assets_updated += 1
             assets_with_tier += 1
-            logger.info(f"  {asset_key}: Added alternate.s3 with tier {tier}")
+            logger.info(f"  {asset_key}: Added alternate.s3 with scheme ref {scheme_ref}")
             continue
 
         # If no alternate.s3 and not adding, skip
@@ -180,70 +237,44 @@ def update_item_storage_tiers(
             )
             assets_s3_failed += 1
             storage_tier: str | None = None
+            distribution = None
         else:
             storage_tier = storage_info["tier"]
+            distribution = storage_info.get("distribution")
 
-        # Get or create storage:scheme object (v2.0 format)
-        storage_scheme = s3_info.get("storage:scheme", {})
-        if not isinstance(storage_scheme, dict):
-            storage_scheme = {}
+        # Get or create storage:refs and objects_per_storage_class (v2.0: refs at asset, schemes in properties)
+        old_refs = s3_info.get("storage:refs")
+        if not isinstance(old_refs, list):
+            old_refs = []
+        old_distribution = s3_info.get("objects_per_storage_class")
 
-        # Track if anything changed
+        scheme_ref = _tier_to_scheme_ref(storage_tier, distribution)
+        new_refs = [scheme_ref]
+        new_distribution = distribution if distribution is not None else None
+
         asset_changed = False
-        old_tier = storage_scheme.get("tier")
-
-        # Update scheme fields (only if missing)
-        scheme_changed = False
-        if "platform" not in storage_scheme:
-            storage_scheme["platform"] = "OVHcloud"
-            scheme_changed = True
-        if "region" not in storage_scheme:
-            storage_scheme["region"] = region
-            scheme_changed = True
-        if "requester_pays" not in storage_scheme:
-            storage_scheme["requester_pays"] = False
-            scheme_changed = True
-
-        # Add/update tier in scheme (standard v2.0 field)
         if storage_tier:
-            if storage_scheme.get("tier") != storage_tier:
-                storage_scheme["tier"] = storage_tier
-                scheme_changed = True
             assets_with_tier += 1
+            if storage_tier == "MIXED" and distribution:
+                logger.info(f"  {asset_key}: Mixed storage detected - {distribution}")
 
-            # Add or update distribution in scheme (contains object counts per tier)
-            # With query_all=True, distribution always includes accurate counts for Zarr directories
-            if storage_info and storage_info.get("distribution") is not None:
-                if storage_scheme.get("tier_distribution") != storage_info["distribution"]:
-                    storage_scheme["tier_distribution"] = storage_info["distribution"]
-                    scheme_changed = True
-                if storage_tier == "MIXED":
-                    logger.info(
-                        f"  {asset_key}: Mixed storage detected - {storage_info['distribution']}"
-                    )
-            else:
-                # Remove distribution from scheme if no longer mixed
-                if "tier_distribution" in storage_scheme:
-                    del storage_scheme["tier_distribution"]
-                    scheme_changed = True
+        if old_refs != new_refs:
+            s3_info["storage:refs"] = new_refs
+            asset_changed = True
+            logger.debug(f"  {asset_key}: storage:refs -> {new_refs}")
 
-            if old_tier != storage_tier:
+        if new_distribution is not None:
+            if old_distribution != new_distribution:
+                s3_info["objects_per_storage_class"] = new_distribution
                 asset_changed = True
-                logger.debug(f"  {asset_key}: {old_tier or 'none'} -> {storage_tier}")
         else:
-            # Remove tier if it cannot be determined
-            if "tier" in storage_scheme:
-                del storage_scheme["tier"]
-                scheme_changed = True
-                logger.debug(f"  {asset_key}: removed tier (not available)")
-            # Also remove distribution from scheme if present
-            if "tier_distribution" in storage_scheme:
-                del storage_scheme["tier_distribution"]
-                scheme_changed = True
+            if "objects_per_storage_class" in s3_info:
+                del s3_info["objects_per_storage_class"]
+                asset_changed = True
 
-        # Update storage:scheme in s3_info if changed
-        if scheme_changed:
-            s3_info["storage:scheme"] = storage_scheme
+        # Remove legacy storage:scheme if present (migration to item-level schemes)
+        if "storage:scheme" in s3_info:
+            del s3_info["storage:scheme"]
             asset_changed = True
 
         if asset_changed:
