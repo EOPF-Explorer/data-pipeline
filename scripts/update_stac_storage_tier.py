@@ -62,6 +62,7 @@ def _build_storage_schemes(region: str) -> dict:
             "platform": STORAGE_SCHEMES_PLATFORM,
             "bucket": STORAGE_SCHEMES_BUCKET,
             "region": region,
+            "requester_pays": False,
             "storage_class": "STANDARD",
         },
         "performance": {
@@ -69,6 +70,7 @@ def _build_storage_schemes(region: str) -> dict:
             "platform": STORAGE_SCHEMES_PLATFORM,
             "bucket": STORAGE_SCHEMES_BUCKET,
             "region": region,
+            "requester_pays": False,
             "storage_class": "EXPRESS_ONEZONE",
         },
         "glacier": {
@@ -76,6 +78,7 @@ def _build_storage_schemes(region: str) -> dict:
             "platform": STORAGE_SCHEMES_PLATFORM,
             "bucket": STORAGE_SCHEMES_BUCKET,
             "region": region,
+            "requester_pays": False,
             "storage_class": "STANDARD_IA",
         },
         "mixed": {
@@ -83,6 +86,7 @@ def _build_storage_schemes(region: str) -> dict:
             "platform": STORAGE_SCHEMES_PLATFORM,
             "bucket": STORAGE_SCHEMES_BUCKET,
             "region": region,
+            "requester_pays": False,
             "storage_class": "MIXED",  # mixed storage class that contains objects with different storage classes
         },
     }

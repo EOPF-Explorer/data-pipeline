@@ -12,6 +12,7 @@
         "platform": "https://s3.de.io.cloud.ovh.net/",
         "bucket": "esa-zarr-sentinel-explorer-fra",
         "region": "de",
+        "requester_pays": false,
         "storage_class": "STANDARD"
       },
       "performance": {
@@ -19,6 +20,7 @@
         "platform": "https://s3.de.io.cloud.ovh.net/",
         "bucket": "esa-zarr-sentinel-explorer-fra",
         "region": "de",
+        "requester_pays": false,
         "storage_class": "EXPRESS_ONEZONE"
       },
       "glacier": {
@@ -26,6 +28,7 @@
         "platform": "https://s3.de.io.cloud.ovh.net/",
         "bucket": "esa-zarr-sentinel-explorer-fra",
         "region": "de",
+        "requester_pays": false,
         "storage_class": "STANDARD_IA"
       },
       "mixed": {
@@ -33,6 +36,7 @@
         "platform": "https://s3.de.io.cloud.ovh.net/",
         "bucket": "esa-zarr-sentinel-explorer-fra",
         "region": "de",
+        "requester_pays": false,
         "storage_class": "MIXED"
       }
     }
