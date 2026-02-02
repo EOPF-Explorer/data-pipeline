@@ -181,21 +181,21 @@ def main() -> int:
     )
     parser.add_argument(
         "--enable-sharding",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=DEFAULT_ENABLE_SHARDING,
-        help=f"Enable sharding (default: {DEFAULT_ENABLE_SHARDING})",
+        help=f"Enable or disable sharding (default: {DEFAULT_ENABLE_SHARDING})",
     )
     parser.add_argument(
         "--dask-cluster",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=DEFAULT_DASK_CLUSTER,
-        help=f"Use dask cluster for parallel processing (default: {DEFAULT_DASK_CLUSTER})",
+        help=f"Enable or disable dask cluster (default: {DEFAULT_DASK_CLUSTER})",
     )
     parser.add_argument(
         "--validate-output",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=DEFAULT_VALIDATE_OUTPUT,
-        help=f"Validate output after conversion (default: {DEFAULT_VALIDATE_OUTPUT})",
+        help=f"Enable or disable output validation (default: {DEFAULT_VALIDATE_OUTPUT})",
     )
     parser.add_argument(
         "--n-workers",
