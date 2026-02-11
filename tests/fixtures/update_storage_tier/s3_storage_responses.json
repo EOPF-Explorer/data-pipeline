@@ -1,0 +1,14 @@
+{
+  "s3://bucket/data.zarr/measurements/reflectance": {
+    "tier": "STANDARD_IA",
+    "distribution": null
+  },
+  "s3://bucket/data.zarr/quality/atmosphere": {
+    "tier": "STANDARD",
+    "distribution": {"STANDARD": 100}
+  },
+  "s3://bucket/mixed.zarr/reflectance": {
+    "tier": "MIXED",
+    "distribution": {"STANDARD": 450, "STANDARD_IA": 608}
+  }
+}

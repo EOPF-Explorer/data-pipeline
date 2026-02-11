@@ -15,6 +15,7 @@ import zarr
 from pystac import Asset, Item, Link
 from pystac.extensions.projection import ProjectionExtension
 from pystac_client import Client
+from storage_tier_utils import extract_region_from_endpoint, get_s3_storage_class
 
 # Configure logging (set LOG_LEVEL=DEBUG for verbose output)
 logging.basicConfig(
@@ -388,20 +389,8 @@ def add_alternate_s3_assets(item: Item, s3_endpoint: str) -> None:
         if ext not in item.stac_extensions:
             item.stac_extensions.append(ext)
 
-    # Parse endpoint to extract region info
-    # For OVHcloud endpoints like "s3.de.io.cloud.ovh.net", region is "de"
-    endpoint_host = urlparse(s3_endpoint).netloc or urlparse(s3_endpoint).path
-    region = "unknown"
-    if ".de." in endpoint_host:
-        region = "de"
-    elif ".gra." in endpoint_host:
-        region = "gra"
-    elif ".sbg." in endpoint_host:
-        region = "sbg"
-    elif ".uk." in endpoint_host:
-        region = "uk"
-    elif ".ca." in endpoint_host:
-        region = "ca"
+    # Extract region from endpoint
+    region = extract_region_from_endpoint(s3_endpoint)
 
     # Add alternate to each asset with data role that has an HTTPS URL
     modified_count = 0
@@ -418,18 +407,47 @@ def add_alternate_s3_assets(item: Item, s3_endpoint: str) -> None:
         if not s3_url:
             continue
 
-        # Add alternate with storage extension fields
+        # Query storage class for this asset
+        storage_tier = get_s3_storage_class(s3_url, s3_endpoint)
+
+        # Add alternate with storage extension fields (v2.0 format)
         if not hasattr(asset, "extra_fields"):
             asset.extra_fields = {}
 
-        asset.extra_fields["alternate"] = {
-            "s3": {
-                "href": s3_url,
-                "storage:platform": "OVHcloud",
-                "storage:region": region,
-                "storage:requester_pays": False,
-            }
+        # Preserve existing alternate structure if present
+        existing_alternate = asset.extra_fields.get("alternate", {})
+        if not isinstance(existing_alternate, dict):
+            existing_alternate = {}
+
+        # Get existing s3 alternate or create new one
+        existing_s3 = existing_alternate.get("s3", {})
+        if not isinstance(existing_s3, dict):
+            existing_s3 = {}
+
+        # Get or create storage:scheme object (v2.0 format)
+        storage_scheme = existing_s3.get("storage:scheme", {})
+        if not isinstance(storage_scheme, dict):
+            storage_scheme = {}
+
+        # Update scheme fields
+        storage_scheme["platform"] = "OVHcloud"
+        storage_scheme["region"] = region
+        storage_scheme["requester_pays"] = False
+
+        # Add tier to scheme (standard field in v2.0)
+        if storage_tier:
+            storage_scheme["tier"] = storage_tier
+
+        # Update s3 alternate (preserving any existing fields)
+        s3_alternate = {
+            **existing_s3,  # Preserve existing fields
+            "href": s3_url,
+            "storage:scheme": storage_scheme,
         }
+
+        # Preserve other alternate formats (e.g., alternate.xarray if it exists)
+        existing_alternate["s3"] = s3_alternate
+        asset.extra_fields["alternate"] = existing_alternate
         modified_count += 1
 
     if modified_count > 0:
@@ -684,22 +702,23 @@ def run_registration(
     remove_xarray_integration(item)
 
     # 7. Add alternate S3 URLs to assets (alternate-assets + storage extensions)
+    # This also queries and adds storage:tier to each asset's alternate
     add_alternate_s3_assets(item, s3_endpoint)
 
     # 8. Add visualization links (viewer, xyz, tilejson)
     add_visualization_links(item, raster_api_url, collection)
     logger.info("   🎨 Added visualization links")
 
-    # 9. Add thumbnail asset for STAC browsers
+    # 10. Add thumbnail asset for STAC browsers
     add_thumbnail_asset(item, raster_api_url, collection)
 
-    # 10. Warm the thumbnail cache (best-effort, doesn't fail registration)
+    # 11. Warm thumbnail cache
     warm_thumbnail_cache(item)
 
-    # 11. Add derived_from link to source item
+    # 12. Add derived_from link to source item
     add_derived_from_link(item, source_url)
 
-    # 12. Register to STAC API
+    # 13. Register to STAC API
     client = Client.open(stac_api_url)
     upsert_item(client, collection, item)
 
