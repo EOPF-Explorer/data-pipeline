@@ -37,7 +37,7 @@
     "SR_10m": {
       "gsd": 10,
       "href": "https://objects.eodc.eu:443/e05ab01a9d56408d82ac32d69a5aae2a:202511-s02msil2a-eu/13/products/cpm_v262/S2A_MSIL2A_20251113T102311_N0511_R065_T32TNQ_20251113T142515.zarr/measurements/reflectance/r10m",
-      "type": "application/vnd+zarr",
+      "type": "application/vnd.zarr",
       "bands": [
         {
           "name": "B02",
@@ -79,7 +79,7 @@
     "SR_20m": {
       "gsd": 20,
       "href": "https://objects.eodc.eu:443/e05ab01a9d56408d82ac32d69a5aae2a:202511-s02msil2a-eu/13/products/cpm_v262/S2A_MSIL2A_20251113T102311_N0511_R065_T32TNQ_20251113T142515.zarr/measurements/reflectance/r20m",
-      "type": "application/vnd+zarr",
+      "type": "application/vnd.zarr",
       "bands": [
         {
           "name": "B01",
@@ -163,7 +163,7 @@
     "SR_60m": {
       "gsd": 60,
       "href": "https://objects.eodc.eu:443/e05ab01a9d56408d82ac32d69a5aae2a:202511-s02msil2a-eu/13/products/cpm_v262/S2A_MSIL2A_20251113T102311_N0511_R065_T32TNQ_20251113T142515.zarr/measurements/reflectance/r60m",
-      "type": "application/vnd+zarr",
+      "type": "application/vnd.zarr",
       "bands": [
         {
           "name": "B01",
@@ -254,7 +254,7 @@
     "AOT_10m": {
       "gsd": 10,
       "href": "https://objects.eodc.eu:443/e05ab01a9d56408d82ac32d69a5aae2a:202511-s02msil2a-eu/13/products/cpm_v262/S2A_MSIL2A_20251113T102311_N0511_R065_T32TNQ_20251113T142515.zarr/quality/atmosphere/r10m/aot",
-      "type": "application/vnd+zarr",
+      "type": "application/vnd.zarr",
       "roles": ["data"],
       "title": "Aerosol optical thickness (AOT)",
       "nodata": 0,
@@ -266,7 +266,7 @@
     "B01_20m": {
       "gsd": 20,
       "href": "https://objects.eodc.eu:443/e05ab01a9d56408d82ac32d69a5aae2a:202511-s02msil2a-eu/13/products/cpm_v262/S2A_MSIL2A_20251113T102311_N0511_R065_T32TNQ_20251113T142515.zarr/measurements/reflectance/r20m/b01",
-      "type": "application/vnd+zarr",
+      "type": "application/vnd.zarr",
       "bands": [
         {
           "name": "B01",
@@ -287,7 +287,7 @@
     "B02_10m": {
       "gsd": 10,
       "href": "https://objects.eodc.eu:443/e05ab01a9d56408d82ac32d69a5aae2a:202511-s02msil2a-eu/13/products/cpm_v262/S2A_MSIL2A_20251113T102311_N0511_R065_T32TNQ_20251113T142515.zarr/measurements/reflectance/r10m/b02",
-      "type": "application/vnd+zarr",
+      "type": "application/vnd.zarr",
       "bands": [
         {
           "name": "B02",
@@ -308,7 +308,7 @@
     "B03_10m": {
       "gsd": 10,
       "href": "https://objects.eodc.eu:443/e05ab01a9d56408d82ac32d69a5aae2a:202511-s02msil2a-eu/13/products/cpm_v262/S2A_MSIL2A_20251113T102311_N0511_R065_T32TNQ_20251113T142515.zarr/measurements/reflectance/r10m/b03",
-      "type": "application/vnd+zarr",
+      "type": "application/vnd.zarr",
       "bands": [
         {
           "name": "B03",
@@ -329,7 +329,7 @@
     "B04_10m": {
       "gsd": 10,
       "href": "https://objects.eodc.eu:443/e05ab01a9d56408d82ac32d69a5aae2a:202511-s02msil2a-eu/13/products/cpm_v262/S2A_MSIL2A_20251113T102311_N0511_R065_T32TNQ_20251113T142515.zarr/measurements/reflectance/r10m/b04",
-      "type": "application/vnd+zarr",
+      "type": "application/vnd.zarr",
       "bands": [
         {
           "name": "B04",
@@ -350,7 +350,7 @@
     "B05_20m": {
       "gsd": 20,
       "href": "https://objects.eodc.eu:443/e05ab01a9d56408d82ac32d69a5aae2a:202511-s02msil2a-eu/13/products/cpm_v262/S2A_MSIL2A_20251113T102311_N0511_R065_T32TNQ_20251113T142515.zarr/measurements/reflectance/r20m/b05",
-      "type": "application/vnd+zarr",
+      "type": "application/vnd.zarr",
       "bands": [
         {
           "name": "B05",
@@ -371,7 +371,7 @@
     "B06_20m": {
       "gsd": 20,
       "href": "https://objects.eodc.eu:443/e05ab01a9d56408d82ac32d69a5aae2a:202511-s02msil2a-eu/13/products/cpm_v262/S2A_MSIL2A_20251113T102311_N0511_R065_T32TNQ_20251113T142515.zarr/measurements/reflectance/r20m/b06",
-      "type": "application/vnd+zarr",
+      "type": "application/vnd.zarr",
       "bands": [
         {
           "name": "B06",
@@ -392,7 +392,7 @@
     "B07_20m": {
       "gsd": 20,
       "href": "https://objects.eodc.eu:443/e05ab01a9d56408d82ac32d69a5aae2a:202511-s02msil2a-eu/13/products/cpm_v262/S2A_MSIL2A_20251113T102311_N0511_R065_T32TNQ_20251113T142515.zarr/measurements/reflectance/r20m/b07",
-      "type": "application/vnd+zarr",
+      "type": "application/vnd.zarr",
       "bands": [
         {
           "name": "B07",
@@ -413,7 +413,7 @@
     "B08_10m": {
       "gsd": 10,
       "href": "https://objects.eodc.eu:443/e05ab01a9d56408d82ac32d69a5aae2a:202511-s02msil2a-eu/13/products/cpm_v262/S2A_MSIL2A_20251113T102311_N0511_R065_T32TNQ_20251113T142515.zarr/measurements/reflectance/r10m/b08",
-      "type": "application/vnd+zarr",
+      "type": "application/vnd.zarr",
       "bands": [
         {
           "name": "B08",
@@ -434,7 +434,7 @@
     "B09_60m": {
       "gsd": 60,
       "href": "https://objects.eodc.eu:443/e05ab01a9d56408d82ac32d69a5aae2a:202511-s02msil2a-eu/13/products/cpm_v262/S2A_MSIL2A_20251113T102311_N0511_R065_T32TNQ_20251113T142515.zarr/measurements/reflectance/r60m/b09",
-      "type": "application/vnd+zarr",
+      "type": "application/vnd.zarr",
       "bands": [
         {
           "name": "B09",
@@ -455,7 +455,7 @@
     "B11_20m": {
       "gsd": 20,
       "href": "https://objects.eodc.eu:443/e05ab01a9d56408d82ac32d69a5aae2a:202511-s02msil2a-eu/13/products/cpm_v262/S2A_MSIL2A_20251113T102311_N0511_R065_T32TNQ_20251113T142515.zarr/measurements/reflectance/r20m/b11",
-      "type": "application/vnd+zarr",
+      "type": "application/vnd.zarr",
       "bands": [
         {
           "name": "B11",
@@ -476,7 +476,7 @@
     "B12_20m": {
       "gsd": 20,
       "href": "https://objects.eodc.eu:443/e05ab01a9d56408d82ac32d69a5aae2a:202511-s02msil2a-eu/13/products/cpm_v262/S2A_MSIL2A_20251113T102311_N0511_R065_T32TNQ_20251113T142515.zarr/measurements/reflectance/r20m/b12",
-      "type": "application/vnd+zarr",
+      "type": "application/vnd.zarr",
       "bands": [
         {
           "name": "B12",
@@ -497,7 +497,7 @@
     "B8A_20m": {
       "gsd": 20,
       "href": "https://objects.eodc.eu:443/e05ab01a9d56408d82ac32d69a5aae2a:202511-s02msil2a-eu/13/products/cpm_v262/S2A_MSIL2A_20251113T102311_N0511_R065_T32TNQ_20251113T142515.zarr/measurements/reflectance/r20m/b8a",
-      "type": "application/vnd+zarr",
+      "type": "application/vnd.zarr",
       "bands": [
         {
           "name": "B8A",
@@ -518,7 +518,7 @@
     "SCL_20m": {
       "gsd": 20,
       "href": "https://objects.eodc.eu:443/e05ab01a9d56408d82ac32d69a5aae2a:202511-s02msil2a-eu/13/products/cpm_v262/S2A_MSIL2A_20251113T102311_N0511_R065_T32TNQ_20251113T142515.zarr/conditions/mask/l2a_classification/r20m/scl",
-      "type": "application/vnd+zarr",
+      "type": "application/vnd.zarr",
       "roles": ["data"],
       "title": "Scene classification map (SCL)",
       "nodata": 0,
@@ -530,7 +530,7 @@
     "TCI_10m": {
       "gsd": 10,
       "href": "https://objects.eodc.eu:443/e05ab01a9d56408d82ac32d69a5aae2a:202511-s02msil2a-eu/13/products/cpm_v262/S2A_MSIL2A_20251113T102311_N0511_R065_T32TNQ_20251113T142515.zarr/quality/l2a_quicklook/r10m/tci",
-      "type": "application/vnd+zarr",
+      "type": "application/vnd.zarr",
       "bands": [
         {
           "name": "B04",
@@ -560,7 +560,7 @@
     "WVP_10m": {
       "gsd": 10,
       "href": "https://objects.eodc.eu:443/e05ab01a9d56408d82ac32d69a5aae2a:202511-s02msil2a-eu/13/products/cpm_v262/S2A_MSIL2A_20251113T102311_N0511_R065_T32TNQ_20251113T142515.zarr/quality/atmosphere/r10m/wvp",
-      "type": "application/vnd+zarr",
+      "type": "application/vnd.zarr",
       "roles": ["data"],
       "title": "Water vapour (WVP)",
       "nodata": 0,
@@ -571,7 +571,7 @@
     },
     "product": {
       "href": "https://objects.eodc.eu:443/e05ab01a9d56408d82ac32d69a5aae2a:202511-s02msil2a-eu/13/products/cpm_v262/S2A_MSIL2A_20251113T102311_N0511_R065_T32TNQ_20251113T142515.zarr",
-      "type": "application/vnd+zarr",
+      "type": "application/vnd.zarr",
       "roles": ["data", "metadata"],
       "title": "EOPF Product",
       "description": "The full Zarr store of the EOPF product",

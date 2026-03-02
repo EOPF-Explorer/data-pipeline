@@ -72,7 +72,7 @@
     "AOT_10m": {
       "gsd": 10,
       "href": "https://esa-zarr-sentinel-explorer-fra.s3.de.io.cloud.ovh.net/tests-output/sentinel-2-l2a-staging/S2A_MSIL2A_20250831T103701_N0511_R008_T31TFL_20250831T145420.zarr/quality/atmosphere/r10m/aot",
-      "type": "application/vnd+zarr",
+      "type": "application/vnd.zarr",
       "roles": ["data"],
       "title": "Aerosol optical thickness (AOT)",
       "proj:bbox": [600000.0, 4990200.0, 709800.0, 5100000.0],
@@ -85,7 +85,7 @@
     "SCL_20m": {
       "gsd": 20,
       "href": "https://esa-zarr-sentinel-explorer-fra.s3.de.io.cloud.ovh.net/tests-output/sentinel-2-l2a-staging/S2A_MSIL2A_20250831T103701_N0511_R008_T31TFL_20250831T145420.zarr/conditions/mask/l2a_classification/r20m/scl",
-      "type": "application/vnd+zarr",
+      "type": "application/vnd.zarr",
       "roles": ["data"],
       "title": "Scene classification map (SCL)",
       "proj:bbox": [600000.0, 4990200.0, 709800.0, 5100000.0],
@@ -98,7 +98,7 @@
     "WVP_10m": {
       "gsd": 10,
       "href": "https://esa-zarr-sentinel-explorer-fra.s3.de.io.cloud.ovh.net/tests-output/sentinel-2-l2a-staging/S2A_MSIL2A_20250831T103701_N0511_R008_T31TFL_20250831T145420.zarr/quality/atmosphere/r10m/wvp",
-      "type": "application/vnd+zarr",
+      "type": "application/vnd.zarr",
       "roles": ["data"],
       "title": "Water vapour (WVP)",
       "proj:bbox": [600000.0, 4990200.0, 709800.0, 5100000.0],
@@ -117,7 +117,7 @@
     "reflectance": {
       "gsd": 10,
       "href": "https://esa-zarr-sentinel-explorer-fra.s3.de.io.cloud.ovh.net/tests-output/sentinel-2-l2a-staging/S2A_MSIL2A_20250831T103701_N0511_R008_T31TFL_20250831T145420.zarr/measurements/reflectance",
-      "type": "application/vnd+zarr; version=3; profile=multiscales",
+      "type": "application/vnd.zarr; version=3; profile=multiscales",
       "bands": [
         {
           "gsd": 20,
