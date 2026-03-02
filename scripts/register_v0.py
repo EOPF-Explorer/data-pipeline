@@ -94,7 +94,7 @@ def upsert_item(client: Client, collection_id: str, item: Item) -> None:
 def add_projection_from_zarr(item: Item) -> None:
     """Add ProjectionExtension from first zarr asset's spatial_ref attribute."""
     for asset in item.assets.values():
-        if asset.media_type == "application/vnd+zarr" and asset.href:
+        if asset.media_type == "application/vnd.zarr" and asset.href:
             try:
                 store = zarr.open(asset.href, mode="r")
                 if (spatial_ref := store.attrs.get("spatial_ref")) and (

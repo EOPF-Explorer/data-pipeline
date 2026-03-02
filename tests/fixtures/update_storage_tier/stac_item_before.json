@@ -44,7 +44,7 @@
   "assets": {
     "reflectance": {
       "href": "https://s3.de.io.cloud.ovh.net/bucket/data.zarr/measurements/reflectance",
-      "type": "application/vnd+zarr",
+      "type": "application/vnd.zarr",
       "roles": ["data"],
       "alternate": {
         "s3": {

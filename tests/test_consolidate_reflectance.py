@@ -271,7 +271,7 @@ class TestAddStoreLink:
 
         store_link = next(link for link in stac_item.links if link.rel == "store")
         assert (
-            store_link.media_type == "application/vnd+zarr; version=2"
+            store_link.media_type == "application/vnd.zarr; version=2"
         ), "Store link should have correct Zarr media type"
 
     def test_store_link_has_title(self, stac_item):

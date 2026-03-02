@@ -171,7 +171,7 @@ class TestRewriteAssetHrefs:
             "data",
             Asset(
                 href="s3://old-bucket/old-prefix/file.zarr",
-                media_type="application/vnd+zarr",
+                media_type="application/vnd.zarr",
             ),
         )
 
@@ -196,7 +196,7 @@ class TestRewriteAssetHrefs:
             "data",
             Asset(
                 href="https://old.example.com/old-prefix/file.zarr",
-                media_type="application/vnd+zarr",
+                media_type="application/vnd.zarr",
             ),
         )
 
@@ -219,7 +219,7 @@ class TestRewriteAssetHrefs:
         original_href = "https://other.example.com/other/file.zarr"
         item.add_asset(
             "data",
-            Asset(href=original_href, media_type="application/vnd+zarr"),
+            Asset(href=original_href, media_type="application/vnd.zarr"),
         )
 
         old_base = "s3://old-bucket/old-prefix"
@@ -242,14 +242,14 @@ class TestRewriteAssetHrefs:
             "asset1",
             Asset(
                 href="s3://old-bucket/old-prefix/file1.zarr",
-                media_type="application/vnd+zarr",
+                media_type="application/vnd.zarr",
             ),
         )
         item.add_asset(
             "asset2",
             Asset(
                 href="s3://old-bucket/old-prefix/file2.zarr",
-                media_type="application/vnd+zarr",
+                media_type="application/vnd.zarr",
             ),
         )
 
@@ -284,7 +284,7 @@ class TestAddAlternateS3Assets:
             "data",
             Asset(
                 href="https://s3.explorer.eopf.copernicus.eu/my-bucket/path/file.zarr",
-                media_type="application/vnd+zarr",
+                media_type="application/vnd.zarr",
                 roles=["data"],
             ),
         )
@@ -327,7 +327,7 @@ class TestAddAlternateS3Assets:
             "data",
             Asset(
                 href="https://my-bucket.s3.gra.io.cloud.ovh.net/path/file.zarr",
-                media_type="application/vnd+zarr",
+                media_type="application/vnd.zarr",
                 roles=["data"],
             ),
         )
@@ -402,7 +402,7 @@ class TestAddAlternateS3Assets:
             "data1",
             Asset(
                 href="https://s3.explorer.eopf.copernicus.eu/bucket/file1.zarr",
-                media_type="application/vnd+zarr",
+                media_type="application/vnd.zarr",
                 roles=["data"],
             ),
         )
@@ -410,7 +410,7 @@ class TestAddAlternateS3Assets:
             "data2",
             Asset(
                 href="https://s3.explorer.eopf.copernicus.eu/bucket/file2.zarr",
-                media_type="application/vnd+zarr",
+                media_type="application/vnd.zarr",
                 roles=["data"],
             ),
         )
@@ -454,7 +454,7 @@ class TestAddAlternateS3Assets:
             "data",
             Asset(
                 href="https://s3.explorer.eopf.copernicus.eu/bucket/file.zarr",
-                media_type="application/vnd+zarr",
+                media_type="application/vnd.zarr",
                 roles=["data"],
             ),
         )
@@ -477,7 +477,7 @@ class TestAddAlternateS3Assets:
             "data",
             Asset(
                 href="https://s3.explorer.eopf.copernicus.eu/bucket/file.zarr",
-                media_type="application/vnd+zarr",
+                media_type="application/vnd.zarr",
                 roles=["data"],
             ),
         )
@@ -500,7 +500,7 @@ class TestAddAlternateS3Assets:
             "data",
             Asset(
                 href="https://s3.explorer.eopf.copernicus.eu/bucket/file.zarr",
-                media_type="application/vnd+zarr",
+                media_type="application/vnd.zarr",
                 roles=["data"],
             ),
         )
@@ -527,7 +527,7 @@ class TestAddAlternateS3Assets:
             "data",
             Asset(
                 href="https://s3.explorer.eopf.copernicus.eu/bucket/file.zarr",
-                media_type="application/vnd+zarr",
+                media_type="application/vnd.zarr",
                 roles=["data"],
             ),
         )
