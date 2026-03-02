@@ -594,7 +594,7 @@ def consolidate_reflectance_assets(item: Item, geozarr_url: str) -> None:
 
     reflectance_asset = Asset(
         href=reflectance_href,
-        media_type="application/vnd+zarr; version=2; profile=multiscales",
+        media_type="application/vnd+zarr; version=3; profile=multiscales",
         title="Surface Reflectance",
         roles=["data", "reflectance"],
         extra_fields={

@@ -117,7 +117,7 @@
     "reflectance": {
       "gsd": 10,
       "href": "https://esa-zarr-sentinel-explorer-fra.s3.de.io.cloud.ovh.net/tests-output/sentinel-2-l2a-staging/S2A_MSIL2A_20250831T103701_N0511_R008_T31TFL_20250831T145420.zarr/measurements/reflectance",
-      "type": "application/vnd+zarr; version=2; profile=multiscales",
+      "type": "application/vnd+zarr; version=3; profile=multiscales",
       "bands": [
         {
           "gsd": 20,

@@ -160,7 +160,7 @@ class TestConsolidateReflectanceAssets:
 
         reflectance = stac_item.assets["reflectance"]
         assert (
-            reflectance.media_type == "application/vnd+zarr; version=2; profile=multiscales"
+            reflectance.media_type == "application/vnd+zarr; version=3; profile=multiscales"
         ), "Should have correct zarr media type"
 
     def test_reflectance_asset_href_structure(self, stac_item):
