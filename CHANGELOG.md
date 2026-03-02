@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.5.0 (2026-02-11)
+
+## What's Changed
+* ci: remove publish and publish-docker jobs by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/91
+* feat: implement script to update stac storage metadata by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/67
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.4.0...v1.5.0
+
 ## 1.4.0 (2026-01-22)
 
 ## What's Changed
