@@ -64,3 +64,4 @@ out/
 reports/
 *.pyc
 pipeline_utils.py
+.venv-cpm/

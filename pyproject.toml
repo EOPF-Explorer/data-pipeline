@@ -34,8 +34,12 @@ dependencies = [
     "tenacity>=8.0.0",
     "morecantile>=5.0.0",
     "cf-xarray>=0.9.0",
+    # Comment for using operator-tools/eopf-cpm-production-sentinel-2-l2a-from-cdse.ipynb
     "eopf-geozarr @ git+https://github.com/EOPF-Explorer/data-model.git@v0.8.0",
     "requests",
+    # Uncomment for using operator-tools/eopf-cpm-production-sentinel-2-l2a-from-cdse.ipynb
+    # "eopf==2.6.4",
+    # "eopf-stac @ git+https://github.com/EOPF-Sample-Service/eopf-stac@main"
 ]
 
 [dependency-groups]
@@ -56,7 +60,7 @@ notebooks = [
     "ipykernel>=7.1.0",
     "pandas>=2.3.3",
     "matplotlib>=3.10.7",
-    "shapely>=2.1.2",
+    "shapely",
     "python-dotenv>=1.2.1",
 ]
 
