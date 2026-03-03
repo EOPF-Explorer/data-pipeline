@@ -208,9 +208,11 @@ scripts/
 ├── register_v0.py             # Basic STAC registration (V0 pipeline)
 ├── register_v1.py             # Enhanced STAC registration (V1 pipeline)
 ├── change_storage_tier.py     # S3 storage tier optimization (V1 pipeline step 3)
+├── aggregate_items.py         # Pre-compute daily/monthly item aggregations for timeline UI
 ├── test_complete_workflow.py  # Workflow testing script
 ├── test_gateway_format.py     # Gateway format testing
-└── README_storage_tier.md     # Storage tier management documentation
+├── README_change_storage_tier.md  # Storage tier management documentation
+└── README_aggregate_items.md      # Item aggregation documentation
 
 operator-tools/
 ├── manage_collections.py           # STAC collection management (create/clean/update)
@@ -269,7 +271,8 @@ For infrastructure issues, see platform-deploy troubleshooting: [staging](https:
 ## Documentation
 
 - **Operator Tools:** [operator-tools/README.md](operator-tools/README.md) - Workflow submission and collection management
-- **Storage Management:** [scripts/README_storage_tier.md](scripts/README_storage_tier.md) - S3 storage tier optimization
+- **Storage Management:** [scripts/README_change_storage_tier.md](scripts/README_change_storage_tier.md) - S3 storage tier optimization
+- **Item Aggregations:** [scripts/README_aggregate_items.md](scripts/README_aggregate_items.md) - Pre-computed timeline aggregations
 - **Tests:** `tests/` - pytest unit and integration tests
 - **Deployment:** [platform-deploy/workspaces/devseed-staging/data-pipeline](https://github.com/EOPF-Explorer/platform-deploy/tree/main/workspaces/devseed-staging/data-pipeline)
 
