@@ -85,9 +85,17 @@ uv run operator-tools/manage_item.py info sentinel-2-l2a-staging ITEM_ID --s3-st
 # Debug S3 URL extraction
 uv run operator-tools/manage_item.py info sentinel-2-l2a-staging ITEM_ID --s3-stats --debug
 
-# Sync storage tiers for a single item (dry run)
+# Sync storage tier metadata for a single item (dry run)
 uv run operator-tools/manage_item.py sync-storage-tiers sentinel-2-l2a-staging ITEM_ID \
     --s3-endpoint https://s3.de.io.cloud.ovh.net --dry-run
+
+# Change storage tier for a single item (dry run - safe, no writes)
+uv run operator-tools/manage_item.py change-storage-tier sentinel-2-l2a-staging ITEM_ID \
+    --storage-class STANDARD_IA --s3-endpoint https://s3.de.io.cloud.ovh.net --dry-run
+
+# Change storage tier for a single item (requires confirmation)
+uv run operator-tools/manage_item.py change-storage-tier sentinel-2-l2a-staging ITEM_ID \
+    --storage-class STANDARD_IA --s3-endpoint https://s3.de.io.cloud.ovh.net -y
 
 # Delete single item with S3 cleanup (dry run)
 uv run operator-tools/manage_item.py delete sentinel-2-l2a-staging ITEM_ID --clean-s3 --dry-run
@@ -100,6 +108,7 @@ uv run operator-tools/manage_item.py delete sentinel-2-l2a-staging ITEM_ID --cle
 - Detailed item inspection with S3 statistics
 - Storage tier statistics from STAC metadata
 - Sync storage tiers with S3 (single item)
+- **Change S3 storage tier** for a single item and update STAC metadata
 - Debug mode for S3 URL extraction troubleshooting
 - Delete with automatic S3 validation
 - Dry-run mode for safe testing
@@ -149,9 +158,18 @@ uv run operator-tools/manage_collections.py info sentinel-2-l2a-staging --s3-sta
 # Debug S3 URL extraction
 uv run operator-tools/manage_collections.py info sentinel-2-l2a-staging --s3-stats --debug
 
-# Sync storage tiers for entire collection (dry run)
+# Sync storage tier metadata for entire collection (dry run)
 uv run operator-tools/manage_collections.py sync-storage-tiers sentinel-2-l2a-staging \
     --s3-endpoint https://s3.de.io.cloud.ovh.net --dry-run
+
+# Change storage tier for items in a date range (dry run - safe, no writes)
+uv run operator-tools/manage_collections.py change-storage-tier sentinel-2-l2a-staging \
+    --storage-class STANDARD_IA --start-date 2024-01-01 --end-date 2024-03-31 \
+    --s3-endpoint https://s3.de.io.cloud.ovh.net --dry-run
+
+# Change storage tier for all items in a collection (requires confirmation)
+uv run operator-tools/manage_collections.py change-storage-tier sentinel-2-l2a-staging \
+    --storage-class STANDARD_IA --s3-endpoint https://s3.de.io.cloud.ovh.net -y
 
 # Clean a collection (dry run first!)
 uv run operator-tools/manage_collections.py clean sentinel-2-l2a-staging --dry-run
@@ -173,6 +191,7 @@ uv run operator-tools/manage_collections.py batch-create stac/
 - **Validated S3 cleanup** - Verifies all S3 objects deleted before removing STAC items
 - **Comprehensive S3 support** - Handles individual files, directories, and Zarr stores
 - **Sync storage tiers** - Keep STAC metadata in sync with S3 storage classes
+- **Change storage tier** - Move items to a different storage class, with date filtering
 - **Debug mode** - Detailed S3 URL extraction and validation info
 - **Safety first** - STAC items preserved if S3 cleanup fails
 
@@ -341,6 +360,61 @@ Sampling 5 of 43 items...
     Objects: ~53,621
     Size: ~100.5 GB
 ```
+
+### Change S3 Storage Tier
+
+Move items to a different storage class (STANDARD, STANDARD_IA, EXPRESS_ONEZONE), then automatically update the STAC metadata to reflect the change.
+
+**Debug workflow** — always test a single item first:
+```bash
+ITEM_ID="S2A_MSIL2A_20250831T103701_N0511_R008_T31TFL_20250831T145420"
+
+# 1. Single item dry run (no writes)
+uv run operator-tools/manage_item.py change-storage-tier sentinel-2-l2a-staging $ITEM_ID \
+    --storage-class STANDARD_IA --s3-endpoint https://s3.de.io.cloud.ovh.net --dry-run
+
+# 2. Single item live run (prompts for confirmation)
+uv run operator-tools/manage_item.py change-storage-tier sentinel-2-l2a-staging $ITEM_ID \
+    --storage-class STANDARD_IA --s3-endpoint https://s3.de.io.cloud.ovh.net -y
+
+# 3. Verify: storage tier info should show the new class
+uv run operator-tools/manage_item.py info sentinel-2-l2a-staging $ITEM_ID --s3-stac-info
+```
+
+**Collection-level** — with optional date filtering:
+```bash
+# Dry run for a date range
+uv run operator-tools/manage_collections.py change-storage-tier sentinel-2-l2a-staging \
+    --storage-class STANDARD_IA --start-date 2024-01-01 --end-date 2024-03-31 \
+    --s3-endpoint https://s3.de.io.cloud.ovh.net --dry-run
+
+# Live run (prompts for confirmation showing item count)
+uv run operator-tools/manage_collections.py change-storage-tier sentinel-2-l2a-staging \
+    --storage-class STANDARD_IA --start-date 2024-01-01 --end-date 2024-03-31 \
+    --s3-endpoint https://s3.de.io.cloud.ovh.net -y
+
+# All items (no date filter)
+uv run operator-tools/manage_collections.py change-storage-tier sentinel-2-l2a-staging \
+    --storage-class STANDARD --s3-endpoint https://s3.de.io.cloud.ovh.net -y
+```
+
+**Options:**
+
+| Option | Description |
+|--------|-------------|
+| `--storage-class` | Target class: `STANDARD`, `STANDARD_IA`, or `EXPRESS_ONEZONE` (required) |
+| `--start-date` | Filter items on or after this date (`YYYY-MM-DD`) |
+| `--end-date` | Filter items on or before this date (`YYYY-MM-DD`) |
+| `--s3-endpoint` | S3 endpoint URL (falls back to `AWS_ENDPOINT_URL`) |
+| `--include-pattern` | fnmatch pattern for objects to include (repeatable) |
+| `--exclude-pattern` | fnmatch pattern for objects to exclude (repeatable) |
+| `--dry-run` | Show what would change without writing anything |
+| `-y` / `--yes` | Skip confirmation prompt |
+
+**Safety guarantees:**
+- S3 storage class is changed first; STAC metadata is only updated if S3 succeeds
+- Items with S3 failures are tracked and reported in the final summary — STAC is not touched
+- `--dry-run` propagates to S3 operations; nothing is written in either system
 
 ### Clean S3 Data (with Validation)
 
