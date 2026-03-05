@@ -6,12 +6,14 @@ on:
       - main
     tags:
       - '*'
-  pull_request:
-  workflow_dispatch:
+  release:
+    types: [published]
   workflow_run:
-    workflows: ["release-please"]
+    workflows: ["Release Please"]
     types:
       - completed
+  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -19,14 +21,59 @@ permissions:
 
 jobs:
   build:
+    # Skip only if triggered by workflow_run with a non-success conclusion
+    if: |
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') || github.event_name == 'pull_request'
 
     steps:
     - name: Checkout code
       uses: actions/checkout@v5
+      with:
+        fetch-depth: 0  # Fetch all history and tags
+        ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref }}
+
+    - name: Check if release was created and checkout tag (for workflow_run trigger)
+      if: github.event_name == 'workflow_run'
+      id: check_release
+      run: |
+        # Fetch all tags to ensure we have the latest one created by release-please
+        git fetch --tags
+
+        # Check if the workflow_run head SHA has a v* tag
+        # This verifies that release-please actually created a release
+        HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
+        TAG=$(git tag --points-at "$HEAD_SHA" | grep '^v[0-9]' || echo "")
+
+        if [ -z "$TAG" ]; then
+          echo "::notice::No release tag found at commit $HEAD_SHA. Release Please ran but did not create a release. Skipping build."
+          echo "should_skip=true" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
+        echo "Found release tag: $TAG at commit $HEAD_SHA"
+        echo "Checking out tag: $TAG"
+        git checkout "$TAG"
+        echo "should_skip=false" >> $GITHUB_OUTPUT
+
+    - name: Get tag name for Docker metadata
+      if: github.event_name != 'workflow_run' || steps.check_release.outputs.should_skip != 'true'
+      id: tag_name
+      run: |
+        if [ "${{ github.event_name }}" = "release" ]; then
+          echo "tag=${{ github.event.release.tag_name }}" >> $GITHUB_OUTPUT
+        elif [ "${{ github.event_name }}" = "workflow_run" ]; then
+          TAG=$(git describe --tags --exact-match HEAD 2>/dev/null || echo "")
+          if [ -n "$TAG" ]; then
+            echo "tag=$TAG" >> $GITHUB_OUTPUT
+          fi
+        elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
+          echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+        fi
 
     - name: Docker meta
+      if: github.event_name != 'workflow_run' || steps.check_release.outputs.should_skip != 'true'
       id: meta
       uses: docker/metadata-action@v5
       with:
@@ -37,11 +84,14 @@ jobs:
           type=ref,event=pr
           type=ref,event=tag
           type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+          type=raw,value=${{ steps.tag_name.outputs.tag }},enable=${{ steps.tag_name.outputs.tag != '' }}
 
     - name: Set up Docker Buildx
+      if: github.event_name != 'workflow_run' || steps.check_release.outputs.should_skip != 'true'
       uses: docker/setup-buildx-action@v3
 
     - name: Log in to OVH Container Registry
+      if: github.event_name != 'workflow_run' || steps.check_release.outputs.should_skip != 'true'
       uses: docker/login-action@v3
       with:
         registry: ${{ secrets.OVH_HARBOR_REGISTRY }}
@@ -49,6 +99,7 @@ jobs:
         password: ${{ secrets.OVH_HARBOR_PASSWORD }}
 
     - name: Build and push Docker image
+      if: github.event_name != 'workflow_run' || steps.check_release.outputs.should_skip != 'true'
       uses: docker/build-push-action@v5
       with:
         context: .
@@ -61,6 +112,7 @@ jobs:
         cache-to: type=gha,mode=max
 
     - name: Image summary
+      if: github.event_name != 'workflow_run' || steps.check_release.outputs.should_skip != 'true'
       run: |
         echo "### Docker Image Built 🐳" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
