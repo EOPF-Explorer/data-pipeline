@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.6.0 (2026-03-05)
+
+## What's Changed
+* fix(stac): reflectance media type version=2 -> version=3 by @wietzesuijker in https://github.com/EOPF-Explorer/data-pipeline/pull/94
+* fix: correct zarr media type format in reflectance assets by @emmanuelmathot in https://github.com/EOPF-Explorer/data-pipeline/pull/100
+* feat: add aggregation tool for daily and monthly item counts by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/106
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.5.0...v1.6.0
+
 ## 1.5.0 (2026-02-11)
 
 ## What's Changed
