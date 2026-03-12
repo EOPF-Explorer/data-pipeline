@@ -1213,5 +1213,217 @@ def sync_storage_tiers(
         raise click.Abort() from e
 
 
+@cli.command()
+@click.argument("collection_id")
+@click.option(
+    "--storage-class",
+    required=True,
+    type=click.Choice(["STANDARD", "STANDARD_IA", "EXPRESS_ONEZONE"]),
+    help="Target S3 storage class",
+)
+@click.option(
+    "--start-date",
+    help="Start date filter, inclusive (YYYY-MM-DD)",
+)
+@click.option(
+    "--end-date",
+    help="End date filter, inclusive (YYYY-MM-DD)",
+)
+@click.option(
+    "--s3-endpoint",
+    help="S3 endpoint URL (required, uses AWS_ENDPOINT_URL env var if not specified)",
+)
+@click.option(
+    "--include-pattern",
+    "include_patterns",
+    multiple=True,
+    help="fnmatch pattern for objects to include (repeatable)",
+)
+@click.option(
+    "--exclude-pattern",
+    "exclude_patterns",
+    multiple=True,
+    help="fnmatch pattern for objects to exclude (repeatable)",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show what would be changed without actually changing",
+)
+@click.option(
+    "--yes",
+    "-y",
+    is_flag=True,
+    help="Skip confirmation prompt",
+)
+@click.pass_context
+def change_storage_tier(
+    ctx: click.Context,
+    collection_id: str,
+    storage_class: str,
+    start_date: str | None,
+    end_date: str | None,
+    s3_endpoint: str | None,
+    include_patterns: tuple[str, ...],
+    exclude_patterns: tuple[str, ...],
+    dry_run: bool,
+    yes: bool,
+) -> None:
+    """
+    Change S3 storage tier for items in a collection, optionally filtered by date.
+
+    This command changes the S3 storage class for all objects in each item's
+    Zarr store, then updates STAC item metadata to reflect the new storage class.
+
+    Example:
+        manage_collections.py change-storage-tier sentinel-2-l2a-staging --storage-class STANDARD_IA --s3-endpoint https://s3.de.io.cloud.ovh.net --dry-run
+        manage_collections.py change-storage-tier sentinel-2-l2a-staging --storage-class STANDARD_IA --start-date 2024-01-01 --end-date 2024-03-31 --s3-endpoint https://s3.de.io.cloud.ovh.net -y
+    """
+    manager: STACCollectionManager = ctx.obj["manager"]
+    api_url: str = ctx.obj["api_url"]
+
+    # Get S3 endpoint
+    if not s3_endpoint:
+        s3_endpoint = os.getenv("AWS_ENDPOINT_URL")
+        if not s3_endpoint:
+            click.echo(
+                "❌ S3 endpoint required. Use --s3-endpoint or set AWS_ENDPOINT_URL", err=True
+            )
+            raise click.Abort()
+
+    # Validate date format early
+    from datetime import datetime
+
+    def _parse_date(date_str: str, param_name: str) -> None:
+        try:
+            datetime.strptime(date_str, "%Y-%m-%d")
+        except ValueError:
+            click.echo(f"❌ Invalid {param_name} format: '{date_str}'. Use YYYY-MM-DD.", err=True)
+            raise click.Abort() from None
+
+    if start_date:
+        _parse_date(start_date, "--start-date")
+    if end_date:
+        _parse_date(end_date, "--end-date")
+
+    try:
+        # Search items with optional date filter
+        catalog = Client.open(api_url)
+        if start_date or end_date:
+            start_str = f"{start_date}T00:00:00Z" if start_date else "1900-01-01T00:00:00Z"
+            end_str = f"{end_date}T23:59:59Z" if end_date else "2100-12-31T23:59:59Z"
+            search = catalog.search(
+                collections=[collection_id],
+                filter={"op": "between", "args": [{"property": "datetime"}, start_str, end_str]},
+                filter_lang="cql2-json",
+                limit=100,
+                max_items=None,
+            )
+        else:
+            search = catalog.search(collections=[collection_id], max_items=None)
+
+        items = list(search.items())
+
+        if not items:
+            click.echo("✅ No items matched the specified criteria.")
+            return
+
+        # Build date range message for confirmation
+        date_range_msg = ""
+        if start_date or end_date:
+            date_range_msg = f" ({start_date or 'any'} → {end_date or 'any'})"
+
+        # Confirmation prompt
+        if not dry_run and not yes:
+            click.confirm(
+                f"⚠️  This will change storage class for {len(items)} item(s) in '{collection_id}'"
+                f"{date_range_msg} to {storage_class}.\n\nContinue?",
+                abort=True,
+            )
+
+        click.echo(
+            f"\n{'DRY RUN: ' if dry_run else ''}Changing storage tier for {len(items)} item(s)"
+        )
+        click.echo(f"Collection: {collection_id}")
+        if date_range_msg:
+            click.echo(f"Date range: {date_range_msg.strip()}")
+        click.echo(f"Target storage class: {storage_class}")
+
+        from change_storage_tier import process_stac_item  # noqa: E402
+        from update_stac_storage_tier import update_item_storage_tiers  # noqa: E402
+
+        items_changed = 0
+        items_failed = 0
+        failed_item_ids: list[str] = []
+
+        with click.progressbar(
+            items, label="Processing items", show_pos=True, show_percent=True
+        ) as bar:
+            for item in bar:
+                item_id = item.id
+                stac_item_url = f"{manager.api_url}/collections/{collection_id}/items/{item_id}"
+
+                stats = process_stac_item(
+                    stac_item_url,
+                    storage_class,
+                    dry_run,
+                    s3_endpoint,
+                    list(include_patterns) or None,
+                    list(exclude_patterns) or None,
+                )
+
+                if stats["failed"] > 0:
+                    items_failed += 1
+                    failed_item_ids.append(item_id)
+                elif stats["processed"] > 0:
+                    if not dry_run:
+                        # Re-fetch and update STAC metadata
+                        item_dict = manager.item_manager.get_item(collection_id, item_id)
+                        if item_dict:
+                            pystac_item = Item.from_dict(item_dict)
+                            update_item_storage_tiers(pystac_item, s3_endpoint)
+
+                            # Use DELETE then POST (pgstac doesn't support PUT)
+                            delete_url = (
+                                f"{manager.api_url}" f"/collections/{collection_id}/items/{item_id}"
+                            )
+                            manager.session.delete(delete_url, timeout=30)
+                            create_url = f"{manager.api_url}" f"/collections/{collection_id}/items"
+                            manager.session.post(
+                                create_url,
+                                json=pystac_item.to_dict(),
+                                headers={"Content-Type": "application/json"},
+                                timeout=30,
+                            )
+                        else:
+                            items_failed += 1
+                            failed_item_ids.append(item_id)
+                            continue
+                    items_changed += 1
+
+        # Summary
+        click.echo("\n" + "=" * 60)
+        click.echo("CHANGE SUMMARY")
+        click.echo("=" * 60)
+        click.echo(f"Items processed: {len(items)}")
+        click.echo(f"✅ Items changed: {items_changed}")
+        if items_failed > 0:
+            click.echo(f"❌ Items failed: {items_failed}")
+            click.echo("\nFailed items:")
+            for fid in failed_item_ids:
+                click.echo(f"  - {fid}")
+
+        if dry_run:
+            click.echo(f"\n{'─'*60}")
+            click.echo("DRY RUN - No changes were made")
+            click.echo(f"{'─'*60}")
+
+        click.echo("=" * 60)
+
+    except Exception as e:
+        click.echo(f"❌ Operation failed: {e}", err=True)
+        raise click.Abort() from e
+
+
 if __name__ == "__main__":
     cli()

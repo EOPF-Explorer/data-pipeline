@@ -1152,5 +1152,147 @@ def sync_storage_tiers(
         raise click.Abort() from e
 
 
+@cli.command()
+@click.argument("collection_id")
+@click.argument("item_id")
+@click.option(
+    "--storage-class",
+    required=True,
+    type=click.Choice(["STANDARD", "STANDARD_IA", "EXPRESS_ONEZONE"]),
+    help="Target S3 storage class",
+)
+@click.option(
+    "--s3-endpoint",
+    help="S3 endpoint URL (required, uses AWS_ENDPOINT_URL env var if not specified)",
+)
+@click.option(
+    "--include-pattern",
+    "include_patterns",
+    multiple=True,
+    help="fnmatch pattern for objects to include (repeatable)",
+)
+@click.option(
+    "--exclude-pattern",
+    "exclude_patterns",
+    multiple=True,
+    help="fnmatch pattern for objects to exclude (repeatable)",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    help="Show what would be changed without actually changing",
+)
+@click.option(
+    "--yes",
+    "-y",
+    is_flag=True,
+    help="Skip confirmation prompt",
+)
+@click.pass_context
+def change_storage_tier(
+    ctx: click.Context,
+    collection_id: str,
+    item_id: str,
+    storage_class: str,
+    s3_endpoint: str | None,
+    include_patterns: tuple[str, ...],
+    exclude_patterns: tuple[str, ...],
+    dry_run: bool,
+    yes: bool,
+) -> None:
+    """
+    Change S3 storage tier for a single STAC item and update STAC metadata.
+
+    This command changes the S3 storage class for all objects in the item's
+    Zarr store, then updates the STAC item metadata to reflect the new storage class.
+
+    Example:
+        manage_item.py change-storage-tier sentinel-2-l2a-staging ITEM_ID --storage-class STANDARD_IA --s3-endpoint https://s3.de.io.cloud.ovh.net --dry-run
+        manage_item.py change-storage-tier sentinel-2-l2a-staging ITEM_ID --storage-class STANDARD_IA --s3-endpoint https://s3.de.io.cloud.ovh.net -y
+    """
+    manager: STACItemManager = ctx.obj["manager"]
+
+    # Get S3 endpoint
+    if not s3_endpoint:
+        s3_endpoint = os.getenv("AWS_ENDPOINT_URL")
+        if not s3_endpoint:
+            click.echo(
+                "❌ S3 endpoint required. Use --s3-endpoint or set AWS_ENDPOINT_URL", err=True
+            )
+            raise click.Abort()
+
+    # Confirmation prompt
+    if not dry_run and not yes:
+        click.confirm(
+            f"⚠️  This will change storage class for item '{item_id}' to {storage_class}.\n\nContinue?",
+            abort=True,
+        )
+
+    try:
+        stac_item_url = f"{manager.api_url}/collections/{collection_id}/items/{item_id}"
+        click.echo(f"\n{'DRY RUN: ' if dry_run else ''}Changing storage tier for item: {item_id}")
+        click.echo(f"Collection: {collection_id}")
+        click.echo(f"Target storage class: {storage_class}")
+
+        # Change S3 storage class
+        from change_storage_tier import process_stac_item  # noqa: E402
+
+        stats = process_stac_item(
+            stac_item_url,
+            storage_class,
+            dry_run,
+            s3_endpoint,
+            list(include_patterns) or None,
+            list(exclude_patterns) or None,
+        )
+
+        click.echo(f"\n{'─'*60}")
+        click.echo("S3 CHANGE SUMMARY")
+        click.echo(f"{'─'*60}")
+        click.echo(f"Objects processed: {stats['processed']}")
+        click.echo(f"✅ Objects changed: {stats['succeeded']}")
+        if stats["failed"] > 0:
+            click.echo(f"❌ Objects failed: {stats['failed']}")
+
+        # Update STAC metadata if S3 succeeded and not dry-run
+        if stats["failed"] == 0 and not dry_run and stats["processed"] > 0:
+            from update_stac_storage_tier import update_item_storage_tiers  # noqa: E402
+
+            # Re-fetch item after S3 change and update storage metadata
+            item_dict = manager.get_item(collection_id, item_id)
+            if not item_dict:
+                raise click.Abort()
+            item = Item.from_dict(item_dict)
+            update_item_storage_tiers(item, s3_endpoint)
+
+            try:
+                # Use DELETE then POST (pgstac doesn't support PUT)
+                delete_url = f"{manager.api_url}/collections/{collection_id}/items/{item_id}"
+                manager.session.delete(delete_url, timeout=30)
+                create_url = f"{manager.api_url}/collections/{collection_id}/items"
+                manager.session.post(
+                    create_url,
+                    json=item.to_dict(),
+                    headers={"Content-Type": "application/json"},
+                    timeout=30,
+                )
+                click.echo(f"\n✅ Updated STAC metadata for item {item_id}")
+            except Exception as e:
+                click.echo(f"\n❌ Failed to update STAC item: {e}", err=True)
+                raise click.Abort() from e
+        elif dry_run:
+            click.echo(f"\n{'─'*60}")
+            click.echo("DRY RUN - No changes were made")
+            click.echo(f"{'─'*60}")
+        elif stats["failed"] > 0:
+            click.echo("\n⚠️  Skipping STAC metadata update due to S3 failures")
+
+        click.echo(f"{'='*60}\n")
+
+    except Exception as e:
+        click.echo(f"❌ Operation failed: {e}", err=True)
+        raise click.Abort() from e
+
+
 if __name__ == "__main__":
     cli()
