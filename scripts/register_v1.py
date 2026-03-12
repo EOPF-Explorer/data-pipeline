@@ -199,7 +199,7 @@ def add_visualization_links(item: Item, raster_base: str, collection_id: str) ->
             )
     elif coll_lower.startswith(("sentinel-2", "sentinel2")):
         # S2: True color from reflectance bands (B04=Red, B03=Green, B02=Blue)
-        query = "rescale=0%2C1&color_formula=gamma+rgb+1.3%2C+sigmoidal+rgb+6+0.1%2C+saturation+1.2&variables=%2Fmeasurements%2Freflectance%3Ab04&variables=%2Fmeasurements%2Freflectance%3Ab03&variables=%2Fmeasurements%2Freflectance%3Ab02&bidx=1"
+        query = "rescale=0%2C1&color_formula=gamma%20rgb%201.3%2C%20sigmoidal%20rgb%206%200.1%2C%20saturation%201.2&variables=%2Fmeasurements%2Freflectance%3Ab04&variables=%2Fmeasurements%2Freflectance%3Ab03&variables=%2Fmeasurements%2Freflectance%3Ab02&bidx=1"
         item.add_link(
             Link(
                 "xyz",
@@ -237,7 +237,7 @@ def add_thumbnail_asset(item: Item, raster_base: str, collection_id: str) -> Non
 
     # Mission-specific thumbnail parameters
     if coll_lower.startswith(("sentinel-2", "sentinel2")):
-        params = "format=png&rescale=0%2C1&color_formula=gamma+rgb+1.3%2C+sigmoidal+rgb+6+0.1%2C+saturation+1.2&variables=%2Fmeasurements%2Freflectance%3Ab04&variables=%2Fmeasurements%2Freflectance%3Ab03&variables=%2Fmeasurements%2Freflectance%3Ab02&bidx=1"
+        params = "format=png&rescale=0%2C1&color_formula=gamma%20rgb%201.3%2C%20sigmoidal%20rgb%206%200.1%2C%20saturation%201.2&variables=%2Fmeasurements%2Freflectance%3Ab04&variables=%2Fmeasurements%2Freflectance%3Ab03&variables=%2Fmeasurements%2Freflectance%3Ab02&bidx=1"
         title = "Sentinel-2 L2A True Color Preview"
     elif coll_lower.startswith(("sentinel-1", "sentinel1")):
         # Use VH band for S-1 thumbnail
