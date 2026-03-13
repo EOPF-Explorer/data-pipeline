@@ -140,7 +140,7 @@ def add_visualization_links(item: Item, raster_base: str, collection_id: str) ->
             )
     elif coll_lower.startswith(("sentinel-2", "sentinel2")):
         # S2: True color from reflectance bands (B04=Red, B03=Green, B02=Blue)
-        query = "rescale=0%2C1&color_formula=gamma+rgb+1.3%2C+sigmoidal+rgb+6+0.1%2C+saturation+1.2&variables=%2Fmeasurements%2Freflectance%2Fr60m%3Ab04&variables=%2Fmeasurements%2Freflectance%2Fr60m%3Ab03&variables=%2Fmeasurements%2Freflectance%2Fr60m%3Ab02&bidx=1"
+        query = "rescale=0%2C1&color_formula=gamma%20rgb%201.3%2C%20sigmoidal%20rgb%206%200.1%2C%20saturation%201.2&variables=%2Fmeasurements%2Freflectance%2Fr60m%3Ab04&variables=%2Fmeasurements%2Freflectance%2Fr60m%3Ab03&variables=%2Fmeasurements%2Freflectance%2Fr60m%3Ab02&bidx=1"
         item.add_link(
             Link(
                 "xyz",
@@ -178,7 +178,7 @@ def add_thumbnail_asset(item: Item, raster_base: str, collection_id: str) -> Non
 
     # Mission-specific thumbnail parameters
     if coll_lower.startswith(("sentinel-2", "sentinel2")):
-        params = "format=png&rescale=0%2C1&color_formula=gamma+rgb+1.3%2C+sigmoidal+rgb+6+0.1%2C+saturation+1.2&variables=%2Fmeasurements%2Freflectance%2Fr60m%3Ab04&variables=%2Fmeasurements%2Freflectance%2Fr60m%3Ab03&variables=%2Fmeasurements%2Freflectance%2Fr60m%3Ab02&bidx=1"
+        params = "format=png&rescale=0%2C1&color_formula=gamma%20rgb%201.3%2C%20sigmoidal%20rgb%206%200.1%2C%20saturation%201.2&variables=%2Fmeasurements%2Freflectance%2Fr60m%3Ab04&variables=%2Fmeasurements%2Freflectance%2Fr60m%3Ab03&variables=%2Fmeasurements%2Freflectance%2Fr60m%3Ab02&bidx=1"
         title = "Sentinel-2 L2A True Color (60m)"
     elif coll_lower.startswith(("sentinel-1", "sentinel1")):
         # Use VH band for S-1 thumbnail
@@ -217,6 +217,32 @@ def add_derived_from_link(item: Item, source_url: str) -> None:
         )
     )
     logger.debug(f"Added derived_from link: {source_url}")
+
+
+def fix_zarr_asset_media_types(item: Item) -> None:
+    """Fix media types for zarr assets and remove non-zarr source assets.
+
+    Source STAC items may have incorrect media types (e.g., 'application/vnd+zarr'
+    instead of 'application/vnd.zarr') and assets that don't belong in the
+    converted product (e.g., zipped_product pointing to external download service).
+    """
+    # Fix zarr media types: vnd+zarr -> vnd.zarr; version=3
+    fixed_count = 0
+    for asset in item.assets.values():
+        if asset.media_type == "application/vnd+zarr":
+            asset.media_type = "application/vnd.zarr; version=3"
+            fixed_count += 1
+    if fixed_count > 0:
+        logger.info(f"   🔧 Fixed media type on {fixed_count} zarr asset(s)")
+
+    # Remove assets that reference external services, not our zarr data
+    removed = []
+    for key in list(item.assets.keys()):
+        if key == "zipped_product":
+            item.assets.pop(key)
+            removed.append(key)
+    if removed:
+        logger.info(f"   🗑️  Removed source-only asset(s): {', '.join(removed)}")
 
 
 def remove_xarray_integration(item: Item) -> None:
@@ -303,20 +329,23 @@ def run_registration(
     else:
         logger.warning("   ⚠️  No source zarr found - assets not rewritten")
 
-    # 3. Add projection metadata from zarr
+    # 3. Fix zarr asset media types and remove non-zarr source assets
+    fix_zarr_asset_media_types(item)
+
+    # 4. Add projection metadata from zarr
     add_projection_from_zarr(item)
 
-    # 4. Remove XArray integration fields (ADR-111 compliance)
+    # 5. Remove XArray integration fields (ADR-111 compliance)
     remove_xarray_integration(item)
 
-    # 5. Add visualization links (viewer, xyz, tilejson)
+    # 6. Add visualization links (viewer, xyz, tilejson)
     add_visualization_links(item, raster_api_url, collection)
     logger.info("   🎨 Added visualization links")
 
-    # 6. Add thumbnail asset for STAC browsers
+    # 7. Add thumbnail asset for STAC browsers
     add_thumbnail_asset(item, raster_api_url, collection)
 
-    # 7. Add derived_from link to source item
+    # 8. Add derived_from link to source item
     add_derived_from_link(item, source_url)
 
     # 8. Register to STAC API
