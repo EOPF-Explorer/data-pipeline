@@ -1,25 +1,15 @@
-"""Unit tests for migrate_catalog.py."""
+"""Unit tests for the migrate_catalog package."""
 
 import json
-import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-# Add operator-tools to path
-operator_tools_dir = Path(__file__).parent.parent.parent / "operator-tools"
-sys.path.insert(0, str(operator_tools_dir))
-
-from migrate_catalog import (  # noqa: E402
-    MigrationResult,
-    STACMigrationRunner,
-    fix_url_encoding,
-    fix_zarr_media_type,
-    load_history,
-    record_run,
-    was_migration_run,
-)
+from migrate_catalog.history import load_history, record_run, was_migration_run
+from migrate_catalog.migrations.fix_url_encoding import fix_url_encoding
+from migrate_catalog.migrations.fix_zarr_media_type import fix_zarr_media_type
+from migrate_catalog.runner import STACMigrationRunner, compose_migrations
+from migrate_catalog.types import MigrationResult
 
 FIXTURES_DIR = Path(__file__).parent.parent / "fixtures" / "migrate_catalog"
 
@@ -252,6 +242,124 @@ class TestSTACMigrationRunner:
 
         assert copied == 0
         assert failed == 1
+
+
+class TestRecoveryFile:
+    def test_recovery_file_written_before_delete(self, tmp_path, item_with_wrong_media_type):
+        runner = STACMigrationRunner("https://api.example.com/stac", recovery_dir=tmp_path)
+
+        recovery_existed_before_delete = []
+
+        def delete_side_effect(*args, **kwargs):
+            files = list(tmp_path.glob(".migration_recovery_*.jsonl"))
+            recovery_existed_before_delete.append(bool(files))
+            return MagicMock()
+
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+
+        with (
+            patch.object(runner.session, "delete", side_effect=delete_side_effect),
+            patch.object(runner.session, "post", return_value=mock_resp),
+        ):
+            runner._update_item("test-col", "item-1", item_with_wrong_media_type)
+
+        assert recovery_existed_before_delete == [
+            True
+        ], "Recovery file must exist before delete is called"
+
+        files = list(tmp_path.glob(".migration_recovery_*.jsonl"))
+        assert len(files) == 1
+        with open(files[0]) as f:
+            saved = json.loads(f.readline())
+        assert saved["id"] == item_with_wrong_media_type["id"]
+
+    def test_no_recovery_file_without_recovery_dir(self, item_with_wrong_media_type):
+        runner = STACMigrationRunner("https://api.example.com/stac")
+
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+
+        with (
+            patch.object(runner.session, "delete", return_value=MagicMock()),
+            patch.object(runner.session, "post", return_value=mock_resp),
+        ):
+            runner._update_item("test-col", "item-1", item_with_wrong_media_type)
+
+        assert runner._recovery_file is None
+
+    def test_multiple_updates_append_to_same_recovery_file(
+        self, tmp_path, item_with_wrong_media_type, item_clean
+    ):
+        runner = STACMigrationRunner("https://api.example.com/stac", recovery_dir=tmp_path)
+
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+
+        with (
+            patch.object(runner.session, "delete", return_value=MagicMock()),
+            patch.object(runner.session, "post", return_value=mock_resp),
+        ):
+            runner._update_item("test-col", "item-1", item_with_wrong_media_type)
+            runner._update_item("test-col", "item-2", item_clean)
+
+        files = list(tmp_path.glob(".migration_recovery_*.jsonl"))
+        assert len(files) == 1
+        lines = files[0].read_text().strip().splitlines()
+        assert len(lines) == 2
+
+
+class TestComposeMigrations:
+    def test_changed_by_both(self):
+        item = {
+            "id": "test-both",
+            "assets": {
+                "data": {
+                    "href": "https://example.com/data?scale=0+1",
+                    "type": "application/vnd+zarr",
+                }
+            },
+            "links": [],
+        }
+        composed = compose_migrations([fix_url_encoding, fix_zarr_media_type])
+        result = composed(item)
+        assert result is not None
+        assert "%20" in result["assets"]["data"]["href"]
+        assert "+" not in result["assets"]["data"]["href"].split("?")[1]
+        assert result["assets"]["data"]["type"] == "application/vnd.zarr"
+
+    def test_changed_by_one_only(self, item_with_plus_urls):
+        # item_with_plus_urls has correct media types — only url fix applies
+        composed = compose_migrations([fix_url_encoding, fix_zarr_media_type])
+        result = composed(item_with_plus_urls)
+        assert result is not None
+        query = result["assets"]["thumbnail"]["href"].split("?")[1]
+        assert "+" not in query
+        assert "%20" in query
+
+    def test_changed_by_none(self, item_clean):
+        composed = compose_migrations([fix_url_encoding, fix_zarr_media_type])
+        assert composed(item_clean) is None
+
+    def test_does_not_mutate_input(self):
+        item = {
+            "id": "test-mutate",
+            "assets": {"data": {"href": "https://ex.com?q=a+b", "type": "application/vnd+zarr"}},
+            "links": [],
+        }
+        original_href = item["assets"]["data"]["href"]
+        original_type = item["assets"]["data"]["type"]
+        compose_migrations([fix_url_encoding, fix_zarr_media_type])(item)
+        assert item["assets"]["data"]["href"] == original_href
+        assert item["assets"]["data"]["type"] == original_type
+
+    def test_composed_name_uses_plus_separator(self):
+        from migrate_catalog.migrations import MIGRATIONS
+
+        migration_name = "+".join(["fix_url_encoding", "fix_zarr_media_type"])
+        assert migration_name == "fix_url_encoding+fix_zarr_media_type"
+        assert "fix_url_encoding" in MIGRATIONS
+        assert "fix_zarr_media_type" in MIGRATIONS
 
 
 class TestHistoryTracking:
