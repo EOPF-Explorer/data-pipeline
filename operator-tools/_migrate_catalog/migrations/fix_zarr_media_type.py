@@ -1,7 +1,7 @@
 from typing import Any
 
-from migrate_catalog.migrations._registry import migration
-from migrate_catalog.types import apply_item_transform
+from _migrate_catalog.migrations._registry import migration
+from _migrate_catalog.types import apply_item_transform
 
 
 def _transform(item: dict[str, Any]) -> bool:
@@ -21,5 +21,8 @@ def _transform(item: dict[str, Any]) -> bool:
     "Replace application/vnd+zarr with application/vnd.zarr (MIME convention)",
 )
 def fix_zarr_media_type(item: dict[str, Any]) -> dict[str, Any] | None:
-    """Replace application/vnd+zarr with application/vnd.zarr in asset type fields."""
+    """Replace application/vnd+zarr with application/vnd.zarr in asset type fields.
+
+    See: https://github.com/EOPF-Explorer/data-pipeline/issues/97
+    """
     return apply_item_transform(item, _transform)

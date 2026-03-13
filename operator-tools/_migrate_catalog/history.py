@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from migrate_catalog.types import MigrationResult
+from _migrate_catalog.types import MigrationResult
 
 
 def load_history(history_file: Path) -> dict[str, Any]:

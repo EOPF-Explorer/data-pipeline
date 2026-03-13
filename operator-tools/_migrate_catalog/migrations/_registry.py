@@ -1,6 +1,6 @@
 from collections.abc import Callable
 
-from migrate_catalog.types import MigrationFn
+from _migrate_catalog.types import MigrationFn
 
 MIGRATIONS: dict[str, tuple[MigrationFn, str]] = {}
 

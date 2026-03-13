@@ -1,0 +1,32 @@
+{
+  "type": "Feature",
+  "stac_version": "1.0.0",
+  "id": "test-item-v2-zarr",
+  "geometry": {"type": "Point", "coordinates": [0.0, 0.0]},
+  "bbox": [0.0, 0.0, 0.0, 0.0],
+  "properties": {"datetime": "2024-01-01T00:00:00Z"},
+  "links": [],
+  "assets": {
+    "reflectance": {
+      "href": "https://s3.example.com/bucket/data.zarr/measurements/reflectance/r10m/b04",
+      "type": "application/vnd.zarr; version=2; profile=multiscales",
+      "roles": ["data"]
+    },
+    "SR_20m": {
+      "href": "https://s3.example.com/bucket/data.zarr/measurements/reflectance/r20m",
+      "type": "application/vnd.zarr; version=2",
+      "roles": ["data"]
+    },
+    "SR_60m": {
+      "href": "https://s3.example.com/bucket/data.zarr/measurements/reflectance/r60m",
+      "type": "application/vnd+zarr; version=2; profile=multiscales",
+      "roles": ["data"]
+    },
+    "thumbnail": {
+      "href": "https://titiler.example.com/thumbnail.png",
+      "type": "image/png",
+      "roles": ["thumbnail"]
+    }
+  },
+  "collection": "sentinel-2-l2a"
+}

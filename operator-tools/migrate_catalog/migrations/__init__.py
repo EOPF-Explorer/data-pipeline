@@ -1,6 +1,0 @@
-# Import migration modules to trigger @migration registration
-from migrate_catalog.migrations import fix_url_encoding as _  # noqa: F401
-from migrate_catalog.migrations import fix_zarr_media_type as __  # noqa: F401
-from migrate_catalog.migrations._registry import MIGRATIONS, migration
-
-__all__ = ["MIGRATIONS", "migration"]

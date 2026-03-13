@@ -5,10 +5,10 @@ from typing import Any
 import click
 import requests
 
-from migrate_catalog.history import load_history, record_run, was_migration_run
-from migrate_catalog.migrations import MIGRATIONS
-from migrate_catalog.runner import STACMigrationRunner, compose_migrations
-from migrate_catalog.types import MigrationFn
+from _migrate_catalog.history import load_history, record_run, was_migration_run
+from _migrate_catalog.migrations import MIGRATIONS
+from _migrate_catalog.runner import STACMigrationRunner, compose_migrations
+from _migrate_catalog.types import MigrationFn
 
 _DEFAULT_API_URL = "https://api.explorer.eopf.copernicus.eu/stac"
 _DEFAULT_HISTORY_FILE = Path(__file__).parent.parent / ".migration_history.json"
@@ -46,6 +46,7 @@ def cli(ctx: click.Context, api_url: str | None, history_file: str | None) -> No
 )
 @click.option("--dry-run", is_flag=True, help="Show changes without updating")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+@click.option("--page-size", default=100, show_default=True, help="Items per page when fetching")
 @click.pass_context
 def run(
     ctx: click.Context,
@@ -53,6 +54,7 @@ def run(
     migration_names: tuple[str, ...],
     dry_run: bool,
     yes: bool,
+    page_size: int,
 ) -> None:
     """Run one or more migrations on a collection."""
     for name in migration_names:
@@ -89,7 +91,9 @@ def run(
             return
 
     runner = STACMigrationRunner(api_url, recovery_dir=history_file.parent)
-    result = runner.run_migration(collection_id, migration_fn, migration_name, dry_run=dry_run)
+    result = runner.run_migration(
+        collection_id, migration_fn, migration_name, dry_run=dry_run, page_size=page_size
+    )
 
     click.echo()
     click.echo("=" * 50)
@@ -112,8 +116,9 @@ def run(
 @click.argument("source_id")
 @click.argument("target_id")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
+@click.option("--page-size", default=100, show_default=True, help="Items per page when fetching")
 @click.pass_context
-def clone(ctx: click.Context, source_id: str, target_id: str, yes: bool) -> None:
+def clone(ctx: click.Context, source_id: str, target_id: str, yes: bool, page_size: int) -> None:
     """Clone a collection (metadata + all items) to a new collection."""
     api_url: str = ctx.obj["api_url"]
 
@@ -125,7 +130,7 @@ def clone(ctx: click.Context, source_id: str, target_id: str, yes: bool) -> None
 
     runner = STACMigrationRunner(api_url)
     try:
-        copied, failed = runner.clone_collection(source_id, target_id)
+        copied, failed = runner.clone_collection(source_id, target_id, page_size=page_size)
         click.echo(f"Done. Items copied: {copied}, failed: {failed}")
         if failed:
             sys.exit(1)
@@ -179,8 +184,14 @@ def history(ctx: click.Context, migration: str | None, collection: str | None) -
     required=True,
     help="Migration to verify (repeatable to compose multiple)",
 )
+@click.option("--page-size", default=100, show_default=True, help="Items per page when fetching")
 @click.pass_context
-def verify(ctx: click.Context, collection_id: str, migration_names: tuple[str, ...]) -> None:
+def verify(
+    ctx: click.Context,
+    collection_id: str,
+    migration_names: tuple[str, ...],
+    page_size: int,
+) -> None:
     """Check if a migration is fully applied to a collection."""
     for name in migration_names:
         if name not in MIGRATIONS:
@@ -198,7 +209,9 @@ def verify(ctx: click.Context, collection_id: str, migration_names: tuple[str, .
 
     click.echo(f"Verifying '{migration_name}' on '{collection_id}'...")
     runner = STACMigrationRunner(api_url)
-    result = runner.run_migration(collection_id, migration_fn, migration_name, dry_run=True)
+    result = runner.run_migration(
+        collection_id, migration_fn, migration_name, dry_run=True, page_size=page_size
+    )
 
     click.echo(f"  Items scanned:            {result.items_processed}")
     click.echo(f"  Items already fixed:      {result.items_skipped}")
@@ -208,7 +221,7 @@ def verify(ctx: click.Context, collection_id: str, migration_names: tuple[str, .
         click.echo(f"✓ Migration '{migration_name}' is fully applied on '{collection_id}'.")
     else:
         click.echo(
-            f"✗ Not fully applied. Run: python migrate_catalog.py run "
+            f"✗ Not fully applied. Run: uv run operator-tools/migrate_catalog.py run "
             f"--migration {migration_name} {collection_id}"
         )
         sys.exit(1)

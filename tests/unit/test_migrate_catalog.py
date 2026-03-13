@@ -5,11 +5,12 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from migrate_catalog.history import load_history, record_run, was_migration_run
-from migrate_catalog.migrations.fix_url_encoding import fix_url_encoding
-from migrate_catalog.migrations.fix_zarr_media_type import fix_zarr_media_type
-from migrate_catalog.runner import STACMigrationRunner, compose_migrations
-from migrate_catalog.types import MigrationResult
+from _migrate_catalog.history import load_history, record_run, was_migration_run
+from _migrate_catalog.migrations.fix_url_encoding import fix_url_encoding
+from _migrate_catalog.migrations.fix_zarr_media_type import fix_zarr_media_type
+from _migrate_catalog.migrations.fix_zarr_version import fix_zarr_version
+from _migrate_catalog.runner import STACMigrationRunner, compose_migrations
+from _migrate_catalog.types import MigrationResult
 
 FIXTURES_DIR = Path(__file__).parent.parent / "fixtures" / "migrate_catalog"
 
@@ -29,6 +30,12 @@ def item_with_wrong_media_type():
 @pytest.fixture
 def item_clean():
     with open(FIXTURES_DIR / "stac_item_clean.json") as f:
+        return json.load(f)
+
+
+@pytest.fixture
+def item_with_v2_zarr():
+    with open(FIXTURES_DIR / "stac_item_with_v2_zarr.json") as f:
         return json.load(f)
 
 
@@ -116,6 +123,63 @@ class TestFixZarrMediaType:
         assert result2 is None
 
 
+class TestFixZarrVersion:
+    def test_replaces_version2_with_profile(self, item_with_v2_zarr):
+        result = fix_zarr_version(item_with_v2_zarr)
+        assert result is not None
+        assert (
+            result["assets"]["reflectance"]["type"]
+            == "application/vnd.zarr; version=3; profile=multiscales"
+        )
+
+    def test_replaces_version2_without_profile(self, item_with_v2_zarr):
+        result = fix_zarr_version(item_with_v2_zarr)
+        assert result is not None
+        assert result["assets"]["SR_20m"]["type"] == "application/vnd.zarr; version=3"
+
+    def test_replaces_version2_on_vnd_plus_zarr(self, item_with_v2_zarr):
+        result = fix_zarr_version(item_with_v2_zarr)
+        assert result is not None
+        assert (
+            result["assets"]["SR_60m"]["type"]
+            == "application/vnd+zarr; version=3; profile=multiscales"
+        )
+
+    def test_does_not_modify_non_zarr_assets(self, item_with_v2_zarr):
+        result = fix_zarr_version(item_with_v2_zarr)
+        assert result is not None
+        assert result["assets"]["thumbnail"]["type"] == "image/png"
+
+    def test_returns_none_when_no_v2(self, item_clean):
+        assert fix_zarr_version(item_clean) is None
+
+    def test_does_not_mutate_input(self, item_with_v2_zarr):
+        original_type = item_with_v2_zarr["assets"]["reflectance"]["type"]
+        fix_zarr_version(item_with_v2_zarr)
+        assert item_with_v2_zarr["assets"]["reflectance"]["type"] == original_type
+
+    def test_idempotent(self, item_with_v2_zarr):
+        result1 = fix_zarr_version(item_with_v2_zarr)
+        assert result1 is not None
+        result2 = fix_zarr_version(result1)
+        assert result2 is None
+
+
+def _make_mock_search(items_dicts: list, total: int | None = None) -> MagicMock:
+    """Build a mock pystac_client search that yields one page with the given items."""
+    mock_items = []
+    for d in items_dicts:
+        m = MagicMock()
+        m.to_dict.return_value = d
+        mock_items.append(m)
+    mock_page = MagicMock()
+    mock_page.items = mock_items
+    mock_search = MagicMock()
+    mock_search.matched.return_value = total
+    mock_search.pages.return_value = [mock_page] if mock_items else []
+    return mock_search
+
+
 class TestSTACMigrationRunner:
     def _make_runner(self):
         runner = STACMigrationRunner("https://api.example.com/stac")
@@ -124,11 +188,13 @@ class TestSTACMigrationRunner:
 
     def test_dry_run_counts_modified_without_updating(self, item_with_wrong_media_type):
         runner = self._make_runner()
-        runner.get_items = MagicMock(return_value=[item_with_wrong_media_type])
+        mock_search = _make_mock_search([item_with_wrong_media_type], total=1)
 
-        result = runner.run_migration(
-            "test-col", fix_zarr_media_type, "fix_zarr_media_type", dry_run=True
-        )
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = mock_search
+            result = runner.run_migration(
+                "test-col", fix_zarr_media_type, "fix_zarr_media_type", dry_run=True
+            )
 
         assert result.items_modified == 1
         assert result.items_skipped == 0
@@ -138,9 +204,11 @@ class TestSTACMigrationRunner:
 
     def test_applies_migration_with_corrected_item(self, item_with_wrong_media_type):
         runner = self._make_runner()
-        runner.get_items = MagicMock(return_value=[item_with_wrong_media_type])
+        mock_search = _make_mock_search([item_with_wrong_media_type], total=1)
 
-        result = runner.run_migration("test-col", fix_zarr_media_type, "fix_zarr_media_type")
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = mock_search
+            result = runner.run_migration("test-col", fix_zarr_media_type, "fix_zarr_media_type")
 
         assert result.items_modified == 1
         assert result.items_failed == 0
@@ -150,9 +218,11 @@ class TestSTACMigrationRunner:
 
     def test_skips_items_with_no_changes(self, item_clean):
         runner = self._make_runner()
-        runner.get_items = MagicMock(return_value=[item_clean])
+        mock_search = _make_mock_search([item_clean], total=1)
 
-        result = runner.run_migration("test-col", fix_zarr_media_type, "fix_zarr_media_type")
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = mock_search
+            result = runner.run_migration("test-col", fix_zarr_media_type, "fix_zarr_media_type")
 
         assert result.items_skipped == 1
         assert result.items_modified == 0
@@ -160,10 +230,12 @@ class TestSTACMigrationRunner:
 
     def test_records_failure_on_update_error(self, item_with_wrong_media_type):
         runner = self._make_runner()
-        runner.get_items = MagicMock(return_value=[item_with_wrong_media_type])
+        mock_search = _make_mock_search([item_with_wrong_media_type], total=1)
         runner._update_item.side_effect = Exception("API error")
 
-        result = runner.run_migration("test-col", fix_zarr_media_type, "fix_zarr_media_type")
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = mock_search
+            result = runner.run_migration("test-col", fix_zarr_media_type, "fix_zarr_media_type")
 
         assert result.items_failed == 1
         assert result.items_modified == 0
@@ -172,9 +244,11 @@ class TestSTACMigrationRunner:
 
     def test_processes_multiple_items(self, item_with_wrong_media_type, item_clean):
         runner = self._make_runner()
-        runner.get_items = MagicMock(return_value=[item_with_wrong_media_type, item_clean])
+        mock_search = _make_mock_search([item_with_wrong_media_type, item_clean], total=2)
 
-        result = runner.run_migration("test-col", fix_zarr_media_type, "fix_zarr_media_type")
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = mock_search
+            result = runner.run_migration("test-col", fix_zarr_media_type, "fix_zarr_media_type")
 
         assert result.items_processed == 2
         assert result.items_modified == 1
@@ -183,11 +257,12 @@ class TestSTACMigrationRunner:
 
     def test_clone_collection_copies_metadata_and_items(self):
         runner = STACMigrationRunner("https://api.example.com/stac")
-        runner.get_items = MagicMock(
-            return_value=[
+        mock_search = _make_mock_search(
+            [
                 {"id": "item-1", "collection": "source-col", "links": [], "assets": {}},
                 {"id": "item-2", "collection": "source-col", "links": [], "assets": {}},
-            ]
+            ],
+            total=2,
         )
 
         mock_resp = MagicMock()
@@ -202,7 +277,9 @@ class TestSTACMigrationRunner:
         with (
             patch.object(runner.session, "get", return_value=mock_resp),
             patch.object(runner.session, "post", return_value=mock_resp) as mock_post,
+            patch("_migrate_catalog.runner.Client") as mock_client,
         ):
+            mock_client.open.return_value.search.return_value = mock_search
             copied, failed = runner.clone_collection("source-col", "target-col")
 
         assert copied == 2
@@ -215,8 +292,9 @@ class TestSTACMigrationRunner:
 
     def test_clone_collection_counts_failed_items(self):
         runner = STACMigrationRunner("https://api.example.com/stac")
-        runner.get_items = MagicMock(
-            return_value=[{"id": "item-1", "collection": "source-col", "links": [], "assets": {}}]
+        mock_search = _make_mock_search(
+            [{"id": "item-1", "collection": "source-col", "links": [], "assets": {}}],
+            total=1,
         )
 
         mock_resp = MagicMock()
@@ -237,7 +315,9 @@ class TestSTACMigrationRunner:
         with (
             patch.object(runner.session, "get", return_value=mock_resp),
             patch.object(runner.session, "post", side_effect=post_side_effect),
+            patch("_migrate_catalog.runner.Client") as mock_client,
         ):
+            mock_client.open.return_value.search.return_value = mock_search
             copied, failed = runner.clone_collection("source-col", "target-col")
 
         assert copied == 0
@@ -354,7 +434,7 @@ class TestComposeMigrations:
         assert item["assets"]["data"]["type"] == original_type
 
     def test_composed_name_uses_plus_separator(self):
-        from migrate_catalog.migrations import MIGRATIONS
+        from _migrate_catalog.migrations import MIGRATIONS
 
         migration_name = "+".join(["fix_url_encoding", "fix_zarr_media_type"])
         assert migration_name == "fix_url_encoding+fix_zarr_media_type"
