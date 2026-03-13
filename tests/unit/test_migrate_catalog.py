@@ -8,7 +8,6 @@ import pytest
 from _migrate_catalog.history import load_history, record_run, was_migration_run
 from _migrate_catalog.migrations.fix_url_encoding import fix_url_encoding
 from _migrate_catalog.migrations.fix_zarr_media_type import fix_zarr_media_type
-from _migrate_catalog.migrations.fix_zarr_version import fix_zarr_version
 from _migrate_catalog.runner import STACMigrationRunner, compose_migrations
 from _migrate_catalog.types import MigrationResult
 
@@ -93,15 +92,21 @@ class TestFixUrlEncoding:
 
 
 class TestFixZarrMediaType:
-    def test_replaces_vnd_plus_zarr(self, item_with_wrong_media_type):
+    def test_replaces_vnd_plus_zarr_with_version_3(self, item_with_wrong_media_type):
         result = fix_zarr_media_type(item_with_wrong_media_type)
         assert result is not None
-        assert result["assets"]["SR_10m"]["type"] == "application/vnd.zarr"
+        assert result["assets"]["SR_10m"]["type"] == "application/vnd.zarr; version=3"
 
-    def test_replaces_vnd_plus_zarr_with_version_suffix(self, item_with_wrong_media_type):
+    def test_replaces_vnd_plus_zarr_with_existing_version_suffix(self, item_with_wrong_media_type):
         result = fix_zarr_media_type(item_with_wrong_media_type)
         assert result is not None
         assert result["assets"]["SR_20m"]["type"] == "application/vnd.zarr; version=3"
+
+    def test_removes_zipped_product_asset(self, item_with_wrong_media_type):
+        assert "zipped_product" in item_with_wrong_media_type["assets"]
+        result = fix_zarr_media_type(item_with_wrong_media_type)
+        assert result is not None
+        assert "zipped_product" not in result["assets"]
 
     def test_does_not_modify_non_zarr_assets(self, item_with_wrong_media_type):
         result = fix_zarr_media_type(item_with_wrong_media_type)
@@ -116,16 +121,8 @@ class TestFixZarrMediaType:
         fix_zarr_media_type(item_with_wrong_media_type)
         assert item_with_wrong_media_type["assets"]["SR_10m"]["type"] == original_type
 
-    def test_idempotent(self, item_with_wrong_media_type):
-        result1 = fix_zarr_media_type(item_with_wrong_media_type)
-        assert result1 is not None
-        result2 = fix_zarr_media_type(result1)
-        assert result2 is None
-
-
-class TestFixZarrVersion:
     def test_replaces_version2_with_profile(self, item_with_v2_zarr):
-        result = fix_zarr_version(item_with_v2_zarr)
+        result = fix_zarr_media_type(item_with_v2_zarr)
         assert result is not None
         assert (
             result["assets"]["reflectance"]["type"]
@@ -133,35 +130,48 @@ class TestFixZarrVersion:
         )
 
     def test_replaces_version2_without_profile(self, item_with_v2_zarr):
-        result = fix_zarr_version(item_with_v2_zarr)
+        result = fix_zarr_media_type(item_with_v2_zarr)
         assert result is not None
         assert result["assets"]["SR_20m"]["type"] == "application/vnd.zarr; version=3"
 
-    def test_replaces_version2_on_vnd_plus_zarr(self, item_with_v2_zarr):
-        result = fix_zarr_version(item_with_v2_zarr)
+    def test_fixes_vnd_plus_zarr_and_version2_together(self, item_with_v2_zarr):
+        result = fix_zarr_media_type(item_with_v2_zarr)
         assert result is not None
         assert (
             result["assets"]["SR_60m"]["type"]
-            == "application/vnd+zarr; version=3; profile=multiscales"
+            == "application/vnd.zarr; version=3; profile=multiscales"
         )
 
-    def test_does_not_modify_non_zarr_assets(self, item_with_v2_zarr):
-        result = fix_zarr_version(item_with_v2_zarr)
+    def test_fixes_vnd_plus_zarr_version2_without_profile(self):
+        item = {
+            "id": "test",
+            "assets": {
+                "data": {
+                    "href": "https://example.com/data.zarr",
+                    "type": "application/vnd+zarr; version=2",
+                }
+            },
+            "links": [],
+        }
+        result = fix_zarr_media_type(item)
         assert result is not None
-        assert result["assets"]["thumbnail"]["type"] == "image/png"
+        assert result["assets"]["data"]["type"] == "application/vnd.zarr; version=3"
 
-    def test_returns_none_when_no_v2(self, item_clean):
-        assert fix_zarr_version(item_clean) is None
-
-    def test_does_not_mutate_input(self, item_with_v2_zarr):
+    def test_does_not_mutate_v2_input(self, item_with_v2_zarr):
         original_type = item_with_v2_zarr["assets"]["reflectance"]["type"]
-        fix_zarr_version(item_with_v2_zarr)
+        fix_zarr_media_type(item_with_v2_zarr)
         assert item_with_v2_zarr["assets"]["reflectance"]["type"] == original_type
 
-    def test_idempotent(self, item_with_v2_zarr):
-        result1 = fix_zarr_version(item_with_v2_zarr)
+    def test_idempotent(self, item_with_wrong_media_type):
+        result1 = fix_zarr_media_type(item_with_wrong_media_type)
         assert result1 is not None
-        result2 = fix_zarr_version(result1)
+        result2 = fix_zarr_media_type(result1)
+        assert result2 is None
+
+    def test_idempotent_v2(self, item_with_v2_zarr):
+        result1 = fix_zarr_media_type(item_with_v2_zarr)
+        assert result1 is not None
+        result2 = fix_zarr_media_type(result1)
         assert result2 is None
 
 
@@ -214,7 +224,7 @@ class TestSTACMigrationRunner:
         assert result.items_failed == 0
         runner._update_item.assert_called_once()
         _, _, posted_item = runner._update_item.call_args[0]
-        assert posted_item["assets"]["SR_10m"]["type"] == "application/vnd.zarr"
+        assert posted_item["assets"]["SR_10m"]["type"] == "application/vnd.zarr; version=3"
 
     def test_skips_items_with_no_changes(self, item_clean):
         runner = self._make_runner()
@@ -406,7 +416,7 @@ class TestComposeMigrations:
         assert result is not None
         assert "%20" in result["assets"]["data"]["href"]
         assert "+" not in result["assets"]["data"]["href"].split("?")[1]
-        assert result["assets"]["data"]["type"] == "application/vnd.zarr"
+        assert result["assets"]["data"]["type"] == "application/vnd.zarr; version=3"
 
     def test_changed_by_one_only(self, item_with_plus_urls):
         # item_with_plus_urls has correct media types — only url fix applies

@@ -21,6 +21,11 @@
       "href": "https://titiler.example.com/thumbnail.png",
       "type": "image/png",
       "roles": ["thumbnail"]
+    },
+    "zipped_product": {
+      "href": "https://zipper.dataspace.copernicus.eu/odata/v1/Products(abc-123)/$value",
+      "type": "application/zip",
+      "roles": ["data"]
     }
   },
   "collection": "sentinel-2-l2a"

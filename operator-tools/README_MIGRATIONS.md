@@ -12,7 +12,7 @@ is shown when the API supports `numberMatched`.
 | Name | Description |
 |---|---|
 | `fix_url_encoding` | Replace `+` with `%20` in asset/link href query strings (RFC 3986 compliance) |
-| `fix_zarr_media_type` | Replace `application/vnd+zarr` with `application/vnd.zarr` (MIME convention) |
+| `fix_zarr_media_type` | Fix zarr media types (`vnd+zarr` → `vnd.zarr`, `version=2` → `version=3`, add missing `version=3`) and remove `zipped_product` asset |
 
 ## Safe Migration Procedure
 

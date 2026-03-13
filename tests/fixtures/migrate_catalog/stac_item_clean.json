@@ -9,7 +9,7 @@
   "assets": {
     "SR_10m": {
       "href": "https://s3.example.com/bucket/data.zarr/measurements/reflectance/r10m",
-      "type": "application/vnd.zarr",
+      "type": "application/vnd.zarr; version=3",
       "roles": ["data"]
     },
     "thumbnail": {
