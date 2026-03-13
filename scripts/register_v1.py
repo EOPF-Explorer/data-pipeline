@@ -341,6 +341,32 @@ def add_derived_from_link(item: Item, source_url: str) -> None:
     logger.debug(f"Added derived_from link: {source_url}")
 
 
+def fix_zarr_asset_media_types(item: Item) -> None:
+    """Fix media types for zarr assets and remove non-zarr source assets.
+
+    Source STAC items may have incorrect media types (e.g., 'application/vnd+zarr'
+    instead of 'application/vnd.zarr') and assets that don't belong in the
+    converted product (e.g., zipped_product pointing to external download service).
+    """
+    # Fix zarr media types: vnd+zarr -> vnd.zarr; version=3
+    fixed_count = 0
+    for asset in item.assets.values():
+        if asset.media_type == "application/vnd+zarr":
+            asset.media_type = "application/vnd.zarr; version=3"
+            fixed_count += 1
+    if fixed_count > 0:
+        logger.info(f"   🔧 Fixed media type on {fixed_count} zarr asset(s)")
+
+    # Remove assets that reference external services, not our zarr data
+    removed = []
+    for key in list(item.assets.keys()):
+        if key == "zipped_product":
+            item.assets.pop(key)
+            removed.append(key)
+    if removed:
+        logger.info(f"   🗑️  Removed source-only asset(s): {', '.join(removed)}")
+
+
 def remove_xarray_integration(item: Item) -> None:
     """Remove XArray-specific fields from assets (ADR-111 compliance)."""
     removed_count = 0
@@ -689,23 +715,26 @@ def run_registration(
     else:
         logger.warning("   ⚠️  No source zarr found - assets not rewritten")
 
-    # 3. Add store link to root Zarr location (best practice)
+    # 3. Fix zarr asset media types and remove zipped_product source asset
+    fix_zarr_asset_media_types(item)
+
+    # 4. Add store link to root Zarr location (best practice)
     add_store_link(item, geozarr_url)
 
-    # 4. Consolidate reflectance assets into single asset with bands/cube metadata
+    # 5. Consolidate reflectance assets into single asset with bands/cube metadata
     consolidate_reflectance_assets(item, geozarr_url)
 
-    # 5. Add projection metadata from zarr
+    # 6. Add projection metadata from zarr
     add_projection_from_zarr(item)
 
-    # 6. Remove XArray integration fields (ADR-111 compliance)
+    # 7. Remove XArray integration fields (ADR-111 compliance)
     remove_xarray_integration(item)
 
-    # 7. Add alternate S3 URLs to assets (alternate-assets + storage extensions)
+    # 8. Add alternate S3 URLs to assets (alternate-assets + storage extensions)
     # This also queries and adds storage:tier to each asset's alternate
     add_alternate_s3_assets(item, s3_endpoint)
 
-    # 8. Add visualization links (viewer, xyz, tilejson)
+    # 9. Add visualization links (viewer, xyz, tilejson)
     add_visualization_links(item, raster_api_url, collection)
     logger.info("   🎨 Added visualization links")
 
