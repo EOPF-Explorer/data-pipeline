@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.6.1 (2026-03-16)
+
+## What's Changed
+* ci: fix docker build after release please by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/107
+* fix: fix color_formula query by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/109
+* fix: fix all zarr assets media type and remove zipped_product asset by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/111
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.6.0...v1.6.1
+
 ## 1.6.0 (2026-03-05)
 
 ## What's Changed
