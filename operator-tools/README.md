@@ -197,7 +197,40 @@ uv run operator-tools/manage_collections.py batch-create stac/
 
 **Documentation:** See [README_collections.md](./README_collections.md) for detailed usage and examples.
 
-### 3. `submit_test_workflow_wh.py` - HTTP Webhook Submission
+### 3. `migrate_catalog.py` - STAC Catalogue Migration Tool
+
+**Purpose**: Apply catalogue-wide fixes to STAC items with history tracking and recovery support.
+
+**Use cases:**
+- Fix incorrect media types or malformed URLs across an entire collection
+- Preview changes safely with `--dry-run` before applying
+- Compose multiple migrations in a single pass
+- Track which migrations have been applied to which collections
+
+**Quick Examples:**
+```bash
+# List available migrations
+uv run operator-tools/migrate_catalog.py list
+
+# Preview a migration (dry run)
+uv run operator-tools/migrate_catalog.py run --migration fix_url_encoding sentinel-2-l2a-staging --dry-run
+
+# Apply a migration
+uv run operator-tools/migrate_catalog.py run --migration fix_url_encoding sentinel-2-l2a-staging
+
+# Apply multiple migrations in one pass
+uv run operator-tools/migrate_catalog.py run --migration fix_url_encoding --migration fix_zarr_media_type sentinel-2-l2a-staging
+
+# Verify a migration is fully applied
+uv run operator-tools/migrate_catalog.py verify --migration fix_url_encoding sentinel-2-l2a-staging
+
+# Clone a collection as backup before migrating
+uv run operator-tools/migrate_catalog.py clone sentinel-2-l2a-staging sentinel-2-l2a-staging-backup-20260312 --yes
+```
+
+**Documentation:** See [README_MIGRATIONS.md](./README_MIGRATIONS.md) for the full safe migration procedure, CLI reference, and instructions for writing new migrations.
+
+### 4. `submit_test_workflow_wh.py` - HTTP Webhook Submission
 
 Submits a single test STAC item via HTTP webhook endpoint.
 
@@ -222,7 +255,7 @@ Edit the script to change:
 - `collection`: Target collection name
 - `action`: Processing action (e.g., `convert-v1-s2-hp`, or `convert-v1-s2-hp`)
 
-### 4. `submit_stac_items_notebook.ipynb` - Interactive STAC Search & Submit
+### 5. `submit_stac_items_notebook.ipynb` - Interactive STAC Search & Submit
 
 Jupyter notebook for searching and batch submitting STAC items.
 

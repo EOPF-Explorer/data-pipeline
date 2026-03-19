@@ -1,0 +1,28 @@
+{
+  "type": "Feature",
+  "stac_version": "1.0.0",
+  "id": "test-item-plus-url",
+  "geometry": {"type": "Point", "coordinates": [0.0, 0.0]},
+  "bbox": [0.0, 0.0, 0.0, 0.0],
+  "properties": {"datetime": "2024-01-01T00:00:00Z"},
+  "links": [
+    {
+      "rel": "preview",
+      "href": "https://titiler.example.com/cog/preview?url=s3://bucket/data.zarr&rescale=0+3000&title=My+Item",
+      "type": "image/png"
+    }
+  ],
+  "assets": {
+    "thumbnail": {
+      "href": "https://titiler.example.com/cog/preview.png?url=s3://bucket/data.zarr&bidx=4+3+2&rescale=0+3000",
+      "type": "image/png",
+      "roles": ["thumbnail"]
+    },
+    "data": {
+      "href": "https://s3.example.com/bucket/data.zarr",
+      "type": "application/vnd.zarr",
+      "roles": ["data"]
+    }
+  },
+  "collection": "sentinel-2-l2a"
+}
