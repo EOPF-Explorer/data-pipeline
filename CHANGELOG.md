@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.7.0 (2026-03-19)
+
+## What's Changed
+* feat: create cli command to change storage tier by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/103
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.6.1...v1.7.0
+
 ## 1.6.1 (2026-03-16)
 
 ## What's Changed
