@@ -36,6 +36,7 @@ dependencies = [
     "cf-xarray>=0.9.0",
     "eopf-geozarr @ git+https://github.com/EOPF-Explorer/data-model.git@v0.8.0",
     "requests",
+    "nats-py>=2.0.0",
 ]
 
 [dependency-groups]
