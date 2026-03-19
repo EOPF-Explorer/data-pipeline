@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
-"""Submit storage tier change workflows via HTTP webhook for a date range of STAC items.
+"""Submit storage tier change workflows via NATS JetStream for a date range of STAC items.
 
-Queries STAC in 24h windows and POSTs one webhook payload per window,
-triggering the eopf-storage-tier-batch-job WorkflowTemplate via Argo Events.
-Each workflow fans out to per-item parallel processing within Argo.
+Queries STAC in 24h windows and publishes one JetStream message per window to the
+'storage-tier-changes' subject. The publish ack confirms durable storage before
+advancing, preventing silent drops that occurred with the HTTP webhook EventSource.
+Each message triggers the eopf-storage-tier-batch-job WorkflowTemplate via Argo Events.
 """
 
 import argparse
+import asyncio
+import json
 import logging
 import sys
 import time
 from datetime import UTC, datetime, timedelta
 from typing import cast
 
-import requests
+import nats
 from pystac_client import Client
 
 logging.basicConfig(
@@ -21,6 +24,8 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+NATS_SUBJECT = "storage-tier-changes"
 
 
 def generate_time_windows(
@@ -58,31 +63,31 @@ def query_stac_items(
     return [item.id for item in search.items()]
 
 
-def submit_batch(webhook_url: str, payload: dict[str, object], dry_run: bool) -> bool:
-    """POST a JSON payload to the webhook endpoint. Returns True on success."""
+async def submit_batch(nats_url: str, payload: dict[str, object], dry_run: bool) -> bool:
+    """Publish a JSON payload to NATS JetStream. Returns True on publish ack."""
     if dry_run:
-        logger.info(f"[dry-run] Would submit: {payload}")
+        logger.info(f"[dry-run] Would publish to NATS {NATS_SUBJECT}: {payload}")
         return True
+    nc = None
     try:
-        response = requests.post(
-            webhook_url,
-            json=payload,
-            headers={"Content-Type": "application/json"},
-        )
-        if response.status_code != 200:
-            logger.warning(
-                f"Non-200 response for window with {len(cast(list[str], payload.get('item_ids', [])))} items: "
-                f"{response.status_code} {response.text}"
-            )
-        return response.status_code == 200
+        nc = await nats.connect(nats_url)
+        js = nc.jetstream()
+        data = json.dumps(payload).encode()
+        ack = await js.publish(NATS_SUBJECT, data)
+        n_items = len(cast(list[str], payload.get("item_ids", [])))
+        logger.info(f"Published {n_items} items to {NATS_SUBJECT}, ack seq={ack.seq}")
+        return True
     except Exception as e:
-        logger.error(f"Error submitting batch: {e}")
+        logger.error(f"Error publishing to NATS: {e}")
         return False
+    finally:
+        if nc is not None:
+            await nc.drain()
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Submit storage tier batch workflows via webhook for a date range of STAC items."
+        description="Submit storage tier batch workflows via NATS JetStream for a date range of STAC items."
     )
     parser.add_argument("--start-date", required=True, help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end-date", required=True, help="End date (YYYY-MM-DD)")
@@ -92,7 +97,7 @@ def main() -> None:
     parser.add_argument("--s3-endpoint", default="https://s3.de.io.cloud.ovh.net")
     parser.add_argument("--pipeline-image-version", default="v1.6.1")
     parser.add_argument("--process-all-assets", action="store_true")
-    parser.add_argument("--webhook-url", default="http://localhost:12000/samples")
+    parser.add_argument("--nats-url", default="nats://localhost:4222")
     parser.add_argument(
         "--delay", type=float, default=1.0, help="Delay between window submissions in seconds"
     )
@@ -135,7 +140,7 @@ def main() -> None:
             "pipeline_image_version": args.pipeline_image_version,
             "process_all_assets": str(args.process_all_assets).lower(),
         }
-        success = submit_batch(args.webhook_url, payload, args.dry_run)
+        success = asyncio.run(submit_batch(args.nats_url, payload, args.dry_run))
         if success:
             total_submitted += 1
         else:

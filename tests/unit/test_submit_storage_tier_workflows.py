@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 from datetime import UTC, datetime
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from submit_storage_tier_workflows import (
@@ -102,14 +104,28 @@ class TestQueryStacItems:
 
 
 class TestSubmitBatch:
-    def test_dry_run_does_not_send_request(self) -> None:
+    def _make_nats_mock(self) -> tuple[AsyncMock, AsyncMock, MagicMock]:
+        """Return (mock_nc, mock_js, mock_ack) with seq=1.
+
+        nc.jetstream() is a sync call in nats-py, so use MagicMock for it.
+        nc.connect() and js.publish() are async.
+        """
+        mock_ack = MagicMock()
+        mock_ack.seq = 1
+        mock_js = AsyncMock()
+        mock_js.publish.return_value = mock_ack
+        mock_nc = AsyncMock()
+        mock_nc.jetstream = MagicMock(return_value=mock_js)
+        return mock_nc, mock_js, mock_ack
+
+    def test_dry_run_does_not_connect(self) -> None:
         payload: dict[str, object] = {
             "action": "batch-change-storage-tier",
             "item_ids": ["item-1", "item-2"],
         }
-        with patch("submit_storage_tier_workflows.requests") as mock_requests:
-            result = submit_batch("http://localhost:12000/samples", payload, dry_run=True)
-        mock_requests.post.assert_not_called()
+        with patch("submit_storage_tier_workflows.nats") as mock_nats:
+            result = asyncio.run(submit_batch("nats://localhost:4222", payload, dry_run=True))
+        mock_nats.connect.assert_not_called()
         assert result is True
 
     def test_success_returns_true(self) -> None:
@@ -117,64 +133,61 @@ class TestSubmitBatch:
             "action": "batch-change-storage-tier",
             "item_ids": ["item-1", "item-2"],
         }
-        mock_response = MagicMock()
-        mock_response.status_code = 200
+        mock_nc, mock_js, _ = self._make_nats_mock()
 
-        with patch("submit_storage_tier_workflows.requests.post", return_value=mock_response):
-            result = submit_batch("http://localhost:12000/samples", payload, dry_run=False)
+        with patch("submit_storage_tier_workflows.nats.connect", return_value=mock_nc):
+            result = asyncio.run(submit_batch("nats://localhost:4222", payload, dry_run=False))
 
         assert result is True
+        mock_js.publish.assert_called_once()
 
-    def test_non_200_returns_false(self) -> None:
+    def test_publish_failure_returns_false(self) -> None:
         payload: dict[str, object] = {
             "action": "batch-change-storage-tier",
             "item_ids": ["item-1"],
         }
-        mock_response = MagicMock()
-        mock_response.status_code = 500
-        mock_response.text = "Internal Server Error"
+        mock_js = AsyncMock()
+        mock_js.publish.side_effect = Exception("stream not found")
+        mock_nc = AsyncMock()
+        mock_nc.jetstream = MagicMock(return_value=mock_js)
 
-        with patch("submit_storage_tier_workflows.requests.post", return_value=mock_response):
-            result = submit_batch("http://localhost:12000/samples", payload, dry_run=False)
+        with patch("submit_storage_tier_workflows.nats.connect", return_value=mock_nc):
+            result = asyncio.run(submit_batch("nats://localhost:4222", payload, dry_run=False))
 
         assert result is False
 
-    def test_request_exception_returns_false(self) -> None:
+    def test_connect_failure_returns_false(self) -> None:
         payload: dict[str, object] = {
             "action": "batch-change-storage-tier",
             "item_ids": ["item-1"],
         }
-
         with patch(
-            "submit_storage_tier_workflows.requests.post",
+            "submit_storage_tier_workflows.nats.connect",
             side_effect=Exception("connection refused"),
         ):
-            result = submit_batch("http://localhost:12000/samples", payload, dry_run=False)
+            result = asyncio.run(submit_batch("nats://localhost:4222", payload, dry_run=False))
 
         assert result is False
 
-    def test_payload_contains_item_ids_list(self) -> None:
+    def test_publishes_correct_subject_and_payload(self) -> None:
         payload: dict[str, object] = {
             "action": "batch-change-storage-tier",
-            "item_ids": ["item-a", "item-b", "item-c"],
+            "item_ids": ["item-a", "item-b"],
         }
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        captured: list[dict[str, object]] = []
+        mock_nc, mock_js, _ = self._make_nats_mock()
 
-        def capture_post(url: str, json: dict[str, object], **kwargs: object) -> MagicMock:
-            captured.append(json)
-            return mock_response
+        with patch("submit_storage_tier_workflows.nats.connect", return_value=mock_nc):
+            asyncio.run(submit_batch("nats://localhost:4222", payload, dry_run=False))
 
-        with patch("submit_storage_tier_workflows.requests.post", side_effect=capture_post):
-            submit_batch("http://localhost:12000/samples", payload, dry_run=False)
-
-        assert captured[0]["item_ids"] == ["item-a", "item-b", "item-c"]
+        call_args = mock_js.publish.call_args
+        assert call_args[0][0] == "storage-tier-changes"
+        published_data = json.loads(call_args[0][1])
+        assert published_data["item_ids"] == ["item-a", "item-b"]
 
 
 class TestMainEmptyWindowSkip:
     def test_empty_window_not_submitted(self) -> None:
-        """Windows with no items should not trigger a POST."""
+        """Windows with no items should not trigger a NATS publish."""
         with (
             patch(
                 "sys.argv",
@@ -202,7 +215,7 @@ class TestMainEmptyWindowSkip:
         """Submitted payload must contain item_ids list and correct action."""
         submitted_payloads: list[dict[str, object]] = []
 
-        def capture(url: str, payload: dict[str, object], dry_run: bool) -> bool:
+        async def capture(nats_url: str, payload: dict[str, object], dry_run: bool) -> bool:
             submitted_payloads.append(payload)
             return True
 
@@ -224,7 +237,7 @@ class TestMainEmptyWindowSkip:
                 "submit_storage_tier_workflows.query_stac_items",
                 return_value=["item-1", "item-2"],
             ),
-            patch("submit_storage_tier_workflows.submit_batch", side_effect=capture),
+            patch("submit_storage_tier_workflows.submit_batch", new=capture),
         ):
             from submit_storage_tier_workflows import main
 
