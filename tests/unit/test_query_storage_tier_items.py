@@ -210,8 +210,8 @@ class TestMain:
                     COLLECTION,
                     "--age-days",
                     "7",
-                    "--target-storage-ref",
-                    "glacier",
+                    "--to-storage-class",
+                    "STANDARD_IA",
                     "--max-batch-size",
                     "100",
                 ]
@@ -237,8 +237,8 @@ class TestMain:
                     COLLECTION,
                     "--age-days",
                     "7",
-                    "--target-storage-ref",
-                    "glacier",
+                    "--to-storage-class",
+                    "STANDARD_IA",
                 ]
             )
 
@@ -262,8 +262,8 @@ class TestMain:
                     COLLECTION,
                     "--age-days",
                     "7",
-                    "--target-storage-ref",
-                    "glacier",
+                    "--to-storage-class",
+                    "STANDARD_IA",
                 ]
             )
 
@@ -284,8 +284,8 @@ class TestMain:
                     COLLECTION,
                     "--age-days",
                     "7",
-                    "--target-storage-ref",
-                    "glacier",
+                    "--to-storage-class",
+                    "STANDARD_IA",
                 ]
             )
 

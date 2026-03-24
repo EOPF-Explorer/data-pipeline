@@ -25,18 +25,18 @@ All dependencies are managed via `uv` and will be automatically installed when r
 | `--stac-api-url` | Yes | -- | STAC API base URL |
 | `--collection` | Yes | -- | STAC collection ID to query |
 | `--age-days` | Yes | -- | Target age in days for tier transition |
-| `--target-storage-ref` | Yes | -- | Expected `storage:refs` value for the target tier |
+| `--to-storage-class` | Yes | -- | Target S3 storage class (`STANDARD`, `STANDARD_IA`, or `EXPRESS_ONEZONE`) |
 | `--max-batch-size` | No | `100` | Maximum number of items to return |
 
-### Storage Ref Values
+### Storage Class to Refs Mapping
 
-The `--target-storage-ref` value corresponds to the `storage:refs` field written by `update_stac_storage_tier.py`:
+The script uses the `TIER_TO_SCHEME` mapping from `update_stac_storage_tier.py` to convert the S3 storage class to the `storage:refs` value used for filtering:
 
-| S3 Storage Class | `storage:refs` value | `--target-storage-ref` |
-|------------------|---------------------|----------------------|
-| `STANDARD` | `standard` | `standard` |
-| `STANDARD_IA` | `glacier` | `glacier` |
-| `EXPRESS_ONEZONE` | `performance` | `performance` |
+| `--to-storage-class` | `storage:refs` value |
+|---------------------|---------------------|
+| `STANDARD` | `standard` |
+| `STANDARD_IA` | `glacier` |
+| `EXPRESS_ONEZONE` | `performance` |
 
 ### Basic Usage
 
@@ -45,7 +45,7 @@ uv run python scripts/query_storage_tier_items.py \
     --stac-api-url https://api.explorer.eopf.copernicus.eu/stac \
     --collection sentinel-2-l2a-staging \
     --age-days 1 \
-    --target-storage-ref glacier \
+    --to-storage-class STANDARD_IA \
     --max-batch-size 100
 ```
 
@@ -61,7 +61,7 @@ LOG_LEVEL=DEBUG uv run python scripts/query_storage_tier_items.py \
     --stac-api-url https://api.explorer.eopf.copernicus.eu/stac \
     --collection sentinel-2-l2a-staging \
     --age-days 7 \
-    --target-storage-ref glacier
+    --to-storage-class STANDARD_IA
 ```
 
 ## How It Works

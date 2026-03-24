@@ -18,6 +18,7 @@ from datetime import UTC, datetime, timedelta
 
 from pystac import Item
 from pystac_client import Client
+from update_stac_storage_tier import TIER_TO_SCHEME
 
 # Configure logging
 logging.basicConfig(
@@ -147,9 +148,10 @@ def main(argv: list[str] | None = None) -> int:
         "--age-days", type=int, required=True, help="Target age in days for tier transition"
     )
     parser.add_argument(
-        "--target-storage-ref",
+        "--to-storage-class",
         required=True,
-        help="storage:refs value for target tier (e.g., glacier, standard, performance)",
+        choices=list(TIER_TO_SCHEME.keys()),
+        help="Target S3 storage class (e.g., STANDARD_IA, STANDARD, EXPRESS_ONEZONE)",
     )
     parser.add_argument(
         "--max-batch-size",
@@ -161,11 +163,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        target_storage_ref = TIER_TO_SCHEME[args.to_storage_class]
         items = query_items(
             stac_api_url=args.stac_api_url,
             collection=args.collection,
             age_days=args.age_days,
-            target_storage_ref=args.target_storage_ref,
+            target_storage_ref=target_storage_ref,
             max_batch_size=args.max_batch_size,
         )
         sys.stdout.write(json.dumps(items))
