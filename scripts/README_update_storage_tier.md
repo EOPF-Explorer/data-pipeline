@@ -118,4 +118,5 @@ Processing: S2A_MSIL2A_20251208T100431_N0511_R122_T32TQQ_20251208T121910
 
 - `register_v1.py` - Initial STAC registration (includes storage tier)
 - `change_storage_tier.py` - Change S3 storage classes
+- `query_storage_tier_items.py` - Query items needing storage tier migration (used by CronWorkflow)
 - `storage_tier_utils.py` - Shared utilities for storage tier operations
