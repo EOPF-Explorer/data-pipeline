@@ -61,13 +61,15 @@ jobs:
       uses: astral-sh/setup-uv@caf0cab7a618c569241d31dcd442f54681755d39 # v3
       with:
         enable-cache: false
+    - name: Install project dependencies
+      run: uv sync --no-dev
     - name: Install security tools
       run: pip install bandit pip-audit
     - name: Run bandit (static security analysis)
       run: bandit -r scripts/ -f json -o bandit-report.json
       continue-on-error: true
     - name: Run pip-audit (dependency vulnerability scan)
-      run: uv export --no-dev --no-emit-project --format requirements-txt | grep -v " @ git+" | pip-audit -r /dev/stdin -f json -o pip-audit-report.json
+      run: .venv/bin/pip freeze | grep -v " @ " | pip-audit -r /dev/stdin -f json -o pip-audit-report.json
       continue-on-error: true
     - name: Write security summary
       if: always()
