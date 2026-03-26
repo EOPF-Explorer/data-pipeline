@@ -78,12 +78,19 @@ jobs:
         RUN_ID: ${{ github.run_id }}
       run: python .github/scripts/security_summary.py
     - name: Post PR comment
-      if: always() && github.event_name == 'pull_request'
+      if: always()
       env:
         GH_TOKEN: ${{ github.token }}
         REPO: ${{ github.repository }}
-        PR: ${{ github.event.pull_request.number }}
       run: |
+        if [ "${{ github.event_name }}" = "pull_request" ]; then
+          PR="${{ github.event.pull_request.number }}"
+        else
+          PR=$(gh pr list --repo "${REPO}" --head "${{ github.ref_name }}" --json number --jq '.[0].number' 2>/dev/null)
+        fi
+
+        [ -z "$PR" ] && echo "No open PR found for this branch, skipping comment." && exit 0
+
         MARKER="<!-- security-scan-results -->"
         BODY=$(cat security-summary.md)
 
