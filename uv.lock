@@ -3075,14 +3075,14 @@ wheels = [
 
 [[package]]
 name = "types-requests"
-version = "2.32.4.20250913"
+version = "2.32.4.20260324"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "urllib3" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/36/27/489922f4505975b11de2b5ad07b4fe1dca0bca9be81a703f26c5f3acfce5/types_requests-2.32.4.20250913.tar.gz", hash = "sha256:abd6d4f9ce3a9383f269775a9835a4c24e5cd6b9f647d64f88aa4613c33def5d", size = 23113, upload-time = "2025-09-13T02:40:02.309Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/6c/b1/66bafdc85965e5aa3db42e1b9128bf8abe252edd7556d00a07ef437a3e0e/types_requests-2.32.4.20260324.tar.gz", hash = "sha256:33a2a9ccb1de7d4e4da36e347622c35418f6761269014cc32857acabd5df739e", size = 23765, upload-time = "2026-03-24T04:06:35.106Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/2a/20/9a227ea57c1285986c4cf78400d0a91615d25b24e257fd9e2969606bdfae/types_requests-2.32.4.20250913-py3-none-any.whl", hash = "sha256:78c9c1fffebbe0fa487a418e0fa5252017e9c60d1a2da394077f1780f655d7e1", size = 20658, upload-time = "2025-09-13T02:40:01.115Z" },
+    { url = "https://files.pythonhosted.org/packages/5b/5a/ce5999f9bd72c7fac681d26cd0a5782b379053bfc2214e2a3fbe30852c9e/types_requests-2.32.4.20260324-py3-none-any.whl", hash = "sha256:f83ef2deb284fe99a249b8b0b0a3e4b9809e01ff456063c4df0aac7670c07ab9", size = 20735, upload-time = "2026-03-24T04:06:33.9Z" },
 ]
 
 [[package]]
