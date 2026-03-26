@@ -62,14 +62,14 @@ jobs:
       with:
         enable-cache: false
     - name: Install project dependencies
-      run: uv sync --no-dev
+      run: uv sync --no-dev && uv pip install pip-audit
     - name: Install security tools
-      run: pip install bandit pip-audit
+      run: pip install bandit
     - name: Run bandit (static security analysis)
       run: bandit -r scripts/ -f json -o bandit-report.json
       continue-on-error: true
     - name: Run pip-audit (dependency vulnerability scan)
-      run: .venv/bin/pip freeze | grep -v " @ " | pip-audit -r /dev/stdin -f json -o pip-audit-report.json
+      run: uv run pip-audit -f json -o pip-audit-report.json
       continue-on-error: true
     - name: Write security summary
       if: always()
