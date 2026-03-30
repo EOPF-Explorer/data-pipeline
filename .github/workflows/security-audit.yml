@@ -10,16 +10,19 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  contents: read # Default for workflow; job overrides below where needed.
 
 jobs:
   security:
+    name: Security audit
     runs-on: ubuntu-latest
     permissions:
-      contents: read
-      pull-requests: write
+      contents: read # Checkout and scan repository paths.
+      pull-requests: write # Let the audit action comment on pull requests.
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
       - uses: lhoupert/action-python-security-auditing@12efad3bddc3efd3668cf6ac6799f94837f4fb3d # v0.5.0
         with:
           package_manager: uv
