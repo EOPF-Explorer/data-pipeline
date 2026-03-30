@@ -23,7 +23,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - uses: lhoupert/action-python-security-auditing@12efad3bddc3efd3668cf6ac6799f94837f4fb3d # v0.5.0
+      - uses: developmentseed/action-python-security-auditing@12efad3bddc3efd3668cf6ac6799f94837f4fb3d # v0.5.0
         with:
           package_manager: uv
           bandit_scan_dirs: scripts/
