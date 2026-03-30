@@ -12,6 +12,9 @@ on:
         default: true
         type: boolean
 
+permissions:
+  contents: read
+
 env:
   HARBOR_URL: ${{ secrets.OVH_HARBOR_REGISTRY }}
   HARBOR_USERNAME: ${{ secrets.OVH_HARBOR_USERNAME }}
