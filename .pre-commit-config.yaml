@@ -30,6 +30,7 @@ repos:
       - id: check-yaml
         args: ["--unsafe"]  # Allow custom tags in Argo YAML
       - id: check-added-large-files
+        exclude: ^uv\.lock$
       - id: check-merge-conflict
       - id: mixed-line-ending
 
