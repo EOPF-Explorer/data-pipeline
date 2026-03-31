@@ -109,7 +109,6 @@ jobs:
         cache-to: type=gha,mode=max
 
     - name: Scan image with Trivy (fail on CRITICAL)
-      if: github.event_name != 'pull_request'
       uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
       with:
         image-ref: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
@@ -120,7 +119,6 @@ jobs:
         severity: CRITICAL
 
     - name: Scan image with Trivy (report HIGH, informational)
-      if: github.event_name != 'pull_request'
       uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
       with:
         image-ref: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
