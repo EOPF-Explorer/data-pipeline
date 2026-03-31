@@ -35,6 +35,7 @@ jobs:
     permissions:
       contents: read # Token scope for invoking the reusable build workflow.
       actions: write # Same scope as build job for Docker Buildx GHA cache.
+      security-events: write # Allow Trivy SARIF upload from reusable build workflow.
     uses: ./.github/workflows/build.yml
     with:
       release_tag: ${{ needs.release-please.outputs.tag_name }}

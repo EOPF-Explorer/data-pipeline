@@ -24,6 +24,9 @@ dmypy.json
 # Linting
 .ruff_cache/
 
+# Local security scans
+trivy-image-report.txt
+
 # Environment
 .env
 .env.local
