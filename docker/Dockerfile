@@ -3,7 +3,7 @@
 # --- Builder stage: installs build tools and Python dependencies ---
 FROM python:3.13-slim AS builder
 
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
     ca-certificates \
@@ -23,7 +23,7 @@ RUN uv pip install --system --no-cache /app
 # --- Runtime stage: minimal production image without build tools ---
 FROM python:3.13-slim
 
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     libgdal-dev \
     gdal-bin \
