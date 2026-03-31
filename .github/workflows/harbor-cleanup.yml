@@ -1,5 +1,9 @@
 name: Harbor Registry Cleanup
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 on:
   schedule:
     # Run daily at 10:00 AM UTC
@@ -12,8 +16,7 @@ on:
         default: true
         type: boolean
 
-permissions:
-  contents: read
+permissions: {}
 
 env:
   HARBOR_URL: ${{ secrets.OVH_HARBOR_REGISTRY }}
@@ -27,10 +30,16 @@ env:
 
 jobs:
   cleanup:
+    name: Harbor cleanup
     runs-on: ubuntu-latest
+    environment: harbor-registry
+    permissions:
+      contents: read # Checkout repository.
     steps:
       - name: Checkout code
-        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -48,10 +57,13 @@ jobs:
           python3 .github/workflows/cleanup_harbor_registry.py
 
       - name: Summary
+        env:
+          SHA_RETENTION_DAYS: ${{ env.SHA_RETENTION_DAYS }}
+          PR_RETENTION_DAYS: ${{ env.PR_RETENTION_DAYS }}
         run: |
           echo "### Harbor Cleanup Complete 🧹" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Configuration:**" >> $GITHUB_STEP_SUMMARY
-          echo "- SHA tags retention: ${{ env.SHA_RETENTION_DAYS }} days" >> $GITHUB_STEP_SUMMARY
-          echo "- PR tags retention: ${{ env.PR_RETENTION_DAYS }} days" >> $GITHUB_STEP_SUMMARY
+          echo "- SHA tags retention: ${SHA_RETENTION_DAYS} days" >> $GITHUB_STEP_SUMMARY
+          echo "- PR tags retention: ${PR_RETENTION_DAYS} days" >> $GITHUB_STEP_SUMMARY
           echo "- Version tags: Protected (never deleted)" >> $GITHUB_STEP_SUMMARY

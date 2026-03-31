@@ -1,0 +1,28 @@
+name: Security Audit
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  security:
+    name: Security audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # Checkout and scan repository paths.
+      pull-requests: write # Let the audit action comment on pull requests.
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: developmentseed/action-python-security-auditing@8ebea22ea75dfba2244ed9883c2aa6cb4df8d9a9 # v0.6.0
+        with:
+          package_manager: uv
+          bandit_scan_dirs: scripts/
