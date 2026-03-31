@@ -35,7 +35,7 @@ dependencies = [
     "morecantile>=5.0.0",
     "cf-xarray>=0.9.0",
     "eopf-geozarr @ git+https://github.com/EOPF-Explorer/data-model.git@v0.8.0",
-    "requests",
+    "requests>=2.31.0",
 ]
 
 [dependency-groups]
@@ -125,6 +125,7 @@ select = [
     "UP",  # pyupgrade
     "ARG", # flake8-unused-arguments
     "SIM", # flake8-simplify
+    "S",   # flake8-bandit (security)
 ]
 ignore = [
     "E501",   # line too long (handled by formatter)
