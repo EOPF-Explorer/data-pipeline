@@ -47,12 +47,13 @@ push:  ## Push Docker image to registry
 	docker push $(IMAGE_NAME):$(TAG)
 	docker push $(IMAGE_NAME):latest
 
-trivy-image:  ## Scan $(IMAGE_NAME):$(TAG) with Trivy; writes $(TRIVY_REPORT) (table). Override TRIVY_CACHE on Linux.
+trivy-image:  ## Scan $(IMAGE_NAME):$(TAG) with Trivy; writes $(TRIVY_REPORT) (fixable vulns only via --ignore-unfixed). Override TRIVY_CACHE on Linux.
 	docker run --rm \
 		-v /var/run/docker.sock:/var/run/docker.sock \
 		-v "$(TRIVY_CACHE):/root/.cache/" \
 		-v "$(CURDIR):/workspace" \
 		aquasec/trivy:$(TRIVY_VERSION) image \
+		--ignore-unfixed \
 		--format table \
 		-o /workspace/$(TRIVY_REPORT) \
 		$(IMAGE_NAME):$(TAG)
