@@ -12,6 +12,7 @@ import logging
 import os
 import sys
 from datetime import datetime, timedelta
+from urllib.parse import urlparse
 
 from pystac_client import Client
 
@@ -21,6 +22,21 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+def _require_https(url: str, name: str) -> None:
+    """Raise SystemExit if url is not an HTTPS URL."""
+    if urlparse(url).scheme != "https":
+        sys.exit(f"Error: {name} must be an HTTPS URL, got: {url!r}")
+
+
+def _validate_bbox(bbox: object) -> None:
+    """Raise SystemExit if bbox is not a list of exactly 4 floats."""
+    if not isinstance(bbox, list) or len(bbox) != 4:
+        sys.exit(f"Error: AOI_BBOX must be a JSON array of 4 numbers, got: {bbox!r}")
+    for i, v in enumerate(bbox):
+        if not isinstance(v, int | float):
+            sys.exit(f"Error: AOI_BBOX[{i}] must be a number, got: {v!r}")
 
 
 def main() -> None:
@@ -33,6 +49,10 @@ def main() -> None:
     SCHEDULED_END_TIME = sys.argv[5]  # ISO timestamp from workflow.scheduledTime
     WINDOW_HOURS = int(sys.argv[6])  # Duration of time window to look back
     AOI_BBOX = json.loads(sys.argv[7])
+
+    _require_https(SOURCE_STAC_API_URL, "SOURCE_STAC_API_URL")
+    _require_https(TARGET_STAC_API_URL, "TARGET_STAC_API_URL")
+    _validate_bbox(AOI_BBOX)
 
     # Parse scheduled end time and calculate start time
     end_time = datetime.fromisoformat(SCHEDULED_END_TIME.replace("Z", "+00:00"))

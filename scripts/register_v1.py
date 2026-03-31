@@ -769,6 +769,16 @@ def main(argv: list[str] | None = None) -> int:
 
     args = parser.parse_args(argv)
 
+    for url, name in [
+        (args.source_url, "--source-url"),
+        (args.stac_api_url, "--stac-api-url"),
+        (args.raster_api_url, "--raster-api-url"),
+        (EXPLORER_BASE, "EXPLORER_BASE_URL"),
+    ]:
+        if urlparse(url).scheme != "https":
+            logger.error("Error: %s must be an HTTPS URL, got: %r", name, url)
+            return 1
+
     try:
         run_registration(
             args.source_url,
