@@ -390,7 +390,8 @@ def update_stac_item(
         # DELETE then POST (pgstac doesn't support PUT for items)
         delete_url = f"{base_url}/collections/{collection_id}/items/{item_id}"
         try:
-            assert client._stac_io is not None
+            if client._stac_io is None:
+                raise RuntimeError("pystac-client session not initialized")
             resp = client._stac_io.session.delete(delete_url, timeout=30)
             resp.raise_for_status()
             logger.debug(f"  Deleted existing {item_id}")
@@ -398,7 +399,8 @@ def update_stac_item(
             logger.warning(f"  Failed to delete existing item (may not exist): {e}")
             # Continue with POST anyway - might be first-time creation
 
-        assert client._stac_io is not None
+        if client._stac_io is None:
+            raise RuntimeError("pystac-client session not initialized")
         create_url = f"{base_url}/collections/{collection_id}/items"
         resp = client._stac_io.session.post(
             create_url,

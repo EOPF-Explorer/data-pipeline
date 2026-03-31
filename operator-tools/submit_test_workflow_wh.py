@@ -18,6 +18,7 @@ response = requests.post(
     "http://localhost:12001/samples",
     data=message,
     headers={"Content-Type": "application/json"},
+    timeout=30,
 )
 
 print(f"✅ Published workflow for item: {payload['source_url']}")

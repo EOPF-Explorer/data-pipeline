@@ -69,6 +69,7 @@ for i, product in enumerate(products, 1):
             "http://localhost:12000/samples",
             data=message,
             headers={"Content-Type": "application/json"},
+            timeout=30,
         )
 
         print(f"[{i}/{len(products)}] ✅ Published workflow for item: {product}")
