@@ -1,6 +1,19 @@
 name: Build Docker Image
 
 on:
+  workflow_call:
+    inputs:
+      release_tag:
+        description: Git tag to build (set by Release Please after a release is created)
+        type: string
+        required: true
+    secrets:
+      OVH_HARBOR_REGISTRY:
+        required: true
+      OVH_HARBOR_USERNAME:
+        required: true
+      OVH_HARBOR_PASSWORD:
+        required: true
   push:
     branches:
       - main
@@ -8,74 +21,62 @@ on:
       - '*'
   release:
     types: [published]
-  workflow_run:
-    workflows: ["Release Please"]
-    types:
-      - completed
   pull_request:
   workflow_dispatch:
 
-permissions:
-  contents: read
-  packages: write
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+permissions: {}
 
 jobs:
   build:
-    # Skip only if triggered by workflow_run with a non-success conclusion
-    if: |
-      github.event_name != 'workflow_run' ||
-      github.event.workflow_run.conclusion == 'success'
+    name: Build and publish image
+    environment: harbor-registry
     runs-on: ubuntu-latest
+    permissions:
+      contents: read # Clone repo and supply Docker build context.
+      actions: write # Persist Docker layer cache for docker/build-push-action (type=gha).
+      security-events: write # Upload Trivy SARIF to GitHub Advanced Security / Security tab.
 
     steps:
+    - name: Checkout code (release tag from Release Please)
+      if: github.event_name == 'workflow_call'
+      uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      with:
+        fetch-depth: 0
+        ref: ${{ inputs.release_tag }}
+        persist-credentials: false
+
     - name: Checkout code
-      uses: actions/checkout@v5
+      if: github.event_name != 'workflow_call'
+      uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       with:
         fetch-depth: 0  # Fetch all history and tags
         ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref }}
-
-    - name: Check if release was created and checkout tag (for workflow_run trigger)
-      if: github.event_name == 'workflow_run'
-      id: check_release
-      run: |
-        # Fetch all tags to ensure we have the latest one created by release-please
-        git fetch --tags
-
-        # Check if the workflow_run head SHA has a v* tag
-        # This verifies that release-please actually created a release
-        HEAD_SHA="${{ github.event.workflow_run.head_sha }}"
-        TAG=$(git tag --points-at "$HEAD_SHA" | grep '^v[0-9]' || echo "")
-
-        if [ -z "$TAG" ]; then
-          echo "::notice::No release tag found at commit $HEAD_SHA. Release Please ran but did not create a release. Skipping build."
-          echo "should_skip=true" >> $GITHUB_OUTPUT
-          exit 0
-        fi
-
-        echo "Found release tag: $TAG at commit $HEAD_SHA"
-        echo "Checking out tag: $TAG"
-        git checkout "$TAG"
-        echo "should_skip=false" >> $GITHUB_OUTPUT
+        persist-credentials: false
 
     - name: Get tag name for Docker metadata
-      if: github.event_name != 'workflow_run' || steps.check_release.outputs.should_skip != 'true'
       id: tag_name
+      env:
+        EVENT_NAME: ${{ github.event_name }}
+        RELEASE_TAG_NAME: ${{ github.event.release.tag_name }}
+        GITHUB_REF_VALUE: ${{ github.ref }}
+        CALL_RELEASE_TAG: ${{ github.event_name == 'workflow_call' && inputs.release_tag || '' }}
       run: |
-        if [ "${{ github.event_name }}" = "release" ]; then
-          echo "tag=${{ github.event.release.tag_name }}" >> $GITHUB_OUTPUT
-        elif [ "${{ github.event_name }}" = "workflow_run" ]; then
-          TAG=$(git describe --tags --exact-match HEAD 2>/dev/null || echo "")
-          if [ -n "$TAG" ]; then
-            echo "tag=$TAG" >> $GITHUB_OUTPUT
-          fi
-        elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
-          echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+        if [ "$EVENT_NAME" = "workflow_call" ]; then
+          echo "tag=$CALL_RELEASE_TAG" >> $GITHUB_OUTPUT
+        elif [ "$EVENT_NAME" = "release" ]; then
+          echo "tag=$RELEASE_TAG_NAME" >> $GITHUB_OUTPUT
+        elif [[ "$GITHUB_REF_VALUE" == refs/tags/* ]]; then
+          ref_no_prefix="${GITHUB_REF_VALUE#refs/tags/}"
+          echo "tag=$ref_no_prefix" >> $GITHUB_OUTPUT
         fi
 
     - name: Docker meta
-      if: github.event_name != 'workflow_run' || steps.check_release.outputs.should_skip != 'true'
       id: meta
-      uses: docker/metadata-action@v5
+      uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
       with:
         images: ${{ secrets.OVH_HARBOR_REGISTRY }}/eopf-sentinel-zarr-explorer/data-pipeline
         tags: |
@@ -87,20 +88,74 @@ jobs:
           type=raw,value=${{ steps.tag_name.outputs.tag }},enable=${{ steps.tag_name.outputs.tag != '' }}
 
     - name: Set up Docker Buildx
-      if: github.event_name != 'workflow_run' || steps.check_release.outputs.should_skip != 'true'
-      uses: docker/setup-buildx-action@v3
+      uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
     - name: Log in to OVH Container Registry
-      if: github.event_name != 'workflow_run' || steps.check_release.outputs.should_skip != 'true'
-      uses: docker/login-action@v3
+      uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
       with:
         registry: ${{ secrets.OVH_HARBOR_REGISTRY }}
         username: ${{ secrets.OVH_HARBOR_USERNAME }}
         password: ${{ secrets.OVH_HARBOR_PASSWORD }}
 
-    - name: Build and push Docker image
-      if: github.event_name != 'workflow_run' || steps.check_release.outputs.should_skip != 'true'
-      uses: docker/build-push-action@v5
+    - name: Build Docker image
+      uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
+      with:
+        context: .
+        file: docker/Dockerfile
+        platforms: linux/amd64
+        push: false
+        load: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Scan image with Trivy (SARIF CRITICAL/HIGH, incl. unfixed)
+      id: trivy-sarif-critical-high
+      uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+      with:
+        image-ref: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
+        format: sarif
+        output: trivy-results-critical-high.sarif
+        exit-code: '0'
+        vuln-type: os,library
+        severity: CRITICAL,HIGH
+
+    - name: Scan image with Trivy (SARIF MEDIUM/LOW, fixed only)
+      id: trivy-sarif-medium-low
+      uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+      with:
+        image-ref: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
+        format: sarif
+        output: trivy-results-medium-low.sarif
+        exit-code: '0'
+        ignore-unfixed: true
+        vuln-type: os,library
+        severity: MEDIUM,LOW
+
+    - name: Fail on fixable CRITICAL vulnerabilities
+      uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+      with:
+        image-ref: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
+        format: table
+        exit-code: '1'
+        ignore-unfixed: true
+        vuln-type: os,library
+        severity: CRITICAL
+
+    - name: Warn on fixable HIGH vulnerabilities
+      uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+      with:
+        image-ref: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
+        format: table
+        exit-code: '0'
+        ignore-unfixed: true
+        vuln-type: os,library
+        severity: HIGH
+
+
+    - name: Push Docker image
+      uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
       with:
         context: .
         file: docker/Dockerfile
@@ -109,19 +164,35 @@ jobs:
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}
         cache-from: type=gha
-        cache-to: type=gha,mode=max
+
+    - name: Upload Trivy SARIF (CRITICAL/HIGH) to GitHub Security tab
+      if: steps.trivy-sarif-critical-high.outcome == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      uses: github/codeql-action/upload-sarif@5c8a8a642e79153f5d047b10ec1cba1d1cc65699 # v3
+      with:
+        sarif_file: trivy-results-critical-high.sarif
+        category: trivy-critical-high
+
+    - name: Upload Trivy SARIF (MEDIUM/LOW fixed) to GitHub Security tab
+      if: steps.trivy-sarif-medium-low.outcome == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      uses: github/codeql-action/upload-sarif@5c8a8a642e79153f5d047b10ec1cba1d1cc65699 # v3
+      with:
+        sarif_file: trivy-results-medium-low.sarif
+        category: trivy-medium-low-fixed
+
 
     - name: Image summary
-      if: github.event_name != 'workflow_run' || steps.check_release.outputs.should_skip != 'true'
+      env:
+        META_TAGS: ${{ steps.meta.outputs.tags }}
+        META_LABELS: ${{ steps.meta.outputs.labels }}
       run: |
         echo "### Docker Image Built 🐳" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "**Tags:**" >> $GITHUB_STEP_SUMMARY
         echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-        echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+        echo "$META_TAGS" >> $GITHUB_STEP_SUMMARY
         echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "**Labels:**" >> $GITHUB_STEP_SUMMARY
         echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
-        echo "${{ steps.meta.outputs.labels }}" >> $GITHUB_STEP_SUMMARY
+        echo "$META_LABELS" >> $GITHUB_STEP_SUMMARY
         echo "\`\`\`" >> $GITHUB_STEP_SUMMARY

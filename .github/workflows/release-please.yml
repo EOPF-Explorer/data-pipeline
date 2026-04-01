@@ -5,19 +5,41 @@ on:
     branches:
       - main
 
-permissions:
-  contents: write
-  pull-requests: write
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
 
 jobs:
   release-please:
+    name: Release Please
+    permissions:
+      contents: write # Merge release PRs, create tags/commits for releases.
+      pull-requests: write # Open/update Release Please version bump PRs.
     runs-on: ubuntu-latest
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
-      - uses:  googleapis/release-please-action@v4
+      - uses:  googleapis/release-please-action@16a9c90856f42705d54a6fda1823352bdc62cf38 # v4
         id: release
         with:
           config-file: "release-please-config.json"
           manifest-file: ".release-please-manifest.json"
+
+  docker-build:
+    name: Docker image after release
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    permissions:
+      contents: read # Token scope for invoking the reusable build workflow.
+      actions: write # Same scope as build job for Docker Buildx GHA cache.
+      security-events: write # Allow Trivy SARIF upload from reusable build workflow.
+    uses: ./.github/workflows/build.yml
+    with:
+      release_tag: ${{ needs.release-please.outputs.tag_name }}
+    secrets:
+      OVH_HARBOR_REGISTRY: ${{ secrets.OVH_HARBOR_REGISTRY }}
+      OVH_HARBOR_USERNAME: ${{ secrets.OVH_HARBOR_USERNAME }}
+      OVH_HARBOR_PASSWORD: ${{ secrets.OVH_HARBOR_PASSWORD }}
