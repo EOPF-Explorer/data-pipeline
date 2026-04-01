@@ -104,7 +104,7 @@ def test_query_stac_main_rejects_invalid_bbox():
         "sentinel-2-l2a-staging",
         "2024-01-01T00:00:00Z",
         "24",
-        "[1, 2, 3]",  # only 3 elements
+        "[1, 2, 3]",
     ]
     with patch.object(sys, "argv", argv):
         from query_stac import main
