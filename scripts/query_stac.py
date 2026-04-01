@@ -7,11 +7,13 @@ a specified time window and checks if they already exist in the target collectio
 to avoid reprocessing. Uses the 'updated' property for harvesting use cases.
 """
 
+import argparse
 import json
 import logging
 import os
 import sys
 from datetime import datetime, timedelta
+from urllib.parse import urlparse
 
 from pystac_client import Client
 
@@ -23,16 +25,44 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _require_https(url: str, name: str) -> None:
+    """Raise SystemExit if url is not an HTTPS URL."""
+    if urlparse(url).scheme != "https":
+        sys.exit(f"Error: {name} must be an HTTPS URL, got: {url!r}")
+
+
+def _validate_bbox(bbox: object) -> None:
+    """Raise SystemExit if bbox is not a list of exactly 4 floats."""
+    if not isinstance(bbox, list) or len(bbox) != 4:
+        sys.exit(f"Error: AOI_BBOX must be a JSON array of 4 numbers, got: {bbox!r}")
+    for i, v in enumerate(bbox):
+        if not isinstance(v, int | float):
+            sys.exit(f"Error: AOI_BBOX[{i}] must be a number, got: {v!r}")
+
+
 def main() -> None:
     """Main entry point for STAC query script."""
-    # Configuration from Argo workflow parameters
-    SOURCE_STAC_API_URL = sys.argv[1]
-    SOURCE_COLLECTION = sys.argv[2]
-    TARGET_STAC_API_URL = sys.argv[3]
-    TARGET_COLLECTION = sys.argv[4]
-    SCHEDULED_END_TIME = sys.argv[5]  # ISO timestamp from workflow.scheduledTime
-    WINDOW_HOURS = int(sys.argv[6])  # Duration of time window to look back
-    AOI_BBOX = json.loads(sys.argv[7])
+    parser = argparse.ArgumentParser(description="Query STAC API for new items to process.")
+    parser.add_argument("source_stac_api_url", metavar="SOURCE_STAC_API_URL")
+    parser.add_argument("source_collection", metavar="SOURCE_COLLECTION")
+    parser.add_argument("target_stac_api_url", metavar="TARGET_STAC_API_URL")
+    parser.add_argument("target_collection", metavar="TARGET_COLLECTION")
+    parser.add_argument("scheduled_end_time", metavar="SCHEDULED_END_TIME")
+    parser.add_argument("window_hours", metavar="WINDOW_HOURS", type=int)
+    parser.add_argument("aoi_bbox", metavar="AOI_BBOX", type=json.loads)
+    args = parser.parse_args()
+
+    SOURCE_STAC_API_URL = args.source_stac_api_url
+    SOURCE_COLLECTION = args.source_collection
+    TARGET_STAC_API_URL = args.target_stac_api_url
+    TARGET_COLLECTION = args.target_collection
+    SCHEDULED_END_TIME = args.scheduled_end_time
+    WINDOW_HOURS = args.window_hours
+    AOI_BBOX = args.aoi_bbox
+
+    _require_https(SOURCE_STAC_API_URL, "SOURCE_STAC_API_URL")
+    _require_https(TARGET_STAC_API_URL, "TARGET_STAC_API_URL")
+    _validate_bbox(AOI_BBOX)
 
     # Parse scheduled end time and calculate start time
     end_time = datetime.fromisoformat(SCHEDULED_END_TIME.replace("Z", "+00:00"))

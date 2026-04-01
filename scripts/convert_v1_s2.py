@@ -211,6 +211,10 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    if urlparse(args.source_url).scheme != "https":
+        logger.error("Error: --source-url must be an HTTPS URL, got: %r", args.source_url)
+        return 1
+
     try:
         run_conversion(
             source_url=args.source_url,

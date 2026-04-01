@@ -386,28 +386,30 @@ def update_stac_item(
 
         client = Client.open(stac_api_url)
         base_url = str(client.self_href).rstrip("/")
+        # Private attr; always set after Client.open() but guard for strict typing and -O.
+        if client._stac_io is None:
+            raise RuntimeError("pystac-client session not initialized")
+        stac_session = client._stac_io.session
 
         # DELETE then POST (pgstac doesn't support PUT for items)
         delete_url = f"{base_url}/collections/{collection_id}/items/{item_id}"
         try:
-            assert client._stac_io is not None
-            resp = client._stac_io.session.delete(delete_url, timeout=30)
-            resp.raise_for_status()
+            delete_resp = stac_session.delete(delete_url, timeout=30)
+            delete_resp.raise_for_status()
             logger.debug(f"  Deleted existing {item_id}")
         except Exception as e:
             logger.warning(f"  Failed to delete existing item (may not exist): {e}")
             # Continue with POST anyway - might be first-time creation
 
-        assert client._stac_io is not None
         create_url = f"{base_url}/collections/{collection_id}/items"
-        resp = client._stac_io.session.post(
+        post_resp = stac_session.post(
             create_url,
             json=item.to_dict(),
             headers={"Content-Type": "application/json"},
             timeout=30,
         )
-        resp.raise_for_status()
-        logger.info(f"  ✅ Updated {item_id} (HTTP {resp.status_code})")
+        post_resp.raise_for_status()
+        logger.info(f"  ✅ Updated {item_id} (HTTP {post_resp.status_code})")
     else:
         logger.info("  No changes needed")
 

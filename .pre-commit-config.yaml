@@ -34,6 +34,17 @@ repos:
       - id: check-merge-conflict
       - id: mixed-line-ending
 
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+
+  - repo: https://github.com/hadolint/hadolint
+    rev: v2.12.0
+    hooks:
+      - id: hadolint-docker
+        args: ["--ignore", "DL3008"]  # Allow unpinned apt (GDAL version tied to Debian)
+
   - repo: local
     hooks:
       - id: pytest
