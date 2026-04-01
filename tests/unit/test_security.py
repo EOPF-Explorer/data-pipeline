@@ -1,11 +1,7 @@
-"""Security-focused tests for input validation at script entry points."""
-
 import sys
 from unittest.mock import patch
 
 import pytest
-
-# ── query_stac.py validators ──────────────────────────────────────────────────
 from query_stac import _require_https, _validate_bbox
 
 
@@ -63,11 +59,7 @@ class TestValidateBbox:
             _validate_bbox([1.0, 2.0, None, 4.0])
 
 
-# ── query_stac.py main() integration ─────────────────────────────────────────
-
-
-def test_query_stac_main_rejects_http_source(monkeypatch):
-    """main() exits on non-HTTPS source URL."""
+def test_query_stac_main_rejects_http_source():
     argv = [
         "script",
         "http://stac.example.com",  # source — not HTTPS
@@ -85,8 +77,7 @@ def test_query_stac_main_rejects_http_source(monkeypatch):
             main()
 
 
-def test_query_stac_main_rejects_http_target(monkeypatch):
-    """main() exits on non-HTTPS target URL."""
+def test_query_stac_main_rejects_http_target():
     argv = [
         "script",
         "https://stac.example.com",
@@ -104,8 +95,7 @@ def test_query_stac_main_rejects_http_target(monkeypatch):
             main()
 
 
-def test_query_stac_main_rejects_invalid_bbox(monkeypatch):
-    """main() exits when bbox has wrong number of elements."""
+def test_query_stac_main_rejects_invalid_bbox():
     argv = [
         "script",
         "https://stac.example.com",
@@ -123,11 +113,7 @@ def test_query_stac_main_rejects_invalid_bbox(monkeypatch):
             main()
 
 
-# ── register_v1.py main() ────────────────────────────────────────────────────
-
-
 def test_register_v1_rejects_http_source_url():
-    """main() returns 1 and does not call run_registration on non-HTTPS source URL."""
     from register_v1 import main
 
     result = main(
@@ -152,7 +138,6 @@ def test_register_v1_rejects_http_source_url():
 
 
 def test_register_v1_rejects_http_stac_api_url():
-    """main() returns 1 when --stac-api-url is not HTTPS."""
     from register_v1 import main
 
     result = main(
@@ -177,7 +162,6 @@ def test_register_v1_rejects_http_stac_api_url():
 
 
 def test_register_v1_rejects_http_explorer_base_url(monkeypatch):
-    """main() returns 1 when EXPLORER_BASE_URL env var is not HTTPS."""
     monkeypatch.setenv("EXPLORER_BASE_URL", "http://explorer.example.com")
     import importlib
 
@@ -206,11 +190,7 @@ def test_register_v1_rejects_http_explorer_base_url(monkeypatch):
     assert result == 1
 
 
-# ── convert_v1_s2.py main() ──────────────────────────────────────────────────
-
-
 def test_convert_v1_s2_rejects_http_source_url():
-    """main() returns 1 when --source-url is not HTTPS."""
     from convert_v1_s2 import main
 
     result = main.__wrapped__() if hasattr(main, "__wrapped__") else None
@@ -238,24 +218,24 @@ def test_convert_v1_s2_rejects_http_source_url():
     assert result == 1
 
 
-def test_convert_v1_s2_accepts_https_source_url_proceeds_to_conversion(mocker):
-    """main() proceeds past validation with a valid HTTPS URL."""
-    mocker.patch("convert_v1_s2.run_conversion", return_value="s3://bucket/output.zarr")
-
-    with patch.object(
-        sys,
-        "argv",
-        [
-            "convert_v1_s2",
-            "--source-url",
-            "https://stac.example.com/item.json",
-            "--collection",
-            "test",
-            "--s3-output-bucket",
-            "mybucket",
-            "--s3-output-prefix",
-            "myprefix",
-        ],
+def test_convert_v1_s2_accepts_https_source_url_proceeds_to_conversion():
+    with (
+        patch("convert_v1_s2.run_conversion", return_value="s3://bucket/output.zarr"),
+        patch.object(
+            sys,
+            "argv",
+            [
+                "convert_v1_s2",
+                "--source-url",
+                "https://stac.example.com/item.json",
+                "--collection",
+                "test",
+                "--s3-output-bucket",
+                "mybucket",
+                "--s3-output-prefix",
+                "myprefix",
+            ],
+        ),
     ):
         from convert_v1_s2 import main as convert_main
 

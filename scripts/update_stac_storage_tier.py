@@ -390,7 +390,9 @@ def update_stac_item(
         # DELETE then POST (pgstac doesn't support PUT for items)
         delete_url = f"{base_url}/collections/{collection_id}/items/{item_id}"
         try:
-            if client._stac_io is None:
+            if (
+                client._stac_io is None
+            ):  # private attr; always set after Client.open() but guard against library changes
                 raise RuntimeError("pystac-client session not initialized")
             resp = client._stac_io.session.delete(delete_url, timeout=30)
             resp.raise_for_status()

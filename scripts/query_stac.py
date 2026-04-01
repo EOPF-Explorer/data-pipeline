@@ -7,6 +7,7 @@ a specified time window and checks if they already exist in the target collectio
 to avoid reprocessing. Uses the 'updated' property for harvesting use cases.
 """
 
+import argparse
 import json
 import logging
 import os
@@ -41,14 +42,23 @@ def _validate_bbox(bbox: object) -> None:
 
 def main() -> None:
     """Main entry point for STAC query script."""
-    # Configuration from Argo workflow parameters
-    SOURCE_STAC_API_URL = sys.argv[1]
-    SOURCE_COLLECTION = sys.argv[2]
-    TARGET_STAC_API_URL = sys.argv[3]
-    TARGET_COLLECTION = sys.argv[4]
-    SCHEDULED_END_TIME = sys.argv[5]  # ISO timestamp from workflow.scheduledTime
-    WINDOW_HOURS = int(sys.argv[6])  # Duration of time window to look back
-    AOI_BBOX = json.loads(sys.argv[7])
+    parser = argparse.ArgumentParser(description="Query STAC API for new items to process.")
+    parser.add_argument("source_stac_api_url", metavar="SOURCE_STAC_API_URL")
+    parser.add_argument("source_collection", metavar="SOURCE_COLLECTION")
+    parser.add_argument("target_stac_api_url", metavar="TARGET_STAC_API_URL")
+    parser.add_argument("target_collection", metavar="TARGET_COLLECTION")
+    parser.add_argument("scheduled_end_time", metavar="SCHEDULED_END_TIME")
+    parser.add_argument("window_hours", metavar="WINDOW_HOURS", type=int)
+    parser.add_argument("aoi_bbox", metavar="AOI_BBOX", type=json.loads)
+    args = parser.parse_args()
+
+    SOURCE_STAC_API_URL = args.source_stac_api_url
+    SOURCE_COLLECTION = args.source_collection
+    TARGET_STAC_API_URL = args.target_stac_api_url
+    TARGET_COLLECTION = args.target_collection
+    SCHEDULED_END_TIME = args.scheduled_end_time
+    WINDOW_HOURS = args.window_hours
+    AOI_BBOX = args.aoi_bbox
 
     _require_https(SOURCE_STAC_API_URL, "SOURCE_STAC_API_URL")
     _require_https(TARGET_STAC_API_URL, "TARGET_STAC_API_URL")
