@@ -759,7 +759,7 @@ requires-dist = [
     { name = "boto3", specifier = "==1.42.70" },
     { name = "cf-xarray", specifier = "==0.10.11" },
     { name = "click", specifier = "==8.3.1" },
-    { name = "eopf-geozarr", git = "https://github.com/EOPF-Explorer/data-model.git?rev=v0.8.0" },
+    { name = "eopf-geozarr", git = "https://github.com/EOPF-Explorer/data-model.git?rev=v0.9.0" },
     { name = "httpx", specifier = "==0.28.1" },
     { name = "morecantile", specifier = "==7.0.3" },
     { name = "pystac", specifier = "==1.14.3" },
@@ -878,8 +878,8 @@ wheels = [
 
 [[package]]
 name = "eopf-geozarr"
-version = "0.8.0"
-source = { git = "https://github.com/EOPF-Explorer/data-model.git?rev=v0.8.0#fd1e0a9549efc0b33fa35d1d3004971674625ddf" }
+version = "0.9.0"
+source = { git = "https://github.com/EOPF-Explorer/data-model.git?rev=v0.9.0#599f5d369e524fc994b800e888e197198e7e7872" }
 dependencies = [
     { name = "aiohttp" },
     { name = "boto3" },
@@ -895,6 +895,7 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "xarray" },
     { name = "zarr" },
+    { name = "zarr-cm" },
 ]
 
 [[package]]
@@ -3637,6 +3638,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/31/5a/b8a0cf39a14c770c30bd1f2d120c54000c8cd9e84e8e79f38d9a7ce58071/zarr-3.1.6.tar.gz", hash = "sha256:d95e72cbea4b90e9a70679468b8266400331756232576ae2b43400ac5108d0eb", size = 386531, upload-time = "2026-03-23T17:25:18.748Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/de/7c/ba8ca8cbe9dbef8e83a95fc208fed8e6686c98b4719aaa0aa7f3d31fe390/zarr-3.1.6-py3-none-any.whl", hash = "sha256:b5a82c5079d1c3d4ee8f06746fa3b9a98a7d804300fa3f4be154362a33e1207e", size = 295655, upload-time = "2026-03-23T17:25:17.189Z" },
+]
+
+[[package]]
+name = "zarr-cm"
+version = "0.2.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/d8/40/99c941d23a7cd84fb194b3eaa2ca2d0d85f5135aa07e2c4f2c12febfef43/zarr_cm-0.2.0.tar.gz", hash = "sha256:737f5b181e8a2456643c423f49b59d879531498c13c7345860f0e718ef73d8a8", size = 24773, upload-time = "2026-02-06T14:47:57.588Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/54/60/06c371c10a321db63ec46634c9498a3c491754214c0e3bfc27410c528d99/zarr_cm-0.2.0-py3-none-any.whl", hash = "sha256:7f4c778d70d37ccb6e10e1509f4c0a488689027dcebcd6b64fa89a899f101e11", size = 14222, upload-time = "2026-02-06T14:47:56.465Z" },
 ]
 
 [[package]]
