@@ -117,8 +117,15 @@ def run(
 @click.argument("target_id")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
 @click.option("--page-size", default=100, show_default=True, help="Items per page when fetching")
+@click.option(
+    "--resume",
+    is_flag=True,
+    help="Skip items that already exist in the target (safe to re-run after interruption)",
+)
 @click.pass_context
-def clone(ctx: click.Context, source_id: str, target_id: str, yes: bool, page_size: int) -> None:
+def clone(
+    ctx: click.Context, source_id: str, target_id: str, yes: bool, page_size: int, resume: bool
+) -> None:
     """Clone a collection (metadata + all items) to a new collection."""
     api_url: str = ctx.obj["api_url"]
 
@@ -130,8 +137,12 @@ def clone(ctx: click.Context, source_id: str, target_id: str, yes: bool, page_si
 
     runner = STACMigrationRunner(api_url)
     try:
-        copied, failed = runner.clone_collection(source_id, target_id, page_size=page_size)
-        click.echo(f"Done. Items copied: {copied}, failed: {failed}")
+        copied, skipped, failed = runner.clone_collection(
+            source_id, target_id, page_size=page_size, resume=resume
+        )
+        click.echo(
+            f"Done. Items copied: {copied}, skipped (already existed): {skipped}, failed: {failed}"
+        )
         if failed:
             sys.exit(1)
     except requests.HTTPError as e:

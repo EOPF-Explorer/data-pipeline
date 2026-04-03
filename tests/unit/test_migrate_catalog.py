@@ -290,9 +290,10 @@ class TestSTACMigrationRunner:
             patch("_migrate_catalog.runner.Client") as mock_client,
         ):
             mock_client.open.return_value.search.return_value = mock_search
-            copied, failed = runner.clone_collection("source-col", "target-col")
+            copied, skipped, failed = runner.clone_collection("source-col", "target-col")
 
         assert copied == 2
+        assert skipped == 0
         assert failed == 0
         # collection creation + 2 item posts = 3 POSTs
         assert mock_post.call_count == 3
@@ -328,10 +329,103 @@ class TestSTACMigrationRunner:
             patch("_migrate_catalog.runner.Client") as mock_client,
         ):
             mock_client.open.return_value.search.return_value = mock_search
-            copied, failed = runner.clone_collection("source-col", "target-col")
+            copied, skipped, failed = runner.clone_collection("source-col", "target-col")
 
         assert copied == 0
+        assert skipped == 0
         assert failed == 1
+
+
+class TestFetchExistingIds:
+    def test_returns_set_of_item_ids(self):
+        runner = STACMigrationRunner("https://api.example.com/stac")
+
+        mock_item_1 = MagicMock()
+        mock_item_1.id = "item-1"
+        mock_item_2 = MagicMock()
+        mock_item_2.id = "item-2"
+        mock_page = MagicMock()
+        mock_page.items = [mock_item_1, mock_item_2]
+        mock_search = MagicMock()
+        mock_search.pages.return_value = [mock_page]
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = mock_search
+            result = runner._fetch_existing_ids("my-col", page_size=100)
+
+        assert result == {"item-1", "item-2"}
+        mock_client.open.return_value.search.assert_called_once_with(
+            collections=["my-col"], max_items=None, limit=100
+        )
+
+
+class TestCloneResume:
+    def _make_collection_resp(self):
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {
+            "id": "source-col",
+            "type": "Collection",
+            "description": "Test",
+            "links": [],
+        }
+        mock_resp.raise_for_status = MagicMock()
+        return mock_resp
+
+    def test_resume_skips_existing_items_without_posting(self):
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        mock_resp = self._make_collection_resp()
+        mock_source_search = _make_mock_search(
+            [
+                {"id": "item-1", "collection": "source-col", "links": [], "assets": {}},
+                {"id": "item-2", "collection": "source-col", "links": [], "assets": {}},
+            ],
+            total=2,
+        )
+
+        with (
+            patch.object(runner.session, "get", return_value=mock_resp),
+            patch.object(runner.session, "post", return_value=mock_resp) as mock_post,
+            patch.object(runner, "_fetch_existing_ids", return_value={"item-1"}),
+            patch("_migrate_catalog.runner.Client") as mock_client,
+        ):
+            mock_client.open.return_value.search.return_value = mock_source_search
+            copied, skipped, failed = runner.clone_collection(
+                "source-col", "target-col", resume=True
+            )
+
+        assert copied == 1
+        assert skipped == 1
+        assert failed == 0
+        # 1 collection POST + 1 item POST (item-2 only; item-1 was skipped)
+        assert mock_post.call_count == 2
+
+    def test_resume_empty_target_copies_all(self):
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        mock_resp = self._make_collection_resp()
+        mock_source_search = _make_mock_search(
+            [
+                {"id": "item-1", "collection": "source-col", "links": [], "assets": {}},
+                {"id": "item-2", "collection": "source-col", "links": [], "assets": {}},
+            ],
+            total=2,
+        )
+
+        with (
+            patch.object(runner.session, "get", return_value=mock_resp),
+            patch.object(runner.session, "post", return_value=mock_resp) as mock_post,
+            patch.object(runner, "_fetch_existing_ids", return_value=set()),
+            patch("_migrate_catalog.runner.Client") as mock_client,
+        ):
+            mock_client.open.return_value.search.return_value = mock_source_search
+            copied, skipped, failed = runner.clone_collection(
+                "source-col", "target-col", resume=True
+            )
+
+        assert copied == 2
+        assert skipped == 0
+        assert failed == 0
+        # 1 collection POST + 2 item POSTs
+        assert mock_post.call_count == 3
 
 
 class TestRecoveryFile:

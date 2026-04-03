@@ -113,18 +113,42 @@ class STACMigrationRunner:
         result.completed_at = datetime.now(UTC).isoformat()
         return result
 
+    def _fetch_existing_ids(self, collection_id: str, page_size: int) -> set[str]:
+        """Return the set of item IDs already present in collection_id."""
+        catalog = Client.open(self.api_url)
+        search = catalog.search(
+            collections=[collection_id],
+            max_items=None,
+            limit=page_size,
+        )
+        return {item.id for page in search.pages() for item in page.items}
+
     def clone_collection(
-        self, source_id: str, target_id: str, page_size: int = 100
-    ) -> tuple[int, int]:
-        """Clone collection metadata and all items. Returns (items_copied, items_failed)."""
+        self, source_id: str, target_id: str, page_size: int = 100, resume: bool = False
+    ) -> tuple[int, int, int]:
+        """Clone collection metadata and all items.
+
+        Returns (items_copied, items_skipped, items_failed).
+        When resume=True, existing target item IDs are pre-fetched into a set upfront so that
+        already-copied items are skipped without issuing a POST at all.
+        """
         resp = self.session.get(f"{self.api_url}/collections/{source_id}", timeout=30)
         resp.raise_for_status()
         collection_data: dict[str, Any] = resp.json()
 
         collection_data["id"] = target_id
         resp = self.session.post(f"{self.api_url}/collections", json=collection_data, timeout=30)
-        resp.raise_for_status()
-        click.echo(f"Created collection '{target_id}'")
+        if resume and resp.status_code == 409:
+            click.echo(f"Collection '{target_id}' already exists, resuming copy...")
+        else:
+            resp.raise_for_status()
+            click.echo(f"Created collection '{target_id}'")
+
+        existing_ids: set[str] = set()
+        if resume:
+            click.echo(f"Fetching existing item IDs from '{target_id}'...")
+            existing_ids = self._fetch_existing_ids(target_id, page_size)
+            click.echo(f"Found {len(existing_ids)} items already in '{target_id}', skipping them.")
 
         catalog = Client.open(self.api_url)
         search = catalog.search(collections=[source_id], max_items=None, limit=page_size)
@@ -136,24 +160,36 @@ class STACMigrationRunner:
             click.echo(f"Copying items from '{source_id}' to '{target_id}'...")
 
         copied = 0
+        skipped = 0
         failed = 0
-        with click.progressbar(length=total, show_pos=True, show_percent=True) as bar:
+        pending_bar = 0
+        with click.progressbar(
+            length=total, show_pos=True, show_percent=True, update_min_steps=100
+        ) as bar:
             for page in search.pages():
                 for item_dict in (item.to_dict() for item in page.items):
                     item_id = item_dict.get("id", "unknown")
                     try:
-                        item_copy = copy.deepcopy(item_dict)
-                        item_copy["collection"] = target_id
-                        resp = self.session.post(
-                            f"{self.api_url}/collections/{target_id}/items",
-                            json=item_copy,
-                            timeout=30,
-                        )
-                        resp.raise_for_status()
-                        copied += 1
+                        if item_id in existing_ids:
+                            skipped += 1
+                        else:
+                            item_copy = copy.deepcopy(item_dict)
+                            item_copy["collection"] = target_id
+                            resp = self.session.post(
+                                f"{self.api_url}/collections/{target_id}/items",
+                                json=item_copy,
+                                timeout=30,
+                            )
+                            resp.raise_for_status()
+                            copied += 1
                     except Exception as e:
                         logger.warning("Failed to copy item %s: %s", item_id, e)
                         failed += 1
-                    bar.update(1)
+                    pending_bar += 1
+                    if pending_bar >= 100:
+                        bar.update(pending_bar)
+                        pending_bar = 0
+            if pending_bar:
+                bar.update(pending_bar)
 
-        return copied, failed
+        return copied, skipped, failed
