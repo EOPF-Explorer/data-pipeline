@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.8.0 (2026-04-08)
+
+## What's Changed
+* Pin GitHub Actions to commit SHAs (coordination#239) by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/127
+* ci: add Dependabot and least-privilege workflow permissions by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/128
+* ci: add proper CI and security scanning workflows by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/129
+* feat: harden docker image and add vuln scanners by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/148
+* ci: skip build and push for dependabot PR by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/149
+* build(deps): bump docker/setup-buildx-action from 3.12.0 to 4.0.0 by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/147
+* feat: create cli migration tool by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/110
+* feat: release v0.9.0 by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/152
+
+## New Contributors
+* @dependabot[bot] made their first contribution in https://github.com/EOPF-Explorer/data-pipeline/pull/147
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.7.0...v1.8.0
+
 ## 1.7.0 (2026-03-25)
 
 ## What's Changed
