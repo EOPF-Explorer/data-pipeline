@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.8.1 (2026-04-08)
+
+## What's Changed
+* ci: fix build on release please tag by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/154
+* ci: add fallback registry by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/156
+* build(deps): bump actions/cache from 4.3.0 to 5.0.4 by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/153
+* ci: update Dependabot configuration for version updates by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/157
+* build(deps): bump the all group with 6 updates by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/158
+* build(deps): bump the minor-and-patch group with 5 updates by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/159
+* build(deps): bump python from `7d8999b` to `f1927c7` in /docker by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/150
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.8.0...v1.8.1
+
 ## 1.8.0 (2026-04-08)
 
 ## What's Changed
