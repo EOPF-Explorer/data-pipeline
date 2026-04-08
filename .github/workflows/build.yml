@@ -78,7 +78,7 @@ jobs:
       id: meta
       uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
       with:
-        images: ${{ secrets.OVH_HARBOR_REGISTRY }}/eopf-sentinel-zarr-explorer/data-pipeline
+        images: ${{ secrets.OVH_HARBOR_REGISTRY || 'localhost' }}/eopf-sentinel-zarr-explorer/data-pipeline
         tags: |
           type=sha
           type=ref,event=branch
