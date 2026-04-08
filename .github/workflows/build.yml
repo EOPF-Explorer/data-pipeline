@@ -16,11 +16,9 @@ on:
         required: true
   push:
     branches:
-      - main
+      - '**'
     tags:
       - '*'
-  release:
-    types: [published]
   pull_request:
   workflow_dispatch:
 
@@ -42,7 +40,7 @@ jobs:
 
     steps:
     - name: Checkout code (release tag from Release Please)
-      if: github.event_name == 'workflow_call'
+      if: inputs.release_tag != ''
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       with:
         fetch-depth: 0
@@ -50,28 +48,23 @@ jobs:
         persist-credentials: false
 
     - name: Checkout code
-      if: github.event_name != 'workflow_call'
+      if: inputs.release_tag == ''
       uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       with:
         fetch-depth: 0  # Fetch all history and tags
-        ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref }}
+        ref: ${{ github.ref }}
         persist-credentials: false
 
     - name: Get tag name for Docker metadata
       id: tag_name
       env:
-        EVENT_NAME: ${{ github.event_name }}
-        RELEASE_TAG_NAME: ${{ github.event.release.tag_name }}
         GITHUB_REF_VALUE: ${{ github.ref }}
-        CALL_RELEASE_TAG: ${{ github.event_name == 'workflow_call' && inputs.release_tag || '' }}
+        CALL_RELEASE_TAG: ${{ inputs.release_tag }}
       run: |
-        if [ "$EVENT_NAME" = "workflow_call" ]; then
+        if [ -n "$CALL_RELEASE_TAG" ]; then
           echo "tag=$CALL_RELEASE_TAG" >> $GITHUB_OUTPUT
-        elif [ "$EVENT_NAME" = "release" ]; then
-          echo "tag=$RELEASE_TAG_NAME" >> $GITHUB_OUTPUT
         elif [[ "$GITHUB_REF_VALUE" == refs/tags/* ]]; then
-          ref_no_prefix="${GITHUB_REF_VALUE#refs/tags/}"
-          echo "tag=$ref_no_prefix" >> $GITHUB_OUTPUT
+          echo "tag=${GITHUB_REF_VALUE#refs/tags/}" >> $GITHUB_OUTPUT
         fi
 
     - name: Docker meta
