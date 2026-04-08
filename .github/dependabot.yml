@@ -9,11 +9,12 @@ updates:
       day: "monday"
     open-pull-requests-limit: 5
     groups:
-      minor-and-patch:
+      all:
         applies-to: version-updates
         patterns:
           - "*"
         update-types:
+          - "major"
           - "minor"
           - "patch"
   - package-ecosystem: "uv"
