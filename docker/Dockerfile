@@ -1,16 +1,14 @@
 # Build for linux/amd64: docker buildx build --platform linux/amd64 -t <tag> . --push
 
 # --- Builder stage: installs build tools and Python dependencies ---
-FROM python:3.13.12-slim@sha256:f1927c75e81efd1e091dbd64b6c0ecaa5630b38635a3d1c04034ac636e1f94c8 AS builder
+FROM python:3.13-alpine AS builder
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apk add --no-cache \
     git \
     curl \
     ca-certificates \
-    build-essential \
-    libgdal-dev \
-    gdal-bin \
-    && rm -rf /var/lib/apt/lists/*
+    build-base \
+    gdal-dev
 
 WORKDIR /app
 
@@ -21,17 +19,15 @@ COPY pyproject.toml README.md /app/
 RUN uv pip install --system --no-cache /app
 
 # --- Runtime stage: minimal production image without build tools ---
-FROM python:3.13.12-slim@sha256:f1927c75e81efd1e091dbd64b6c0ecaa5630b38635a3d1c04034ac636e1f94c8
+FROM python:3.13-alpine
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apk add --no-cache \
     ca-certificates \
-    libgdal-dev \
-    gdal-bin \
-    && rm -rf /var/lib/apt/lists/*
+    gdal
 
 COPY --from=builder /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
 
-RUN useradd --create-home --no-log-init --shell /bin/bash appuser
+RUN adduser -D -h /home/appuser -s /bin/sh appuser
 
 WORKDIR /app
 
@@ -41,4 +37,4 @@ RUN chown -R appuser:appuser /app
 
 USER appuser
 
-CMD ["/bin/bash"]
+CMD ["/bin/sh"]
