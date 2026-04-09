@@ -135,6 +135,18 @@ jobs:
         vuln-type: os,library
         severity: HIGH
 
+    - name: Scan image with Trivy (SARIF MEDIUM/LOW, fixed only)
+      id: trivy-sarif-medium-low
+      uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+      with:
+        image-ref: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
+        format: sarif
+        output: trivy-results-medium-low.sarif
+        exit-code: '0'
+        ignore-unfixed: true
+        vuln-type: os,library
+        severity: MEDIUM,LOW
+
 
     - name: Push Docker image
       if: github.actor != 'dependabot[bot]'
