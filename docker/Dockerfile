@@ -18,18 +18,20 @@ RUN pip install --no-cache-dir -r /app/requirements-build.txt
 
 # Copy lockfile before source so this layer is cached independently of code changes
 COPY pyproject.toml uv.lock README.md /app/
-RUN uv sync --frozen --no-dev --system --no-editable
+RUN uv sync --frozen --no-dev --no-editable
 
 # --- Runtime stage: minimal production image without build tools ---
 FROM python:3.13-alpine@sha256:18f00d382da0de501bc850c1dd422eb4deea736f5ec45cb34e6a9cacd5199813
 
 RUN apk add --no-cache \
     ca-certificates \
-    gdal
+    gdal \
+    gdal-tools
 
-# Copy installed packages and any console-script entrypoints from builder
-COPY --from=builder /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
-COPY --from=builder /usr/local/bin /usr/local/bin
+# Copy the virtualenv created by uv sync; activate it via PATH
+COPY --from=builder /app/.venv /app/.venv
+ENV VIRTUAL_ENV=/app/.venv
+ENV PATH="/app/.venv/bin:$PATH"
 
 RUN adduser -D -h /home/appuser -s /bin/sh appuser
 
