@@ -8,7 +8,8 @@ RUN apk add --no-cache \
     curl \
     ca-certificates \
     build-base \
-    gdal-dev
+    gdal-dev \
+    crc32c-dev
 
 WORKDIR /app
 
@@ -26,7 +27,8 @@ FROM python:3.13-alpine@sha256:18f00d382da0de501bc850c1dd422eb4deea736f5ec45cb34
 RUN apk add --no-cache \
     ca-certificates \
     gdal \
-    gdal-tools
+    gdal-tools \
+    crc32c
 
 # Copy the virtualenv created by uv sync; activate it via PATH
 COPY --from=builder /app/.venv /app/.venv
