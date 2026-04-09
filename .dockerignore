@@ -6,7 +6,7 @@ operator-tools/
 tasks/
 *.ipynb
 *.md
-!README.md
+!README.md   # Dockerfile COPYs README.md; keep it in the build context
 .ruff_cache/
 .mypy_cache/
 .pytest_cache/
