@@ -25,8 +25,10 @@ RUN uv sync --frozen --no-dev --no-editable
 FROM python:3.13-alpine@sha256:18f00d382da0de501bc850c1dd422eb4deea736f5ec45cb34e6a9cacd5199813
 
 RUN apk add --no-cache \
+    bash \
     ca-certificates \
     gdal \
+    gdal-dev \
     gdal-tools \
     crc32c
 
