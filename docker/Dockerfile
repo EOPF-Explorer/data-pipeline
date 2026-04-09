@@ -12,9 +12,10 @@ RUN apk add --no-cache \
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir pip==26.0.1 uv==0.11.2
+# Pin build tools — versions tracked by Dependabot (docker/requirements-build.txt)
+COPY docker/requirements-build.txt /app/
+RUN pip install --no-cache-dir -r /app/requirements-build.txt
 
-# Copy project files and install dependencies (includes eopf-geozarr from data-model via git)
 COPY pyproject.toml README.md /app/
 RUN uv pip install --system --no-cache /app
 

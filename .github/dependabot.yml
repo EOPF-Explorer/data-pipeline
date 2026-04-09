@@ -32,6 +32,21 @@ updates:
         update-types:
           - "minor"
           - "patch"
+  - package-ecosystem: "pip"
+    directory: "/docker"
+    cooldown:
+      default-days: 7
+    schedule:
+      interval: "weekly"
+    groups:
+      all:
+        applies-to: version-updates
+        patterns:
+          - "*"
+        update-types:
+          - "major"
+          - "minor"
+          - "patch"
   - package-ecosystem: "docker"
     directory: "/docker"
     cooldown:
