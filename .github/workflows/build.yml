@@ -108,12 +108,32 @@ jobs:
       id: trivy-sarif-critical-high
       uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
       with:
-        image-ref: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
+        image-ref: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}  # tags[0] is always the sha-* tag emitted first by docker/metadata-action
         format: sarif
         output: trivy-results-critical-high.sarif
         exit-code: '0'
         vuln-type: os,library
         severity: CRITICAL,HIGH
+
+    - name: Fail on fixable CRITICAL vulnerabilities
+      uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+      with:
+        image-ref: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}  # tags[0] is always the sha-* tag emitted first by docker/metadata-action
+        format: table
+        exit-code: '1'
+        ignore-unfixed: true
+        vuln-type: os,library
+        severity: CRITICAL
+
+    - name: Warn on fixable HIGH vulnerabilities
+      uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+      with:
+        image-ref: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}  # tags[0] is always the sha-* tag emitted first by docker/metadata-action
+        format: table
+        exit-code: '0'
+        ignore-unfixed: true
+        vuln-type: os,library
+        severity: HIGH
 
     - name: Scan image with Trivy (SARIF MEDIUM/LOW, fixed only)
       id: trivy-sarif-medium-low
@@ -126,26 +146,6 @@ jobs:
         ignore-unfixed: true
         vuln-type: os,library
         severity: MEDIUM,LOW
-
-    - name: Fail on fixable CRITICAL vulnerabilities
-      uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
-      with:
-        image-ref: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
-        format: table
-        exit-code: '1'
-        ignore-unfixed: true
-        vuln-type: os,library
-        severity: CRITICAL
-
-    - name: Warn on fixable HIGH vulnerabilities
-      uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
-      with:
-        image-ref: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
-        format: table
-        exit-code: '0'
-        ignore-unfixed: true
-        vuln-type: os,library
-        severity: HIGH
 
 
     - name: Push Docker image
@@ -166,14 +166,6 @@ jobs:
       with:
         sarif_file: trivy-results-critical-high.sarif
         category: trivy-critical-high
-
-    - name: Upload Trivy SARIF (MEDIUM/LOW fixed) to GitHub Security tab
-      if: steps.trivy-sarif-medium-low.outcome == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-      uses: github/codeql-action/upload-sarif@c10b8064de6f491fea524254123dbe5e09572f13 # v4.35.1
-      with:
-        sarif_file: trivy-results-medium-low.sarif
-        category: trivy-medium-low-fixed
-
 
     - name: Image summary
       env:

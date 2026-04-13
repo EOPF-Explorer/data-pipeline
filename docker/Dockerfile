@@ -1,44 +1,49 @@
 # Build for linux/amd64: docker buildx build --platform linux/amd64 -t <tag> . --push
 
 # --- Builder stage: installs build tools and Python dependencies ---
-FROM python:3.13.12-slim@sha256:f1927c75e81efd1e091dbd64b6c0ecaa5630b38635a3d1c04034ac636e1f94c8 AS builder
+FROM python:3.13-alpine@sha256:18f00d382da0de501bc850c1dd422eb4deea736f5ec45cb34e6a9cacd5199813 AS builder
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apk add --no-cache \
     git \
     curl \
     ca-certificates \
-    build-essential \
-    libgdal-dev \
-    gdal-bin \
-    && rm -rf /var/lib/apt/lists/*
+    build-base \
+    gdal-dev \
+    crc32c-dev
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir pip==26.0.1 uv==0.11.2
+# Pin build tools — versions tracked by Dependabot (docker/requirements-build.txt)
+COPY docker/requirements-build.txt /app/
+RUN pip install --no-cache-dir -r /app/requirements-build.txt
 
-# Copy project files and install dependencies (includes eopf-geozarr from data-model via git)
-COPY pyproject.toml README.md /app/
-RUN uv pip install --system --no-cache /app
+# Copy lockfile before source so this layer is cached independently of code changes
+COPY pyproject.toml uv.lock README.md /app/
+RUN uv sync --frozen --no-dev --no-editable
 
 # --- Runtime stage: minimal production image without build tools ---
-FROM python:3.13.12-slim@sha256:f1927c75e81efd1e091dbd64b6c0ecaa5630b38635a3d1c04034ac636e1f94c8
+FROM python:3.13-alpine@sha256:18f00d382da0de501bc850c1dd422eb4deea736f5ec45cb34e6a9cacd5199813
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apk add --no-cache \
+    bash \
     ca-certificates \
-    libgdal-dev \
-    gdal-bin \
-    && rm -rf /var/lib/apt/lists/*
+    gdal \
+    gdal-dev \
+    gdal-tools \
+    crc32c
 
-COPY --from=builder /usr/local/lib/python3.13/site-packages /usr/local/lib/python3.13/site-packages
+# Copy the virtualenv created by uv sync; activate it via PATH
+COPY --from=builder /app/.venv /app/.venv
+ENV VIRTUAL_ENV=/app/.venv
+ENV PATH="/app/.venv/bin:$PATH"
 
-RUN useradd --create-home --no-log-init --shell /bin/bash appuser
+RUN adduser -D -h /home/appuser -s /bin/sh appuser
 
 WORKDIR /app
 
 COPY scripts/ /app/scripts/
-
-RUN chown -R appuser:appuser /app
+# Remove test helpers (no purpose in production) and set ownership in one layer
+RUN find /app/scripts -name 'test_*.py' -delete \
+    && chown -R appuser:appuser /app
 
 USER appuser
-
-CMD ["/bin/bash"]

@@ -1,0 +1,17 @@
+.git
+.github
+tests/
+notebooks/
+operator-tools/
+tasks/
+*.ipynb
+*.md
+# README.md is re-included because the Dockerfile COPYs it explicitly
+!README.md
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+__pycache__/
+*.pyc
+.venv/
+htmlcov/

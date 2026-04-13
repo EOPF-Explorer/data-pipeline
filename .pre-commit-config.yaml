@@ -43,7 +43,7 @@ repos:
     rev: v2.12.0
     hooks:
       - id: hadolint-docker
-        args: ["--ignore", "DL3008"]  # Allow unpinned apt (GDAL version tied to Debian)
+        args: ["--ignore", "DL3008", "--ignore", "DL3018"]  # Allow unpinned apt/apk (GDAL version tied to OS release)
 
   - repo: local
     hooks:
