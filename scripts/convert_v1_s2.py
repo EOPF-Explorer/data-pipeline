@@ -14,6 +14,7 @@ import fsspec
 import httpx
 import xarray as xr
 import zarr
+from aiohttp import ClientTimeout
 from eopf_geozarr.conversion.fs_utils import (
     get_storage_options,
 )
@@ -132,6 +133,28 @@ def run_conversion(
     # Load input dataset
     logger.info(f"{'   📥 Loading input dataset '}{zarr_url}")
     storage_options = get_storage_options(str(zarr_url))
+    if str(zarr_url).startswith("https://"):
+        # fsspec HTTP: retries + backoff for transient issues; tight timeouts to fail fast on real stalls
+        http_options: dict[str, Any] = {
+            "client_kwargs": {
+                "timeout": ClientTimeout(
+                    total=600,  # 10 min cap per HTTP request (whole range read)
+                    sock_read=360,  # 6 min between socket reads (slightly above aiohttp 5m default)
+                ),
+            },
+            "retries": 5,
+            "backoff_factor": 2.0,  # 2s, 4s, 8s, 16s, 32s between retries
+        }
+        if storage_options:
+            base_ck = storage_options.get("client_kwargs") or {}
+            http_ck = http_options["client_kwargs"]
+            storage_options = {
+                **storage_options,
+                **http_options,
+                "client_kwargs": {**base_ck, **http_ck},
+            }
+        else:
+            storage_options = http_options
     dt_input = xr.open_datatree(
         str(zarr_url),
         engine="zarr",
