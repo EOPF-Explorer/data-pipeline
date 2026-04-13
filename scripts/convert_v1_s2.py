@@ -7,6 +7,7 @@ import argparse
 import logging
 import os
 import sys
+import tempfile
 from typing import Any
 from urllib.parse import urlparse
 
@@ -14,7 +15,7 @@ import fsspec
 import httpx
 import xarray as xr
 import zarr
-from aiohttp import ClientTimeout
+from aiohttp import TCPConnector
 from eopf_geozarr.conversion.fs_utils import (
     get_storage_options,
 )
@@ -38,6 +39,9 @@ DEFAULT_COMPRESSION_LEVEL = 3
 DEFAULT_ENABLE_SHARDING = True
 DEFAULT_DASK_CLUSTER = True
 DEFAULT_VALIDATE_OUTPUT = True
+
+# Cap simultaneous aiohttp connections to the HTTPS source per pod (override via env).
+DEFAULT_SOURCE_HTTP_MAX_CONNECTIONS = 10
 
 
 def get_zarr_url(stac_item_url: str) -> str:
@@ -134,27 +138,40 @@ def run_conversion(
     logger.info(f"{'   📥 Loading input dataset '}{zarr_url}")
     storage_options = get_storage_options(str(zarr_url))
     if str(zarr_url).startswith("https://"):
-        # fsspec HTTP: retries + backoff for transient issues; tight timeouts to fail fast on real stalls
-        http_options: dict[str, Any] = {
-            "client_kwargs": {
-                "timeout": ClientTimeout(
-                    total=600,  # 10 min cap per HTTP request (whole range read)
-                    sock_read=360,  # 6 min between socket reads (slightly above aiohttp 5m default)
-                ),
-            },
-            "retries": 5,
-            "backoff_factor": 2.0,  # 2s, 4s, 8s, 16s, 32s between retries
+        # fsspec registers `filecache` as WholeFileCacheFileSystem, which is incompatible with
+        # zarr 3's async FsspecStore (no _cat_file on the class). `simplecache` caches each
+        # remote key on local disk once per job; repeated reads (e.g. multiscale) hit the cache.
+        #
+        # `asynchronous` must be True on both the outer chain and the HTTPS target FS or aiohttp
+        # raises inside the nested cache path.
+        #
+        # Do not pass fsspec's `retries`/`backoff_factor` into HTTP storage_options: they end up
+        # on aiohttp ClientSession.request() and raise TypeError.
+        default_cache = os.path.join(tempfile.gettempdir(), "zarr-source-cache")
+        cache_target = os.environ.get("ZARR_SOURCE_CACHE_DIR", default_cache)
+        max_conn = int(
+            os.environ.get(
+                "ZARR_SOURCE_HTTP_MAX_CONNECTIONS",
+                str(DEFAULT_SOURCE_HTTP_MAX_CONNECTIONS),
+            )
+        )
+        merged_target: dict[str, Any] = dict(storage_options) if storage_options else {}
+        merged_target["asynchronous"] = True
+        client_kwargs: dict[str, Any] = dict(merged_target.get("client_kwargs") or {})
+        client_kwargs["connector"] = TCPConnector(
+            limit=max_conn,
+            limit_per_host=max_conn,
+        )
+        merged_target["client_kwargs"] = client_kwargs
+
+        storage_options = {
+            "protocol": "simplecache",
+            "target_protocol": "https",
+            "cache_storage": cache_target,
+            "expiry_time": 3600,
+            "asynchronous": True,
+            "target_options": merged_target,
         }
-        if storage_options:
-            base_ck = storage_options.get("client_kwargs") or {}
-            http_ck = http_options["client_kwargs"]
-            storage_options = {
-                **storage_options,
-                **http_options,
-                "client_kwargs": {**base_ck, **http_ck},
-            }
-        else:
-            storage_options = http_options
     dt_input = xr.open_datatree(
         str(zarr_url),
         engine="zarr",
