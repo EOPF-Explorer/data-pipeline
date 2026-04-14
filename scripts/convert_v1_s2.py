@@ -11,11 +11,11 @@ import tempfile
 from typing import Any
 from urllib.parse import urlparse
 
+import aiohttp
 import fsspec
 import httpx
 import xarray as xr
 import zarr
-from aiohttp import TCPConnector
 from eopf_geozarr.conversion.fs_utils import (
     get_storage_options,
 )
@@ -157,12 +157,17 @@ def run_conversion(
         )
         merged_target: dict[str, Any] = dict(storage_options) if storage_options else {}
         merged_target["asynchronous"] = True
-        client_kwargs: dict[str, Any] = dict(merged_target.get("client_kwargs") or {})
-        client_kwargs["connector"] = TCPConnector(
-            limit=max_conn,
-            limit_per_host=max_conn,
-        )
-        merged_target["client_kwargs"] = client_kwargs
+        # TCPConnector must be created inside an async context (aiohttp 3.9+ /
+        # Python 3.12+ call asyncio.get_running_loop() in __init__).  Pass a
+        # custom get_client factory so the connector is built lazily, safely
+        # inside fsspec's own async path.
+        _extra_client_kwargs: dict[str, Any] = dict(merged_target.pop("client_kwargs", None) or {})
+
+        async def _get_client(**kwargs: Any) -> aiohttp.ClientSession:
+            connector = aiohttp.TCPConnector(limit=max_conn, limit_per_host=max_conn)
+            return aiohttp.ClientSession(connector=connector, **{**_extra_client_kwargs, **kwargs})
+
+        merged_target["get_client"] = _get_client
 
         storage_options = {
             "protocol": "simplecache",
