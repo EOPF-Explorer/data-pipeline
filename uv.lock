@@ -777,7 +777,7 @@ dev = [
     { name = "pip-audit", specifier = "==2.10.0" },
     { name = "pre-commit", specifier = "==4.5.1" },
     { name = "ruff", specifier = "==0.15.9" },
-    { name = "types-boto3", specifier = "==1.42.83" },
+    { name = "types-boto3", specifier = "==1.42.86" },
     { name = "types-requests", specifier = "==2.33.0.20260327" },
 ]
 notebooks = [
@@ -789,7 +789,7 @@ notebooks = [
     { name = "shapely", specifier = "==2.1.2" },
 ]
 test = [
-    { name = "pytest", specifier = "==9.0.2" },
+    { name = "pytest", specifier = "==9.0.3" },
     { name = "pytest-cov", specifier = "==7.1.0" },
     { name = "pytest-mock", specifier = "==3.15.1" },
 ]
@@ -2676,7 +2676,7 @@ wheels = [
 
 [[package]]
 name = "pytest"
-version = "9.0.2"
+version = "9.0.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "colorama", marker = "sys_platform == 'win32'" },
@@ -2685,9 +2685,9 @@ dependencies = [
     { name = "pluggy" },
     { name = "pygments" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d1/db/7ef3487e0fb0049ddb5ce41d3a49c235bf9ad299b6a25d5780a89f19230f/pytest-9.0.2.tar.gz", hash = "sha256:75186651a92bd89611d1d9fc20f0b4345fd827c41ccd5c299a868a05d70edf11", size = 1568901, upload-time = "2025-12-06T21:30:51.014Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/7d/0d/549bd94f1a0a402dc8cf64563a117c0f3765662e2e668477624baeec44d5/pytest-9.0.3.tar.gz", hash = "sha256:b86ada508af81d19edeb213c681b1d48246c1a91d304c6c81a427674c17eb91c", size = 1572165, upload-time = "2026-04-07T17:16:18.027Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3b/ab/b3226f0bd7cdcf710fbede2b3548584366da3b19b5021e74f5bde2a8fa3f/pytest-9.0.2-py3-none-any.whl", hash = "sha256:711ffd45bf766d5264d487b917733b453d917afd2b0ad65223959f59089f875b", size = 374801, upload-time = "2025-12-06T21:30:49.154Z" },
+    { url = "https://files.pythonhosted.org/packages/d4/24/a372aaf5c9b7208e7112038812994107bc65a84cd00e0354a88c2c77a617/pytest-9.0.3-py3-none-any.whl", hash = "sha256:2c5efc453d45394fdd706ade797c0a81091eccd1d6e4bccfcd476e2b8e0ab5d9", size = 375249, upload-time = "2026-04-07T17:16:16.13Z" },
 ]
 
 [[package]]
@@ -3348,15 +3348,15 @@ wheels = [
 
 [[package]]
 name = "types-boto3"
-version = "1.42.83"
+version = "1.42.86"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "botocore-stubs" },
     { name = "types-s3transfer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/e4/c6/e3b3d5e79a963be763daef1b2a2f83653fddb9bd0715a18587f2362d8e01/types_boto3-1.42.83.tar.gz", hash = "sha256:5986d7136e739af654500223372666a6df39d00b369584be8c9ad3e92183e7ec", size = 102460, upload-time = "2026-04-03T19:54:20.358Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/30/b1/338932b5a4e76c0c908c02ef622eb9bfe7456dcd416a5dc3d75e1891197b/types_boto3-1.42.86.tar.gz", hash = "sha256:dae9662b09376dc6fca042bf4717dbd06a20681f813e0d096695688414527ebc", size = 102903, upload-time = "2026-04-09T01:14:45.182Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/48/52/625fb8571130a36093a2667adb26cbc51ff0ccac635fdded4f54c127e8aa/types_boto3-1.42.83-py3-none-any.whl", hash = "sha256:4a6fca4c35233aaa1e5e0a062a51edfd860b92fdb2a44b9e41ec0f55fa06f065", size = 70345, upload-time = "2026-04-03T19:54:16.889Z" },
+    { url = "https://files.pythonhosted.org/packages/0e/1f/e7d874a3ffd22d8b1e1d2dc259b561b1cb1e00ee3ea65e8a78736b118114/types_boto3-1.42.86-py3-none-any.whl", hash = "sha256:424e953ba8b3bfae1539a523b4221a7502a775c6326bcd7a3c6e31458c6b58ec", size = 70511, upload-time = "2026-04-09T01:14:41.201Z" },
 ]
 
 [[package]]
