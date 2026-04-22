@@ -2,16 +2,11 @@
 
 ## Objective
 
-Automate the end-to-end S1 GRD RTC ingestion pipeline: from S1Tiling GeoTIFF output on S3,
-through Zarr store append, to a queryable STAC item in the EOPF Explorer catalog — orchestrated
-by two independent Argo Workflows targeting the `sentinel-1-grd-rtc-staging` collection.
+Automate the end-to-end S1 GRD RTC ingestion pipeline: from S1Tiling GeoTIFF output on S3, through Zarr store append, to a queryable STAC item in the EOPF Explorer catalog — orchestrated by two independent Argo Workflows targeting the `sentinel-1-grd-rtc-staging` collection.
 
 **Target users**: EOPF Explorer data team running scheduled or manual ingestion of S1 GRD RTC tiles.
 
-**Success metric**: A new S1Tiling acquisition over tile 31TCH, submitted to the ingest workflow,
-results in a viewable STAC item at
-`https://api.explorer.eopf.copernicus.eu/rstaging/collections/sentinel-1-grd-rtc-staging/items/s1-rtc-31TCH`
-within one workflow run.
+**Success metric**: A new S1Tiling acquisition over tile 31TCH, submitted to the ingest workflow, results in a viewable STAC item at `https://api.explorer.eopf.copernicus.eu/rstaging/collections/sentinel-1-grd-rtc-staging/items/s1-rtc-31TCH` within one workflow run.
 
 ---
 
@@ -41,42 +36,39 @@ within one workflow run.
 The two workflows are independent and loosely coupled via S3:
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│  Workflow 1: eopf-explorer-s1tiling  (platform-deploy)        │
-│                                                               │
-│  Trigger: CronWorkflow (daily) or manual Sensor webhook       │
-│  Inputs:  tile_id, orbit_direction, date_start, date_end      │
-│                                                               │
-│  Step 1 [cnes/s1tiling:1.4.0]:                               │
-│    SAFE products → S1Tiling processing → GeoTIFFs             │
-│    Output: s3://bucket/s1tiling-output/{tile}/{orbit}/{date}/ │
-└──────────────────────────────┬───────────────────────────────┘
+┌────────────────────────────────────────────────────────────────┐
+│  Workflow 1: eopf-explorer-s1tiling  (platform-deploy)         │
+│                                                                │
+│  Trigger: CronWorkflow (daily) or manual Sensor webhook        │
+│  Inputs:  tile_id, orbit_direction, date_start, date_end       │
+│                                                                │
+│  Step 1 [cnes/s1tiling:1.4.0]:                                 │
+│    SAFE products → S1Tiling processing → GeoTIFFs              │
+│    Output: s3://bucket/s1tiling-output/{tile}/{orbit}/{date}/  │
+└───────────────────────────────┬────────────────────────────────┘
                                 │ S3 GeoTIFF prefix
                                 │ (manual handoff or chained trigger)
                                 ▼
-┌──────────────────────────────────────────────────────────────┐
-│  Workflow 2: eopf-explorer-ingest-v1-s1rtc  (platform-deploy) │
-│                                                               │
-│  Trigger: CronWorkflow (daily) or manual Sensor webhook       │
-│  Inputs:  s3_geotiff_prefix, tile_id, orbit_direction,        │
+┌────────────────────────────────────────────────────────────────┐
+│  Workflow 2: eopf-explorer-ingest-v1-s1rtc  (platform-deploy)  │
+│                                                                │
+│  Trigger: CronWorkflow (daily) or manual Sensor webhook        │
+│  Inputs:  s3_geotiff_prefix, tile_id, orbit_direction,         │
 │           collection, zarr store params, STAC API params       │
-│                                                               │
-│  Step 1 [data-pipeline]: ingest                               │
-│    discover GeoTIFFs → append Zarr store → consolidate        │
-│    Script: scripts/ingest_v1_s1_rtc.py                       │
-│                                                               │
-│  Step 2 [data-pipeline]: register-stac  (depends on ingest)  │
-│    build STAC item from Zarr → augment → upsert               │
-│    Script: scripts/register_v1_s1_rtc.py                     │
-└──────────────────────────────────────────────────────────────┘
+│                                                                │
+│  Step 1 [data-pipeline]: ingest                                │
+│    discover GeoTIFFs → append Zarr store → consolidate         │
+│    Script: scripts/ingest_v1_s1_rtc.py                         │
+│                                                                │
+│  Step 2 [data-pipeline]: register-stac  (depends on ingest)    │
+│    build STAC item from Zarr → augment → upsert                │
+│    Script: scripts/register_v1_s1_rtc.py                       │
+└────────────────────────────────────────────────────────────────┘
 ```
 
-**Design decision**: `build_s1_rtc_stac_item()` lives in `data-model` (co-located with domain
-knowledge) and is imported directly into `register_v1_s1_rtc.py`. This follows the same pattern
-as `convert_v1_s2.py` importing from `eopf_geozarr.s2_optimization`. No subprocess calls.
+**Design decision**: `build_s1_rtc_stac_item()` lives in `data-model` (co-located with domain knowledge) and is imported directly into `register_v1_s1_rtc.py`. This follows the same pattern as `convert_v1_s2.py` importing from `eopf_geozarr.s2_optimization`. No subprocess calls.
 
-**Zarr store path convention**:
-`s3://{s3_output_bucket}/{s3_output_prefix}/s1-grd-rtc-{tile_id}.zarr`
+**Zarr store path convention**: `s3://{s3_output_bucket}/{s3_output_prefix}/s1-grd-rtc-{tile_id}.zarr`
 
 ---
 
@@ -170,7 +162,7 @@ eopf-geozarr generate-stac-s1 \
 
 #### Interface
 
-```
+```bash
 python scripts/ingest_v1_s1_rtc.py \
   --s3-geotiff-prefix  s3://bucket/s1tiling-output/31TCH/ascending/2026-04-01/ \
   --s3-zarr-store      s3://bucket/s1-rtc-staging/s1-grd-rtc-31TCH.zarr \
@@ -206,7 +198,7 @@ Imports directly from `eopf_geozarr.conversion.s1_ingest` (no subprocess):
 
 #### Interface
 
-```
+```bash
 python scripts/register_v1_s1_rtc.py \
   --store            s3://bucket/s1-rtc-staging/s1-grd-rtc-31TCH.zarr \
   --collection       sentinel-1-grd-rtc-staging \
@@ -246,8 +238,7 @@ Key fields (modelled on `stac/sentinel-2-l2a-staging.json`):
 | `extent.temporal` | `[["2014-04-03T00:00:00Z", null]]` (S1A launch, open end) |
 | `extent.spatial.bbox` | `[[-180, -90, 180, 90]]` (global, narrow after staging) |
 
-Collection must be created in the STAC API once before any item is registered — manual step
-using `operator-tools/manage_collections.py`. Not automated in the workflow.
+Collection must be created in the STAC API once before any item is registered — manual step using `operator-tools/manage_collections.py`. Not automated in the workflow.
 
 ---
 
@@ -350,15 +341,17 @@ using `operator-tools/manage_collections.py`. Not automated in the workflow.
 - Concurrency via `eopf-workflow-concurrency.v1-s1rtc-limit`
 
 **Manual trigger** (consistent with `submit_test_workflow_wh.py`):
-```python
-# operator-tools/submit_test_workflow_wh.py payload:
+
+```json
 {
-    "action": "ingest-v1-s1rtc",
-    "s3_geotiff_prefix": "s3://esa-zarr-sentinel-explorer-fra/s1tiling-output/31TCH/ascending/2026-04-01/",
-    "tile_id": "31TCH",
-    "orbit_direction": "ascending"
+  "action": "ingest-v1-s1rtc",
+  "s3_geotiff_prefix": "s3://esa-zarr-sentinel-explorer-fra/s1tiling-output/31TCH/ascending/2026-04-01/",
+  "tile_id": "31TCH",
+  "orbit_direction": "ascending"
 }
 ```
+
+Example: `operator-tools/submit_test_workflow_wh.py` POST body as above.
 
 ---
 
@@ -386,9 +379,7 @@ data-model new tag     →   pyproject.toml pin bump
                        →   CI tests pass
 ```
 
-**Critical path**: data-model must be tagged before the data-pipeline Docker image can be built
-and the Argo template can reference a concrete `pipeline_image_version`. The data-model STAC
-builder (step 1) must be merged and tagged (`v0.10.0` or similar) first.
+**Critical path**: data-model must be tagged before the data-pipeline Docker image can be built and the Argo template can reference a concrete `pipeline_image_version`. The data-model STAC builder (step 1) must be merged and tagged (`v0.10.0` or similar) first.
 
 ---
 
@@ -416,34 +407,21 @@ builder (step 1) must be merged and tagged (`v0.10.0` or similar) first.
 
 ## Acceptance Criteria
 
-- [ ] `build_s1_rtc_stac_item()` produces a `pystac`-valid item with correct WGS84 bbox and
-      ISO 8601 temporal extent for the 31TCH fixture store
-- [ ] `ingest_v1_s1_rtc.py` runs without error on a synthetic GeoTIFF batch, producing a
-      Zarr store readable by `xr.open_zarr()`
-- [ ] `register_v1_s1_rtc.py` upserts to `sentinel-1-grd-rtc-staging` and the viewer link
-      resolves (`/viewer` returns HTTP 200)
+- [ ] `build_s1_rtc_stac_item()` produces a `pystac`-valid item with correct WGS84 bbox and ISO 8601 temporal extent for the 31TCH fixture store
+- [ ] `ingest_v1_s1_rtc.py` runs without error on a synthetic GeoTIFF batch, producing a Zarr store readable by `xr.open_zarr()`
+- [ ] `register_v1_s1_rtc.py` upserts to `sentinel-1-grd-rtc-staging` and the viewer link resolves (`/viewer` returns HTTP 200)
 - [ ] All unit and integration tests pass in CI (`pytest` + pre-commit ruff/mypy)
 - [ ] Argo YAML lints cleanly (`argo lint --offline`)
-- [ ] End-to-end: Workflow 2 triggered manually for tile 31TCH produces a queryable item at
-      the staging STAC API
+- [ ] End-to-end: Workflow 2 triggered manually for tile 31TCH produces a queryable item at the staging STAC API
 
 ---
 
 ## Open Questions
 
-1. **S1Tiling `.cfg` template**: Which parameters to set for staging (CDSE credentials, DEM
-   source, output path)? Must be resolved before Workflow 1 can be tested end-to-end. The
-   implementation plan (`s1tiling_docker_instructions.md`) is the reference.
+1. **S1Tiling `.cfg` template**: Which parameters to set for staging (CDSE credentials, DEM source, output path)? Must be resolved before Workflow 1 can be tested end-to-end. The implementation plan (`s1tiling_docker_instructions.md`) is the reference.
 
-2. **data-model version tag**: `register_v1_s1_rtc.py` imports from `eopf_geozarr.stac.s1_rtc`
-   which does not yet exist in `v0.9.0`. The data-pipeline `pyproject.toml` pin must be bumped
-   to a new data-model release that includes the STAC builder.
+2. **data-model version tag**: `register_v1_s1_rtc.py` imports from `eopf_geozarr.stac.s1_rtc` which does not yet exist in `v0.9.0`. The data-pipeline `pyproject.toml` pin must be bumped to a new data-model release that includes the STAC builder.
 
-3. **Multi-orbit STAC item**: Current spec builds one item per tile covering all orbit directions.
-   If ascending/descending orbits need separate temporal extents or visualization configs, split
-   into per-orbit items (`s1-rtc-31TCH-ascending`). Defer until staging validation reveals the
-   viewer UX.
+3. **Multi-orbit STAC item**: Current spec builds one item per tile covering all orbit directions. If ascending/descending orbits need separate temporal extents or visualization configs, split into per-orbit items (`s1-rtc-31TCH-ascending`). Defer until staging validation reveals the viewer UX.
 
-4. **Exit code 2 in Argo retry policy**: Argo `expression`-based retry skip on exit code 2
-   must be tested — verify `asInt(lastRetry.exitCode) == 2` evaluation works correctly in the
-   cluster version.
+4. **Exit code 2 in Argo retry policy**: Argo `expression`-based retry skip on exit code 2 must be tested — verify `asInt(lastRetry.exitCode) == 2` evaluation works correctly in the cluster version.
