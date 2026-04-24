@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.8.2 (2026-04-24)
+
+## What's Changed
+* ci: harden Docker image — switch to Alpine, fix CVE surface, clean Trivy scanning by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/160
+* perf: improve eodc zarr store read reliability by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/168
+* build(deps): bump uv from 0.11.2 to 0.11.3 in /docker in the all group by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/164
+* build(deps): bump python from `18f00d3` to `70dd893` in /docker by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/165
+* build(deps): bump docker/login-action from 3.7.0 to 4.1.0 in the all group by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/166
+* build(deps): bump the minor-and-patch group across 1 directory with 5 updates by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/167
+* fix: defer TCPConnector creation to async context (Python 3.13 crash) by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/170
+* build(deps): bump uv from 0.11.3 to 0.11.6 in /docker by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/171
+* fix: skip registry login on forks by @wietzesuijker in https://github.com/EOPF-Explorer/data-pipeline/pull/65
+* fix: exclude dependabot from PUSH_IMAGE to prevent login failures by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/180
+* build(deps): bump the all group across 1 directory with 4 updates by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/178
+* build(deps): bump python from `70dd893` to `420cd0b` in /docker by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/175
+* fix: fail fast when delete of existing item fails by @wietzesuijker in https://github.com/EOPF-Explorer/data-pipeline/pull/64
+* fix: allow disabling sharding/dask/validation flags by @wietzesuijker in https://github.com/EOPF-Explorer/data-pipeline/pull/63
+* build(deps): bump the minor-and-patch group across 1 directory with 7 updates by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/188
+* build(deps): bump uv from 0.11.6 to 0.11.7 in /docker in the all group by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/187
+* build(deps): bump nbconvert from 7.17.0 to 7.17.1 by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/183
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.8.1...v1.8.2
+
 ## 1.8.1 (2026-04-08)
 
 ## What's Changed
