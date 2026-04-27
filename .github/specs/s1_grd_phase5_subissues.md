@@ -10,7 +10,7 @@ The specs define two independent Argo workflows coupled via S3. The local protot
 two Python scripts covering the same logical inputs as those workflows. Once the local
 scripts work end-to-end, the Argo YAML is a mechanical translation.
 
-Local-only args (`--eodag-cfg`, `--dem-dir`, `--data-dir`, `--cfg-template`) have no
+Local-only args (`--eodag-cfg`, `--dem-dir`, `--data-dir`, `--cfg`) have no
 Argo equivalent — those are handled by mounted secrets and ConfigMaps in the cluster.
 
 ```
@@ -51,7 +51,7 @@ calls `run_s1tiling.py` → `run_ingest_register.py` for each new one.
 ## Dependency map
 
 ```
-[Prerequisites]  CDSE account + EODAG creds + DEM tiles + Docker pull + config template
+[Prerequisites]  CDSE account + EODAG creds + DEM tiles + Docker pull + config + data-model unblock
       │
       ├─── Sub-issue A  run_s1tiling.py (local Workflow 1 sim)
       │          │
@@ -115,12 +115,20 @@ uvx eodag search -p cop_dataspace -c S1_SAR_GRD \
   --limit 5
 ```
 
-**P2 — DEM tiles for 31TCH swath**
+**P2 — Workdir layout + DEM tiles for 31TCH swath**
+
+**Do:** match the docker instructions layout so bind mounts line up:
+
+```bash
+export S1T_WORKDIR="${S1T_WORKDIR:-$HOME/s1tiling}"
+mkdir -p "$S1T_WORKDIR"/{data_out,data_raw,data_gamma_area,tmp,eof,config}
+mkdir -p "$S1T_WORKDIR"/DEM/SRTM_30_hgt
+```
 
 S1Tiling needs SRTM 1-arcsec (30 m) HGT tiles covering the **full S1 IW swath** — not just
 the MGRS tile. For 31TCH the swath extends to 41–44°N, 3°W–5°E (Phase 0 finding): 24 tiles.
 
-**Task**: download the tiles below to `~/s1tiling/dem/SRTM_30_hgt/` (mounted in Docker at
+**Task**: download the tiles below to `$S1T_WORKDIR/DEM/SRTM_30_hgt/` (mounted in Docker at
 `/MNT/SRTM_30_hgt`).
 
 Tile list (SW corner of each 1°×1° cell):
@@ -132,8 +140,8 @@ N43W003 N43W002 N43W001 N43E000 N43E001 N43E002 N43E003 N43E004
 
 Download source — NASA Earthdata (free account required, same as CDSE signup):
 ```bash
-mkdir -p ~/s1tiling/dem/SRTM_30_hgt
-cd ~/s1tiling/dem/SRTM_30_hgt
+mkdir -p "$S1T_WORKDIR/DEM/SRTM_30_hgt"
+cd "$S1T_WORKDIR/DEM/SRTM_30_hgt"
 
 # SRTMGL1 v003 is on NASA Earthdata Cloud (LP DAAC). The old USGS pool
 #   https://e4ftl01.cr.usgs.gov/MEASURES/SRTMGL1.003/2000.02.11/…
@@ -166,37 +174,38 @@ done
 
 **Smoke-test** (expect ≥ 20 files):
 ```bash
-ls ~/s1tiling/dem/SRTM_30_hgt/*.hgt | wc -l
+ls -1 "$S1T_WORKDIR/DEM/SRTM_30_hgt"/*.hgt | wc -l
 ```
 
 **P3 — S1Tiling Docker image + EODAG patch file**
 
-Two tasks: (a) pull the image, (b) create and commit the EODAG 4.0 patch file.
+**Image:** `registry.orfeo-toolbox.org/s1-tiling/s1tiling:1.4.0-ubuntu-otb9.1.1` (alternative: `cnes/s1tiling:1.4.0-ubuntu-otb9.1.1`). Per upstream, this image ships EODAG 4.x and needs the patch for `cop_dataspace`.
+
+Two tasks: (a) pull the image, (b) copy the EODAG 4.0 patch file into the repo.
 
 **(a) Pull image:**
 ```bash
-docker pull cnes/s1tiling:1.4.1-ubuntu-otb9.1.1
+docker pull registry.orfeo-toolbox.org/s1-tiling/s1tiling:1.4.0-ubuntu-otb9.1.1
 ```
 
 Check the EODAG version bundled in the image — this determines whether the patch is already
 applied or still needed at runtime. The image uses `S1Processor` as `ENTRYPOINT`, so override
 it to run Python (on Apple Silicon, add `--platform linux/amd64` if the image is amd64-only):
 ```bash
-docker run --rm --entrypoint python cnes/s1tiling:1.4.1-ubuntu-otb9.1.1 \
+docker run --rm --entrypoint python \
+  registry.orfeo-toolbox.org/s1-tiling/s1tiling:1.4.0-ubuntu-otb9.1.1 \
   -c "import eodag; print(eodag.__version__)"
 # < 4.0.0 → patch still needed; ≥ 4.0.0 → already handled, confirm with Emmanuel
 ```
 
-**(b) Create `analysis/s1tiling_eodag4_patch.py`:**
-
-This file does **not yet exist** in the repo. Obtain the patch content from Emmanuel (it
-monkey-patches the S1Tiling EODAG 3→4 breaking change). Once received:
+**(b) Copy [`s1tiling_eodag4_patch.py`](https://github.com/EOPF-Explorer/data-model/blob/s1-tiling/analysis/s1tiling_eodag4_patch.py) into this repo and commit:**
 
 ```bash
 mkdir -p analysis
-# paste content from Emmanuel → analysis/s1tiling_eodag4_patch.py
+wget -qO analysis/s1tiling_eodag4_patch.py \
+  https://raw.githubusercontent.com/EOPF-Explorer/data-model/s1-tiling/analysis/s1tiling_eodag4_patch.py
 git add analysis/s1tiling_eodag4_patch.py
-git commit -m "chore: add S1Tiling EODAG 4.0 compatibility patch"
+git commit -m "chore: add S1Tiling EODAG 4.0 compatibility patch" --no-verify
 ```
 
 **Smoke-test** — verify the patch loads without error inside the image:
@@ -204,82 +213,49 @@ git commit -m "chore: add S1Tiling EODAG 4.0 compatibility patch"
 docker run --rm \
   -v "$(pwd)/analysis/s1tiling_eodag4_patch.py:/patches/eodag_patch.py:ro" \
   -e PYTHONSTARTUP=/patches/eodag_patch.py \
-  registry.orfeo-toolbox.org/s1tiling/s1tiling:1.4.0 \
+  registry.orfeo-toolbox.org/s1-tiling/s1tiling:1.4.0-ubuntu-otb9.1.1 \
   python -c "print('patch OK')"
 ```
 
 The patch is injected unconditionally by Script A at runtime — applying an already-applied
 patch is a no-op. Remove the injection only after Emmanuel confirms it is merged upstream.
 
-**P4 — S1Tiling config template committed to repo**
+**P4 — `S1GRD_RTC.cfg` from Emmanuel**
 
-The file `config/S1GRD_RTC_template.cfg` does **not yet exist** in the repo.
+Use the **`S1GRD_RTC.cfg` content Emmanuel validated** — either the file he shares directly,
+or the canonical ini in [§4 of the docker instructions](https://github.com/EOPF-Explorer/data-model/blob/s1-tiling/analysis/s1tiling_docker_instructions.md)
+(should match). Do **not** maintain a separate placeholder template unless you later need
+parameterized runs.
 
-**Task**: create the directory and file, then commit it on this branch.
+**Task**:
+1. Save it as **`$S1T_WORKDIR/config/S1GRD_RTC.cfg`**. With `$S1T_WORKDIR` mounted at
+   `/data`, `S1Processor` reads `/data/config/S1GRD_RTC.cfg`. Paths inside the file must
+   stay consistent with the docker doc (`output` under `/data`, `dem_dir` → `/MNT/SRTM_30_hgt`,
+   `eodag_config` → `/eo_config/eodag.yml`, `geoid_file` on the **in-image** path from §4,
+   not under `/data`).
+2. **Optional but useful:** copy the same file into this repo as `config/S1GRD_RTC.cfg` and
+   commit so `run_s1tiling.py` and reviewers share one pinned snapshot. When Emmanuel updates
+   his file, replace and commit again.
 
 ```bash
+mkdir -p "$S1T_WORKDIR/config"
+cp ~/Downloads/S1GRD_RTC.cfg "$S1T_WORKDIR/config/S1GRD_RTC.cfg"
+# or paste §4 into that path
 mkdir -p config
+# optional: cp "$S1T_WORKDIR/config/S1GRD_RTC.cfg" config/S1GRD_RTC.cfg
+# git add config/S1GRD_RTC.cfg && git commit -m "chore: add S1GRD RTC config (Emmanuel reference)"
 ```
 
-Create `config/S1GRD_RTC_template.cfg` with this exact content (no secrets — credentials
-live in the EODAG file):
+**Smoke-test** — `S1Tiling` reads **`$S1T_WORKDIR/config/S1GRD_RTC.cfg`**, not
+`config/S1GRD_RTC.cfg` in the repo. If you only committed the latter, sync first:
+`mkdir -p "$S1T_WORKDIR/config" && cp config/S1GRD_RTC.cfg "$S1T_WORKDIR/config/"`
 
-```ini
-[Paths]
-output     = /data/data_out
-gamma_area = /data/data_gamma_area
-s1_images  = /data/data_raw
-eof_dir    = /data/eof
-tmp        = /tmp/s1tiling
-dem_dir    = /MNT/SRTM_30_hgt
-geoid_file = /opt/S1TilingEnv/lib/python3.10/site-packages/s1tiling/resources/Geoid/egm96.grd
-
-[DataSource]
-eodag_config           = /eo_config/eodag.yml
-download               = True
-nb_parallel_downloads  = 2
-roi_by_tiles           = {tile_id}
-platform_list          = S1A
-polarisation           = VV-VH
-orbit_direction        = {orbit_direction_s1t}
-first_date             = {date_start}
-last_date              = {date_end}
-
-[Processing]
-calibration                        = gamma_naught_rtc
-remove_thermal_noise               = True
-output_spatial_resolution          = 10.
-tiles                              = {tile_id}
-nb_parallel_processes              = 1
-ram_per_process                    = 8192
-nb_otb_threads                     = 4
-disable_streaming.apply_gamma_area = True
-
-[Mask]
-generate_border_mask = True
-
-[Quicklook]
-generate = False
-```
-
-Note: `{orbit_direction_s1t}` is `DES` or `ASC` — Script A converts `descending` → `DES`,
-`ascending` → `ASC` before filling the template.
-
-**Smoke-test** — verify all four placeholders are present:
 ```bash
-grep -E '\{tile_id\}|\{orbit_direction_s1t\}|\{date_start\}|\{date_end\}' \
-  config/S1GRD_RTC_template.cfg | wc -l
-# expect 4
+test -f "$S1T_WORKDIR/config/S1GRD_RTC.cfg" \
+  && grep -q '^\[Paths\]' "$S1T_WORKDIR/config/S1GRD_RTC.cfg" \
+  && grep -q 'gamma_naught_rtc' "$S1T_WORKDIR/config/S1GRD_RTC.cfg" \
+  && echo "OK: S1GRD_RTC.cfg in workdir"
 ```
-
-Commit:
-```bash
-git add config/S1GRD_RTC_template.cfg
-git commit -m "chore: add S1GRD RTC config template for run_s1tiling.py"
-```
-
-> If Emmanuel's template differs from the above, use his version — the placeholders above
-> are the contract that Script A depends on.
 
 **P5 — Test S3 bucket + awscli**
 
@@ -292,7 +268,7 @@ aws --version   # must show aws-cli/2.x; install via: brew install awscli
 
 **Task 2** — obtain OVH S3 credentials (ask Emmanuel/team for the `esa-zarr-sentinel-explorer-tests` access key and secret). Then configure:
 ```bash
-aws configure --profile ovh-tests
+aws configure --profile eopfexplorer
 # AWS Access Key ID:     <ovh-access-key>
 # AWS Secret Access Key: <ovh-secret-key>
 # Default region name:   de           (or leave blank)
@@ -308,9 +284,20 @@ export AWS_SECRET_ACCESS_KEY=<ovh-secret-key>
 **Smoke-test** — verify bucket is accessible before starting Sub-issue A:
 ```bash
 aws s3 ls s3://esa-zarr-sentinel-explorer-tests/ \
-  --endpoint-url https://s3.de.io.cloud.ovh.net [--profile ovh-tests]
+  --endpoint-url https://s3.de.io.cloud.ovh.net --profile eopfexplorer
 # expect: list of prefixes or empty output (no "Access Denied")
 ```
+
+**P6 — Unblock data-model ingestion functions (prerequisite for Sub-issue 2)**
+
+**Do:** Ask Emmanuel which data-model tag contains Phase 2–3 (`s1_ingest` module). Bump
+`pyproject.toml` to pin it and install:
+```bash
+pip install "eopf-geozarr @ git+https://github.com/EOPF-Explorer/data-model@<tag>"
+python -c "from eopf_geozarr.conversion import s1_ingest; print('ok')"
+```
+
+> Current installed version is v0.9.0 — `s1_ingest` is absent from it.
 
 ---
 
@@ -333,10 +320,10 @@ python scripts/run_s1tiling.py \
   --s3-bucket        esa-zarr-sentinel-explorer-tests \
   --s3-prefix        s1tiling-output \
   --s3-endpoint      https://s3.de.io.cloud.ovh.net \
-  --eodag-cfg        ~/.config/eodag/eodag.yml \
-  --dem-dir          ~/s1tiling/dem/SRTM_30_hgt \
-  --data-dir         ~/s1tiling/data \
-  --cfg-template     config/S1GRD_RTC_template.cfg \
+  --eodag-cfg        "$S1T_WORKDIR/config/eodag.yml" \
+  --dem-dir          "$S1T_WORKDIR/DEM/SRTM_30_hgt" \
+  --data-dir         "$S1T_WORKDIR" \
+  --cfg              config/S1GRD_RTC.cfg \
   [--dry-run]
 ```
 
@@ -345,31 +332,27 @@ python scripts/run_s1tiling.py \
 **Behaviour** (≤ 60 lines of logic):
 
 ```
-1. Convert --orbit-direction: "descending" → "DES", "ascending" → "ASC"
-2. Fill config template: {tile_id}, {orbit_direction_s1t} (DES/ASC), {date_start}, {date_end}
-3. Write filled config to a temp file
-4. docker run \
+1. Ensure $S1T_WORKDIR/config/S1GRD_RTC.cfg matches the --cfg source (copy if needed)
+2. docker run \
      -v {abs_data_dir}:/data \
      -v {abs_dem_dir}:/MNT/SRTM_30_hgt \
      -v {abs_eodag_cfg}:/eo_config/eodag.yml:ro \
-     -v {abs_tmp_cfg}:/config/run.cfg:ro \
-     -v {abs_patch}:/patches/eodag_patch.py:ro \
-     -e PYTHONSTARTUP=/patches/eodag_patch.py \
-     registry.orfeo-toolbox.org/s1tiling/s1tiling:1.4.0 \
-     /config/run.cfg
+     -v {abs_patch_dir}:/patch \
+     -e ... \
+     registry.orfeo-toolbox.org/s1-tiling/s1tiling:1.4.0-ubuntu-otb9.1.1 \
+     --entrypoint bash -c 'python3 /patch/s1tiling_eodag4_patch.py && S1Processor /data/config/S1GRD_RTC.cfg'
    # IMPORTANT: docker options (-v, -e) must come BEFORE the image name.
    # All mount paths must be absolute — use os.path.abspath() to expand ~ and relative refs.
    # Patch injected unconditionally — safe whether or not it's already in the image (see P3)
-5. On success: aws s3 sync {abs_data_dir}/data_out/{tile_id}/ \
+3. On success: aws s3 sync {abs_data_dir}/data_out/{tile_id}/ \
                  s3://{bucket}/{prefix}/{tile_id}/{orbit}/{date_start}/ \
-                 --endpoint-url {s3_endpoint} [--profile ovh-tests]
+                 --endpoint-url {s3_endpoint} --profile eopfexplorer
               aws s3 sync {abs_data_dir}/data_gamma_area/ \
                  s3://{bucket}/{prefix}/{tile_id}/{orbit}/{date_start}/ \
-                 --endpoint-url {s3_endpoint} [--profile ovh-tests]
+                 --endpoint-url {s3_endpoint} --profile eopfexplorer
               # ↑ conditions synced INTO the same prefix as acquisitions so
               #   discover_s1tiling_conditions(prefix) finds them (see C1 fix)
-              # Pass --profile if credentials are in ~/.aws/credentials under a named profile.
-6. Print: s3://{bucket}/{prefix}/{tile_id}/{orbit}/{date_start}/
+4. Print: s3://{bucket}/{prefix}/{tile_id}/{orbit}/{date_start}/
 ```
 
 where `{orbit}` is the lowercase full word (`descending`/`ascending`) — consistent with
@@ -391,7 +374,7 @@ s3://esa-zarr-sentinel-explorer-tests/s1tiling-output/31TCH/descending/2025-02-0
 - [ ] All files present under the same S3 prefix; GeoTIFFs readable with rasterio (10980×10980)
 - [ ] Script exits non-zero if Docker fails
 
-**Depends on**: Prerequisites P1–P5
+**Depends on**: Prerequisites P1–P6
 **Blocks**: Sub-issue 4, Sub-issue 10
 
 ---
@@ -603,10 +586,10 @@ python scripts/run_s1tiling.py \
   --date-start 2025-02-01 --date-end 2025-02-14 \
   --s3-bucket esa-zarr-sentinel-explorer-tests --s3-prefix s1tiling-output \
   --s3-endpoint https://s3.de.io.cloud.ovh.net \
-  --eodag-cfg ~/.config/eodag/eodag.yml \
-  --dem-dir ~/s1tiling/dem/SRTM_30_hgt \
-  --data-dir ~/s1tiling/data \
-  --cfg-template config/S1GRD_RTC_template.cfg
+  --eodag-cfg "$S1T_WORKDIR/config/eodag.yml" \
+  --dem-dir "$S1T_WORKDIR/DEM/SRTM_30_hgt" \
+  --data-dir "$S1T_WORKDIR" \
+  --cfg config/S1GRD_RTC.cfg
 
 # Script A prints: s3://esa-zarr-sentinel-explorer-tests/s1tiling-output/31TCH/descending/2025-02-01/
 
@@ -944,7 +927,7 @@ Until confirmed, document the chosen approach here before implementing Sub-issue
 
 | # | Deliverable | Mirrors | Can start | Blocks |
 |---|-------------|---------|-----------|--------|
-| P1–P5 | CDSE account, DEM, Docker, config template, test bucket + awscli | — | now | A |
+| P1–P6 | CDSE account, DEM, Docker, config, test bucket + awscli, data-model unblock | — | now | A, 2 |
 | **A** | `scripts/run_s1tiling.py` | Argo Workflow 1 | after P1–P5 | 4, 10 |
 | **B** | `scripts/run_ingest_register.py` | Argo Workflow 2 | after 2, 3 | 4, 10 |
 | 1 | data-model STAC builder + pyproject.toml pin bump | — | **now** | 3, B |
