@@ -135,16 +135,31 @@ Download source — NASA Earthdata (free account required, same as CDSE signup):
 mkdir -p ~/s1tiling/dem/SRTM_30_hgt
 cd ~/s1tiling/dem/SRTM_30_hgt
 
-# One-liner using wget + netrc (set up ~/.netrc with Earthdata creds once):
-#   machine urs.earthdata.nasa.gov login <user> password <password>
-BASE=https://e4ftl01.cr.usgs.gov/MEASURES/SRTMGL1.003/2000.02.11
+# SRTMGL1 v003 is on NASA Earthdata Cloud (LP DAAC). The old USGS pool
+#   https://e4ftl01.cr.usgs.gov/MEASURES/SRTMGL1.003/2000.02.11/…
+# returns **404** for these objects — use `data.lpdaac.earthdatacloud.nasa.gov` instead.
+#
+# Auth (Earthdata Login — free): LP DAAC recommends `~/.wgetrc` for HTTPS downloads:
+#   https://github.com/nasa/LPDAAC-Data-Resources/blob/main/guides/bulk_download_using_wget.md
+# Create ~/.wgetrc with:
+#   http_user = YOUR_USER
+#   http_password = YOUR_PASS
+# then: chmod og-rw ~/.wgetrc
+# (Do not commit ~/.wgetrc.)
+#
+# Granule URL shape from CMR: …/SRTMGL1.003/<tile>.SRTMGL1.hgt/<tile>.SRTMGL1.hgt.zip
+CLOUD=https://data.lpdaac.earthdatacloud.nasa.gov/lp-prod-protected/SRTMGL1.003
 for tile in N41W003 N41W002 N41W001 N41E000 N41E001 N41E002 N41E003 N41E004 \
             N42W003 N42W002 N42W001 N42E000 N42E001 N42E002 N42E003 N42E004 \
             N43W003 N43W002 N43W001 N43E000 N43E001 N43E002 N43E003 N43E004; do
-  wget -q --netrc "$BASE/${tile}.SRTMGL1.hgt.zip" -O "${tile}.SRTMGL1.hgt.zip" \
+  echo "Fetching ${tile} …"
+  url="${CLOUD}/${tile}.SRTMGL1.hgt/${tile}.SRTMGL1.hgt.zip"
+  wget -4 -S -O "${tile}.SRTMGL1.hgt.zip" "$url" \
     && unzip -qo "${tile}.SRTMGL1.hgt.zip" && rm "${tile}.SRTMGL1.hgt.zip" || true
 done
 ```
+
+(`-4` forces IPv4 if connect hangs on IPv6. `-S` prints HTTP headers. For wire trace, add `--debug`. If `wget` reports auth errors, confirm `~/.wgetrc` and [pre-authorized LP DAAC / Earthdata applications](https://urs.earthdata.nasa.gov/documentation/for_users/how_to_preauth_app) for your account.)
 
 > Some tiles may be ocean-only and absent from the SRTM catalogue — `|| true` skips them.
 > Ask Emmanuel if he has a pre-downloaded set; prefer that over re-downloading.
@@ -160,14 +175,15 @@ Two tasks: (a) pull the image, (b) create and commit the EODAG 4.0 patch file.
 
 **(a) Pull image:**
 ```bash
-docker pull registry.orfeo-toolbox.org/s1tiling/s1tiling:1.4.0
+docker pull cnes/s1tiling:1.4.1-ubuntu-otb9.1.1
 ```
 
 Check the EODAG version bundled in the image — this determines whether the patch is already
-applied or still needed at runtime:
+applied or still needed at runtime. The image uses `S1Processor` as `ENTRYPOINT`, so override
+it to run Python (on Apple Silicon, add `--platform linux/amd64` if the image is amd64-only):
 ```bash
-docker run --rm registry.orfeo-toolbox.org/s1tiling/s1tiling:1.4.0 \
-  python -c "import eodag; print(eodag.__version__)"
+docker run --rm --entrypoint python cnes/s1tiling:1.4.1-ubuntu-otb9.1.1 \
+  -c "import eodag; print(eodag.__version__)"
 # < 4.0.0 → patch still needed; ≥ 4.0.0 → already handled, confirm with Emmanuel
 ```
 
