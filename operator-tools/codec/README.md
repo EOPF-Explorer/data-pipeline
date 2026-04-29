@@ -38,6 +38,23 @@ After `--quick`, verify the codec chain:
 uv run operator-tools/codec/check_zarr_codecs.py codec_probe.zarr/b02
 ```
 
+### `validate_conversion.ipynb`
+Sanity-checks a conversion by comparing the original Zarr V2 store against the converted Zarr V3 (GeoZarr) store.
+
+Checks performed:
+1. Structure inspection of both stores
+2. Data-type and shape comparison per band / resolution
+3. Value statistics (mean, std, min, max, p5, p95) for key bands
+4. Side-by-side false-colour RGB visualisation (B04/B03/B02)
+5. Pixel-level difference map and histogram
+
+```bash
+# Open the notebook (paths default to the repo-root scene used for --quick):
+uv run jupyter lab operator-tools/codec/validate_conversion.ipynb
+```
+
+Edit `SCENE_STEM` at the top of the notebook to point to a different scene.
+
 ### `check_zarr_codecs.py`
 Reads `zarr.json` from a local path or S3 URL and prints the dtype + codec chain.
 
