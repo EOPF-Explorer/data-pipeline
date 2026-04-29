@@ -63,8 +63,13 @@ def print_codec_summary(meta: dict) -> None:
             inner = codec.get("configuration", {}).get("codecs", [])
             print(f"  └─ inner codecs: {[c.get('name') for c in inner]}")
 
-    has_scale_offset = any(c.get("name") == "scale_offset" for c in codecs)
-    has_cast_value = any(c.get("name") == "cast_value" for c in codecs)
+    all_codecs = list(codecs)
+    for codec in codecs:
+        if codec.get("name") == "sharding_indexed":
+            all_codecs.extend(codec.get("configuration", {}).get("codecs", []))
+
+    has_scale_offset = any(c.get("name") == "scale_offset" for c in all_codecs)
+    has_cast_value = any(c.get("name") == "cast_value" for c in all_codecs)
     print()
     print(f"scale_offset codec: {'✓ YES' if has_scale_offset else '✗ NO'}")
     print(f"cast_value codec:   {'✓ YES' if has_cast_value else '✗ NO'}")

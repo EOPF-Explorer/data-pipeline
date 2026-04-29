@@ -169,9 +169,19 @@ def main() -> int:
         logger.info(f"🧹 Removing existing output: {output_path}")
         shutil.rmtree(output_path)
 
-    setup_dask_cluster(
+    client = setup_dask_cluster(
         enable_dask=True, verbose=True, n_workers=args.n_workers, memory_limit=args.memory_limit
     )
+    if client is not None:
+        # eopf_geozarr.__init__ doesn't import .codecs, so ScaleOffset is never registered
+        # in zarr's codec registry in fresh worker subprocesses without this plugin.
+        from dask.distributed import WorkerPlugin
+
+        class _EopfCodecsPlugin(WorkerPlugin):
+            def setup(self, _worker: object) -> None:
+                import eopf_geozarr.codecs  # noqa: F401  # pragma: no cover
+
+        client.register_worker_plugin(_EopfCodecsPlugin(), name="eopf-codecs")
 
     logger.info(f"📥 Loading input dataset: {source_path}")
     storage_options = get_storage_options(str(source_path))
