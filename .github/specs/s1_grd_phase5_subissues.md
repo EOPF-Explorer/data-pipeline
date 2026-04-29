@@ -122,59 +122,172 @@ uvx eodag search -p cop_dataspace -c S1_SAR_GRD \
 ```bash
 export S1T_WORKDIR="${S1T_WORKDIR:-$HOME/s1tiling}"
 mkdir -p "$S1T_WORKDIR"/{data_out,data_raw,data_gamma_area,tmp,eof,config}
-mkdir -p "$S1T_WORKDIR"/DEM/SRTM_30_hgt
+mkdir -p "$S1T_WORKDIR"/DEM/COP_DEM_GLO30
+mkdir -p "$S1T_WORKDIR"/DEM/dem_db
+mkdir -p "$S1T_WORKDIR"/geoid
 ```
 
-S1Tiling needs SRTM 1-arcsec (30 m) HGT tiles covering the **full S1 IW swath** — not just
-the MGRS tile. For 31TCH the swath extends to 41–44°N, 3°W–5°E (Phase 0 finding): 24 tiles.
+S1Tiling needs Copernicus DEM GLO-30 COG GeoTIFF tiles covering the **full S1 IW swath** —
+not just the MGRS tile. For 31TCH the swath extends to 41–44°N, 3°W–5°E (Phase 0 finding):
+~24 tiles. Copernicus DEM is open access — no authentication required.
 
-**Task**: download the tiles below to `$S1T_WORKDIR/DEM/SRTM_30_hgt/` (mounted in Docker at
-`/MNT/SRTM_30_hgt`).
+**Task**: download ~24 Copernicus DEM COG tiles covering the 31TCH swath (41–44°N, 3°W–5°E)
+to `$S1T_WORKDIR/DEM/COP_DEM_GLO30/` (mounted in Docker at `/MNT/COP_DEM_GLO30`).
 
-Tile list (SW corner of each 1°×1° cell):
-```
-N41W003 N41W002 N41W001 N41E000 N41E001 N41E002 N41E003 N41E004
-N42W003 N42W002 N42W001 N42E000 N42E001 N42E002 N42E003 N42E004
-N43W003 N43W002 N43W001 N43E000 N43E001 N43E002 N43E003 N43E004
-```
-
-Download source — NASA Earthdata (free account required, same as CDSE signup):
 ```bash
-mkdir -p "$S1T_WORKDIR/DEM/SRTM_30_hgt"
-cd "$S1T_WORKDIR/DEM/SRTM_30_hgt"
+# Download ~24 Copernicus DEM COG tiles covering the 31TCH swath (41–44°N, 3°W–5°E)
+# Uses eodag with the earth_search provider (Element84 / AWS) — no authentication required
+mkdir -p "$S1T_WORKDIR/DEM/COP_DEM_GLO30"
+cd "$S1T_WORKDIR/DEM/COP_DEM_GLO30"
 
-# SRTMGL1 v003 is on NASA Earthdata Cloud (LP DAAC). The old USGS pool
-#   https://e4ftl01.cr.usgs.gov/MEASURES/SRTMGL1.003/2000.02.11/…
-# returns **404** for these objects — use `data.lpdaac.earthdatacloud.nasa.gov` instead.
-#
-# Auth (Earthdata Login — free): LP DAAC recommends `~/.wgetrc` for HTTPS downloads:
-#   https://github.com/nasa/LPDAAC-Data-Resources/blob/main/guides/bulk_download_using_wget.md
-# Create ~/.wgetrc with:
-#   http_user = YOUR_USER
-#   http_password = YOUR_PASS
-# then: chmod og-rw ~/.wgetrc
-# (Do not commit ~/.wgetrc.)
-#
-# Granule URL shape from CMR: …/SRTMGL1.003/<tile>.SRTMGL1.hgt/<tile>.SRTMGL1.hgt.zip
-CLOUD=https://data.lpdaac.earthdatacloud.nasa.gov/lp-prod-protected/SRTMGL1.003
-for tile in N41W003 N41W002 N41W001 N41E000 N41E001 N41E002 N41E003 N41E004 \
-            N42W003 N42W002 N42W001 N42E000 N42E001 N42E002 N42E003 N42E004 \
-            N43W003 N43W002 N43W001 N43E000 N43E001 N43E002 N43E003 N43E004; do
-  echo "Fetching ${tile} …"
-  url="${CLOUD}/${tile}.SRTMGL1.hgt/${tile}.SRTMGL1.hgt.zip"
-  wget -4 -S -O "${tile}.SRTMGL1.hgt.zip" "$url" \
-    && unzip -qo "${tile}.SRTMGL1.hgt.zip" && rm "${tile}.SRTMGL1.hgt.zip" || true
+# Step 1: search and save results (earth_search uses public AWS S3, no credentials needed)
+uvx eodag search -p earth_search -c COP_DEM_GLO30_DGED \
+  --box -3 41 5 44 \
+  --all \
+  --storage dem_search
+
+# Creates dem_search.geojson in current directory
+
+# Step 2: download tiles via HTTPS
+# (earth_search assets have s3:// hrefs — eodag download requires boto3 anonymous S3 access,
+#  which is not set up by default. Convert to HTTPS instead; the bucket is public.)
+# (still in $S1T_WORKDIR/DEM/COP_DEM_GLO30)
+python3 <<'PYEOF'
+import json, os, time, urllib.request, urllib.error
+features = json.load(open("dem_search.geojson"))["features"]
+for f in features:
+    href = f["assets"]["tif"]["href"]
+    url = href.replace("s3://copernicus-dem-30m/", "https://copernicus-dem-30m.s3.amazonaws.com/")
+    name = os.path.basename(url)
+    if os.path.exists(name) and os.path.getsize(name) > 0:
+        print(f"Skipping {name} (already exists)")
+        continue
+    for attempt in range(1, 4):
+        try:
+            print(f"Downloading {name} (attempt {attempt}) ...")
+            urllib.request.urlretrieve(url, name)
+            break
+        except (urllib.error.URLError, OSError) as e:
+            print(f"  WARN attempt {attempt} failed: {e}")
+            if attempt < 3:
+                time.sleep(2 ** attempt)
+            else:
+                print(f"  SKIP {name} after 3 failures")
+PYEOF
+
+# Step 3: clean up and rename to match eotile's Product10 column convention
+#   Copernicus_DSM_COG_10_N41_00_W003_00_DEM.tif → Copernicus_DSM_10_N41_00_W003_00.tif
+# First: remove any 0-byte .tif files left by failed wget downloads (wget creates empty
+# files on 404 before the || catches the error)
+find . -name "*.tif" -empty -delete
+# Then: rename valid COG_ files (skip if already renamed)
+# (setopt nullglob prevents zsh error when no COG_ files remain)
+setopt nullglob 2>/dev/null; for f in Copernicus_DSM_COG_*.tif; do
+    [ -s "$f" ] || continue
+    newname=$(echo "$f" | sed 's/Copernicus_DSM_COG_/Copernicus_DSM_/' | sed 's/_DEM\.tif$/.tif/')
+    mv "$f" "$newname"
 done
+echo "Tiles after rename: $(ls Copernicus_DSM_10_*.tif 2>/dev/null | wc -l)"
 ```
 
-(`-4` forces IPv4 if connect hangs on IPv6. `-S` prints HTTP headers. For wire trace, add `--debug`. If `wget` reports auth errors, confirm `~/.wgetrc` and [pre-authorized LP DAAC / Earthdata applications](https://urs.earthdata.nasa.gov/documentation/for_users/how_to_preauth_app) for your account.)
+> **Rename required**: eodag (via AWS) delivers files with `COG_` and `_DEM` in the name, but
+> eotile's `Product10` column contains `Copernicus_DSM_10_N41_00_E000_00` (no `COG_`, no `_DEM`).
+> The rename above makes local filenames match what `dem_format = {Product10}.tif` resolves to.
 
-> Some tiles may be ocean-only and absent from the SRTM catalogue — `|| true` skips them.
-> Ask Emmanuel if he has a pre-downloaded set; prefer that over re-downloading.
+> **Why `earth_search` and not `cop_dataspace`?**
+> - `cop_dataspace` does **not** include `COP_DEM_GLO30_DGED` as a product type in eodag.
+> - The CDSE STAC browser (`browser.stac.dataspace.copernicus.eu`) shows the collection exists,
+>   but its S3 storage is either CDSE-authenticated or CREODIAS requester-pays — no free access.
+> - `earth_search` (Element84) indexes the same tiles via public AWS S3
+>   (`s3://copernicus-dem-30m`, `requester_pays: false`) — no credentials needed.
+
+**Add: obtain eotile GeoPackage database**
+S1-Tiling needs a GeoPackage (`dem_database`) that maps tile geometries to filenames. The `eotile` Python package bundles `DEM_Union.gpkg` for this purpose.
+
+```bash
+# On the host (not inside Docker)
+# Install eotile data-only (--no-deps avoids building fiona/GDAL from source)
+uv pip install eotile --no-deps --target /tmp/eotile_data -q
+python3 -c "
+import pathlib, shutil, os
+gpkg = next(pathlib.Path('/tmp/eotile_data').rglob('DEM_Union.gpkg'))
+dest = pathlib.Path(os.path.expandvars('\$S1T_WORKDIR/DEM/dem_db/DEM_Union.gpkg'))
+dest.parent.mkdir(parents=True, exist_ok=True)
+shutil.copy(gpkg, dest)
+print('Copied:', gpkg)
+"
+```
+
+> **Verify**: run the script below — uses stdlib `sqlite3` (no GDAL required):
+
+```bash
+python3 <<'PYEOF'
+import sqlite3, pathlib, os
+
+gpkg = pathlib.Path(os.path.expandvars("$S1T_WORKDIR/DEM/dem_db/DEM_Union.gpkg"))
+dem_dir = pathlib.Path(os.path.expandvars("$S1T_WORKDIR/DEM/COP_DEM_GLO30"))
+
+con = sqlite3.connect(gpkg)
+
+# Find the DEM table (any table with a Product10 column)
+tables = [r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+dem_table = next((t for t in tables
+                  if "Product10" in [c[1] for c in con.execute(f"PRAGMA table_info({t})")]), None)
+if not dem_table:
+    raise RuntimeError(f"No table with Product10 column found in {gpkg}. Tables: {tables}")
+print(f"Found table: {dem_table}")
+
+gpkg_products = {r[0] for r in con.execute(f"SELECT Product10 FROM {dem_table}") if r[0]}
+local_stems   = {p.stem for p in dem_dir.glob("Copernicus_DSM_10_*.tif")}
+
+missing_from_gpkg  = local_stems - gpkg_products
+missing_from_local = gpkg_products - local_stems
+
+print(f"GPKG entries : {len(gpkg_products)}")
+print(f"Local tiles  : {len(local_stems)}")
+if local_stems:
+    if missing_from_gpkg:
+        print(f"WARNING — local files not in GPKG ({len(missing_from_gpkg)}): {sorted(missing_from_gpkg)[:5]} ...")
+    if missing_from_local:
+        print(f"INFO    — GPKG entries with no local tile ({len(missing_from_local)}): {sorted(missing_from_local)[:5]} ...")
+    if not missing_from_gpkg:
+        print("OK: all local tiles have a matching Product10 entry in DEM_Union.gpkg")
+else:
+    print("ERROR: no local tiles found — download or rename step not done yet")
+PYEOF
+```
+>
+> **Known GPKG gap**: `N41E004` and `N42E004` are absent from eotile's `DEM_Union.gpkg`
+> (confirmed by inspection). S1-Tiling may skip DEM lookup for those cells. Confirm with
+> Emmanuel whether this affects the 31TCH swath before populating the PVC (Sub-issue 7a).
+
+**Add: obtain EGM2008 geoid file**
+S1-Tiling's `resources/Geoid/` directory ships only `egm96.grd` — **no EGM2008 file**.
+Emmanuel's reference config also still uses `egm96.grd` (written for SRTM).
+**Copernicus DEM requires EGM2008** (S1-Tiling docs: *"Make sure to use an EGM2008 model for Copernicus DEM files."*).
+
+**Step 1 — check whether OTB bundles EGM2008 inside the Docker image** (run with Docker available):
+
+```bash
+docker run --rm --entrypoint find \
+  registry.orfeo-toolbox.org/s1-tiling/s1tiling:1.4.0-ubuntu-otb9.1.1 \
+  /usr /opt -name "egm2008*" 2>/dev/null
+```
+
+- **If found** (e.g. `/usr/local/share/OTB/geoid/egm2008.grd`): set `geoid_file` to that in-image path — no bind-mount needed.
+- **If not found**: obtain the file from the OTB superbuild data archive (`OTBData.tar.gz`) or ask Emmanuel. The PROJ CDN file (`us_nga_egm08_25.tif`) is GeoTIFF format — OTB requires `.grd`.
+
+**Step 2 — if bind-mount is needed**:
+```bash
+mkdir -p "$S1T_WORKDIR/geoid"
+cp /path/to/egm2008.grd "$S1T_WORKDIR/geoid/egm2008.grd"
+```
 
 **Smoke-test** (expect ≥ 20 files):
 ```bash
-ls -1 "$S1T_WORKDIR/DEM/SRTM_30_hgt"/*.hgt | wc -l
+ls -1 "$S1T_WORKDIR/DEM/COP_DEM_GLO30"/*.tif | wc -l
+test -f "$S1T_WORKDIR/DEM/dem_db/DEM_Union.gpkg" && echo "OK: DEM_Union.gpkg present"
+test -f "$S1T_WORKDIR/geoid/egm2008.grd" && echo "OK: EGM2008 geoid present"
 ```
 
 **P3 — S1Tiling Docker image + EODAG patch file**
@@ -229,10 +342,15 @@ parameterized runs.
 
 **Task**:
 1. Save it as **`$S1T_WORKDIR/config/S1GRD_RTC.cfg`**. With `$S1T_WORKDIR` mounted at
-   `/data`, `S1Processor` reads `/data/config/S1GRD_RTC.cfg`. Paths inside the file must
-   stay consistent with the docker doc (`output` under `/data`, `dem_dir` → `/MNT/SRTM_30_hgt`,
-   `eodag_config` → `/eo_config/eodag.yml`, `geoid_file` on the **in-image** path from §4,
-   not under `/data`).
+   `/data`, `S1Processor` reads `/data/config/S1GRD_RTC.cfg`. Key DEM/geoid paths in the
+   file (Copernicus DEM keys):
+   - `dem_dir      : /MNT/COP_DEM_GLO30`
+   - `dem_database : /MNT/dem_db/DEM_Union.gpkg`
+   - `dem_format   : {Product10}.tif`
+   - `dem_info     : CopDEM GLO-30 30m`
+   - `geoid_file   : /MNT/geoid/egm2008.grd` (bind-mounted from host — see P2 EGM2008 step;
+     may resolve to an in-image OTB path if found there instead)
+   - `eodag_config : /eo_config/eodag.yml`
 2. **Optional but useful:** copy the same file into this repo as `config/S1GRD_RTC.cfg` and
    commit so `run_s1tiling.py` and reviewers share one pinned snapshot. When Emmanuel updates
    his file, replace and commit again.
@@ -254,6 +372,8 @@ mkdir -p config
 test -f "$S1T_WORKDIR/config/S1GRD_RTC.cfg" \
   && grep -q '^\[Paths\]' "$S1T_WORKDIR/config/S1GRD_RTC.cfg" \
   && grep -q 'gamma_naught_rtc' "$S1T_WORKDIR/config/S1GRD_RTC.cfg" \
+  && grep -q 'COP_DEM_GLO30' "$S1T_WORKDIR/config/S1GRD_RTC.cfg" \
+  && grep -q 'egm2008' "$S1T_WORKDIR/config/S1GRD_RTC.cfg" \
   && echo "OK: S1GRD_RTC.cfg in workdir"
 ```
 
@@ -321,7 +441,7 @@ python scripts/run_s1tiling.py \
   --s3-prefix        s1tiling-output \
   --s3-endpoint      https://s3.de.io.cloud.ovh.net \
   --eodag-cfg        "$S1T_WORKDIR/config/eodag.yml" \
-  --dem-dir          "$S1T_WORKDIR/DEM/SRTM_30_hgt" \
+  --dem-dir          "$S1T_WORKDIR/DEM/COP_DEM_GLO30" \
   --data-dir         "$S1T_WORKDIR" \
   --cfg              config/S1GRD_RTC.cfg \
   [--dry-run]
@@ -335,7 +455,9 @@ python scripts/run_s1tiling.py \
 1. Ensure $S1T_WORKDIR/config/S1GRD_RTC.cfg matches the --cfg source (copy if needed)
 2. docker run \
      -v {abs_data_dir}:/data \
-     -v {abs_dem_dir}:/MNT/SRTM_30_hgt \
+     -v {abs_dem_dir}:/MNT/COP_DEM_GLO30 \
+     -v {abs_dem_db}:/MNT/dem_db:ro \
+     -v {abs_geoid_dir}:/MNT/geoid:ro \
      -v {abs_eodag_cfg}:/eo_config/eodag.yml:ro \
      -v {abs_patch_dir}:/patch \
      -e ... \
@@ -344,6 +466,9 @@ python scripts/run_s1tiling.py \
    # IMPORTANT: docker options (-v, -e) must come BEFORE the image name.
    # All mount paths must be absolute — use os.path.abspath() to expand ~ and relative refs.
    # Patch injected unconditionally — safe whether or not it's already in the image (see P3)
+   # abs_dem_dir    = os.path.abspath(f"{data_dir}/DEM/COP_DEM_GLO30")
+   # abs_dem_db     = os.path.abspath(f"{data_dir}/DEM/dem_db")
+   # abs_geoid_dir  = os.path.abspath(f"{data_dir}/geoid")
 3. On success: aws s3 sync {abs_data_dir}/data_out/{tile_id}/ \
                  s3://{bucket}/{prefix}/{tile_id}/{orbit}/{date_start}/ \
                  --endpoint-url {s3_endpoint} --profile eopfexplorer
@@ -587,7 +712,7 @@ python scripts/run_s1tiling.py \
   --s3-bucket esa-zarr-sentinel-explorer-tests --s3-prefix s1tiling-output \
   --s3-endpoint https://s3.de.io.cloud.ovh.net \
   --eodag-cfg "$S1T_WORKDIR/config/eodag.yml" \
-  --dem-dir "$S1T_WORKDIR/DEM/SRTM_30_hgt" \
+  --dem-dir "$S1T_WORKDIR/DEM/COP_DEM_GLO30" \
   --data-dir "$S1T_WORKDIR" \
   --cfg config/S1GRD_RTC.cfg
 
@@ -796,13 +921,13 @@ Recommended approach:
 
 **DEM access in Argo — recommended approach: PersistentVolumeClaim (ReadOnlyMany)**
 
-S1Tiling expects the DEM at a fixed path (`/MNT/SRTM_30_hgt`). A PVC with `ReadOnlyMany`
+S1Tiling expects the DEM at a fixed path (`/MNT/COP_DEM_GLO30`). A PVC with `ReadOnlyMany`
 access mode mounts directly there without an init container or per-run S3 download.
 Multiple S1Tiling pods can read simultaneously with no contention.
 
 One-time setup (before Sub-issue 7):
 1. Create a PVC in the `devseed` namespace (e.g. `s1tiling-dem-pvc`, `ReadOnlyMany`, 5 Gi)
-2. Populate it with SRTM 30m HGT tiles for the tiles of interest (same set as P2)
+2. Populate it with Copernicus DEM GLO-30 COG GeoTIFF tiles for the tiles of interest (same set as P2)
 3. Mount in the Argo pod spec:
    ```yaml
    volumes:
@@ -813,7 +938,7 @@ One-time setup (before Sub-issue 7):
    containers:
      - volumeMounts:
          - name: dem
-           mountPath: /MNT/SRTM_30_hgt
+           mountPath: /MNT/COP_DEM_GLO30
            readOnly: true
    ```
 
@@ -832,7 +957,7 @@ Mount `analysis/s1tiling_eodag4_patch.py` as a ConfigMap and set
 **Repo**: `EOPF-Explorer/platform-deploy`
 
 One-time setup that must be done before Sub-issue 7 can be implemented. The S1Tiling pod
-expects DEM tiles at `/MNT/SRTM_30_hgt`; a `ReadOnlyMany` PVC is the recommended mount
+expects DEM tiles at `/MNT/COP_DEM_GLO30`; a `ReadOnlyMany` PVC is the recommended mount
 strategy (no per-run download, multiple pods can read concurrently).
 
 **Steps**:
@@ -849,14 +974,18 @@ strategy (no per-run download, multiple pods can read concurrently).
        requests:
          storage: 5Gi
    ```
-2. Populate from the same SRTM 30m HGT tiles used locally (P2 — same ~20 tiles for the
-   31TCH swath: 41–44°N, 3°W–5°E). Copy via a one-off pod or `kubectl cp`.
-3. Commit the PVC manifest to `workspaces/devseed-staging/data-pipeline/`.
+   Storage size stays 5 Gi (24 COG tiles ≈ 400–600 MB, fits comfortably).
+2. Populate from the Copernicus DEM GLO-30 COG GeoTIFF tiles used locally (P2 — same ~24
+   tiles for the 31TCH swath: 41–44°N, 3°W–5°E). Copy via a one-off pod or `kubectl cp`.
+   Use the renamed filenames (no `COG_` infix, no `_DEM` suffix — see P2 rename step).
+3. The eotile GPKG (`DEM_Union.gpkg`) and EGM2008 geoid should either go in the same PVC
+   or a separate small PVC/ConfigMap — coordinate with Emmanuel before populating.
+4. Commit the PVC manifest to `workspaces/devseed-staging/data-pipeline/`.
 
 **Acceptance criteria**:
 - [ ] PVC manifest committed and applied in `devseed` namespace; `kubectl get pvc s1tiling-dem-pvc -n devseed` shows `Bound`
-- [ ] Test pod mounts the PVC at `/MNT/SRTM_30_hgt` and lists ≥ 20 `.hgt` files covering the 31TCH swath
-- [ ] Coordinate with Emmanuel to confirm tile set is complete before populating
+- [ ] Test pod mounts the PVC at `/MNT/COP_DEM_GLO30` and lists ≥ 20 `.tif` files covering the 31TCH swath
+- [ ] Coordinate with Emmanuel to confirm tile set and GPKG/geoid strategy before populating
 
 **Depends on**: P2 (DEM tiles downloaded locally)
 **Blocks**: Sub-issue 7
