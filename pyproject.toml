@@ -30,7 +30,7 @@ dependencies = [
     "xarray==2026.4.0",
     "zarr==3.1.6",
     "s3fs==2026.3.0",
-    "click==8.3.2",
+    "click==8.3.3",
     "tenacity==9.1.4",
     "morecantile==7.0.3",
     "cf-xarray==0.10.11",
@@ -40,10 +40,10 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "ruff==0.15.10",
-    "mypy==1.20.1",
-    "pre-commit==4.5.1",
-    "types-boto3==1.42.89",
+    "ruff==0.15.11",
+    "mypy==1.20.2",
+    "pre-commit==4.6.0",
+    "types-boto3==1.42.94",
     "types-requests==2.33.0.20260327",
     "pip-audit==2.10.0",
 ]
