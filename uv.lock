@@ -355,19 +355,6 @@ filecache = [
 ]
 
 [[package]]
-name = "cast-value"
-version = "0.2.1"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "numpy" },
-    { name = "zarr" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/a1/80/d486892982a81ba344193c7bd29b85d3cb353375a2e13a2db2be59e34c62/cast_value-0.2.1.tar.gz", hash = "sha256:38173b6fc7e75aaf4f62bf7c46cd506309156a4b988a7ee4dd9f77569f410f1d", size = 99415, upload-time = "2026-04-02T19:26:47.088Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/59/b1/8a0793034fc781b092b2c7827115f5fe63175f985dc246d54d5ea2845353/cast_value-0.2.1-py3-none-any.whl", hash = "sha256:1b32e9cccbcac63210f41774942ef4dc92a3b2ddbbc0342642e0b114a373894c", size = 15571, upload-time = "2026-04-02T19:26:45.926Z" },
-]
-
-[[package]]
 name = "cast-value-rs"
 version = "0.4.0"
 source = { registry = "https://pypi.org/simple" }
@@ -794,7 +781,7 @@ dependencies = [
     { name = "s3fs" },
     { name = "tenacity" },
     { name = "xarray" },
-    { name = "zarr" },
+    { name = "zarr", extra = ["cast-value-rs"] },
 ]
 
 [package.dev-dependencies]
@@ -825,7 +812,7 @@ requires-dist = [
     { name = "boto3", specifier = "==1.42.89" },
     { name = "cf-xarray", specifier = "==0.10.11" },
     { name = "click", specifier = "==8.3.2" },
-    { name = "eopf-geozarr", git = "https://github.com/EOPF-Explorer/data-model.git?rev=c16bdb6aaa3fd97c06e115c6571f23a97aed2723" },
+    { name = "eopf-geozarr", git = "https://github.com/EOPF-Explorer/data-model.git?rev=bf18c531b882f765e352572adb55e0ef95334b75" },
     { name = "httpx", specifier = "==0.28.1" },
     { name = "morecantile", specifier = "==7.0.3" },
     { name = "pystac", specifier = "==1.14.3" },
@@ -834,7 +821,7 @@ requires-dist = [
     { name = "s3fs", specifier = "==2026.3.0" },
     { name = "tenacity", specifier = "==9.1.4" },
     { name = "xarray", specifier = "==2026.4.0" },
-    { name = "zarr", specifier = "==3.1.6" },
+    { name = "zarr", extras = ["cast-value-rs"], specifier = ">=3.2.0" },
 ]
 
 [package.metadata.requires-dev]
@@ -945,12 +932,10 @@ wheels = [
 [[package]]
 name = "eopf-geozarr"
 version = "0.8.0"
-source = { git = "https://github.com/EOPF-Explorer/data-model.git?rev=c16bdb6aaa3fd97c06e115c6571f23a97aed2723#c16bdb6aaa3fd97c06e115c6571f23a97aed2723" }
+source = { git = "https://github.com/EOPF-Explorer/data-model.git?rev=bf18c531b882f765e352572adb55e0ef95334b75#bf18c531b882f765e352572adb55e0ef95334b75" }
 dependencies = [
     { name = "aiohttp" },
     { name = "boto3" },
-    { name = "cast-value" },
-    { name = "cast-value-rs" },
     { name = "cf-xarray" },
     { name = "dask", extra = ["array", "distributed"] },
     { name = "numpy" },
@@ -962,7 +947,7 @@ dependencies = [
     { name = "structlog" },
     { name = "typing-extensions" },
     { name = "xarray" },
-    { name = "zarr" },
+    { name = "zarr", extra = ["cast-value-rs"] },
     { name = "zarr-cm" },
 ]
 
@@ -3702,7 +3687,7 @@ wheels = [
 
 [[package]]
 name = "zarr"
-version = "3.1.6"
+version = "3.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "donfig" },
@@ -3712,9 +3697,14 @@ dependencies = [
     { name = "packaging" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/31/5a/b8a0cf39a14c770c30bd1f2d120c54000c8cd9e84e8e79f38d9a7ce58071/zarr-3.1.6.tar.gz", hash = "sha256:d95e72cbea4b90e9a70679468b8266400331756232576ae2b43400ac5108d0eb", size = 386531, upload-time = "2026-03-23T17:25:18.748Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/db/27/8f391a4304f503ab6f4df6e1724380ea2e35e78a5d1ba973ba2b1347df5b/zarr-3.2.0.tar.gz", hash = "sha256:5867fa8dd7910541075531368c8eaa6f35957ab5413c68c168830e83948665ed", size = 454948, upload-time = "2026-04-30T22:18:03.074Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/de/7c/ba8ca8cbe9dbef8e83a95fc208fed8e6686c98b4719aaa0aa7f3d31fe390/zarr-3.1.6-py3-none-any.whl", hash = "sha256:b5a82c5079d1c3d4ee8f06746fa3b9a98a7d804300fa3f4be154362a33e1207e", size = 295655, upload-time = "2026-03-23T17:25:17.189Z" },
+    { url = "https://files.pythonhosted.org/packages/0b/9e/2e99d08824f300046eba83b480d6be17f771f57eed80dd7c162381cbe4de/zarr-3.2.0-py3-none-any.whl", hash = "sha256:c693bd4ae24328f242e47e9e1ced221e919d9f62cad71030fd059e398320e555", size = 318784, upload-time = "2026-04-30T22:18:01.13Z" },
+]
+
+[package.optional-dependencies]
+cast-value-rs = [
+    { name = "cast-value-rs" },
 ]
 
 [[package]]

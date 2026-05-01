@@ -1,5 +1,6 @@
 """Unit tests for S3 gateway format and alternate asset extension."""
 
+import pytest
 from pystac import Asset, Item
 
 from scripts.register_v1 import (
@@ -270,6 +271,13 @@ class TestRewriteAssetHrefs:
 
 class TestAddAlternateS3Assets:
     """Test add_alternate_s3_assets function."""
+
+    @pytest.fixture(autouse=True)
+    def mock_storage_class(self, monkeypatch):
+        """Prevent real S3 network calls in all tests in this class."""
+        import scripts.register_v1 as _reg
+
+        monkeypatch.setattr(_reg, "get_s3_storage_class", lambda *_args, **_kwargs: "STANDARD")
 
     def test_add_alternate_to_gateway_url(self):
         """Test adding alternate S3 URL to asset with gateway HTTPS URL."""

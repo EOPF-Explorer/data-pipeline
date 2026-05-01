@@ -74,7 +74,7 @@ def run_conversion(
     spatial_chunk: int | None = None,
     compression_level: int | None = None,
     enable_sharding: bool | None = None,
-    use_dask_cluster: bool = False,
+    use_dask_cluster: bool = DEFAULT_DASK_CLUSTER,
     validate_output: bool | None = None,
     experimental_scale_offset_codec: bool = False,
     n_workers: int = 3,
@@ -87,7 +87,7 @@ def run_conversion(
         collection: Collection ID (for output path)
         s3_output_bucket: S3 bucket for output
         s3_output_prefix: S3 prefix for output
-        spatial_chunk: Override spatial chunk size (default: 512)
+        spatial_chunk: Override spatial chunk size (default: 256)
         compression_level: Compression level 1-9 (default: 3)
         enable_sharding: Enable sharding (default: True)
         use_dask_cluster: Use dask cluster for parallel processing
@@ -116,7 +116,7 @@ def run_conversion(
     validate_output = validate_output if validate_output is not None else DEFAULT_VALIDATE_OUTPUT
 
     logger.info(
-        f"   Parameters: chunk={spatial_chunk}, compression={compression_level}, sharding={enable_sharding}, dask={use_dask_cluster}, validate={validate_output}"
+        f"   Parameters: chunk={spatial_chunk}, compression={compression_level}, sharding={enable_sharding}, dask={use_dask_cluster}, validate={validate_output}, scale_offset_codec={experimental_scale_offset_codec}"
     )
 
     # Construct output path and clean existing
@@ -132,7 +132,7 @@ def run_conversion(
     except Exception as e:
         logger.warning(f"   ⚠️  Cleanup warning: {e}")
 
-    setup_dask_cluster(
+    client = setup_dask_cluster(
         enable_dask=use_dask_cluster, verbose=True, n_workers=n_workers, memory_limit=memory_limit
     )
 
@@ -186,17 +186,20 @@ def run_conversion(
         storage_options=storage_options,
     )
 
-    # Run S2 optimized conversion
-    convert_s2_optimized(
-        dt_input=dt_input,
-        output_path=output_url,
-        spatial_chunk=spatial_chunk,
-        compression_level=compression_level,
-        enable_sharding=enable_sharding,
-        validate_output=validate_output,
-        keep_scale_offset=False,
-        experimental_scale_offset_codec=experimental_scale_offset_codec,
-    )
+    try:
+        convert_s2_optimized(
+            dt_input=dt_input,
+            output_path=output_url,
+            spatial_chunk=spatial_chunk,
+            compression_level=compression_level,
+            enable_sharding=enable_sharding,
+            validate_output=validate_output,
+            keep_scale_offset=False,
+            experimental_scale_offset_codec=experimental_scale_offset_codec,
+        )
+    finally:
+        if client is not None:
+            client.close()
 
     logger.info(f"✅ Conversion complete → {output_url}")
     return output_url
