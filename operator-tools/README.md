@@ -292,11 +292,11 @@ When you encounter issues with collection operations, **always start by examinin
 
 ```bash
 # 1. Identify a problematic item from collection operation output
-python manage_collections.py clean test-coll --clean-s3 -y
+uv run python manage_collections.py clean test-coll --clean-s3 -y
 # Output shows: "⚠️  Item S2A_MSIL2A_... skipped due to S3 failures"
 
 # 2. Debug that specific item
-python manage_item.py info test-coll S2A_MSIL2A_... --s3-stats --debug
+uv run python manage_item.py info test-coll S2A_MSIL2A_... --s3-stats --debug
 
 # This shows:
 # - Exact S3 URLs extracted from the item
@@ -305,10 +305,10 @@ python manage_item.py info test-coll S2A_MSIL2A_... --s3-stats --debug
 # - Any extraction or access issues
 
 # 3. Test deletion on single item
-python manage_item.py delete test-coll S2A_MSIL2A_... --clean-s3 --dry-run
+uv run python manage_item.py delete test-coll S2A_MSIL2A_... --clean-s3 --dry-run
 
 # 4. If dry-run looks good, actually delete
-python manage_item.py delete test-coll S2A_MSIL2A_... --clean-s3 -y
+uv run python manage_item.py delete test-coll S2A_MSIL2A_... --clean-s3 -y
 ```
 
 ### Step 2: Scale to Collection
@@ -317,22 +317,22 @@ Once individual items work correctly, apply to the entire collection:
 
 ```bash
 # Preview collection operation
-python manage_collections.py clean test-coll --clean-s3 --dry-run
+uv run python manage_collections.py clean test-coll --clean-s3 --dry-run
 
 # Execute if preview looks good
-python manage_collections.py clean test-coll --clean-s3 -y
+uv run python manage_collections.py clean test-coll --clean-s3 -y
 ```
 
 ### When to Use Each Tool
 
 | Tool | Use When | Example |
 |------|----------|---------|
-| `manage_item.py` | Debugging single items | `python manage_item.py info coll-id item-id --debug` |
-| `manage_item.py` | Testing operations on one item | `python manage_item.py delete coll-id item-id --dry-run` |
-| `manage_item.py` | Investigating S3 issues | `python manage_item.py info coll-id item-id --s3-stats` |
-| `manage_collections.py` | Viewing collection statistics | `python manage_collections.py info coll-id --s3-stats` |
-| `manage_collections.py` | Batch operations on all items | `python manage_collections.py clean coll-id --clean-s3 -y` |
-| `manage_collections.py` | Collection lifecycle management | `python manage_collections.py create/delete` |
+| `manage_item.py` | Debugging single items | `uv run python manage_item.py info coll-id item-id --debug` |
+| `manage_item.py` | Testing operations on one item | `uv run python manage_item.py delete coll-id item-id --dry-run` |
+| `manage_item.py` | Investigating S3 issues | `uv run python manage_item.py info coll-id item-id --s3-stats` |
+| `manage_collections.py` | Viewing collection statistics | `uv run python manage_collections.py info coll-id --s3-stats` |
+| `manage_collections.py` | Batch operations on all items | `uv run python manage_collections.py clean coll-id --clean-s3 -y` |
+| `manage_collections.py` | Collection lifecycle management | `uv run python manage_collections.py create/delete` |
 
 ### Benefits of This Workflow
 

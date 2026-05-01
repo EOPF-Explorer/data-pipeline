@@ -893,7 +893,7 @@ uv run operator-tools/manage_collections.py --help
 
 ### Invalid JSON Template
 
-- Validate JSON syntax: `python -m json.tool < stac/template.json`
+- Validate JSON syntax: `uv run python -m json.tool < stac/template.json`
 - Ensure required fields (`id`, `type`) are present
 - Check that `type` is set to "Collection"
 
