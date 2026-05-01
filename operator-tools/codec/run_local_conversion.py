@@ -1,33 +1,30 @@
 #!/usr/bin/env python3
-"""Local debug wrapper: converts a local .zarr store to GeoZarr, output stored locally.
+"""Convert a local .zarr store to GeoZarr with output stored locally.
 
-Calls convert_s2_optimized() directly so no S3 credentials are needed for output.
-
-Pass --quick to do a fast codec probe instead of a full conversion:
-  - Opens only measurements/reflectance/r10m from the source
-  - Slices to the first QUICK_TILE_SIZE×QUICK_TILE_SIZE pixels
-  - Writes a minimal zarr using create_measurements_encoding() directly
-  - Prints the zarr.json codec chain  (~seconds instead of minutes)
+Calls convert_s2_optimized() directly (no S3 credentials required for output). With
+``--quick``, runs a fast codec probe: opens only measurements/reflectance/r10m, slices
+to the first QUICK_TILE_SIZE×QUICK_TILE_SIZE pixels, writes a minimal zarr via
+create_measurements_encoding(), and prints the zarr.json codec chain (seconds instead
+of minutes).
 
 Usage
 -----
-# Fast codec probe (seconds) — writes ./codec_probe.zarr:
-    python scripts/run_local_conversion.py \
+# Fast codec probe (seconds; writes ./codec_probe.zarr):
+    uv run python operator-tools/codec/run_local_conversion.py \
         S2C_MSIL2A_20260427T101021_N0512_R022_T33UWT_20260427T151616.zarr \
         --quick
 
 # Fast probe with a custom output directory:
-    python scripts/run_local_conversion.py path/to/scene.zarr --quick --output-dir /tmp
+    uv run python operator-tools/codec/run_local_conversion.py path/to/scene.zarr \
+        --quick --output-dir /tmp
 
-# Full local conversion — writes ./<stem>_converted.zarr:
-    python scripts/run_local_conversion.py \
+# Full local conversion (writes ./<stem>_converted.zarr):
+    uv run python operator-tools/codec/run_local_conversion.py \
         S2C_MSIL2A_20260427T101021_N0512_R022_T33UWT_20260427T151616.zarr
 
 # Full conversion with more workers and a custom output directory:
-    python scripts/run_local_conversion.py path/to/scene.zarr \
+    uv run python operator-tools/codec/run_local_conversion.py path/to/scene.zarr \
         --n-workers 4 --memory-limit 16Gi --output-dir /tmp
-
-DELETE this script once the scale-offset codec bug is root-caused (see plan).
 """
 
 from __future__ import annotations
@@ -169,19 +166,9 @@ def main() -> int:
         logger.info(f"🧹 Removing existing output: {output_path}")
         shutil.rmtree(output_path)
 
-    client = setup_dask_cluster(
+    setup_dask_cluster(
         enable_dask=True, verbose=True, n_workers=args.n_workers, memory_limit=args.memory_limit
     )
-    if client is not None:
-        # eopf_geozarr.__init__ doesn't import .codecs, so ScaleOffset is never registered
-        # in zarr's codec registry in fresh worker subprocesses without this plugin.
-        from dask.distributed import WorkerPlugin
-
-        class _EopfCodecsPlugin(WorkerPlugin):
-            def setup(self, _worker: object) -> None:
-                import eopf_geozarr.codecs  # noqa: F401  # pragma: no cover
-
-        client.register_worker_plugin(_EopfCodecsPlugin(), name="eopf-codecs")
 
     logger.info(f"📥 Loading input dataset: {source_path}")
     storage_options = get_storage_options(str(source_path))

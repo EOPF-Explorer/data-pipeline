@@ -135,16 +135,6 @@ def run_conversion(
     client = setup_dask_cluster(
         enable_dask=use_dask_cluster, verbose=True, n_workers=n_workers, memory_limit=memory_limit
     )
-    if client is not None and experimental_scale_offset_codec:
-        # eopf_geozarr.__init__ doesn't import .codecs, so ScaleOffset is never registered
-        # in zarr's codec registry in fresh worker subprocesses without this plugin.
-        from dask.distributed import WorkerPlugin
-
-        class _EopfCodecsPlugin(WorkerPlugin):
-            def setup(self, worker: object) -> None:  # noqa: ARG002
-                import eopf_geozarr.codecs  # noqa: F401  # pragma: no cover
-
-        client.register_plugin(_EopfCodecsPlugin(), name="eopf-codecs")
 
     # Load input dataset
     logger.info(f"{'   📥 Loading input dataset '}{zarr_url}")
