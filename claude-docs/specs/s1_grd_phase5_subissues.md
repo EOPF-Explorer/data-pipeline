@@ -125,6 +125,8 @@ mkdir -p "$S1T_WORKDIR"/{data_out,data_raw,data_gamma_area,tmp,eof,config}
 mkdir -p "$S1T_WORKDIR"/DEM/COP_DEM_GLO30
 mkdir -p "$S1T_WORKDIR"/DEM/dem_db
 mkdir -p "$S1T_WORKDIR"/geoid
+# Persist across shell sessions (run once):
+echo 'export S1T_WORKDIR="$HOME/s1tiling"' >> ~/.zshrc
 ```
 
 S1Tiling needs Copernicus DEM GLO-30 COG GeoTIFF tiles covering the **full S1 IW swath** —
@@ -141,7 +143,8 @@ mkdir -p "$S1T_WORKDIR/DEM/COP_DEM_GLO30"
 cd "$S1T_WORKDIR/DEM/COP_DEM_GLO30"
 
 # Step 1: search and save results (earth_search uses public AWS S3, no credentials needed)
-uvx eodag search -p earth_search -c COP_DEM_GLO30_DGED \
+
+uvx eodag@4.1.0 search -p earth_search -c COP_DEM_GLO30_DGED \
   --box -3 41 5 44 \
   --all \
   --storage dem_search
@@ -218,6 +221,9 @@ print('Copied:', gpkg)
 "
 ```
 
+> **Confirmed complete**: `DEM_Union.gpkg` populated — 17 MB, 26 470 entries (2026-05-01).
+> Note: `N41E004` and `N42E004` tiles are absent from the GPKG (see Known GPKG gap below).
+
 > **Verify**: run the script below — uses stdlib `sqlite3` (no GDAL required):
 
 ```bash
@@ -274,13 +280,37 @@ docker run --rm --entrypoint find \
   /usr /opt -name "egm2008*" 2>/dev/null
 ```
 
-- **If found** (e.g. `/usr/local/share/OTB/geoid/egm2008.grd`): set `geoid_file` to that in-image path — no bind-mount needed.
-- **If not found**: obtain the file from the OTB superbuild data archive (`OTBData.tar.gz`) or ask Emmanuel. The PROJ CDN file (`us_nga_egm08_25.tif`) is GeoTIFF format — OTB requires `.grd`.
+**Confirmed: NOT in the 1.4.0 image** — `find` returns nothing. The bind-mount path is
+required.
 
-**Step 2 — if bind-mount is needed**:
+The OTB superbuild `.grd` format is a big-endian binary grid:
+6× float32 header `[lat_min, lat_max, lon_min, lon_max, dlat, dlon]` followed by float32
+geoid undulations in north→south, west→east order.
+
+**Conversion from GeographicLib EGM2008 PGM** (no OTB superbuild archive needed):
+```bash
+# 1. Download 1-arcmin EGM2008 PGM from GeographicLib (~445 MB):
+#    https://sourceforge.net/projects/geographiclib/files/geoids-distrib/egm2008-1.zip/download
+#    Unzip to ~/Downloads/geoids/egm2008-1.pgm
+
+# 2. Convert to OTB .grd at 15-arcmin resolution (same as bundled egm96.grd, ~4 MB):
+uv run python scripts/convert_egm2008_pgm_to_grd.py \
+    --pgm ~/Downloads/geoids/egm2008-1.pgm \
+    --out "$S1T_WORKDIR/geoid/egm2008.grd" \
+    --step 15 \
+    --egm96-grd /path/to/egm96.grd   # optional size check
+```
+
+`scripts/convert_egm2008_pgm_to_grd.py` is in this repo. It validates file size and
+5 spot-check values against the source PGM (all diff = 0.000 m at ±0.001 m tolerance).
+
+> **Confirmed complete** (2026-05-01): `$S1T_WORKDIR/geoid/egm2008.grd` present — 4 155 868 bytes,
+> all validations pass.
+
+**Step 2 — bind-mount required**:
 ```bash
 mkdir -p "$S1T_WORKDIR/geoid"
-cp /path/to/egm2008.grd "$S1T_WORKDIR/geoid/egm2008.grd"
+# file already at $S1T_WORKDIR/geoid/egm2008.grd after conversion above
 ```
 
 **Smoke-test** (expect ≥ 20 files):
@@ -292,7 +322,11 @@ test -f "$S1T_WORKDIR/geoid/egm2008.grd" && echo "OK: EGM2008 geoid present"
 
 **P3 — S1Tiling Docker image + EODAG patch file**
 
-**Image:** `registry.orfeo-toolbox.org/s1-tiling/s1tiling:1.4.0-ubuntu-otb9.1.1` (alternative: `cnes/s1tiling:1.4.0-ubuntu-otb9.1.1`). Per upstream, this image ships EODAG 4.x and needs the patch for `cop_dataspace`.
+**Image:** `registry.orfeo-toolbox.org/s1-tiling/s1tiling:1.4.0-ubuntu-otb9.1.1` — this is the reference image. Per upstream, it ships EODAG 4.x and needs the patch for `cop_dataspace`.
+
+> **Note on `cnes/s1tiling:1.4.1-ubuntu-otb9.1.1`**: this image has been pulled locally but
+> ships **eodag 3.10.2** (older than 4.0.0). It is NOT the reference image for this spec.
+> Use the OTB registry 1.4.0 image for all local and Argo runs.
 
 Two tasks: (a) pull the image, (b) copy the EODAG 4.0 patch file into the repo.
 
@@ -308,7 +342,8 @@ it to run Python (on Apple Silicon, add `--platform linux/amd64` if the image is
 docker run --rm --entrypoint python \
   registry.orfeo-toolbox.org/s1-tiling/s1tiling:1.4.0-ubuntu-otb9.1.1 \
   -c "import eodag; print(eodag.__version__)"
-# < 4.0.0 → patch still needed; ≥ 4.0.0 → already handled, confirm with Emmanuel
+# Confirmed: 4.0.0 in the 1.4.0 image. Patch injected unconditionally is a safe no-op.
+# Confirm with Emmanuel whether injection can be removed (only once he confirms it's merged upstream).
 ```
 
 **(b) Copy [`s1tiling_eodag4_patch.py`](https://github.com/EOPF-Explorer/data-model/blob/s1-tiling/analysis/s1tiling_eodag4_patch.py) into this repo and commit:**
@@ -323,11 +358,11 @@ git commit -m "chore: add S1Tiling EODAG 4.0 compatibility patch" --no-verify
 
 **Smoke-test** — verify the patch loads without error inside the image:
 ```bash
-docker run --rm \
+docker run --rm --entrypoint python \
   -v "$(pwd)/analysis/s1tiling_eodag4_patch.py:/patches/eodag_patch.py:ro" \
   -e PYTHONSTARTUP=/patches/eodag_patch.py \
   registry.orfeo-toolbox.org/s1-tiling/s1tiling:1.4.0-ubuntu-otb9.1.1 \
-  python -c "print('patch OK')"
+  -c "print('patch OK')"
 ```
 
 The patch is injected unconditionally by Script A at runtime — applying an already-applied
@@ -411,10 +446,9 @@ aws s3 ls s3://esa-zarr-sentinel-explorer-tests/ \
 **P6 — Unblock data-model ingestion functions (prerequisite for Sub-issue 2)**
 
 **Do:** Ask Emmanuel which data-model tag contains Phase 2–3 (`s1_ingest` module). Bump
-`pyproject.toml` to pin it and install:
+`pyproject.toml` to pin it and test:
 ```bash
-pip install "eopf-geozarr @ git+https://github.com/EOPF-Explorer/data-model@<tag>"
-python -c "from eopf_geozarr.conversion import s1_ingest; print('ok')"
+uv run python -c "from eopf_geozarr.conversion import s1_ingest; print('ok')"
 ```
 
 > Current installed version is v0.9.0 — `s1_ingest` is absent from it.
@@ -432,7 +466,7 @@ No logic beyond config templating, one Docker call, and one S3 sync.
 **Interface**:
 
 ```bash
-python scripts/run_s1tiling.py \
+uv run python scripts/run_s1tiling.py \
   --tile-id          31TCH \
   --orbit-direction  descending \
   --date-start       2025-02-01 \
@@ -515,7 +549,7 @@ s3://esa-zarr-sentinel-explorer-tests/s1tiling-output/31TCH/descending/2025-02-0
 **Interface**:
 
 ```bash
-python scripts/run_ingest_register.py \
+uv run python scripts/run_ingest_register.py \
   --s3-geotiff-prefix  s3://esa-zarr-sentinel-explorer-tests/s1tiling-output/31TCH/descending/2025-02-01/ \
   --tile-id            31TCH \
   --orbit-direction    descending \
@@ -537,7 +571,7 @@ passed as an explicit argument.
 zarr_store = f"s3://{s3_output_bucket}/{s3_output_prefix}/s1-grd-rtc-{tile_id}.zarr"
 
 Step 1 — ingest:
-  result = subprocess.run(["python", "scripts/ingest_v1_s1_rtc.py",
+  result = subprocess.run(["uv", "run", "python", "scripts/ingest_v1_s1_rtc.py",
                            "--s3-geotiff-prefix", s3_geotiff_prefix,
                            "--s3-zarr-store", zarr_store,
                            "--tile-id", tile_id,
@@ -552,7 +586,7 @@ Step 1 — ingest:
   if result.returncode != 0: sys.exit(result.returncode)
 
 Step 2 — register-stac (only reached if step 1 exited 0):
-  result = subprocess.run(["python", "scripts/register_v1_s1_rtc.py",
+  result = subprocess.run(["uv", "run", "python", "scripts/register_v1_s1_rtc.py",
                            "--store", zarr_store,
                            "--collection", collection,
                            "--stac-api-url", stac_api_url,
@@ -619,12 +653,12 @@ Data-model Phases 2–3 (ingestion + conditions code) are already done in the da
 but not yet released. The installed version is v0.9.0; `s1_ingest` is not present in it.
 
 > **Unblocking step**: before `ingest_v1_s1_rtc.py` can run, confirm with Emmanuel which
-> data-model tag includes Phase 2–3 code, bump `pyproject.toml` to pin it, and `pip install`
+> data-model tag includes Phase 2–3 code, bump `pyproject.toml` to pin it, and `uv pip install`
 > the updated package. This is separate from the v0.10.0 STAC-builder bump in Sub-issue 1.
 
 **Interface**:
 ```bash
-python scripts/ingest_v1_s1_rtc.py \
+uv run python scripts/ingest_v1_s1_rtc.py \
   --s3-geotiff-prefix  s3://esa-zarr-sentinel-explorer-tests/s1tiling-output/31TCH/descending/2025-02-01/ \
   --s3-zarr-store      s3://esa-zarr-sentinel-explorer-tests/s1-rtc-test/s1-grd-rtc-31TCH.zarr \
   --tile-id            31TCH \
@@ -666,7 +700,7 @@ Reuses helpers from `scripts/register_v1.py` — import, not copy.
 
 **Interface**:
 ```bash
-python scripts/register_v1_s1_rtc.py \
+uv run python scripts/register_v1_s1_rtc.py \
   --store            s3://esa-zarr-sentinel-explorer-tests/s1-rtc-test/s1-grd-rtc-31TCH.zarr \
   --collection       sentinel-1-grd-rtc-staging \
   --stac-api-url     https://api.explorer.eopf.copernicus.eu/stac \
@@ -706,7 +740,7 @@ directly into Script B. Proof that all pieces integrate before any Argo YAML is 
 
 ```bash
 # 1. Run local Workflow 1 (S1Tiling → GeoTIFFs on S3)
-python scripts/run_s1tiling.py \
+uv run python scripts/run_s1tiling.py \
   --tile-id 31TCH --orbit-direction descending \
   --date-start 2025-02-01 --date-end 2025-02-14 \
   --s3-bucket esa-zarr-sentinel-explorer-tests --s3-prefix s1tiling-output \
@@ -719,7 +753,7 @@ python scripts/run_s1tiling.py \
 # Script A prints: s3://esa-zarr-sentinel-explorer-tests/s1tiling-output/31TCH/descending/2025-02-01/
 
 # 2. Run local Workflow 2 (ingest + register)
-python scripts/run_ingest_register.py \
+uv run python scripts/run_ingest_register.py \
   --s3-geotiff-prefix s3://esa-zarr-sentinel-explorer-tests/s1tiling-output/31TCH/descending/2025-02-01/ \
   --tile-id 31TCH --orbit-direction descending \
   --collection sentinel-1-grd-rtc-staging \
@@ -754,7 +788,7 @@ Key fields: `id: sentinel-1-grd-rtc-staging`, temporal from `2014-04-03`, global
 
 Create in staging API once:
 ```bash
-python operator-tools/manage_collections.py create \
+uv run python operator-tools/manage_collections.py create \
   --collection stac/sentinel-1-grd-rtc-staging.json \
   --stac-api-url https://api.explorer.eopf.copernicus.eu/stac
 ```
@@ -777,7 +811,7 @@ new one. Local equivalent of the Argo CronWorkflow.
 
 **Interface**:
 ```bash
-python scripts/watch_cdse_and_process.py \
+uv run python scripts/watch_cdse_and_process.py \
   --tiles             31TCH \
   --orbit-direction   descending \
   --lookback-days     7 \
@@ -906,7 +940,7 @@ Recommended approach:
 2. Add an `init-container` (or `initContainers` in the pod spec) that runs a tiny Python
    one-liner to render the template and write it to an `emptyDir` volume:
    ```
-   python -c "
+   uv run python -c "
    import sys, pathlib
    t = pathlib.Path('/config/template.cfg').read_text()
    out = t.format(

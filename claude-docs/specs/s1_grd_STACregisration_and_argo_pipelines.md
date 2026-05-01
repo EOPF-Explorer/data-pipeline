@@ -163,7 +163,7 @@ eopf-geozarr generate-stac-s1 \
 #### Interface
 
 ```bash
-python scripts/ingest_v1_s1_rtc.py \
+uv run python scripts/ingest_v1_s1_rtc.py \
   --s3-geotiff-prefix  s3://bucket/s1tiling-output/31TCH/ascending/2026-04-01/ \
   --s3-zarr-store      s3://bucket/s1-rtc-staging/s1-grd-rtc-31TCH.zarr \
   --tile-id            31TCH \
@@ -199,7 +199,7 @@ Imports directly from `eopf_geozarr.conversion.s1_ingest` (no subprocess):
 #### Interface
 
 ```bash
-python scripts/register_v1_s1_rtc.py \
+uv run python scripts/register_v1_s1_rtc.py \
   --store            s3://bucket/s1-rtc-staging/s1-grd-rtc-31TCH.zarr \
   --collection       sentinel-1-grd-rtc-staging \
   --stac-api-url     https://api.explorer.eopf.copernicus.eu/stac \
