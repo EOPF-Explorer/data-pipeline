@@ -83,6 +83,7 @@ addopts = [
     "--cov=scripts",
     "--cov-report=term-missing",
     "--cov-report=html",
+    "-m", "not docker",
 ]
 filterwarnings = [
     "ignore::ResourceWarning",
@@ -92,6 +93,7 @@ filterwarnings = [
 markers = [
     "unit: Unit tests (fast, no external dependencies)",
     "integration: Integration tests (may use mocked external services)",
+    "docker: Tests that require a running Docker daemon (skip with -m 'not docker')",
 ]
 
 [tool.coverage.run]
