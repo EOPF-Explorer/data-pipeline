@@ -109,7 +109,7 @@ jobs:
 
     - name: Scan image with Trivy (SARIF CRITICAL/HIGH, incl. unfixed)
       id: trivy-sarif-critical-high
-      uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
       with:
         image-ref: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}  # tags[0] is always the sha-* tag emitted first by docker/metadata-action
         format: sarif
@@ -119,7 +119,7 @@ jobs:
         severity: CRITICAL,HIGH
 
     - name: Fail on fixable CRITICAL vulnerabilities
-      uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
       with:
         image-ref: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}  # tags[0] is always the sha-* tag emitted first by docker/metadata-action
         format: table
@@ -129,7 +129,7 @@ jobs:
         severity: CRITICAL
 
     - name: Warn on fixable HIGH vulnerabilities
-      uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
       with:
         image-ref: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}  # tags[0] is always the sha-* tag emitted first by docker/metadata-action
         format: table
@@ -140,7 +140,7 @@ jobs:
 
     - name: Scan image with Trivy (SARIF MEDIUM/LOW, fixed only)
       id: trivy-sarif-medium-low
-      uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
       with:
         image-ref: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
         format: sarif
@@ -165,7 +165,7 @@ jobs:
 
     - name: Upload Trivy SARIF (CRITICAL/HIGH) to GitHub Security tab
       if: steps.trivy-sarif-critical-high.outcome == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-      uses: github/codeql-action/upload-sarif@c10b8064de6f491fea524254123dbe5e09572f13 # v4.35.1
+      uses: github/codeql-action/upload-sarif@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v4.35.2
       with:
         sarif_file: trivy-results-critical-high.sarif
         category: trivy-critical-high
