@@ -11,7 +11,7 @@
 | Resource | Status |
 |----------|--------|
 | `scripts/run_s1tiling.py` | **Written** — 84 lines total, ~50 lines logic |
-| P1 EODAG creds at `$S1T_WORKDIR/config/eodag.yml` | Done |
+| P1 EODAG creds at `$S1T_WORKDIR/config/eodag.yml` | Done — **Sentinel Hub service account** (`sh-*` / `client_credentials` grant); token smoke-test passes |
 | P2 DEM tiles (29), `DEM_Union.gpkg`, `egm2008.grd` | Done |
 | P3 Docker image `1.4.0-ubuntu-otb9.1.1` pulled | Done |
 | P3 `analysis/s1tiling_eodag4_patch.py` in repo | Done |
@@ -37,7 +37,7 @@ P5 (awscli + eopfexplorer profile)                   ──► S3 sync step
 
 ## Tasks
 
-### Task 1 — dry-run correctness  ✅ ready to run
+### Task 1 — dry-run correctness  ✅ DONE
 
 **What**: run with `--dry-run` and inspect every printed command.
 
@@ -57,18 +57,18 @@ uv run python scripts/run_s1tiling.py \
 ```
 
 **Acceptance criteria**:
-- [ ] `--entrypoint bash` appears before the image name in the docker command
-- [ ] All six `-v` mounts present and paths are absolute (no `~`, no relative segments)
-- [ ] `-v .../analysis:/patch:ro` points to the real `analysis/` dir
-- [ ] `-c 'python3 /patch/s1tiling_eodag4_patch.py && S1Processor /data/config/S1GRD_RTC.cfg'` is the command
-- [ ] Two `aws s3 sync` commands printed — one for `data_out/31TCH/`, one for `data_gamma_area/`
-- [ ] Both syncs target `s3://.../s1tiling-output/31TCH/descending/2025-02-01/`
-- [ ] Last line printed is the S3 prefix (no extra output)
-- [ ] Script exits 0
+- [x] `--entrypoint bash` appears before the image name in the docker command
+- [x] All six `-v` mounts present and paths are absolute (no `~`, no relative segments)
+- [x] `-v .../analysis:/patch:ro` points to the real `analysis/` dir
+- [x] `-c 'python3 /patch/s1tiling_eodag4_patch.py && S1Processor /data/config/S1GRD_RTC.cfg'` is the command
+- [x] Two `aws s3 sync` commands printed — one for `data_out/31TCH/`, one for `data_gamma_area/`
+- [x] Both syncs target `s3://.../s1tiling-output/31TCH/descending/2025-02-01/`
+- [x] Last line printed is the S3 prefix (no extra output)
+- [x] Script exits 0
 
 ---
 
-### Task 2 — Docker run (local, no S3)  ⚠️ ~30–60 min, downloads S1 data
+### Task 2 — Docker run (local, no S3)  🟡 NEXT — pre-flight cleared, ~30–60 min
 
 **What**: run without `--dry-run`; S1Tiling downloads one S1 GRD acquisition, orthorectifies it,
 writes GeoTIFFs to `$S1T_WORKDIR/data_out/31TCH/` and GAMMA_AREA to `$S1T_WORKDIR/data_gamma_area/`.
@@ -134,7 +134,7 @@ print('OK')
 
 ---
 
-### Task 4 — failure-mode check
+### Task 4 — failure-mode check  ✅ DONE
 
 **What**: verify the script exits non-zero when Docker fails, so Sub-issue B / Argo can detect errors.
 
@@ -157,15 +157,23 @@ echo "exit: $?"   # must be non-zero
 
 ---
 
-## Open questions (confirm with Emmanuel before Task 2)
+## Open questions — resolved (2026-05-05)
 
-1. **`N41E004` / `N42E004` GPKG gap**: do these cells fall inside the 31TCH swath? If so,
-   will S1Tiling skip them silently or error?
-2. **EODAG orbit direction casing**: the patch notes say `DESCENDING` (uppercase) is required
-   for `cop_dataspace` via EODAG. The config uses `orbit_direction : DES`. Confirm the patch
-   handles this mapping correctly before the first real run.
-3. **RAM/CPU**: S1Tiling config has `nb_parallel_processes : 1`, `ram_per_process : 8192`.
-   Confirm this is safe on the dev machine before the long run.
+1. **`N41E004` / `N42E004` GPKG gap** ✅ — These cells do not exist in Copernicus DEM GLO-30.
+   N41–42°N, 4–5°E is the Gulf of Lion (open Mediterranean); the dataset simply has no tiles
+   over open water. The GPKG gap is correct, not a download failure. 31TCH spans −0.64°E to
+   0.53°E (entirely west of E001) so it never touches these cells. S1Tiling may log a warning
+   when processing the eastern IW swath edge, but the orthorectified 31TCH output is unaffected.
+   **Safe to proceed.**
+
+2. **EODAG orbit direction casing** ✅ — Handled by the patch (`analysis/s1tiling_eodag4_patch.py`
+   lines 59–64). It replaces `'DES': 'descending'` with `'DES': 'DESCENDING'`, so
+   `orbit_direction : DES` in the config correctly maps to `DESCENDING` for `cop_dataspace`.
+   The mapping is explicit and documented in the patch's docstring (issue #4). **No action needed.**
+
+3. **RAM/CPU** ✅ — Safe. Docker is allocated 16 GB; `ram_per_process: 8192` + ~1–2 GB overhead
+   ≈ 10 GB peak — well within the 16 GB limit. Single process (`nb_parallel_processes: 1`).
+   **Safe to proceed with Task 2.**
 
 ---
 

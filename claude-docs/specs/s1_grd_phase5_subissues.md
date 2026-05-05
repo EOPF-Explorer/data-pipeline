@@ -96,24 +96,66 @@ with Sub-issue A.
 ## Prerequisites — environment setup (no code, do first)
 
 **P1 — CDSE account + EODAG credentials**
-1. Create account at https://dataspace.copernicus.eu
+
+Two credential types work with EODAG's `cop_dataspace` provider:
+
+| Type | `username` field | `password` field | Token grant |
+|------|-----------------|-----------------|-------------|
+| Human CDSE account | your email | your CDSE password | `password` (via `cdse-public`) |
+| **Sentinel Hub service account** | `sh-<uuid>` client ID | client secret (32 chars) | `client_credentials` |
+
+EODAG picks the correct grant automatically — use whichever you have.
+
+1. Create account / service account at https://dataspace.copernicus.eu
 2. Fill `~/Downloads/eodag-empty.yml` (from Emmanuel) — **never commit with credentials**:
    ```yaml
    cop_dataspace:
      priority: 1
      auth:
        credentials:
-         username: <your-email>
-         password: <your-password>
+         username: <your-email-or-sh-uuid>
+         password: <your-password-or-client-secret>
    ```
-3. Store as `~/.config/eodag/eodag.yml`
-4. Smoke-test: confirm `eodag search` returns ≥ 1 S1 GRD product for tile 31TCH, Feb 2025 :
-```
+3. Store as `~/.config/eodag/eodag.yml` **and** copy/symlink to `$S1T_WORKDIR/config/eodag.yml`:
+   ```bash
+   mkdir -p "$S1T_WORKDIR/config"
+   ln -sf ~/.config/eodag/eodag.yml "$S1T_WORKDIR/config/eodag.yml"
+   ```
+4. Smoke-test credentials — two checks:
+
+   **4a.** Confirm `eodag search` returns ≥ 1 S1 GRD product:
+```bash
 uvx eodag search -p cop_dataspace -c S1_SAR_GRD \
   -s 2025-02-01 -e 2025-02-28 \
   --box 0 42 2 43 \
   --limit 5
 ```
+
+   **4b.** Confirm a raw token can be obtained (catches YAML parsing issues):
+   ```bash
+   uv run python3 -c '
+   import json, os, urllib.error, urllib.parse, urllib.request, yaml
+   path = os.path.expandvars("$S1T_WORKDIR/config/eodag.yml")
+   c = yaml.safe_load(open(path))["cop_dataspace"]["auth"]["credentials"]
+   u = c["username"]
+   # Sentinel Hub service account (sh-*): client_credentials grant
+   # Human CDSE account (email): password grant via cdse-public
+   if u.startswith("sh-"):
+       data = {"grant_type": "client_credentials", "client_id": u, "client_secret": c["password"]}
+   else:
+       data = {"grant_type": "password", "client_id": "cdse-public", "username": u, "password": c["password"]}
+   req = urllib.request.Request(
+       "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token",
+       data=urllib.parse.urlencode(data).encode(), method="POST",
+   )
+   try:
+       r = json.loads(urllib.request.urlopen(req).read())
+       print("OK — token received" if "access_token" in r else r)
+   except urllib.error.HTTPError as e:
+       print(e.code, e.reason); print(e.read().decode(errors="replace"))
+   '
+   ```
+   Expected output: `OK — token received`
 
 **P2 — Workdir layout + DEM tiles for 31TCH swath**
 
