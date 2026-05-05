@@ -152,8 +152,8 @@ echo "exit: $?"   # must be non-zero
 ```
 
 **Acceptance criteria**:
-- [ ] Exit code non-zero when Docker fails
-- [ ] S3 sync is not attempted after a Docker failure
+- [x] Exit code non-zero when Docker fails — `test_s3_sync_not_attempted_after_docker_failure` PASSED (2026-05-05)
+- [x] S3 sync is not attempted after a Docker failure — same test asserts `"aws" not in result.stdout` PASSED (2026-05-05)
 
 ---
 
