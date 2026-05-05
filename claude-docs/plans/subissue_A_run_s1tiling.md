@@ -11,7 +11,7 @@
 | Resource | Status |
 |----------|--------|
 | `scripts/run_s1tiling.py` | **Written** — 84 lines total, ~50 lines logic |
-| P1 EODAG creds at `$S1T_WORKDIR/config/eodag.yml` | Done — **Sentinel Hub service account** (`sh-*` / `client_credentials` grant); token smoke-test passes |
+| P1 EODAG creds at `$S1T_WORKDIR/config/eodag.yml` | Done — regular CDSE human account (email + password); token smoke-test passes |
 | P2 DEM tiles (29), `DEM_Union.gpkg`, `egm2008.grd` | Done |
 | P3 Docker image `1.4.0-ubuntu-otb9.1.1` pulled | Done |
 | P3 `analysis/s1tiling_eodag4_patch.py` in repo | Done |
@@ -157,7 +157,19 @@ echo "exit: $?"   # must be non-zero
 
 ---
 
+## Open questions
+
+*(none)*
+
+---
+
 ## Open questions — resolved (2026-05-05)
+
+3. **CDSE credentials for download** ✔︎ — resolved 2026-05-05
+   The `sh-*` Sentinel Hub service account produced JWTs rejected by CDSE's download service
+   (`MissingRequiredClaimError: aud`, `ImmatureSignatureError: iat`). Switched to a regular
+   CDSE human account (email + password / `password` grant). Keycloak patch removed from
+   `analysis/s1tiling_eodag4_patch.py` — no longer needed.
 
 1. **`N41E004` / `N42E004` GPKG gap** ✅ — These cells do not exist in Copernicus DEM GLO-30.
    N41–42°N, 4–5°E is the Gulf of Lion (open Mediterranean); the dataset simply has no tiles

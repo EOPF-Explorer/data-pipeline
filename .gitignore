@@ -71,3 +71,6 @@ pipeline_utils.py
 
 # Migration recovery files
 operator-tools/.migration_recovery_*.jsonl
+
+*.json
+*.geojson

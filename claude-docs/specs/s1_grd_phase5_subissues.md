@@ -97,24 +97,18 @@ with Sub-issue A.
 
 **P1 — CDSE account + EODAG credentials**
 
-Two credential types work with EODAG's `cop_dataspace` provider:
+Use a regular **human CDSE account** (email + password); this is the only supported credential
+type now that the keycloak patch has been removed.
 
-| Type | `username` field | `password` field | Token grant |
-|------|-----------------|-----------------|-------------|
-| Human CDSE account | your email | your CDSE password | `password` (via `cdse-public`) |
-| **Sentinel Hub service account** | `sh-<uuid>` client ID | client secret (32 chars) | `client_credentials` |
-
-EODAG picks the correct grant automatically — use whichever you have.
-
-1. Create account / service account at https://dataspace.copernicus.eu
+1. Create account at https://dataspace.copernicus.eu
 2. Fill `~/Downloads/eodag-empty.yml` (from Emmanuel) — **never commit with credentials**:
    ```yaml
    cop_dataspace:
      priority: 1
      auth:
        credentials:
-         username: <your-email-or-sh-uuid>
-         password: <your-password-or-client-secret>
+         username: <your-email>
+         password: <your-CDSE-password>
    ```
 3. Store as `~/.config/eodag/eodag.yml` **and** copy/symlink to `$S1T_WORKDIR/config/eodag.yml`:
    ```bash
@@ -137,13 +131,8 @@ uvx eodag search -p cop_dataspace -c S1_SAR_GRD \
    import json, os, urllib.error, urllib.parse, urllib.request, yaml
    path = os.path.expandvars("$S1T_WORKDIR/config/eodag.yml")
    c = yaml.safe_load(open(path))["cop_dataspace"]["auth"]["credentials"]
-   u = c["username"]
-   # Sentinel Hub service account (sh-*): client_credentials grant
-   # Human CDSE account (email): password grant via cdse-public
-   if u.startswith("sh-"):
-       data = {"grant_type": "client_credentials", "client_id": u, "client_secret": c["password"]}
-   else:
-       data = {"grant_type": "password", "client_id": "cdse-public", "username": u, "password": c["password"]}
+   data = {"grant_type": "password", "client_id": "cdse-public",
+           "username": c["username"], "password": c["password"]}
    req = urllib.request.Request(
        "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token",
        data=urllib.parse.urlencode(data).encode(), method="POST",
@@ -530,16 +519,19 @@ uv run python scripts/run_s1tiling.py \
 ```
 1. Ensure $S1T_WORKDIR/config/S1GRD_RTC.cfg matches the --cfg source (copy if needed)
 2. docker run \
+     --rm --platform linux/amd64 \
+     --entrypoint bash \
      -v {abs_data_dir}:/data \
      -v {abs_dem_dir}:/MNT/COP_DEM_GLO30 \
      -v {abs_dem_db}:/MNT/dem_db:ro \
      -v {abs_geoid_dir}:/MNT/geoid:ro \
      -v {abs_eodag_cfg}:/eo_config/eodag.yml:ro \
-     -v {abs_patch_dir}:/patch \
-     -e ... \
+     -v {abs_patch_dir}:/patch:ro \
      registry.orfeo-toolbox.org/s1-tiling/s1tiling:1.4.0-ubuntu-otb9.1.1 \
-     --entrypoint bash -c 'python3 /patch/s1tiling_eodag4_patch.py && S1Processor /data/config/S1GRD_RTC.cfg'
-   # IMPORTANT: docker options (-v, -e) must come BEFORE the image name.
+     -c 'python3 /patch/s1tiling_eodag4_patch.py && S1Processor /data/config/S1GRD_RTC.cfg'
+   # IMPORTANT: docker options (--entrypoint, -v) must come BEFORE the image name.
+   # No -e flags needed: PATH/OTB_*/GDAL_* are baked into the image; EODAG config
+   # path is set via eodag_config in S1GRD_RTC.cfg (-> /eo_config/eodag.yml).
    # All mount paths must be absolute — use os.path.abspath() to expand ~ and relative refs.
    # Patch injected unconditionally — safe whether or not it's already in the image (see P3)
    # abs_dem_dir    = os.path.abspath(f"{data_dir}/DEM/COP_DEM_GLO30")
