@@ -34,7 +34,7 @@ dependencies = [
     "tenacity==9.1.4",
     "morecantile==7.0.3",
     "cf-xarray==0.10.11",
-    "eopf-geozarr @ git+https://github.com/EOPF-Explorer/data-model.git@bf18c531b882f765e352572adb55e0ef95334b75",
+    "eopf-geozarr @ git+https://github.com/EOPF-Explorer/data-model.git@3c71242f4666bb002c60d9fe1ac432f7cff6f847",
     "requests==2.33.1",
 ]
 
