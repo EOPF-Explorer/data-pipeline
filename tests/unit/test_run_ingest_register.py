@@ -33,15 +33,17 @@ def _mock_proc(returncode: int) -> MagicMock:
 
 
 def test_exits_0_on_success() -> None:
-    """Ingest rc=0, register rc=0 -> pipeline returns 0; both subprocesses called."""
-    with patch(f"{_MOD}.subprocess.run", side_effect=[_mock_proc(0), _mock_proc(0)]) as mock_run:
+    """Ingest rc=0, upload rc=0, register rc=0 -> pipeline returns 0; all 3 subprocesses called."""
+    with patch(
+        f"{_MOD}.subprocess.run", side_effect=[_mock_proc(0), _mock_proc(0), _mock_proc(0)]
+    ) as mock_run:
         result = run_pipeline(**_KWARGS)
     assert result == 0
-    assert mock_run.call_count == 2
+    assert mock_run.call_count == 3
 
 
 def test_exits_0_skips_register_on_empty_prefix() -> None:
-    """Ingest rc=2 (no acquisitions) -> register not called, pipeline returns 0."""
+    """Ingest rc=2 (no acquisitions) -> upload and register not called, pipeline returns 0."""
     with patch(f"{_MOD}.subprocess.run", return_value=_mock_proc(2)) as mock_run:
         result = run_pipeline(**_KWARGS)
     assert result == 0
@@ -49,19 +51,74 @@ def test_exits_0_skips_register_on_empty_prefix() -> None:
 
 
 def test_exits_1_on_ingest_error() -> None:
-    """Ingest rc=1 -> register not called, pipeline returns 1."""
+    """Ingest rc=1 -> upload and register not called, pipeline returns 1."""
     with patch(f"{_MOD}.subprocess.run", return_value=_mock_proc(1)) as mock_run:
         result = run_pipeline(**_KWARGS)
     assert result == 1
     assert mock_run.call_count == 1
 
 
-def test_zarr_store_derived_correctly() -> None:
-    """--store arg to register subprocess must equal s3://{bucket}/{prefix}/s1-grd-rtc-{tile}.zarr."""
-    with patch(f"{_MOD}.subprocess.run", side_effect=[_mock_proc(0), _mock_proc(0)]) as mock_run:
+def test_ingest_uses_local_zarr_path() -> None:
+    """Ingest subprocess must receive a local (non-s3://) path as --s3-zarr-store."""
+    with patch(
+        f"{_MOD}.subprocess.run", side_effect=[_mock_proc(0), _mock_proc(0), _mock_proc(0)]
+    ) as mock_run:
         run_pipeline(**_KWARGS)
 
-    register_cmd: list[str] = mock_run.call_args_list[1][0][0]
+    ingest_cmd: list[str] = mock_run.call_args_list[0][0][0]
+    store_idx = ingest_cmd.index("--s3-zarr-store")
+    local_store = ingest_cmd[store_idx + 1]
+    assert not local_store.startswith(
+        "s3://"
+    ), f"ingest must receive a local path, got: {local_store!r}"
+
+
+def test_upload_called_between_ingest_and_register() -> None:
+    """An S3 sync upload must be called after ingest and before register."""
+    with patch(
+        f"{_MOD}.subprocess.run", side_effect=[_mock_proc(0), _mock_proc(0), _mock_proc(0)]
+    ) as mock_run:
+        run_pipeline(**_KWARGS)
+
+    upload_cmd: list[str] = mock_run.call_args_list[1][0][0]
+    assert (
+        "s3" in upload_cmd and "sync" in upload_cmd
+    ), f"second subprocess call must be aws s3 sync, got: {upload_cmd}"
+    # upload destination must be the S3 zarr
+    expected_s3_zarr = "s3://my-bucket/my-prefix/s1-grd-rtc-31TCH.zarr"
+    assert expected_s3_zarr in upload_cmd, f"upload must target {expected_s3_zarr}"
+
+
+def test_zarr_store_derived_correctly() -> None:
+    """--store arg to register subprocess must equal s3://{bucket}/{prefix}/s1-grd-rtc-{tile}.zarr."""
+    with patch(
+        f"{_MOD}.subprocess.run", side_effect=[_mock_proc(0), _mock_proc(0), _mock_proc(0)]
+    ) as mock_run:
+        run_pipeline(**_KWARGS)
+
+    register_cmd: list[str] = mock_run.call_args_list[2][0][0]  # third call = register
     expected_store = "s3://my-bucket/my-prefix/s1-grd-rtc-31TCH.zarr"
     store_idx = register_cmd.index("--store")
     assert register_cmd[store_idx + 1] == expected_store
+
+
+def test_upload_failure_stops_pipeline() -> None:
+    """Upload rc=1 -> register not called, pipeline returns 1."""
+    with patch(f"{_MOD}.subprocess.run", side_effect=[_mock_proc(0), _mock_proc(1)]) as mock_run:
+        result = run_pipeline(**_KWARGS)
+    assert result == 1
+    assert mock_run.call_count == 2  # ingest + failed upload; no register
+
+
+def test_local_zarr_cleaned_before_ingest() -> None:
+    """Stale local zarr must be removed before ingest to avoid appending to old data."""
+    with (
+        patch(f"{_MOD}.subprocess.run", side_effect=[_mock_proc(0), _mock_proc(0), _mock_proc(0)]),
+        patch(f"{_MOD}.shutil.rmtree") as mock_rm,
+        patch(f"{_MOD}.os.path.exists", return_value=True),
+    ):
+        run_pipeline(**_KWARGS)
+
+    mock_rm.assert_called_once()
+    cleaned_path = mock_rm.call_args[0][0]
+    assert "s1-grd-rtc-31TCH" in cleaned_path

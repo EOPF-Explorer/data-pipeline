@@ -12,8 +12,11 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
+import shutil
 import subprocess
 import sys
+import tempfile
 
 log = logging.getLogger(__name__)
 
@@ -29,9 +32,15 @@ def run_pipeline(
     stac_api_url: str,
     raster_api_url: str,
 ) -> int:
-    zarr_store = f"s3://{s3_output_bucket}/{s3_output_prefix}/s1-grd-rtc-{tile_id}.zarr"
+    s3_zarr = f"s3://{s3_output_bucket}/{s3_output_prefix}/s1-grd-rtc-{tile_id}.zarr"
+    # eopf_geozarr uses pathlib.Path internally, which collapses s3:// to s3:/ and
+    # writes the zarr to a local directory. Use a local temp path for ingest, then
+    # sync the result to S3 before registering.
+    local_zarr = os.path.join(tempfile.gettempdir(), f"s1-grd-rtc-{tile_id}.zarr")
+    if os.path.exists(local_zarr):
+        shutil.rmtree(local_zarr)
 
-    # Step 1 — ingest
+    # Step 1 — ingest (writes to local temp dir)
     ingest_cmd = [  # noqa: S607
         "uv",
         "run",
@@ -40,7 +49,7 @@ def run_pipeline(
         "--s3-geotiff-prefix",
         s3_geotiff_prefix,
         "--s3-zarr-store",
-        zarr_store,
+        local_zarr,
         "--tile-id",
         tile_id,
         "--orbit-direction",
@@ -53,14 +62,29 @@ def run_pipeline(
     if result.returncode != 0:
         return result.returncode
 
-    # Step 2 — register (only reached when ingest exited 0)
+    # Step 2 — upload local zarr to S3
+    upload_cmd = [  # noqa: S607
+        "aws",
+        "s3",
+        "sync",
+        local_zarr,
+        s3_zarr,
+        "--endpoint-url",
+        s3_endpoint,
+    ]
+    result = subprocess.run(upload_cmd)  # noqa: S603
+    if result.returncode != 0:
+        log.error("zarr upload to %s failed (exit %d)", s3_zarr, result.returncode)
+        return result.returncode
+
+    # Step 3 — register (only reached when upload exited 0)
     register_cmd = [  # noqa: S607
         "uv",
         "run",
         "python",
         "scripts/register_v1_s1_rtc.py",
         "--store",
-        zarr_store,
+        s3_zarr,
         "--collection",
         collection,
         "--stac-api-url",

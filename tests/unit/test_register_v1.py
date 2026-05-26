@@ -106,6 +106,23 @@ class TestUpsertItemNewItem:
         client._stac_io.session.delete.assert_not_called()
         client._stac_io.session.post.assert_called_once()
 
+    def test_no_delete_when_get_item_returns_none(self):
+        """get_item() returning None (not raising) must be treated as no item → no DELETE.
+
+        pystac-client's get_item() does not raise on 404 — it returns None. The old
+        code checked only for exceptions, so None returned means exists=True (wrong).
+        """
+        client = _make_client(item_exists=False)
+        # Override to return None instead of raising (matches pystac-client 404 behavior)
+        client.get_collection.return_value.get_item.side_effect = None
+        client.get_collection.return_value.get_item.return_value = None
+        client._stac_io.session.delete.return_value = _make_response(200)
+        client._stac_io.session.post.return_value = _make_response(201)
+
+        upsert_item(client, "my-collection", _make_item("new-item"))
+
+        client._stac_io.session.delete.assert_not_called()
+
     def test_post_url_for_new_item(self):
         client = _make_client(item_exists=False, base_url="https://stac.example.com")
         client._stac_io.session.post.return_value = _make_response(201)

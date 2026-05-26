@@ -120,10 +120,10 @@ def rewrite_asset_hrefs(item: Item, old_base: str, new_base: str) -> None:
 
 def upsert_item(client: Client, collection_id: str, item: Item) -> None:
     """Register or update STAC item using pystac-client session."""
-    # Check if exists
+    # pystac-client's get_item() returns None for 404 instead of raising, so check explicitly
     try:
-        client.get_collection(collection_id).get_item(item.id)
-        exists = True
+        fetched = client.get_collection(collection_id).get_item(item.id)
+        exists = fetched is not None
     except Exception:
         exists = False
 
