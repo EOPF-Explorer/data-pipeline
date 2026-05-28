@@ -46,6 +46,14 @@ sequence, respecting exit code 2 (empty → skip). No logic of its own.
 `watch_cdse_and_process.py` sits above both: queries CDSE for new S1 GRD products and
 calls `run_s1tiling.py` → `run_ingest_register.py` for each new one.
 
+> **S3 URI requirement for Argo**: In Argo, `--s3-geotiff-prefix` is always an `s3://` URI —
+> there is no local `$S1T_WORKDIR` fallback. `eopf_geozarr.conversion.s1_ingest.discover_s1tiling_acquisitions`
+> currently uses `pathlib.Path.glob()`, which silently returns 0 files for `s3://` paths
+> (causing `ingest_v1_s1_rtc.py` to exit 2 — "no acquisitions"). This must be fixed before
+> Sub-issue 6. Locally a workaround exists (see Sub-issue 4 pre-flight / OQ-1). The fix is
+> to make `discover_s1tiling_acquisitions` (and `discover_s1tiling_conditions`) use `fsspec`
+> when the input path starts with `s3://`.
+
 ---
 
 ## Dependency map
@@ -445,7 +453,8 @@ test -f "$S1T_WORKDIR/config/S1GRD_RTC.cfg" \
 
 **P5 — Test S3 bucket + awscli**
 
-Test bucket: **`esa-zarr-sentinel-explorer-tests`** (separate from production `esa-zarr-sentinel-explorer-fra`).
+Test bucket: **`esa-zarr-sentinel-explorer-tests`** (for local development).
+Production S1 buckets: **`esa-zarr-sentinel-explorer-s1-l1grd-prod`** and **`esa-zarr-sentinel-explorer-s1-l1grd-staging`** (for Argo workflows).
 
 **Task 1** — install awscli v2 if not present:
 ```bash
@@ -690,6 +699,20 @@ but not yet released. The installed version is v0.9.0; `s1_ingest` is not presen
 > data-model tag includes Phase 2–3 code, bump `pyproject.toml` to pin it, and `uv pip install`
 > the updated package. This is separate from the v0.10.0 STAC-builder bump in Sub-issue 1.
 
+> **S3 URI limitation (found in Sub-issue 4 planning, 2026-05-26)**: `discover_s1tiling_acquisitions`
+> and `discover_s1tiling_conditions` use `pathlib.Path.glob()` internally, which does not
+> handle `s3://` URIs — they silently return 0 results, causing `ingest_v1_s1_rtc.py` to
+> exit 2. This is undetectable from unit tests that use local mock paths.
+>
+> **Required fix** (in `eopf_geozarr.conversion.s1_ingest`, data-model repo): detect when
+> `input_dir` starts with `s3://` and use `s3fs.S3FileSystem.glob()` (or `fsspec`) instead
+> of `pathlib.Path.glob()`. The file paths returned to the caller should remain as `str`
+> passable to `rasterio.open()` (which supports `s3://` via GDAL). Until the data-model fix
+> lands and is pinned, use the local-path workaround described in Sub-issue 4.
+>
+> **Argo impact**: without this fix, `ingest_v1_s1_rtc.py` always exits 2 in Argo (no local
+> directory exists). This fix **must** land and be pinned before Sub-issue 6 starts.
+
 **Interface**:
 ```bash
 uv run python scripts/ingest_v1_s1_rtc.py \
@@ -715,6 +738,7 @@ uv run python scripts/ingest_v1_s1_rtc.py \
 - [ ] `discover_s1tiling_conditions` finds GAMMA_AREA files in the same prefix as acquisitions
 - [ ] Correct exit codes for all three states
 - [ ] CI passes
+- [ ] `discover_s1tiling_acquisitions('s3://...')` returns ≥ 1 acquisition for a real S3 prefix (not 0 — the data-model S3 fix must be pinned; verified end-to-end in Sub-issue 4)
 
 **Depends on**: nothing — start immediately
 **Blocks**: Sub-issue B
@@ -770,6 +794,13 @@ Skip `consolidate_reflectance_assets` and `fix_zarr_asset_media_types` (S2-speci
 Run the two local workflow scripts back-to-back, passing Script A's printed S3 prefix
 directly into Script B. Proof that all pieces integrate before any Argo YAML is written.
 
+> **Pre-flight (OQ-1 — S3 URI support)**: before running Script B, confirm that
+> `discover_s1tiling_acquisitions('s3://...')` returns ≥ 1 result (see S3 URI limitation in
+> Sub-issue 2). If the data-model fix is not yet pinned, apply the local-path workaround:
+> merge `$S1T_WORKDIR/data_out/31TCH/*.tif` and `$S1T_WORKDIR/data_gamma_area/*.tif` into a
+> single temp directory and pass that local path as `--s3-geotiff-prefix`. Document the
+> outcome and report to Emmanuel either way — S3 URI support is required for Argo (Sub-issue 6).
+
 **Run sequence**:
 
 ```bash
@@ -803,9 +834,10 @@ curl "https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-1-grd-rt
 **Acceptance criteria**:
 - [ ] Script A produces GeoTIFFs + GAMMA_AREA under the same S3 prefix
 - [ ] Script B ingests ≥ 2 acquisitions; Zarr readable by `xr.open_zarr()`
-- [ ] `eopf-geozarr validate-s1` passes on the Zarr store
+- [ ] `eopf-geozarr validate <zarr_store>` passes on the Zarr store (command is `validate`, not `validate-s1`)
 - [ ] Item `s1-rtc-31TCH` queryable at staging STAC API
-- [ ] TiTiler viewer link for `vv` returns HTTP 200
+- [ ] TiTiler viewer link for `vh` returns HTTP 200 (S1 uses VH band; `vv` tilejson also present)
+- [ ] S3 URI support confirmed or workaround documented and reported to Emmanuel
 - [ ] Issues reported to Emmanuel
 
 **Depends on**: Sub-issues A, B, 5
@@ -930,7 +962,7 @@ Look up the image name from an existing WorkflowTemplate in `platform-deploy` (e
 | `tile_id` | — |
 | `orbit_direction` | `descending` |
 | `collection` | `sentinel-1-grd-rtc-staging` |
-| `s3_output_bucket` | `esa-zarr-sentinel-explorer-fra` |
+| `s3_output_bucket` | `esa-zarr-sentinel-explorer-s1-l1grd-staging` |
 | `s3_output_prefix` | `s1-rtc-staging` |
 | `s3_endpoint` | `https://s3.de.io.cloud.ovh.net` |
 | `stac_api_url` | `https://api.explorer.eopf.copernicus.eu/stac` |
@@ -961,7 +993,7 @@ Argo translation of `run_s1tiling.py` (Sub-issue A). Written after Sub-issue 4 v
 | `orbit_direction` | `descending` |
 | `date_start` | — |
 | `date_end` | — |
-| `s3_geotiff_bucket` | `esa-zarr-sentinel-explorer-fra` |
+| `s3_geotiff_bucket` | `esa-zarr-sentinel-explorer-s1-l1grd-staging` |
 | `s3_geotiff_prefix` | `s1tiling-output` |
 | `s1tiling_image` | `registry.orfeo-toolbox.org/s1tiling/s1tiling:1.4.0` |
 | `semaphore_key` | `v1-s1tiling-limit` |
@@ -1075,7 +1107,7 @@ Manual trigger body:
 ```json
 {
   "action": "ingest-v1-s1rtc",
-  "s3_geotiff_prefix": "s3://esa-zarr-sentinel-explorer-fra/s1tiling-output/31TCH/descending/2025-02-05/",
+  "s3_geotiff_prefix": "s3://esa-zarr-sentinel-explorer-s1-l1grd-staging/s1tiling-output/31TCH/descending/2025-02-05/",
   "tile_id": "31TCH",
   "orbit_direction": "descending"
 }
