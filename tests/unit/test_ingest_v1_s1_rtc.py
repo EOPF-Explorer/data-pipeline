@@ -1,0 +1,184 @@
+"""Unit tests for ingest_v1_s1_rtc.py -- ingest_all."""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+from unittest.mock import call, patch
+
+import zarr
+
+scripts_dir = Path(__file__).parent.parent.parent / "scripts"
+sys.path.insert(0, str(scripts_dir))
+
+from ingest_v1_s1_rtc import _patch_cf_grid_mapping, ingest_all  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# Shared fixtures
+# ---------------------------------------------------------------------------
+
+_ACQ = {
+    "platform": "s1a",
+    "tile": "31TCH",
+    "orbit_dir": "ASC",
+    "rel_orbit": "037",
+    "acq_stamp": "20230115t061234",
+    "vv": Path("/data/s1a_31TCH_vv_ASC_037_20230115t061234_GammaNaughtRTC.tif"),
+    "vh": Path("/data/s1a_31TCH_vh_ASC_037_20230115t061234_GammaNaughtRTC.tif"),
+    "vv_mask": Path("/data/s1a_31TCH_vv_ASC_037_20230115t061234_GammaNaughtRTC_BorderMask.tif"),
+    "vh_mask": Path("/data/s1a_31TCH_vh_ASC_037_20230115t061234_GammaNaughtRTC_BorderMask.tif"),
+}
+_COND = {
+    "tile": "31TCH",
+    "orbit": "037",
+    "gamma_area": Path("/data/GAMMA_AREA_31TCH_037.tif"),
+    "lia": Path("/data/LIA_31TCH_037.tif"),
+}
+
+_MOD = "ingest_v1_s1_rtc"
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+
+def test_exits_0_on_success() -> None:
+    """Happy path: 2 acquisitions + 1 condition group -> all 5 steps called -> exit 0."""
+    with (
+        patch(f"{_MOD}.discover_s1tiling_acquisitions", return_value=[_ACQ, _ACQ]) as mock_disc,
+        patch(f"{_MOD}.ingest_s1tiling_acquisition", return_value=0) as mock_ing,
+        patch(f"{_MOD}.discover_s1tiling_conditions", return_value=[_COND]) as mock_disc_cond,
+        patch(f"{_MOD}.ingest_s1tiling_conditions") as mock_ing_cond,
+        patch(f"{_MOD}.consolidate_s1_store") as mock_cons,
+        patch(f"{_MOD}._patch_tile_matrix_limits") as mock_tml,
+        patch(f"{_MOD}._patch_cf_grid_mapping") as mock_cf,
+    ):
+        result = ingest_all("/input", "/store.zarr", "ascending")
+
+    assert result == 0
+    mock_tml.assert_called_once_with("/store.zarr", "ascending")
+    mock_cf.assert_called_once_with("/store.zarr", "ascending")
+    mock_disc.assert_called_once_with("/input")
+    assert mock_ing.call_count == 2
+    mock_ing.assert_called_with(
+        vv_path=_ACQ["vv"],
+        vh_path=_ACQ["vh"],
+        border_mask_path=_ACQ["vv_mask"],
+        store_path="/store.zarr",
+        orbit_direction="ascending",
+    )
+    mock_disc_cond.assert_called_once_with("/input")
+    mock_ing_cond.assert_called_once_with(
+        store_path="/store.zarr",
+        orbit_direction="ascending",
+        relative_orbit=37,
+        gamma_area_path=_COND["gamma_area"],
+        lia_path=_COND["lia"],
+    )
+    # consolidated twice: once after ingest (step 5), once after the patches (step 6)
+    assert mock_cons.call_count == 2
+    mock_cons.assert_has_calls([call("/store.zarr", "ascending"), call("/store.zarr", "ascending")])
+
+
+def test_exits_2_on_empty_prefix() -> None:
+    """Empty discovery result -> exit 2, ingest never called."""
+    with (
+        patch(f"{_MOD}.discover_s1tiling_acquisitions", return_value=[]),
+        patch(f"{_MOD}.ingest_s1tiling_acquisition") as mock_ing,
+        patch(f"{_MOD}.consolidate_s1_store") as mock_cons,
+    ):
+        result = ingest_all("/input", "/store.zarr", "ascending")
+
+    assert result == 2
+    mock_ing.assert_not_called()
+    mock_cons.assert_not_called()
+
+
+def test_exits_1_on_ingest_error() -> None:
+    """First ingest failure -> exit 1; consolidate_s1_store must not be called."""
+    with (
+        patch(f"{_MOD}.discover_s1tiling_acquisitions", return_value=[_ACQ]),
+        patch(f"{_MOD}.ingest_s1tiling_acquisition", side_effect=OSError("disk full")),
+        patch(f"{_MOD}.consolidate_s1_store") as mock_cons,
+    ):
+        result = ingest_all("/input", "/store.zarr", "descending")
+
+    assert result == 1
+    mock_cons.assert_not_called()
+
+
+def test_conditions_non_fatal_if_empty() -> None:
+    """Empty conditions -> consolidate_s1_store still called (non-fatal)."""
+    with (
+        patch(f"{_MOD}.discover_s1tiling_acquisitions", return_value=[_ACQ]),
+        patch(f"{_MOD}.ingest_s1tiling_acquisition", return_value=0),
+        patch(f"{_MOD}.discover_s1tiling_conditions", return_value=[]),
+        patch(f"{_MOD}.ingest_s1tiling_conditions") as mock_ing_cond,
+        patch(f"{_MOD}.consolidate_s1_store") as mock_cons,
+        patch(f"{_MOD}._patch_tile_matrix_limits"),
+        patch(f"{_MOD}._patch_cf_grid_mapping"),
+    ):
+        result = ingest_all("/input", "/store.zarr", "ascending")
+
+    assert result == 0
+    mock_ing_cond.assert_not_called()
+    assert mock_cons.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# _patch_cf_grid_mapping -- exercised against a real (tiny) local zarr store
+# ---------------------------------------------------------------------------
+
+
+def _build_minimal_s1_store(store_path: str) -> None:
+    """Create a minimal S1-shaped GeoZarr V3 store: descending/r10m with a 3D
+    vh array (time, y, x) and a geozarr proj:code but NO CF spatial_ref --
+    mirroring what eopf_geozarr.s1_ingest produces (and what TiTiler rejects)."""
+    import numpy as np
+
+    root = zarr.open_group(store_path, mode="w-", zarr_format=3)
+    orbit = root.create_group("descending")
+    orbit.attrs["proj:code"] = "EPSG:32631"
+    r10m = orbit.create_group("r10m")
+    vh = r10m.create_array(
+        "vh", shape=(2, 4, 4), dtype="float32", dimension_names=("time", "y", "x")
+    )
+    vh[...] = np.zeros((2, 4, 4), dtype="float32")
+    # coordinate arrays (no y/x data semantics individually)
+    r10m.create_array("time", shape=(2,), dtype="int64", dimension_names=("time",))[...] = [0, 1]
+    r10m.create_array("y", shape=(4,), dtype="float64", dimension_names=("y",))[...] = range(4)
+    r10m.create_array("x", shape=(4,), dtype="float64", dimension_names=("x",))[...] = range(4)
+
+
+def test_patch_cf_grid_mapping_adds_spatial_ref_and_crs(tmp_path) -> None:
+    """After the patch, the r10m group has a spatial_ref coord, vh carries
+    grid_mapping=spatial_ref, and rioxarray can resolve the CRS (the condition
+    titiler-eopf v0.5.0's _validate_zarr requires)."""
+    import xarray as xr
+
+    store = str(tmp_path / "s1.zarr")
+    _build_minimal_s1_store(store)
+
+    patched = _patch_cf_grid_mapping(store, "descending")
+
+    assert patched == ["descending/r10m"]
+    r10m = zarr.open_group(store, mode="r", zarr_format=3)["descending"]["r10m"]
+    assert "spatial_ref" in list(r10m.array_keys())
+    assert dict(r10m["vh"].attrs).get("grid_mapping") == "spatial_ref"
+
+    # The decisive check: rioxarray resolves the CRS with decode_coords="all"
+    ds = xr.open_zarr(f"{store}/descending/r10m", consolidated=False, decode_coords="all")
+    assert ds.rio.crs is not None
+    assert ds.rio.crs.to_epsg() == 32631
+
+
+def test_patch_cf_grid_mapping_idempotent(tmp_path) -> None:
+    """Running the patch twice does not error or duplicate the coordinate."""
+    store = str(tmp_path / "s1.zarr")
+    _build_minimal_s1_store(store)
+    _patch_cf_grid_mapping(store, "descending")
+    patched = _patch_cf_grid_mapping(store, "descending")
+    assert patched == ["descending/r10m"]
+    r10m = zarr.open_group(store, mode="r", zarr_format=3)["descending"]["r10m"]
+    assert list(r10m.array_keys()).count("spatial_ref") == 1
