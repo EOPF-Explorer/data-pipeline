@@ -179,8 +179,11 @@ def add_visualization_links(item: Item, raster_base: str, collection_id: str) ->
     coll_lower = collection_id.lower()
     if coll_lower.startswith(("sentinel-1", "sentinel1")):
         # S1: VH band visualization
+        # vh asset points to {store}/{orbit_group} — variables path is /{orbit_group}:vh
+        # (same convention as S2: /{group}:{variable}, TiTiler uses tile_matrix_set to pick resolution)
         if (vh := item.assets.get("vh")) and ".zarr/" in (vh.href or ""):
-            var_path = f"/{vh.href.split('.zarr/')[1]}:grd"
+            orbit_group = vh.href.split(".zarr/")[1]
+            var_path = f"/{orbit_group}:vh"
             query = f"variables={urllib.parse.quote(var_path, safe='')}&bidx=1&rescale=0%2C219&assets=vh"
             item.add_link(
                 Link(
@@ -243,7 +246,8 @@ def add_thumbnail_asset(item: Item, raster_base: str, collection_id: str) -> Non
     elif coll_lower.startswith(("sentinel-1", "sentinel1")):
         # Use VH band for S-1 thumbnail
         if (vh := item.assets.get("vh")) and ".zarr/" in (vh.href or ""):
-            var_path = f"/{vh.href.split('.zarr/')[1]}:grd"
+            orbit_group = vh.href.split(".zarr/")[1]
+            var_path = f"/{orbit_group}:vh"
             params = f"format=png&variables={urllib.parse.quote(var_path, safe='')}&bidx=1&rescale=0%2C219&assets=vh"
             title = "Sentinel-1 GRD VH Preview"
         else:
