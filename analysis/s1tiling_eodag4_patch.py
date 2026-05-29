@@ -63,6 +63,16 @@ def patch_s1filemanager() -> None:
         "{ 'ASC': 'ASCENDING', 'DES': 'DESCENDING' }",
     )
 
+    # Restrict search to cop_dataspace only — prevents EODAG from querying PEPS
+    # (which is a built-in provider that cannot be removed via user config).
+    # Without this, a PEPS outage causes S1Tiling to report a tile download failure
+    # even when all products are available on CDSE.
+    src = src.replace(
+        "collection=product_type,",
+        'collection=product_type,\n                provider="cop_dataspace",',
+        1,
+    )
+
     fpath.write_text(src)
     print(f"  Patched {fpath.name}")
 
