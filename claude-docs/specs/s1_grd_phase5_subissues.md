@@ -47,12 +47,10 @@ sequence, respecting exit code 2 (empty → skip). No logic of its own.
 calls `run_s1tiling.py` → `run_ingest_register.py` for each new one.
 
 > **S3 URI requirement for Argo**: In Argo, `--s3-geotiff-prefix` is always an `s3://` URI —
-> there is no local `$S1T_WORKDIR` fallback. `eopf_geozarr.conversion.s1_ingest.discover_s1tiling_acquisitions`
-> currently uses `pathlib.Path.glob()`, which silently returns 0 files for `s3://` paths
-> (causing `ingest_v1_s1_rtc.py` to exit 2 — "no acquisitions"). This must be fixed before
-> Sub-issue 6. Locally a workaround exists (see Sub-issue 4 pre-flight / OQ-1). The fix is
-> to make `discover_s1tiling_acquisitions` (and `discover_s1tiling_conditions`) use `fsspec`
-> when the input path starts with `s3://`.
+> there is no local `$S1T_WORKDIR` fallback. **Fixed (2026-05-29)**: data-model PR #175 merged
+> (`5a91b355`) — `discover_s1tiling_acquisitions`, `discover_s1tiling_conditions`, and both
+> `ingest_*` functions now accept `s3://` URIs via `s3fs`. `data-pipeline` pin updated. Sub-issue 6
+> can proceed without a local GeoTIFF fallback.
 
 ---
 

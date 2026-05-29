@@ -68,7 +68,7 @@ uv run python scripts/run_s1tiling.py \
 
 ---
 
-### Task 2 — Docker run (local, no S3)  🟡 NEXT — pre-flight cleared, ~30–60 min
+### Task 2 — Docker run (local, no S3)  ✅ DONE
 
 **What**: run without `--dry-run`; S1Tiling downloads one S1 GRD acquisition, orthorectifies it,
 writes GeoTIFFs to `$S1T_WORKDIR/data_out/31TCH/` and GAMMA_AREA to `$S1T_WORKDIR/data_gamma_area/`.
@@ -93,17 +93,19 @@ uv run python scripts/run_s1tiling.py \
 ```
 
 **Acceptance criteria**:
-- [ ] Docker container exits 0
-- [ ] `ls $S1T_WORKDIR/data_out/31TCH/*.tif` shows ≥ 2 GeoTIFF files (VV + VH ± BorderMask)
-- [ ] `ls $S1T_WORKDIR/data_gamma_area/GAMMA_AREA*.tif` shows ≥ 1 file
-- [ ] Script exits non-zero if Docker fails (test: kill container mid-run)
+- [x] Docker container exits 0 — confirmed 2026-05-25, exit code 0
+- [x] `ls $S1T_WORKDIR/data_out/31TCH/*.tif` shows ≥ 2 GeoTIFF files — 12 files (VV+VH GammaNaughtRTC + BorderMasks for orbits 008/20250210, 037/20250212, 110/20250205)
+- [x] `ls $S1T_WORKDIR/data_gamma_area/GAMMA_AREA*.tif` shows ≥ 1 file — 3 files (GAMMA_AREA_31TCH_008 + 037 + 110)
+- [x] Script exits non-zero if Docker fails — Task 4 (already done)
 
-**Known risk**: `N41E004` / `N42E004` absent from `DEM_Union.gpkg` — S1Tiling may log a
-warning for those cells. Non-fatal; confirm with Emmanuel if it affects output quality.
+**Issues encountered and resolved**:
+- CDSE dropped connections mid-download (ChunkedEncodingError) on 3/3 acquisitions on first attempt; connection was stable on retry.
+- `20250210` acquisition (orbit 008) failed with missing DEM tiles `N44_W001` and `N44_W002` (swath extends beyond tile at 34.5% coverage). Resolved by downloading tiles from public AWS COP DEM bucket (`s3://copernicus-dem-30m/` with `--no-sign-request`) to `$S1T_WORKDIR/DEM/COP_DEM_GLO30/`. Full date range restored; re-run produced orbit 008 outputs successfully 2026-05-25.
+- PEPS outage caused exit 67 even when CDSE products were available. Fixed by adding `provider="cop_dataspace"` to the `dag.search()` call in `analysis/s1tiling_eodag4_patch.py`.
 
 ---
 
-### Task 3 — S3 sync and output verification  ⚠️ requires Task 2 complete
+### Task 3 — S3 sync and output verification  ✅ DONE
 
 **What**: confirm files land in S3 and are rasterio-readable.
 
@@ -127,10 +129,10 @@ print('OK')
 ```
 
 **Acceptance criteria**:
-- [ ] ≥ 2 `*GammaNaughtRTC.tif` files in the S3 prefix
-- [ ] ≥ 1 `GAMMA_AREA*.tif` file in the **same** S3 prefix (not a separate prefix)
-- [ ] Each GeoTIFF is 10980 × 10980 pixels
-- [ ] Script printed `s3://esa-zarr-sentinel-explorer-tests/s1tiling-output/31TCH/descending/2025-02-01/` as last line
+- [x] ≥ 2 `*GammaNaughtRTC.tif` files in the S3 prefix — 6 files (VV+VH for orbits 008/037/110) confirmed 2026-05-25
+- [x] ≥ 1 `GAMMA_AREA*.tif` file in the **same** S3 prefix (not a separate prefix) — 3 files (GAMMA_AREA_31TCH_008/037/110) confirmed 2026-05-25
+- [x] Each GeoTIFF is 10980 × 10980 pixels — all 6 GammaNaughtRTC tifs confirmed 10980×10980 by rasterio 2026-05-25
+- [x] Script printed `s3://esa-zarr-sentinel-explorer-tests/s1tiling-output/31TCH/descending/2025-02-01/` as last line — confirmed in task output 2026-05-25
 
 ---
 

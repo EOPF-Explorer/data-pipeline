@@ -264,17 +264,59 @@ THUMBNAIL_URL=$(curl -s "$ITEM_URL" | python -c "import sys,json; print(json.loa
 - [~] Thumbnail URL returns HTTP 200 — returns **500** (Issue I-6: TiTiler can't access OVH S3)
 - [x] TiTiler tilejson link present for VH band visualization — link present in STAC item links
 
-**Issue I-6**: TiTiler at `api.explorer.eopf.copernicus.eu/raster` returns 500 for all render endpoints
-(thumbnail, tilejson, tiles). Root cause: zarr is on OVH S3 (`s3://esa-zarr-sentinel-explorer-tests/...`)
-and TiTiler does not have the OVH S3 endpoint URL (`https://s3.de.io.cloud.ovh.net`) configured
-server-side. The viewer HTML loads (200) but cannot render tiles. Zarr is now public-read (ACL set
-2026-05-26). Fix: configure TiTiler with `AWS_ENDPOINT_URL=https://s3.de.io.cloud.ovh.net` or move
-zarr to an S3 bucket TiTiler already has access to. **Blocking for Sub-issue 6/7 production use** —
-Argo-produced zarr will have the same problem.
+**Issue I-6 — corrected root cause** (2026-05-29): TiTiler accesses zarr via the HTTPS gateway
+`s3.explorer.eopf.copernicus.eu`, not directly via S3 credentials. S2 STAC assets use
+`https://s3.explorer.eopf.copernicus.eu/{bucket}/{path}` — TiTiler reads them through that proxy.
+S1 assets were registered with `s3://` hrefs; `add_alternate_s3_assets` only processes `https://`
+assets, so TiTiler received an `s3://` URI it couldn't resolve → 500.
+
+**Two-part fix**:
+1. `register_v1_s1_rtc.py`: convert `s3://` asset hrefs to `https://` via `s3_to_https()` immediately
+   after `build_s1_rtc_stac_item` — **committed** (`b95bc43`). Item re-registered with `https://` hrefs.
+2. `s3.explorer.eopf.copernicus.eu` gateway only proxies the production S2 bucket
+   (`esa-zarr-sentinel-explorer-fra`). The test bucket (`esa-zarr-sentinel-explorer-tests`) and the
+   production S1 buckets (`esa-zarr-sentinel-explorer-s1-l1grd-staging`,
+   `esa-zarr-sentinel-explorer-s1-l1grd-prod`) are **not yet proxied** →
+   **platform-deploy PR #205** opened: adds nginx-s3-gateway Deployment + Service + ingress routes for
+   both S1 buckets. Once merged and credentials wired, TiTiler will serve tiles from S1 zarr stores.
+
+**Status for Sub-issues 6/7**: fix (1) already in main branch. Fix (2) unblocks production use once
+PR #205 merges. The test bucket 500 will persist until gateway is extended (expected; acceptable).
 
 ---
 
-### Task 4.5 — Full chain re-run: Script A → Script B back-to-back  ready
+### Task 4.5 — Full chain re-run for DIFFERENT data: tile 31TDH  ✅ DONE (2026-05-29)
+
+**What**: re-run the whole chain (Script A → Script B) on a **different MGRS tile** to prove
+the pipeline generalises beyond 31TCH. Chose **31TDH** (east-adjacent: lon ~1.77–3.12°E,
+lat ~42.36–43.35°N) — all 6 required Copernicus DEM tiles already staged, no DEM download.
+
+**Run (2026-05-29)**:
+- Script A: 31TDH cfg derived from `config/S1GRD_RTC.cfg` (only `roi_by_tiles`/`tiles` changed),
+  passed via `--cfg /tmp/S1GRD_RTC_31TDH.cfg`. Exit 0. Downloaded 2 S1A descending scenes
+  (orbit 110 @ 2025-02-05, orbit 037 @ 2025-02-12), produced 10 GeoTIFFs on S3 at
+  `s1tiling-output/31TDH/descending/2025-02-01/`.
+- Script B: ingested 2 acquisitions, consolidated, **applied both metadata patches**
+  (`tile_matrix_limits` ×6 levels, **CF `grid_mapping` ×7 groups** — the I-7 fix), synced to S3,
+  registered `s1-rtc-31TDH` (HTTP 201). Exit 0.
+
+**Acceptance criteria**:
+- [x] Script A exits 0 — 2 acquisitions, 10 GeoTIFFs on S3 (2026-05-29)
+- [x] Script B exits 0 — store `s1-grd-rtc-31TDH.zarr` written + STAC item registered HTTP 201
+- [x] Item `s1-rtc-31TDH` queryable at staging STAC API — start 2025-02-05 / end 2025-02-12, descending
+- [x] `eopf-geozarr validate` passes on the fresh store — "✅ GeoZarr compliant"
+- [x] **TiTiler renders (live, deployed server)** — once the fixed store was placed at TiTiler's
+  expected path `s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-1-grd-rtc-staging/s1-rtc-31TDH.zarr`
+  (I-8 workaround): `/info` HTTP 200 (`crs=EPSG:32631`), `/preview` HTTP 200 (PNG 915×915),
+  tilejson (z7–13, bounds 1.766,42.358,3.12,43.353), XYZ tile z9 HTTP 200 (256×256 PNG).
+  **This is the end-to-end proof the I-7 CF `grid_mapping` fix resolves the `tile_matrix_set` 500.**
+
+**Note on `run_s1tiling.py`** (Argo-relevant finding): the script does **not** template the cfg —
+it copies `--cfg` verbatim and runs `S1Processor` on it; `--tile-id`/`--date-*`/`--orbit` only
+build the S3 output path. So a per-tile/-date run needs a per-run cfg. Argo must template the cfg
+(roi_by_tiles, tiles, first_date, last_date, orbit_direction) — logged for Sub-issue 7.
+
+<details><summary>Original 31TCH back-to-back recipe (superseded)</summary>
 
 **What**: re-run Script A to get a fresh S3 prefix, then pass it directly to Script B —
 the formal proof of end-to-end integration. **Note**: Script A takes 30–60 min (Docker
@@ -309,11 +351,7 @@ uv run python scripts/run_ingest_register.py \
 echo "Pipeline exit: $?"
 ```
 
-**Acceptance criteria**:
-- [ ] Script A exits 0; `$S3_PREFIX` captures the printed prefix
-- [ ] Script B called with `$S3_PREFIX` directly (no manual copy-paste); exits 0
-- [ ] Item `s1-rtc-31TCH` updated at staging STAC API (new timestamps if data changed)
-- [ ] Tasks 4.2–4.4 checks pass on the freshly-ingested store
+</details>
 
 ---
 
@@ -326,19 +364,21 @@ explicitly lists "Issues reported to Emmanuel" as an acceptance criterion.
 
 | # | Issue | Observed in | Triage | Status |
 |---|-------|-------------|--------|--------|
-| I-1 | `discover_s1tiling_acquisitions` uses `pathlib.Path.glob()` — S3 URIs silently return 0 acquisitions (OQ-1) | Task 4.0 | (a) Report to Emmanuel; fix needed before Sub-issue 6 (Argo has no local dir fallback) | Fixed in pipeline: workaround uses local merged dir + S3 upload |
+| I-1 | `discover_s1tiling_acquisitions` uses `pathlib.Path.glob()` — S3 URIs silently return 0 acquisitions (OQ-1) | Task 4.0 | (a) Fix in `eopf_geozarr` before Sub-issue 6 | **Fixed** — data-model PR #175 merged (`5a91b355`); `data-pipeline` pin updated; 330 tests pass |
 | I-2 | `ingest_v1_s1_rtc.py` has no `--s3-endpoint` arg — endpoint must be in `AWS_ENDPOINT_URL` env var | Planning | (c) Accept as-is — document as Argo env var requirement | Documented |
 | I-3 | eopf_geozarr `Path(s3://)` → `s3:/` normalizes to local write; `consolidate_s1_store` then uses real S3 (empty) → FileNotFoundError | Task 4.1 | (b) Fixed locally: `run_ingest_register.py` now writes to tempdir then `aws s3 sync` | Fixed + tested |
 | I-4 | `upsert_item` in `register_v1.py` set `exists=True` when pystac-client `get_item()` returns `None` (instead of raising) → DELETE 404 | Task 4.1 | (b) Fixed locally: check `fetched is not None` | Fixed + tested |
 | I-5 | Stale local zarr at tempdir caused `BoundsCheckError` on re-run (append tried at out-of-bounds index) | Task 4.1 | (b) Fixed locally: `shutil.rmtree` before ingest | Fixed + tested |
-| I-6 | TiTiler at `api.explorer.eopf.copernicus.eu/raster` returns 500 for all render endpoints — can't access OVH S3 zarr without endpoint config | Task 4.4 | (a) Report to Emmanuel; blocking for production Sub-issue 6/7 — TiTiler needs `AWS_ENDPOINT_URL` for OVH S3 | Open — needs server config |
+| I-6 | TiTiler 500 on all render endpoints — S1 assets registered with `s3://` hrefs; TiTiler uses HTTPS gateway `s3.explorer.eopf.copernicus.eu` and can't resolve bare S3 URIs; additionally S1 buckets were not proxied by gateway | Task 4.4 | (b) Two-part fix | **Fixed** — (1) `register_v1_s1_rtc.py` converts `s3://` → `https://` via `s3_to_https()` (commit `b95bc43`); (2) platform-deploy PR #205 **merged**: nginx-s3-gateway now proxies `esa-zarr-sentinel-explorer-s1-l1grd-staging` + `-prod`. Pending: credentials wired to new gateway deployments |
+| **I-7** | **TiTiler 500 on render/info even after I-6 — `KeyError: 'tile_matrix_set'` (variables path) / `not enough values to unpack (expected 4, got 0)` (assets path).** Root cause (debugged 2026-05-29): the S1 GeoZarr stores written by `eopf_geozarr.conversion.s1_ingest.create_s1_store` carry only the GeoZarr `proj:code` attr — they have **no CF `grid_mapping` / `spatial_ref` coordinate**. rioxarray ignores `proj:code`, so `ds.rio.crs is None` for every resolution group. The deployed **titiler-eopf v0.5.0** (`/raster/api` → version 0.5.0) validates each multiscale group with `_validate_zarr`, which returns `False` when `rio.crs is None`. All S1 groups are rejected → `self.groups == []` → reader construction raises (`zip(*[])`). The all-zero `tile_matrix_limits` (I-handoff) was a **red herring**: v0.5.0 is a GeoZarr-V0 reader and never reads `tile_matrix_limits`. Confirmed by: (a) the working S2 store has a `spatial_ref` coord (`rio.crs=EPSG:32626`), S1 does not (`rio.crs=None`); (b) gateway now serves the test bucket (HTTP 200) so I-6's infra theory no longer applies; (c) local round-trip proves adding `spatial_ref` + `decode_coords="all"` recovers the CRS. | Task 4.5 (debug) | (a)+(b) Library bug; worked around in pipeline | **Fixed in pipeline + LIVE-VERIFIED** — `ingest_v1_s1_rtc.py::_patch_cf_grid_mapping` injects a CF `spatial_ref` coordinate + `grid_mapping` attr into every (y,x) sub-group after consolidation; 2 RED→GREEN unit tests assert `rio.crs.to_epsg()==32631`. End-to-end proof: 31TDH store with the fix → live TiTiler `/info` + `/preview` + XYZ tiles all HTTP 200 (2026-05-29). **Upstream**: report to data-model — `create_s1_store` should write CF `grid_mapping` like the S2 converter does. |
+| **I-8** | **TiTiler reads from a server-side path convention, not the STAC asset href.** For collection `sentinel-1-grd-rtc-staging`, TiTiler opens `s3://esa-zarr-sentinel-explorer-fra/tests-output/{collection}/{item_id}.zarr` (note: **prod `fra` bucket**, `tests-output/` prefix, store named after the **item id** `s1-rtc-31TDH`, not the file `s1-grd-rtc-31TDH`). Our pipeline writes to `esa-zarr-sentinel-explorer-tests/s1-rtc-test/s1-grd-rtc-{tile}.zarr`. TiTiler ignores the registered `vh`/`zarr-store` hrefs entirely. Symptom: a tile that *has* a store at the fra path (31TCH, placed earlier) returns the I-7 `tile_matrix_set` error; one that doesn't (31TDH) returns `"No group found in store ... bucket=esa-zarr-sentinel-explorer-fra prefix=tests-output/sentinel-1-grd-rtc-staging/s1-rtc-31TDH.zarr"`. | Task 4.5 (debug) | (a) Platform config — needs Emmanuel | **Worked around for proof** — copied the fixed 31TDH store to the fra path; TiTiler then served it. **Decision needed**: either (i) point `run_ingest_register.py` output at `fra/tests-output/{collection}/{item}.zarr`, or (ii) reconfigure TiTiler's `path_dependency` to honour the STAC asset href / the test bucket. |
 
 **Verify**: issues file updated with outcomes; message sent to Emmanuel.
 
 **Acceptance criteria**:
 - [x] All issues from Tasks 4.1–4.4 recorded in this plan under Task 4.6
-- [x] Issues triaged: I-1→(a), I-2→(c), I-3→(b), I-4→(b), I-5→(b), I-6→(a)
-- [ ] Emmanuel notified of blockers I-1 and I-6 (affect Sub-issue 6 Argo template)
+- [x] Issues triaged: I-1→(a), I-2→(c), I-3→(b), I-4→(b), I-5→(b), I-6→(a), I-7→(a)+(b), I-8→(a)
+- [ ] Emmanuel notified of blockers I-7 (CF grid_mapping — upstream) and I-8 (store-path convention — platform config)
 
 ---
 
@@ -351,10 +391,16 @@ Sub-issues 6 (Argo ingest template) and 7 (Argo s1tiling template) must not star
 | Task 4.1 — Script B exits 0; ≥ 2 acquisitions ingested | [x] 3 acquisitions, exit 0 (2026-05-26) |
 | Task 4.2 — `eopf-geozarr validate` passes; Zarr readable | [x] Validates clean; 3 timestamps (2026-05-26) |
 | Task 4.3 — STAC item `s1-rtc-31TCH` queryable at staging API | [x] HTTP 200, all fields correct (2026-05-26) |
-| Task 4.4 — TiTiler viewer link returns HTTP 200 | [x] Viewer returns 200; thumbnail 500 (I-6: OVH endpoint not in TiTiler) |
-| Task 4.6 — Issues reported to Emmanuel | [ ] Pending notification |
+| Task 4.4 — TiTiler viewer link returns HTTP 200 | [x] Viewer 200; **render 500 root-caused + fixed (I-7) and live-verified on 31TDH** (2026-05-29) |
+| Task 4.5 — Full chain re-run on a different tile (31TDH) | [x] Script A + B exit 0; validate + STAC pass; TiTiler renders live (2026-05-29) |
+| Task 4.6 — Issues reported to Emmanuel | [ ] Pending notification (I-7 upstream, I-8 platform config) |
 
-Task 4.5 (full chain re-run) is **recommended but not blocking** for Sub-issues 6/7.
+**Argo (Sub-issue 6/7) prerequisites surfaced by Task 4.5**:
+- I-7 fix (`_patch_cf_grid_mapping`) is in `ingest_v1_s1_rtc.py` → the Argo ingest step inherits it.
+- I-8: the Argo ingest step must write the store to TiTiler's expected path
+  (`fra/tests-output/{collection}/{item}.zarr`) **or** TiTiler must be reconfigured. Decide before Sub-issue 6.
+- `run_s1tiling.py` does not template the cfg → Sub-issue 7 Argo template must parametrise
+  `roi_by_tiles`/`tiles`/`first_date`/`last_date`/`orbit_direction`.
 
 ---
 
@@ -400,17 +446,23 @@ and reads directly from S3. No local copy needed. Exits 0 with compliant output.
 
 ## Open questions — resolved
 
-### OQ-1 — Does `discover_s1tiling_acquisitions` support S3 URIs? (resolved 2026-05-26)
+### OQ-1 — Does `discover_s1tiling_acquisitions` support S3 URIs? (resolved 2026-05-26; fixed 2026-05-29)
 
-**Answer**: No. `pathlib.Path("s3://bucket/...")` silently collapses `s3://` to `s3:/` (one slash)
+**Answer**: No (original). `pathlib.Path("s3://bucket/...")` silently collapses `s3://` to `s3:/`
 and treats it as a relative local path, returning 0 `.tif` matches.
 
-**Workaround for Task 4.1**: merge local `data_out/31TCH/` + `data_gamma_area/` into a temp
+**Workaround used in Task 4.1**: merge local `data_out/31TCH/` + `data_gamma_area/` into a temp
 directory and pass that local path as `--s3-geotiff-prefix`.
 
-**Impact on Sub-issue 6**: `ingest_v1_s1_rtc.py` **cannot** be called with an S3 prefix in Argo.
-Either (a) fix `discover_s1tiling_acquisitions` to use `s3fs`/`fsspec` for S3 URIs, or
-(b) mount a local GeoTIFF volume in the Argo workflow. Must be resolved before Sub-issue 6.
+**Fix (2026-05-29)**: data-model PR #175 (`fix/s3-uri-discovery` → `feat/s1-rtc-stac-builder`)
+adds `_list_tifs`, `_coerce_input_path`, `_input_path_exists`, `_rasterio_env` helpers to
+`s1_ingest.py`; both `discover_*` and both `ingest_*` functions now accept `s3://` URIs via
+`s3fs`. **Merged as `5a91b355`**. `data-pipeline` `pyproject.toml` pin updated. 330 tests pass.
+
+**rasterio/GDAL OVH endpoint note**: `rasterio.open("s3://...")` on OVH S3 requires
+`rasterio.Env(AWSSession(session, endpoint_url='s3.de.io.cloud.ovh.net'))` — hostname only,
+no scheme. `AWS_ENDPOINT_URL` alone is ignored by GDAL. `AWSSession.get_credential_options()`
+passes `AWS_S3_ENDPOINT` to GDAL which must be the bare hostname.
 
 ---
 
