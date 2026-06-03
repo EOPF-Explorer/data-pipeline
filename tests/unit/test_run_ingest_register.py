@@ -19,7 +19,6 @@ _KWARGS = {
     "orbit_direction": "descending",
     "collection": "sentinel-1-grd-rtc-staging",
     "s3_output_bucket": "my-bucket",
-    "s3_output_prefix": "my-prefix",
     "s3_endpoint": "https://s3.example.com",
     "stac_api_url": "https://stac.example.com",
     "raster_api_url": "https://raster.example.com",
@@ -84,20 +83,39 @@ def test_upload_called_between_ingest_and_register() -> None:
     assert (
         "s3" in upload_cmd and "sync" in upload_cmd
     ), f"second subprocess call must be aws s3 sync, got: {upload_cmd}"
-    # upload destination must be the S3 zarr
-    expected_s3_zarr = "s3://my-bucket/my-prefix/s1-grd-rtc-31TCH.zarr"
+    # upload destination must be the S3 zarr (prefix == collection)
+    expected_s3_zarr = "s3://my-bucket/sentinel-1-grd-rtc-staging/s1-grd-rtc-31TCH.zarr"
     assert expected_s3_zarr in upload_cmd, f"upload must target {expected_s3_zarr}"
 
 
 def test_zarr_store_derived_correctly() -> None:
-    """--store arg to register subprocess must equal s3://{bucket}/{prefix}/s1-grd-rtc-{tile}.zarr."""
+    """--store arg to register subprocess must equal s3://{bucket}/{collection}/s1-grd-rtc-{tile}.zarr."""
     with patch(
         f"{_MOD}.subprocess.run", side_effect=[_mock_proc(0), _mock_proc(0), _mock_proc(0)]
     ) as mock_run:
         run_pipeline(**_KWARGS)
 
     register_cmd: list[str] = mock_run.call_args_list[2][0][0]  # third call = register
-    expected_store = "s3://my-bucket/my-prefix/s1-grd-rtc-31TCH.zarr"
+    expected_store = "s3://my-bucket/sentinel-1-grd-rtc-staging/s1-grd-rtc-31TCH.zarr"
+    store_idx = register_cmd.index("--store")
+    assert register_cmd[store_idx + 1] == expected_store
+
+
+def test_store_prefix_tracks_collection() -> None:
+    """Store key prefix must be derived from --collection, not a fixed value.
+
+    Adversarial: a *different* collection must move the store path accordingly.
+    The staging-only assertions above would also pass a hardcoded prefix; this one
+    would not.
+    """
+    kwargs = {**_KWARGS, "collection": "sentinel-1-grd-rtc-tests"}
+    with patch(
+        f"{_MOD}.subprocess.run", side_effect=[_mock_proc(0), _mock_proc(0), _mock_proc(0)]
+    ) as mock_run:
+        run_pipeline(**kwargs)
+
+    register_cmd: list[str] = mock_run.call_args_list[2][0][0]
+    expected_store = "s3://my-bucket/sentinel-1-grd-rtc-tests/s1-grd-rtc-31TCH.zarr"
     store_idx = register_cmd.index("--store")
     assert register_cmd[store_idx + 1] == expected_store
 

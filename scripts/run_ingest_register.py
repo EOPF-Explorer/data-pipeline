@@ -27,12 +27,13 @@ def run_pipeline(
     orbit_direction: str,
     collection: str,
     s3_output_bucket: str,
-    s3_output_prefix: str,
     s3_endpoint: str,
     stac_api_url: str,
     raster_api_url: str,
 ) -> int:
-    s3_zarr = f"s3://{s3_output_bucket}/{s3_output_prefix}/s1-grd-rtc-{tile_id}.zarr"
+    # Store key prefix is the STAC collection, so per-mission/per-env buckets stay
+    # self-describing: s3://{bucket}/{collection}/s1-grd-rtc-{tile}.zarr
+    s3_zarr = f"s3://{s3_output_bucket}/{collection}/s1-grd-rtc-{tile_id}.zarr"
     # eopf_geozarr uses pathlib.Path internally, which collapses s3:// to s3:/ and
     # writes the zarr to a local directory. Use a local temp path for ingest, then
     # sync the result to S3 before registering.
@@ -93,10 +94,6 @@ def run_pipeline(
         raster_api_url,
         "--s3-endpoint",
         s3_endpoint,
-        "--s3-output-bucket",
-        s3_output_bucket,
-        "--s3-output-prefix",
-        s3_output_prefix,
     ]
     result = subprocess.run(register_cmd)  # noqa: S603
     return result.returncode
@@ -111,7 +108,6 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--orbit-direction", required=True, choices=["ascending", "descending"])
     parser.add_argument("--collection", required=True, help="Target STAC collection ID")
     parser.add_argument("--s3-output-bucket", required=True, help="S3 bucket for Zarr output")
-    parser.add_argument("--s3-output-prefix", required=True, help="S3 prefix for Zarr output")
     parser.add_argument("--s3-endpoint", required=True, help="S3 endpoint URL")
     parser.add_argument("--stac-api-url", required=True, help="STAC API base URL")
     parser.add_argument("--raster-api-url", required=True, help="TiTiler raster API base URL")
@@ -128,7 +124,6 @@ def main() -> None:
             orbit_direction=args.orbit_direction,
             collection=args.collection,
             s3_output_bucket=args.s3_output_bucket,
-            s3_output_prefix=args.s3_output_prefix,
             s3_endpoint=args.s3_endpoint,
             stac_api_url=args.stac_api_url,
             raster_api_url=args.raster_api_url,

@@ -78,8 +78,6 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stac-api-url", required=True, help="STAC API base URL")
     parser.add_argument("--raster-api-url", required=True, help="TiTiler raster API base URL")
     parser.add_argument("--s3-endpoint", required=True, help="S3 endpoint URL")
-    parser.add_argument("--s3-output-bucket", required=False, help="S3 bucket name (unused)")
-    parser.add_argument("--s3-output-prefix", required=False, help="S3 prefix (unused)")
     return parser
 
 
