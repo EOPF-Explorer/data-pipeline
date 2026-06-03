@@ -1,0 +1,94 @@
+{
+  "id": "sentinel-1-grd-rtc-staging",
+  "type": "Collection",
+  "links": [
+    {
+      "rel": "license",
+      "href": "https://sentinel.esa.int/documents/247904/690755/Sentinel_Data_Legal_Notice",
+      "type": "application/pdf",
+      "title": "Legal notice on the use of Copernicus Sentinel Data and Service Information"
+    }
+  ],
+  "title": "Sentinel-1 GRD RTC [V1 staging]",
+  "assets": {},
+  "extent": {
+    "spatial": {
+      "bbox": [
+        [-180, -90, 180, 90]
+      ]
+    },
+    "temporal": {
+      "interval": [
+        ["2014-04-03T00:00:00Z", null]
+      ]
+    }
+  },
+  "license": "proprietary",
+  "keywords": [
+    "Copernicus",
+    "Sentinel",
+    "EU",
+    "ESA",
+    "Satellite",
+    "SAR",
+    "Radar",
+    "RTC",
+    "GRD"
+  ],
+  "providers": [
+    {
+      "url": "https://commission.europa.eu/",
+      "name": "European Commission",
+      "roles": ["licensor"]
+    },
+    {
+      "url": "https://sentinel.esa.int/web/sentinel/missions/sentinel-1",
+      "name": "ESA",
+      "roles": ["producer", "processor"]
+    },
+    {
+      "url": "https://zarr.eopf.copernicus.eu/",
+      "name": "EOPF Sentinel Zarr Samples Service",
+      "roles": ["host", "processor"]
+    }
+  ],
+  "summaries": {
+    "gsd": [10],
+    "platform": ["Sentinel-1A", "Sentinel-1B"],
+    "instruments": ["c-sar"],
+    "constellation": ["sentinel-1"],
+    "sar:instrument_mode": ["IW"],
+    "sar:frequency_band": ["C"],
+    "sar:center_frequency": [5.405],
+    "sar:polarizations": [["VV", "VH"]],
+    "sar:product_type": ["GRD"],
+    "sat:orbit_state": ["ascending", "descending"],
+    "processing:level": ["L1"]
+  },
+  "description": "Sentinel-1 Ground Range Detected (GRD) data processed to Radiometric Terrain Correction (RTC), stored as analysis-ready Zarr V3 tiles. Each tile aggregates all acquisitions for a given MGRS tile and orbit direction into a time-stacked Zarr store.",
+  "item_assets": {
+    "zarr-store": {
+      "type": "application/vnd.zarr; version=3",
+      "roles": ["data"],
+      "title": "S1 GRD RTC Zarr store"
+    },
+    "vv": {
+      "gsd": 10,
+      "type": "application/vnd.zarr; version=3",
+      "roles": ["data"],
+      "title": "VV polarisation (native 10 m)"
+    },
+    "vh": {
+      "gsd": 10,
+      "type": "application/vnd.zarr; version=3",
+      "roles": ["data"],
+      "title": "VH polarisation (native 10 m)"
+    }
+  },
+  "stac_version": "1.1.0",
+  "stac_extensions": [
+    "https://stac-extensions.github.io/sar/v1.0.0/schema.json",
+    "https://stac-extensions.github.io/sat/v1.0.0/schema.json",
+    "https://stac-extensions.github.io/projection/v2.0.0/schema.json"
+  ]
+}
