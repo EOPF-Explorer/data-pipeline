@@ -6,6 +6,8 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 scripts_dir = Path(__file__).parent.parent.parent / "scripts"
 sys.path.insert(0, str(scripts_dir))
 
@@ -99,6 +101,17 @@ def test_zarr_store_derived_correctly() -> None:
     expected_store = "s3://my-bucket/sentinel-1-grd-rtc-staging/s1-grd-rtc-31TCH.zarr"
     store_idx = register_cmd.index("--store")
     assert register_cmd[store_idx + 1] == expected_store
+
+
+@pytest.mark.parametrize("bad_collection", ["", "has/slash", "a/b/c"])
+def test_invalid_collection_rejected(bad_collection: str) -> None:
+    """An empty or slash-bearing collection would yield a malformed S3 key -> reject early.
+
+    The guard must fire before any subprocess runs (no store written, no API touched).
+    """
+    with patch(f"{_MOD}.subprocess.run") as mock_run, pytest.raises(ValueError):
+        run_pipeline(**{**_KWARGS, "collection": bad_collection})
+    mock_run.assert_not_called()
 
 
 def test_store_prefix_tracks_collection() -> None:
