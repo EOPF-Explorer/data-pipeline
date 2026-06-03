@@ -5,18 +5,23 @@ from __future__ import annotations
 from pathlib import Path
 
 import pystac
+import pytest
 
 STAC_DIR = Path(__file__).parent.parent / "stac"
 
 
-def test_s1_rtc_staging_collection_valid() -> None:
-    """sentinel-1-grd-rtc-staging.json must load as a valid pystac Collection."""
-    col_path = STAC_DIR / "sentinel-1-grd-rtc-staging.json"
+@pytest.mark.parametrize(
+    "collection_id",
+    ["sentinel-1-grd-rtc-staging", "sentinel-1-grd-rtc-tests"],
+)
+def test_s1_rtc_collection_valid(collection_id: str) -> None:
+    """Each S1 GRD RTC collection definition must load as a valid pystac Collection."""
+    col_path = STAC_DIR / f"{collection_id}.json"
     assert col_path.exists(), f"Collection file not found: {col_path}"
 
     col = pystac.Collection.from_file(str(col_path))
 
-    assert col.id == "sentinel-1-grd-rtc-staging"
+    assert col.id == collection_id
     assert col.extent.temporal.intervals[0][0] is not None
 
     asset_keys = set(col.extra_fields.get("item_assets", {}).keys())
