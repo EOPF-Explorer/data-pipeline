@@ -14,6 +14,7 @@ import os
 import shutil
 import sys
 import tempfile
+from typing import Any
 
 import zarr
 from eopf_geozarr.conversion.s1_ingest import (
@@ -143,6 +144,28 @@ def ingest_all(s3_geotiff_prefix: str, store_path: str, orbit_direction: str) ->
     return 0
 
 
+def _put_tree(fs: Any, local_store: str, dest: str) -> None:
+    """Upload every file under ``local_store`` to ``dest/<relpath>``.
+
+    Maps each file explicitly rather than calling ``fs.put(..., recursive=True)``,
+    whose directory-nesting behaviour depends on trailing slashes and the fsspec
+    version (it can land the tree at ``dest/<basename>/...`` instead of ``dest/...``).
+    Mapping per file makes the store land at exactly ``dest`` on any version.
+    """
+    made: set[str] = set()
+    for root, _dirs, files in os.walk(local_store):
+        for name in files:
+            lpath = os.path.join(root, name)
+            rel = os.path.relpath(lpath, local_store).replace(os.sep, "/")
+            rpath = f"{dest}/{rel}"
+            parent = rpath.rsplit("/", 1)[0]
+            if parent not in made:
+                # No-op on s3fs (bucket exists); creates parents on a local fs.
+                fs.makedirs(parent, exist_ok=True)
+                made.add(parent)
+            fs.put_file(lpath, rpath)
+
+
 def _upload_store_to_s3(local_store: str, s3_uri: str) -> None:
     """Upload a local Zarr store directory to an ``s3://`` URI via s3fs.
 
@@ -154,10 +177,10 @@ def _upload_store_to_s3(local_store: str, s3_uri: str) -> None:
 
     endpoint = os.environ.get("AWS_ENDPOINT_URL")
     fs = s3fs.S3FileSystem(client_kwargs={"endpoint_url": endpoint} if endpoint else None)
-    dest = s3_uri[len("s3://") :]
+    dest = s3_uri[len("s3://") :].rstrip("/")
     if fs.exists(dest):
         fs.rm(dest, recursive=True)
-    fs.put(local_store, dest, recursive=True)
+    _put_tree(fs, local_store, dest)
 
 
 def run_ingest(s3_geotiff_prefix: str, store: str, orbit_direction: str) -> int:

@@ -11,7 +11,12 @@ import zarr
 scripts_dir = Path(__file__).parent.parent.parent / "scripts"
 sys.path.insert(0, str(scripts_dir))
 
-from ingest_v1_s1_rtc import _patch_cf_grid_mapping, ingest_all, run_ingest  # noqa: E402
+from ingest_v1_s1_rtc import (  # noqa: E402
+    _patch_cf_grid_mapping,
+    _put_tree,
+    ingest_all,
+    run_ingest,
+)
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -226,3 +231,23 @@ def test_run_ingest_s3_skips_upload_on_failure() -> None:
             rc = run_ingest("s3://bucket/in/", s3_store, "descending")
         assert rc == code
         mock_upload.assert_not_called()
+
+
+def test_put_tree_lands_at_dest_without_nesting(tmp_path) -> None:
+    """_put_tree maps each file to dest/<relpath> — the store lands AT dest, not
+    nested under dest/<store-basename>/ (the fsspec put recursive footgun)."""
+    import fsspec
+
+    store = tmp_path / "src" / "s1-grd-rtc-31TCH.zarr"
+    (store / "descending" / "r10m").mkdir(parents=True)
+    (store / "zarr.json").write_text("{}")
+    (store / "descending" / "r10m" / "c" / "0.0").parent.mkdir(parents=True)
+    (store / "descending" / "r10m" / "c" / "0.0").write_text("chunk")
+
+    dest_root = tmp_path / "dst" / "s1-grd-rtc-31TCH.zarr"
+    _put_tree(fsspec.filesystem("file"), str(store), str(dest_root))
+
+    assert (dest_root / "zarr.json").is_file()
+    assert (dest_root / "descending" / "r10m" / "c" / "0.0").is_file()
+    # the basename must NOT be nested a second time under dest
+    assert not (dest_root / "s1-grd-rtc-31TCH.zarr").exists()
