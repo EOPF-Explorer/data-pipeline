@@ -180,7 +180,8 @@ def add_visualization_links(item: Item, raster_base: str, collection_id: str) ->
     if coll_lower.startswith(("sentinel-1", "sentinel1")):
         # S1: VH band visualization
         # vh asset points to {store}/{orbit_group} — variables path is /{orbit_group}:vh
-        # (same convention as S2: /{group}:{variable}, TiTiler uses tile_matrix_set to pick resolution)
+        # (same convention as S2: /{group}:{variable}; TiTiler v0.5.0 selects resolution
+        # from the multiscale group hierarchy / CRS, not a tile_matrix_set)
         if (vh := item.assets.get("vh")) and ".zarr/" in (vh.href or ""):
             orbit_group = vh.href.split(".zarr/")[1]
             var_path = f"/{orbit_group}:vh"

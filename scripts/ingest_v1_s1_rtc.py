@@ -25,45 +25,6 @@ from pyproj import CRS
 log = logging.getLogger(__name__)
 
 
-def _patch_tile_matrix_limits(store_path: str, orbit_direction: str) -> None:
-    """Inject tile_matrix_limits into the orbit group's multiscales attribute.
-
-    eopf_geozarr.conversion.s1_ingest.create_s1_store omits tile_matrix_limits
-    from the multiscales metadata, but TiTiler requires it to compute tile bounds.
-    S1 stores each resolution as a single full-image zarr chunk (matrixWidth=1,
-    matrixHeight=1), so maxTileCol and maxTileRow are always 0.
-    """
-    store = zarr.open_group(store_path, mode="r+", zarr_format=3)
-    orbit_group = store[orbit_direction]
-    ms = dict(orbit_group.attrs).get("multiscales", {})
-    if "tile_matrix_limits" in ms:
-        log.info(
-            "tile_matrix_limits already present in %s/%s — skipping patch",
-            store_path,
-            orbit_direction,
-        )
-        return
-    layout = ms.get("layout", [])
-    tile_matrix_limits = {
-        entry["asset"]: {
-            "tileMatrix": entry["asset"],
-            "minTileCol": 0,
-            "maxTileCol": 0,
-            "minTileRow": 0,
-            "maxTileRow": 0,
-        }
-        for entry in layout
-    }
-    ms["tile_matrix_limits"] = tile_matrix_limits
-    orbit_group.attrs["multiscales"] = ms
-    log.info(
-        "Patched tile_matrix_limits for %d resolution levels in %s/%s",
-        len(tile_matrix_limits),
-        store_path,
-        orbit_direction,
-    )
-
-
 def _patch_cf_grid_mapping(store_path: str, orbit_direction: str) -> list[str]:
     """Inject a CF ``spatial_ref`` coordinate + ``grid_mapping`` attrs into every
     sub-group of the orbit group that holds 2D (y, x) data arrays.
@@ -170,10 +131,9 @@ def ingest_all(s3_geotiff_prefix: str, store_path: str, orbit_direction: str) ->
     # Step 5 -- consolidate
     consolidate_s1_store(store_path, orbit_direction)
 
-    # Step 6 -- patch metadata omitted by eopf_geozarr.s1_ingest that TiTiler needs:
-    #   - tile_matrix_limits (multiscales)
-    #   - CF spatial_ref coordinate so rioxarray can resolve the CRS
-    _patch_tile_matrix_limits(store_path, orbit_direction)
+    # Step 6 -- patch the CF spatial_ref coordinate omitted by eopf_geozarr.s1_ingest
+    # so rioxarray can resolve the CRS (titiler-eopf v0.5.0 rejects groups where
+    # ds.rio.crs is None). eopf_geozarr writes only the GeoZarr proj:code attr.
     _patch_cf_grid_mapping(store_path, orbit_direction)
     consolidate_s1_store(store_path, orbit_direction)
 

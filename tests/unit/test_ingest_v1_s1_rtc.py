@@ -51,13 +51,11 @@ def test_exits_0_on_success() -> None:
         patch(f"{_MOD}.discover_s1tiling_conditions", return_value=[_COND]) as mock_disc_cond,
         patch(f"{_MOD}.ingest_s1tiling_conditions") as mock_ing_cond,
         patch(f"{_MOD}.consolidate_s1_store") as mock_cons,
-        patch(f"{_MOD}._patch_tile_matrix_limits") as mock_tml,
         patch(f"{_MOD}._patch_cf_grid_mapping") as mock_cf,
     ):
         result = ingest_all("/input", "/store.zarr", "ascending")
 
     assert result == 0
-    mock_tml.assert_called_once_with("/store.zarr", "ascending")
     mock_cf.assert_called_once_with("/store.zarr", "ascending")
     mock_disc.assert_called_once_with("/input")
     assert mock_ing.call_count == 2
@@ -116,7 +114,6 @@ def test_conditions_non_fatal_if_empty() -> None:
         patch(f"{_MOD}.discover_s1tiling_conditions", return_value=[]),
         patch(f"{_MOD}.ingest_s1tiling_conditions") as mock_ing_cond,
         patch(f"{_MOD}.consolidate_s1_store") as mock_cons,
-        patch(f"{_MOD}._patch_tile_matrix_limits"),
         patch(f"{_MOD}._patch_cf_grid_mapping"),
     ):
         result = ingest_all("/input", "/store.zarr", "ascending")

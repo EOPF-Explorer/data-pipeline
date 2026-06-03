@@ -17,6 +17,11 @@
 > not the STAC asset href — the store must live there for TiTiler to find it.
 > See `claude-docs/plans/subissue_4_end_to_end.md` (Tasks 4.5/4.6, issues I-7/I-8) for full detail.
 > The section below is the original (pre-resolution) investigation, kept for history.
+>
+> **Update 2026-06-01:** Emmanuel confirmed `tile_matrix_set` is not part of the S1 data model, so the
+> `_patch_tile_matrix_limits` workaround (which injected the `tile_matrix_limits` TMS companion) was
+> **removed** from `scripts/ingest_v1_s1_rtc.py`. Only `_patch_cf_grid_mapping` remains. Dropping `tile_matrix_set`
+> itself is now a data-model (upstream) task. Mentions of the `tile_matrix_limits` patch below are historical.
 
 ---
 
