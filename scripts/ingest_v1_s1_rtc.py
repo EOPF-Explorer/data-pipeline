@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
+import shutil
 import sys
+import tempfile
 
 import zarr
 from eopf_geozarr.conversion.s1_ingest import (
@@ -140,6 +143,46 @@ def ingest_all(s3_geotiff_prefix: str, store_path: str, orbit_direction: str) ->
     return 0
 
 
+def _upload_store_to_s3(local_store: str, s3_uri: str) -> None:
+    """Upload a local Zarr store directory to an ``s3://`` URI via s3fs.
+
+    The endpoint is taken from ``AWS_ENDPOINT_URL`` (OVH S3 is not AWS-default);
+    credentials come from the ambient ``AWS_ACCESS_KEY_ID`` / ``AWS_SECRET_ACCESS_KEY``.
+    Any existing store at the destination is removed first so re-runs are clean.
+    """
+    import s3fs
+
+    endpoint = os.environ.get("AWS_ENDPOINT_URL")
+    fs = s3fs.S3FileSystem(client_kwargs={"endpoint_url": endpoint} if endpoint else None)
+    dest = s3_uri[len("s3://") :]
+    if fs.exists(dest):
+        fs.rm(dest, recursive=True)
+    fs.put(local_store, dest, recursive=True)
+
+
+def run_ingest(s3_geotiff_prefix: str, store: str, orbit_direction: str) -> int:
+    """Ingest into ``store``, handling ``s3://`` destinations.
+
+    eopf_geozarr writes the store via ``pathlib.Path``, which collapses ``s3://``
+    to a local path. So for an ``s3://`` destination we ingest into a local temp
+    store and upload the result with s3fs. Local destinations pass straight through.
+    """
+    if not store.startswith("s3://"):
+        return ingest_all(s3_geotiff_prefix, store, orbit_direction)
+
+    tmp_dir = tempfile.mkdtemp(prefix="s1-ingest-")
+    local_store = os.path.join(tmp_dir, os.path.basename(store.rstrip("/")))
+    try:
+        rc = ingest_all(s3_geotiff_prefix, local_store, orbit_direction)
+        if rc != 0:
+            return rc
+        log.info("Uploading store %s -> %s", local_store, store)
+        _upload_store_to_s3(local_store, store)
+        return 0
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -169,7 +212,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
     args = _build_parser().parse_args()
-    sys.exit(ingest_all(args.s3_geotiff_prefix, args.s3_zarr_store, args.orbit_direction))
+    sys.exit(run_ingest(args.s3_geotiff_prefix, args.s3_zarr_store, args.orbit_direction))
 
 
 if __name__ == "__main__":

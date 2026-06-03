@@ -11,7 +11,7 @@ import zarr
 scripts_dir = Path(__file__).parent.parent.parent / "scripts"
 sys.path.insert(0, str(scripts_dir))
 
-from ingest_v1_s1_rtc import _patch_cf_grid_mapping, ingest_all  # noqa: E402
+from ingest_v1_s1_rtc import _patch_cf_grid_mapping, ingest_all, run_ingest  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -179,3 +179,50 @@ def test_patch_cf_grid_mapping_idempotent(tmp_path) -> None:
     assert patched == ["descending/r10m"]
     r10m = zarr.open_group(store, mode="r", zarr_format=3)["descending"]["r10m"]
     assert list(r10m.array_keys()).count("spatial_ref") == 1
+
+
+# ---------------------------------------------------------------------------
+# run_ingest -- s3:// routing (container-native upload for Argo)
+# ---------------------------------------------------------------------------
+
+
+def test_run_ingest_local_passthrough(tmp_path) -> None:
+    """A local store path goes straight to ingest_all; no temp dir, no upload."""
+    local_store = str(tmp_path / "s1-grd-rtc-31TCH.zarr")
+    with (
+        patch(f"{_MOD}.ingest_all", return_value=0) as mock_ingest,
+        patch(f"{_MOD}._upload_store_to_s3") as mock_upload,
+    ):
+        rc = run_ingest("s3://bucket/in/", local_store, "descending")
+    assert rc == 0
+    mock_ingest.assert_called_once_with("s3://bucket/in/", local_store, "descending")
+    mock_upload.assert_not_called()
+
+
+def test_run_ingest_s3_uploads_on_success() -> None:
+    """An s3:// store ingests into a local temp store, then uploads it to S3."""
+    s3_store = "s3://out-bucket/sentinel-1-grd-rtc-staging/s1-grd-rtc-31TCH.zarr"
+    with (
+        patch(f"{_MOD}.ingest_all", return_value=0) as mock_ingest,
+        patch(f"{_MOD}._upload_store_to_s3") as mock_upload,
+    ):
+        rc = run_ingest("s3://bucket/in/", s3_store, "descending")
+    assert rc == 0
+    # ingest_all was given a LOCAL temp path named after the store basename
+    local_store = mock_ingest.call_args.args[1]
+    assert local_store.endswith("s1-grd-rtc-31TCH.zarr")
+    assert not local_store.startswith("s3://")
+    mock_upload.assert_called_once_with(local_store, s3_store)
+
+
+def test_run_ingest_s3_skips_upload_on_failure() -> None:
+    """If ingest_all fails (exit 1 or 2), the upload is not attempted."""
+    s3_store = "s3://out-bucket/coll/s1-grd-rtc-31TCH.zarr"
+    for code in (1, 2):
+        with (
+            patch(f"{_MOD}.ingest_all", return_value=code),
+            patch(f"{_MOD}._upload_store_to_s3") as mock_upload,
+        ):
+            rc = run_ingest("s3://bucket/in/", s3_store, "descending")
+        assert rc == code
+        mock_upload.assert_not_called()
