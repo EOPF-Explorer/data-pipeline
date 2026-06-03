@@ -14,7 +14,9 @@ the **CDSE/EODAG secret is created by user/Emmanuel** (referenced by name here).
 | Resource | Status |
 |----------|--------|
 | Data-pipeline image w/ S1 scripts | ✅ `sha-651dbb2` built+pushed (PR #186); registry `w9mllyot.c1.de1.container-registry.ovh.net/eopf-sentinel-zarr-explorer/data-pipeline` |
-| `ingest_v1_s1_rtc.py` container-native | ✅ `run_ingest()`+`_upload_store_to_s3()` (s3fs) added; 340 tests pass; **uncommitted** |
+| `ingest_v1_s1_rtc.py` container-native | ✅ `run_ingest()`+`_upload_store_to_s3()` (s3fs); 340 tests pass; committed `0aaaee3` |
+| Argo templates + ConfigMaps + PVCs + semaphore | ✅ built, `argo lint --offline` + `kubectl --dry-run` clean; committed platform-deploy `2309d6d` (branch `feat/s1-grd-argo-staging`) |
+| 3 SealedSecrets + DEM upload | ⏳ pending Emmanuel — runbook `SEALED-SECRETS.md` |
 | Staging collection | ✅ live (HTTP 200), 0 items |
 | OTB image | `registry.orfeo-toolbox.org/s1-tiling/s1tiling:1.4.0-ubuntu-otb9.1.1` (eodag 4.0.0) |
 | Local DEM data to upload | ✅ 31 COG tiles (980 MB) + `DEM_Union.gpkg` (18 MB) + `egm2008.grd` (4 MB) in `$S1T_WORKDIR` |
