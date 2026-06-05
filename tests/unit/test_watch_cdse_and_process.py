@@ -12,7 +12,15 @@ import pytest
 scripts_dir = Path(__file__).parent.parent.parent / "scripts"
 sys.path.insert(0, str(scripts_dir))
 
-from watch_cdse_and_process import build_parser, query_cdse, tile_bbox  # noqa: E402
+from watch_cdse_and_process import (  # noqa: E402
+    build_parser,
+    is_processed,
+    load_processed,
+    mark_processed,
+    query_cdse,
+    save_processed,
+    tile_bbox,
+)
 
 _MOD = "watch_cdse_and_process"
 
@@ -125,3 +133,38 @@ def test_query_applies_orbit_and_collection_filter() -> None:
     assert kwargs["collections"] == ["SENTINEL-1-GRD"]
     assert kwargs["bbox"] == [0.5, 42.4, 1.8, 43.3]
     assert kwargs["query"] == {"sat:orbit_state": {"eq": "descending"}}
+
+
+# --- state file -----------------------------------------------------------------------------
+
+
+def test_load_missing_file_returns_empty(tmp_path: Path) -> None:
+    assert load_processed(tmp_path / "nope.json") == {}
+
+
+def test_mark_then_is_processed_roundtrip_via_disk(tmp_path: Path) -> None:
+    """mark -> save -> load -> is_processed returns True for the same tile+orbit+product."""
+    path = tmp_path / "data" / ".processed_products.json"
+    state = load_processed(path)
+    assert not is_processed(state, "31TCH", "descending", "S1A_X")
+    mark_processed(state, "31TCH", "descending", "S1A_X", "2025-02-05")
+    save_processed(path, state)
+
+    reloaded = load_processed(path)
+    assert is_processed(reloaded, "31TCH", "descending", "S1A_X")
+
+
+def test_is_processed_scoped_by_tile_and_orbit(tmp_path: Path) -> None:
+    """A product marked under one tile/orbit is not considered processed under another."""
+    state: dict = {}
+    mark_processed(state, "31TCH", "descending", "S1A_X", "2025-02-05")
+    assert is_processed(state, "31TCH", "descending", "S1A_X")
+    assert not is_processed(state, "31TCH", "ascending", "S1A_X")
+    assert not is_processed(state, "30TXM", "descending", "S1A_X")
+
+
+def test_malformed_state_file_treated_as_empty(tmp_path: Path) -> None:
+    """Adversarial: a corrupt/non-JSON state file degrades to empty, not a crash."""
+    path = tmp_path / ".processed_products.json"
+    path.write_text("{ this is not valid json ]")
+    assert load_processed(path) == {}

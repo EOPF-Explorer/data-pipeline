@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import logging
+from pathlib import Path
 
 import mgrs
 from pystac_client import Client
@@ -22,6 +24,9 @@ log = logging.getLogger(__name__)
 CDSE_COLLECTION = "SENTINEL-1-GRD"
 # Orbit-state filter is isolated here so Task 6 can pin casing/mechanism against the live API.
 ORBIT_STATE_PROPERTY = "sat:orbit_state"
+
+# Processed-product state: {tile: {orbit: [{"product_id", "date"}]}}
+State = dict[str, dict[str, list[dict[str, str]]]]
 
 
 def tile_bbox(tile_id: str) -> list[float]:
@@ -73,6 +78,34 @@ def query_cdse(
             continue
         products.append({"product_id": item.id, "date": date})
     return products
+
+
+def load_processed(path: str | Path) -> State:
+    """Load the processed-product state; a missing or unreadable file yields empty state."""
+    p = Path(path)
+    if not p.exists():
+        return {}
+    try:
+        data = json.loads(p.read_text())
+    except (json.JSONDecodeError, OSError):
+        log.warning("state file %s unreadable; treating as empty", p)
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def is_processed(state: State, tile: str, orbit: str, product_id: str) -> bool:
+    return any(e["product_id"] == product_id for e in state.get(tile, {}).get(orbit, []))
+
+
+def mark_processed(state: State, tile: str, orbit: str, product_id: str, date: str) -> None:
+    entries = state.setdefault(tile, {}).setdefault(orbit, [])
+    entries.append({"product_id": product_id, "date": date})
+
+
+def save_processed(path: str | Path, state: State) -> None:
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(state, indent=2))
 
 
 def build_parser() -> argparse.ArgumentParser:
