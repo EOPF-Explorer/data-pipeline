@@ -39,6 +39,7 @@ DEFAULT_COMPRESSION_LEVEL = 3
 DEFAULT_ENABLE_SHARDING = True
 DEFAULT_DASK_CLUSTER = True
 DEFAULT_VALIDATE_OUTPUT = True
+DEFAULT_EXPERIMENTAL_SCALE_OFFSET_CODEC = False
 
 # Cap simultaneous aiohttp connections to the HTTPS source per pod (override via env).
 DEFAULT_SOURCE_HTTP_MAX_CONNECTIONS = 10
@@ -75,6 +76,7 @@ def run_conversion(
     enable_sharding: bool | None = None,
     use_dask_cluster: bool = False,
     validate_output: bool | None = None,
+    experimental_scale_offset_codec: bool = False,
     n_workers: int = 3,
     memory_limit: str = "8GB",
 ) -> str:
@@ -192,7 +194,8 @@ def run_conversion(
         compression_level=compression_level,
         enable_sharding=enable_sharding,
         validate_output=validate_output,
-        keep_scale_offset=False,  # Explicitly disable scale/offset handling
+        keep_scale_offset=False,
+        experimental_scale_offset_codec=experimental_scale_offset_codec,
     )
 
     logger.info(f"✅ Conversion complete → {output_url}")
@@ -243,6 +246,12 @@ def main() -> int:
         help=f"Enable or disable output validation (default: {DEFAULT_VALIDATE_OUTPUT})",
     )
     parser.add_argument(
+        "--experimental-scale-offset-codec",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_EXPERIMENTAL_SCALE_OFFSET_CODEC,
+        help=f"Enable experimental scale-offset codec (default: {DEFAULT_EXPERIMENTAL_SCALE_OFFSET_CODEC})",
+    )
+    parser.add_argument(
         "--n-workers",
         type=int,
         default=3,
@@ -271,6 +280,7 @@ def main() -> int:
             enable_sharding=args.enable_sharding,
             use_dask_cluster=args.dask_cluster,
             validate_output=args.validate_output,
+            experimental_scale_offset_codec=args.experimental_scale_offset_codec,
             n_workers=args.n_workers,
             memory_limit=args.memory_limit,
         )
