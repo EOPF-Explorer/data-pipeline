@@ -14,6 +14,8 @@ import argparse
 import datetime as dt
 import json
 import logging
+import os
+import subprocess
 from pathlib import Path
 
 import mgrs
@@ -24,6 +26,9 @@ log = logging.getLogger(__name__)
 CDSE_COLLECTION = "SENTINEL-1-GRD"
 # Orbit-state filter is isolated here so Task 6 can pin casing/mechanism against the live API.
 ORBIT_STATE_PROPERTY = "sat:orbit_state"
+
+# Local S1Tiling workdir (matches the Sub-issue 4 layout); used to default Script A's local args.
+S1T_WORKDIR = os.environ.get("S1T_WORKDIR", os.path.expanduser("~/s1tiling"))
 
 # Processed-product state: {tile: {orbit: [{"product_id", "date"}]}}
 State = dict[str, dict[str, list[dict[str, str]]]]
@@ -125,13 +130,86 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stac-api-url", required=True, help="STAC API base URL")
     parser.add_argument("--raster-api-url", required=True, help="TiTiler raster API base URL")
     parser.add_argument("--dry-run", action="store_true")
+    # Local-only Script A args (no Argo equivalent); default to the $S1T_WORKDIR layout.
+    parser.add_argument("--eodag-cfg", default=f"{S1T_WORKDIR}/config/eodag.yml")
+    parser.add_argument("--dem-dir", default=f"{S1T_WORKDIR}/DEM/COP_DEM_GLO30")
+    parser.add_argument("--data-dir", default=S1T_WORKDIR)
+    parser.add_argument("--cfg", default="config/S1GRD_RTC.cfg")
     return parser
+
+
+def _script_a_cmd(args: argparse.Namespace, tile: str, date_start: str, date_end: str) -> list[str]:
+    return [
+        "uv", "run", "python", "scripts/run_s1tiling.py",
+        "--tile-id", tile,
+        "--orbit-direction", args.orbit_direction,
+        "--date-start", date_start,
+        "--date-end", date_end,
+        "--s3-bucket", args.s3_bucket,
+        "--s3-prefix", args.s3_prefix,
+        "--s3-endpoint", args.s3_endpoint,
+        "--eodag-cfg", args.eodag_cfg,
+        "--dem-dir", args.dem_dir,
+        "--data-dir", args.data_dir,
+        "--cfg", args.cfg,
+    ]  # fmt: skip
+
+
+def _script_b_cmd(args: argparse.Namespace, tile: str, geotiff_prefix: str) -> list[str]:
+    # Aligned to the real run_ingest_register.py: Zarr path derives from --collection,
+    # so the watcher's --s3-zarr-bucket maps to Script B's --s3-output-bucket (no output prefix).
+    return [
+        "uv", "run", "python", "scripts/run_ingest_register.py",
+        "--s3-geotiff-prefix", geotiff_prefix,
+        "--tile-id", tile,
+        "--orbit-direction", args.orbit_direction,
+        "--collection", args.collection,
+        "--s3-output-bucket", args.s3_zarr_bucket,
+        "--s3-endpoint", args.s3_endpoint,
+        "--stac-api-url", args.stac_api_url,
+        "--raster-api-url", args.raster_api_url,
+    ]  # fmt: skip
+
+
+def process_product(args: argparse.Namespace, product: dict[str, str], tile: str) -> bool:
+    """Run Script A then Script B for one product. Returns True on success, False on any failure.
+
+    The S3 GeoTIFF prefix is reconstructed from Script A's own output formula (rather than captured
+    from its stdout) so Script A's long docker logs can stream straight to the terminal.
+    """
+    date = dt.date.fromisoformat(product["date"])
+    date_start = (date - dt.timedelta(days=1)).isoformat()
+    date_end = (date + dt.timedelta(days=1)).isoformat()
+    # Mirrors run_s1tiling.py: s3://{bucket}/{prefix}/{tile}/{orbit}/{date_start}/
+    geotiff_prefix = (
+        f"s3://{args.s3_bucket}/{args.s3_prefix}/{tile}/{args.orbit_direction}/{date_start}/"
+    )
+
+    a_cmd = _script_a_cmd(args, tile, date_start, date_end)
+    b_cmd = _script_b_cmd(args, tile, geotiff_prefix)
+
+    if args.dry_run:
+        log.info(
+            "[dry-run] %s -> would run:\n  A: %s\n  B: %s",
+            product["product_id"],
+            " ".join(a_cmd),
+            " ".join(b_cmd),
+        )
+        return True
+
+    if subprocess.run(a_cmd).returncode != 0:  # noqa: S603 -- Script A streams to terminal (not captured)
+        log.error("Script A (s1tiling) failed for %s", product["product_id"])
+        return False
+    if subprocess.run(b_cmd).returncode != 0:  # noqa: S603
+        log.error("Script B (ingest/register) failed for %s", product["product_id"])
+        return False
+    return True
 
 
 def main() -> None:
     build_parser().parse_args()
-    # Tasks 2-5 wire query_cdse -> dedupe -> process_product here.
-    raise SystemExit("watch_cdse_and_process: orchestration not yet implemented (Task 1 skeleton)")
+    # Task 5 wires query_cdse -> dedupe -> process_product here.
+    raise SystemExit("watch_cdse_and_process: orchestration not yet implemented (Task 4 skeleton)")
 
 
 if __name__ == "__main__":
