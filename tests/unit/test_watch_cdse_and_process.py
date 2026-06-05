@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import sys
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 scripts_dir = Path(__file__).parent.parent.parent / "scripts"
 sys.path.insert(0, str(scripts_dir))
 
-from watch_cdse_and_process import build_parser, tile_bbox  # noqa: E402
+from watch_cdse_and_process import build_parser, query_cdse, tile_bbox  # noqa: E402
+
+_MOD = "watch_cdse_and_process"
 
 
 def test_tile_bbox_31tch_matches_mgrs_square() -> None:
@@ -63,3 +67,61 @@ def test_parser_lists_expected_args() -> None:
         "--dry-run",
     ):
         assert expected in opt_strings
+
+
+# --- query_cdse -----------------------------------------------------------------------------
+
+
+def _item(item_id: str, when: dt.datetime | None, properties: dict | None = None) -> MagicMock:
+    item = MagicMock()
+    item.id = item_id
+    item.datetime = when
+    item.properties = properties or {}
+    return item
+
+
+def _patched_client(items: list[MagicMock]) -> MagicMock:
+    """Patch Client.open -> client whose search().items() yields `items`. Returns the client mock."""
+    client = MagicMock()
+    client.search.return_value.items.return_value = iter(items)
+    return client
+
+
+def test_query_returns_parsed_products() -> None:
+    items = [
+        _item("S1A_IW_GRDH_A", dt.datetime(2025, 2, 5, 6, 29, tzinfo=dt.UTC)),
+        _item("S1A_IW_GRDH_B", dt.datetime(2025, 2, 6, 6, 30, tzinfo=dt.UTC)),
+    ]
+    with patch(f"{_MOD}.Client.open", return_value=_patched_client(items)):
+        products = query_cdse("https://cdse/stac", [0.5, 42.4, 1.8, 43.3], "descending", 7)
+    assert products == [
+        {"product_id": "S1A_IW_GRDH_A", "date": "2025-02-05"},
+        {"product_id": "S1A_IW_GRDH_B", "date": "2025-02-06"},
+    ]
+
+
+def test_query_empty_returns_empty_list() -> None:
+    with patch(f"{_MOD}.Client.open", return_value=_patched_client([])):
+        assert query_cdse("https://cdse/stac", [0.5, 42.4, 1.8, 43.3], "descending", 7) == []
+
+
+def test_query_skips_item_without_datetime() -> None:
+    """Adversarial: an item with no datetime and no start_datetime is skipped, not crashed on."""
+    items = [
+        _item("good", dt.datetime(2025, 2, 5, tzinfo=dt.UTC)),
+        _item("bad", None, properties={}),
+    ]
+    with patch(f"{_MOD}.Client.open", return_value=_patched_client(items)):
+        products = query_cdse("https://cdse/stac", [0.5, 42.4, 1.8, 43.3], "descending", 7)
+    assert [p["product_id"] for p in products] == ["good"]
+
+
+def test_query_applies_orbit_and_collection_filter() -> None:
+    """The CDSE search is scoped to SENTINEL-1-GRD, the bbox, and the orbit-state filter."""
+    client = _patched_client([])
+    with patch(f"{_MOD}.Client.open", return_value=client):
+        query_cdse("https://cdse/stac", [0.5, 42.4, 1.8, 43.3], "descending", 7)
+    kwargs = client.search.call_args.kwargs
+    assert kwargs["collections"] == ["SENTINEL-1-GRD"]
+    assert kwargs["bbox"] == [0.5, 42.4, 1.8, 43.3]
+    assert kwargs["query"] == {"sat:orbit_state": {"eq": "descending"}}

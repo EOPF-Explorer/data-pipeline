@@ -11,8 +11,17 @@ CLI aligns to the *real* run_ingest_register.py interface: the Zarr store path i
 from __future__ import annotations
 
 import argparse
+import datetime as dt
+import logging
 
 import mgrs
+from pystac_client import Client
+
+log = logging.getLogger(__name__)
+
+CDSE_COLLECTION = "SENTINEL-1-GRD"
+# Orbit-state filter is isolated here so Task 6 can pin casing/mechanism against the live API.
+ORBIT_STATE_PROPERTY = "sat:orbit_state"
 
 
 def tile_bbox(tile_id: str) -> list[float]:
@@ -30,6 +39,40 @@ def tile_bbox(tile_id: str) -> list[float]:
     lats = [lat for lat, _ in latlon]
     lons = [lon for _, lon in latlon]
     return [min(lons), min(lats), max(lons), max(lats)]
+
+
+def _item_date(item: object) -> str | None:
+    """Return the acquisition date as YYYY-MM-DD, or None if the item carries no datetime."""
+    when = getattr(item, "datetime", None)
+    if when is not None:
+        return str(when.date().isoformat())
+    start = getattr(item, "properties", {}).get("start_datetime")
+    return start[:10] if isinstance(start, str) else None
+
+
+def query_cdse(
+    stac_url: str, bbox: list[float], orbit_direction: str, lookback_days: int
+) -> list[dict[str, str]]:
+    """Query the CDSE STAC API for S1 GRD products over `bbox` in the last `lookback_days`.
+
+    Returns ``[{"product_id", "date": "YYYY-MM-DD"}, ...]``. Items without a datetime are skipped.
+    """
+    now = dt.datetime.now(dt.UTC)
+    start = now - dt.timedelta(days=lookback_days)
+    search = Client.open(stac_url).search(
+        collections=[CDSE_COLLECTION],
+        bbox=bbox,
+        datetime=f"{start.isoformat()}/{now.isoformat()}",
+        query={ORBIT_STATE_PROPERTY: {"eq": orbit_direction}},
+    )
+    products: list[dict[str, str]] = []
+    for item in search.items():
+        date = _item_date(item)
+        if date is None:
+            log.warning("skipping %s: no datetime", item.id)
+            continue
+        products.append({"product_id": item.id, "date": date})
+    return products
 
 
 def build_parser() -> argparse.ArgumentParser:
