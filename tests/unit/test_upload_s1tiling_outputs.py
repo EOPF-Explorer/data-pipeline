@@ -125,6 +125,29 @@ def test_upload_outputs_verify_size_mismatch_returns_1(tmp_path) -> None:
     assert rc == 1
 
 
+def test_upload_outputs_permanent_failure_returns_1(tmp_path, monkeypatch) -> None:
+    """A retry-exhausted upload fails loudly with a clean exit code, not a traceback."""
+    monkeypatch.setattr("time.sleep", lambda *_a, **_k: None)
+    data_dir = _make_inputs(tmp_path)
+    fs = MagicMock()
+    fs.put_file.side_effect = OSError("backend down")  # always fails
+    rc = upload_outputs(fs, data_dir, TILE, ORBIT, DATE, "bucket")
+    assert rc == 1
+    fs.ls.assert_not_called()  # never claims verification on a failed upload
+
+
+def test_upload_outputs_duplicate_basename_returns_1(tmp_path) -> None:
+    """A basename collision across source dirs is refused (would silently overwrite)."""
+    data_dir = _make_inputs(tmp_path)
+    # Same basename in both data_out/<tile> and data_gamma_area.
+    (data_dir / "data_out" / TILE / "DUP.tif").write_bytes(b"x")
+    (data_dir / "data_gamma_area" / "DUP.tif").write_bytes(b"y")
+    fs = MagicMock()
+    rc = upload_outputs(fs, data_dir, TILE, ORBIT, DATE, "bucket")
+    assert rc == 1
+    fs.put_file.assert_not_called()  # refused before uploading anything
+
+
 def test_put_one_retries_transient_errors(tmp_path, monkeypatch) -> None:
     """_put_one retries on transient backend errors (no real waiting)."""
     monkeypatch.setattr("time.sleep", lambda *_a, **_k: None)

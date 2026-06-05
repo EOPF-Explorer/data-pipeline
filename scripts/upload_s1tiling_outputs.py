@@ -12,7 +12,8 @@ expect:  s3://{bucket}/s1tiling-output/{tile}/{orbit}/{date_start}/<name>.tif
 
 Exit codes:
     0 -- all GeoTIFFs uploaded and verified
-    1 -- no GeoTIFFs found, or post-upload verification mismatch
+    1 -- nothing to upload, an upload failed after retries, a basename collision,
+         or post-upload verification mismatch
 """
 
 from __future__ import annotations
@@ -75,15 +76,28 @@ def upload_outputs(
         )
         return 1
 
+    # The destination is flat (basename only), so two source files sharing a
+    # basename would silently overwrite each other AND dedup in the verify map --
+    # exactly the silent-loss class this script exists to prevent. Refuse upfront.
+    names = [f.name for f in files]
+    dupes = sorted({n for n in names if names.count(n) > 1})
+    if dupes:
+        log.error("Refusing to upload: duplicate GeoTIFF basenames would collide: %s", dupes)
+        return 1
+
     # Strip the s3:// scheme: s3fs (and local fsspec) operate on "bucket/key" paths.
     dest = s1_output_prefix(bucket, tile_id, orbit_direction, date_start)
     dest = dest[len("s3://") :].rstrip("/")
     fs.makedirs(dest, exist_ok=True)  # no-op on s3fs; creates parents on a local fs
 
-    for f in files:
-        rpath = f"{dest}/{f.name}"
-        _put_one(fs, f, rpath)
-        log.info("uploaded %s -> s3://%s", f.name, rpath)
+    try:
+        for f in files:
+            rpath = f"{dest}/{f.name}"
+            _put_one(fs, f, rpath)
+            log.info("uploaded %s -> s3://%s", f.name, rpath)
+    except Exception:
+        log.exception("Upload failed after retries; aborting (no partial success reported)")
+        return 1
 
     # Verify: every local file is present at dest with a matching size.
     expected = {f.name: f.stat().st_size for f in files}
