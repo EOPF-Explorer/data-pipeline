@@ -19,6 +19,7 @@ from watch_cdse_and_process import (  # noqa: E402
     mark_processed,
     process_product,
     query_cdse,
+    run_watch,
     save_processed,
     tile_bbox,
 )
@@ -131,7 +132,7 @@ def test_query_applies_orbit_and_collection_filter() -> None:
     with patch(f"{_MOD}.Client.open", return_value=client):
         query_cdse("https://cdse/stac", [0.5, 42.4, 1.8, 43.3], "descending", 7)
     kwargs = client.search.call_args.kwargs
-    assert kwargs["collections"] == ["SENTINEL-1-GRD"]
+    assert kwargs["collections"] == ["sentinel-1-grd"]
     assert kwargs["bbox"] == [0.5, 42.4, 1.8, 43.3]
     assert kwargs["query"] == {"sat:orbit_state": {"eq": "descending"}}
 
@@ -271,3 +272,77 @@ def test_process_dry_run_runs_nothing() -> None:
         ok = process_product(_args(dry_run=True), _PRODUCT, "31TCH")
     assert ok is True
     run.assert_not_called()
+
+
+# --- run_watch (main wiring) ----------------------------------------------------------------
+
+
+def test_run_watch_dry_run_invokes_no_subprocess_and_writes_no_state(tmp_path: Path) -> None:
+    state_file = tmp_path / ".processed_products.json"
+    with (
+        patch(f"{_MOD}.STATE_FILE", state_file),
+        patch(f"{_MOD}.query_cdse", return_value=[_PRODUCT]),
+        patch(f"{_MOD}.subprocess.run") as run,
+    ):
+        counts = run_watch(_args(dry_run=True))
+    run.assert_not_called()
+    assert not state_file.exists()
+    assert counts["found"] == 1 and counts["new"] == 1
+
+
+def test_run_watch_queries_cdse_catalogue_not_target_stac(tmp_path: Path) -> None:
+    """The query must hit the CDSE source catalogue, not the EOPF target STAC (--stac-api-url)."""
+    from watch_cdse_and_process import CDSE_STAC_URL
+
+    with (
+        patch(f"{_MOD}.STATE_FILE", tmp_path / "s.json"),
+        patch(f"{_MOD}.query_cdse", return_value=[]) as q,
+    ):
+        run_watch(_args(stac_api_url="https://eopf-target/stac"))
+    assert q.call_args[0][0] == CDSE_STAC_URL
+    assert q.call_args[0][0] != "https://eopf-target/stac"
+
+
+def test_run_watch_skips_already_processed(tmp_path: Path) -> None:
+    state_file = tmp_path / ".processed_products.json"
+    state: dict = {}
+    mark_processed(state, "31TCH", "descending", "S1A_X", "2025-02-05")
+    save_processed(state_file, state)
+    with (
+        patch(f"{_MOD}.STATE_FILE", state_file),
+        patch(f"{_MOD}.query_cdse", return_value=[_PRODUCT]),
+        patch(f"{_MOD}.process_product") as proc,
+    ):
+        counts = run_watch(_args())
+    proc.assert_not_called()
+    assert counts["found"] == 1 and counts["new"] == 0 and counts["processed"] == 0
+
+
+def test_run_watch_processes_new_product_and_persists_state(tmp_path: Path) -> None:
+    state_file = tmp_path / ".processed_products.json"
+    with (
+        patch(f"{_MOD}.STATE_FILE", state_file),
+        patch(f"{_MOD}.query_cdse", return_value=[_PRODUCT]),
+        patch(f"{_MOD}.process_product", return_value=True),
+    ):
+        counts = run_watch(_args())
+    assert counts["processed"] == 1 and counts["failed"] == 0
+    assert is_processed(load_processed(state_file), "31TCH", "descending", "S1A_X")
+
+
+def test_run_watch_counts_failures_and_does_not_persist_them(tmp_path: Path) -> None:
+    state_file = tmp_path / ".processed_products.json"
+    products = [
+        {"product_id": "ok", "date": "2025-02-05"},
+        {"product_id": "boom", "date": "2025-02-06"},
+    ]
+    with (
+        patch(f"{_MOD}.STATE_FILE", state_file),
+        patch(f"{_MOD}.query_cdse", return_value=products),
+        patch(f"{_MOD}.process_product", side_effect=[True, False]),
+    ):
+        counts = run_watch(_args())
+    assert counts == {"found": 2, "new": 2, "processed": 1, "failed": 1}
+    state = load_processed(state_file)
+    assert is_processed(state, "31TCH", "descending", "ok")
+    assert not is_processed(state, "31TCH", "descending", "boom")

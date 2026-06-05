@@ -23,12 +23,19 @@ from pystac_client import Client
 
 log = logging.getLogger(__name__)
 
-CDSE_COLLECTION = "SENTINEL-1-GRD"
-# Orbit-state filter is isolated here so Task 6 can pin casing/mechanism against the live API.
+# Source catalogue queried for new acquisitions (distinct from the EOPF target STAC passed to
+# Script B via --stac-api-url). Verified live in Task 6.
+CDSE_STAC_URL = "https://catalogue.dataspace.copernicus.eu/stac"
+# Verified live 2026-06-05: id is lowercase (SENTINEL-1-GRD returns 0); sat:orbit_state is lowercase
+# ('descending'/'ascending') and the `query` extension filters correctly.
+CDSE_COLLECTION = "sentinel-1-grd"
 ORBIT_STATE_PROPERTY = "sat:orbit_state"
 
 # Local S1Tiling workdir (matches the Sub-issue 4 layout); used to default Script A's local args.
 S1T_WORKDIR = os.environ.get("S1T_WORKDIR", os.path.expanduser("~/s1tiling"))
+
+# Local idempotency state (gitignored).
+STATE_FILE = Path("data/.processed_products.json")
 
 # Processed-product state: {tile: {orbit: [{"product_id", "date"}]}}
 State = dict[str, dict[str, list[dict[str, str]]]]
@@ -206,10 +213,45 @@ def process_product(args: argparse.Namespace, product: dict[str, str], tile: str
     return True
 
 
+def run_watch(args: argparse.Namespace) -> dict[str, int]:
+    """Query each tile, run Script A -> B for unseen products, persist state, return run counts."""
+    tiles = [t.strip() for t in args.tiles.split(",") if t.strip()]
+    state = load_processed(STATE_FILE)
+    counts = {"found": 0, "new": 0, "processed": 0, "failed": 0}
+
+    for tile in tiles:
+        products = query_cdse(
+            CDSE_STAC_URL, tile_bbox(tile), args.orbit_direction, args.lookback_days
+        )
+        counts["found"] += len(products)
+        for product in products:
+            if is_processed(state, tile, args.orbit_direction, product["product_id"]):
+                log.info("skipping %s (already processed)", product["product_id"])
+                continue
+            counts["new"] += 1
+            if process_product(args, product, tile):
+                counts["processed"] += 1
+                if not args.dry_run:
+                    mark_processed(
+                        state, tile, args.orbit_direction, product["product_id"], product["date"]
+                    )
+                    save_processed(STATE_FILE, state)
+            else:
+                counts["failed"] += 1
+
+    log.info(
+        "Summary: %d found, %d new, %d processed, %d failed",
+        counts["found"],
+        counts["new"],
+        counts["processed"],
+        counts["failed"],
+    )
+    return counts
+
+
 def main() -> None:
-    build_parser().parse_args()
-    # Task 5 wires query_cdse -> dedupe -> process_product here.
-    raise SystemExit("watch_cdse_and_process: orchestration not yet implemented (Task 4 skeleton)")
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+    run_watch(build_parser().parse_args())
 
 
 if __name__ == "__main__":
