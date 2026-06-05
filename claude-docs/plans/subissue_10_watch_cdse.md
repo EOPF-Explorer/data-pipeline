@@ -12,9 +12,10 @@
 | `scripts/run_s1tiling.py` (Script A) | **Done** — prints `s3://{bucket}/{prefix}/{tile}/{orbit}/{date_start}/` as last line |
 | `scripts/run_ingest_register.py` (Script B) | **Done** — Zarr path derived from `--collection`; **no `--s3-output-prefix`** |
 | `pystac_client` (0.9.0) | Available — reused for the CDSE query (no new STAC dep) |
-| `mgrs` | **Not yet added** — Task 1 adds it; validated installable (1.5.4, prebuilt wheel) + bbox derivation works |
-| `scripts/watch_cdse_and_process.py` | **Not started** |
-| `tests/unit/test_watch_cdse_and_process.py` | **Not started** |
+| `mgrs` | **Done** — pinned 1.5.4; mypy override added |
+| `scripts/watch_cdse_and_process.py` | **Done** (Tasks 1–5) — `tile_bbox`/`query_cdse`/state/`process_product`/`run_watch` |
+| `tests/unit/test_watch_cdse_and_process.py` | **Done** — 29 tests; full suite 378 passed |
+| Live `--dry-run` | **Verified** — lists real S1 GRD products for 31TCH + planned A/B runs |
 
 ### Decisions taken before planning (confirmed with user, 2026-06-05)
 
@@ -42,7 +43,7 @@ Build bottom-up: foundation (dep + bbox) → query → state → orchestration �
 Tests in `tests/unit/`, patch `subprocess.run`/`pystac_client` at the module boundary, import via
 `sys.path.insert` — mirroring `tests/unit/test_run_ingest_register.py`.
 
-### Task 1 — Foundation: `mgrs` dep + `tile_bbox()` + CLI skeleton  <NEXT>
+### Task 1 — Foundation: `mgrs` dep + `tile_bbox()` + CLI skeleton  ✅ DONE (`423f096`)
 **What**: Add `mgrs` to `pyproject.toml` + `uv lock`. Create `scripts/watch_cdse_and_process.py`
 with the full argparse interface (`--tiles`, `--orbit-direction`, `--lookback-days`, `--s3-bucket`,
 `--s3-prefix`, `--s3-zarr-bucket`, `--s3-endpoint`, `--collection`, `--stac-api-url`,
@@ -61,7 +62,7 @@ four are needed).
 - [ ] `--help` lists every arg above and **no `--s3-zarr-prefix`**
 - [ ] Adversarial: malformed/unknown tile id raises a clear error (not a silent empty bbox)
 
-### Task 2 — `query_cdse()` against the CDSE STAC API
+### Task 2 — `query_cdse()` against the CDSE STAC API  ✅ DONE (`8e4339b`)
 **What**: `query_cdse(stac_url, bbox, orbit_direction, lookback_days) -> list[dict]` via
 `Client.open`, `collections=["SENTINEL-1-GRD"]`, `bbox`, `datetime=(now-lookback)/now`, filtering on
 `sat:orbit_state`. Returns `[{"product_id", "date": "YYYY-MM-DD"}, ...]`.
@@ -72,7 +73,7 @@ four are needed).
 - [ ] `date` extracted as `YYYY-MM-DD` from item datetime
 - [ ] Adversarial: item with missing/`null` datetime skipped or clear error, not a crash
 
-### Task 3 — State file (idempotency)
+### Task 3 — State file (idempotency)  ✅ DONE (`f72b44c`)
 **What**: `load_processed`/`is_processed`/`mark_processed`/`save_processed` over a plain dict
 `{"31TCH": {"descending": [{"product_id", "date"}]}}` at `data/.processed_products.json`; add it to
 `.gitignore`. Keep minimal — no class/schema layer.
@@ -83,7 +84,9 @@ four are needed).
 - [ ] `.gitignore` excludes the state file
 - [ ] Adversarial: malformed/empty state file → treated as empty, not a crash
 
-### Task 4 — `process_product()` orchestration (Script A → Script B)
+### Task 4 — `process_product()` orchestration (Script A → Script B)  ✅ DONE (`6211b02`)
+> Added optional Script-A local args (`--eodag-cfg`/`--dem-dir`/`--data-dir`/`--cfg`) to the watcher
+> CLI, defaulting to the `$S1T_WORKDIR` layout — a gap the spec's watcher interface omitted.
 **What**: `date_start = date−1d`, `date_end = date+1d`. Run Script A with those dates, **streaming
 its output (not captured)**. **Reconstruct** the prefix as
 `s3://{s3_bucket}/{s3_prefix}/{tile}/{orbit}/{date_start}/` (watcher owns all inputs). Run Script B
@@ -98,7 +101,9 @@ with that prefix, `--collection`, `--s3-output-bucket` (= `--s3-zarr-bucket`) �
 - [ ] Script B gets `--collection` + `--s3-output-bucket`, and **never** `--s3-output-prefix`
 - [ ] Script A failure → B not called, returns False; B failure → returns False
 
-### Task 5 — `main()` wiring, `--dry-run`, summary
+### Task 5 — `main()` wiring, `--dry-run`, summary  ✅ DONE (`99a4c3a`)
+> Fixed a wiring bug found via the dry-run smoke: `run_watch` now queries the CDSE *source* catalogue
+> (`CDSE_STAC_URL`), not the EOPF target STAC (`--stac-api-url`, which is for Script B registration).
 **What**: per tile: `tile_bbox` → `query_cdse` → skip via state → `process_product` →
 `mark_processed`+`save_processed` on success. `--dry-run` prints planned runs, no subprocess, no
 state write. Summary: `N found, M new, K processed, L failed`.
@@ -108,18 +113,19 @@ state write. Summary: `N found, M new, K processed, L failed`.
 - [ ] Already-processed products skipped (state consulted first)
 - [ ] Summary line with the four counts
 
-### Checkpoint — after Tasks 1–5 (offline gate)
-- [ ] `uv run pytest` green overall
-- [ ] `ruff` + `mypy` (pre-commit) pass
-- [ ] `--dry-run` runs end-to-end with stub state
+### Checkpoint — after Tasks 1–5 (offline gate)  ✅ PASSED (2026-06-05)
+- [x] `uv run pytest` green overall — 378 passed, 1 skipped
+- [x] `ruff` + `mypy` (pre-commit) pass
+- [x] `--dry-run` runs end-to-end — lists real S1 GRD products for 31TCH + planned A/B runs
 
-### Task 6 — Live verification + `sat:orbit_state` casing (resolves OQ-1)
-**What**: Smoke-test `"descending"` vs `"DESCENDING"` **and** the filter mechanism (cql2 vs `query`
-ext vs client-side) against the live CDSE STAC API; pin what works. Run the watcher for 31TCH
-end-to-end, then re-run for idempotency. Needs CDSE creds + S3 + Docker (Sub-issue 4 environment).
+### Task 6 — Live verification + `sat:orbit_state` casing  🟡 PARTIAL
+**Query side resolved (2026-06-05, verified live)**: collection id is lowercase `sentinel-1-grd`
+(`SENTINEL-1-GRD` → 0); `sat:orbit_state` is lowercase; the `query` extension filters correctly
+(descending→6 / ascending→8, no cross-contamination). All pinned in code.
+**Remaining (needs the Sub-issue 4 environment: CDSE creds + DEM + Docker + S3 write):**
 **Verify**: two consecutive real runs; second reports `0 new`.
 **Acceptance criteria**:
-- [ ] Correct `sat:orbit_state` casing + filter mechanism verified live and pinned in code
+- [x] Correct `sat:orbit_state` casing + filter mechanism verified live and pinned in code
 - [ ] ≥ 1 new product processed A→B end-to-end (item queryable in staging STAC)
 - [ ] Idempotent re-run reports `0 new`, runs nothing
 - [ ] Outcome reported to Emmanuel
@@ -131,7 +137,7 @@ end-to-end, then re-run for idempotency. Needs CDSE creds + S3 + Docker (Sub-iss
 | Risk | Impact | Mitigation |
 |------|--------|------------|
 | ~~`mgrs` C-extension may not build~~ | Low (retired) | Validated 2026-06-05: mgrs 1.5.4 installs from a prebuilt wheel in ~3 ms under `uv`; needs `packaging` (already present) |
-| CDSE query returns 0 silently — wrong casing **or** filter mechanism | Med | Task 2 isolates the filter; Task 6 smoke-tests both before pinning |
+| ~~CDSE query returns 0 silently — wrong casing/mechanism~~ | Resolved | Root cause was the collection id (`SENTINEL-1-GRD`→0); fixed to `sentinel-1-grd`. Casing/mechanism verified live |
 | Prefix-formula coupling (watcher reconstructs Script A's path) | Med | Task 4 test asserts reconstruction == Script A's formula → drift fails CI |
 | CDSE endpoint/collection (`SENTINEL-1-GRD`, `catalogue.dataspace.copernicus.eu/stac`) unverified | Low | Confirmed live in Task 6; URL/collection isolated as constants |
 
@@ -139,11 +145,13 @@ end-to-end, then re-run for idempotency. Needs CDSE creds + S3 + Docker (Sub-iss
 
 ## Open questions
 
-1. **OQ-1 `sat:orbit_state` casing + filter mechanism** — owner: this work; resolved in Task 6.
+None open. All resolved below.
 
 ### Resolved
+- **OQ-1 — CDSE casing + filter mechanism (2026-06-05, live)**: collection `sentinel-1-grd` (lowercase), `sat:orbit_state` lowercase, `query` extension filters correctly. Pinned in code.
 - **OQ — Script B interface (2026-06-05)**: align watcher to real Script B (drop `--s3-zarr-prefix`; pass `--collection` + `--s3-zarr-bucket`). Impact: spec block stale (see below).
-- **OQ — tile→bbox (2026-06-05)**: use `mgrs` dependency. Impact: one new dep, C-extension build risk.
+- **OQ — tile→bbox (2026-06-05)**: use `mgrs` dependency (validated installable; bbox `[0.533, 42.427, 1.784, 43.346]`).
+- **OQ — Script A local args (2026-06-05)**: add `--eodag-cfg`/`--dem-dir`/`--data-dir`/`--cfg` as optional watcher flags defaulting to `$S1T_WORKDIR`.
 
 ---
 
