@@ -36,6 +36,7 @@ dependencies = [
     "cf-xarray==0.11.1",
     "eopf-geozarr @ git+https://github.com/EOPF-Explorer/data-model.git@9231a5c372953e2ce55823f169ef4fbfebf4e196",
     "requests==2.34.1",
+    "mgrs==1.5.4",
 ]
 
 [tool.uv]
@@ -177,5 +178,5 @@ module = "notebooks.*"
 ignore_errors = true
 
 [[tool.mypy.overrides]]
-module = ["boto3.*", "botocore.*"]
+module = ["boto3.*", "botocore.*", "mgrs.*"]
 ignore_missing_imports = true
