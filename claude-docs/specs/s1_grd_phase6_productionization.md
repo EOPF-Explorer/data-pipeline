@@ -1,6 +1,6 @@
 # Spec: S1 GRD RTC Productionization (Phase 6)
 
-**Status**: Draft (Define stage) — 2026-06-08
+**Status**: Draft (Define stage) — 2026-06-08 · **Tracked in #226**
 **Builds on**: `s1_grd_phase5_subissues.md` (local prototype + Argo templates),
 `s1_grd_STACregisration_and_argo_pipelines.md`, `spike_s1tiling_platform_support.md` (S1C/S1D finding).
 
@@ -11,7 +11,7 @@
 Move the S1 GRD RTC pipeline from the verified **single-tile (31TCH) / S1A** prototype to an
 **automated, multi-tile, in-cluster production service**: a data-driven trigger discovers new CDSE
 S1 GRD products, provisions the DEM for any requested tile automatically, and runs
-s1tiling → ingest → register, promoting outputs along a staging → prod path.
+s1tiling → ingest → register, writing to **staging** (staging→prod promotion is a later phase — P3).
 
 **Target users**: the EOPF Explorer platform (STAC catalogue + raster viewer consumers) and the
 devseed operators who run/monitor the pipeline.
@@ -19,7 +19,7 @@ devseed operators who run/monitor the pipeline.
 ### Resolved decisions (2026-06-08, confirmed with Loïc)
 | # | Decision | Implication |
 |---|----------|-------------|
-| Goal | Productionize S1 GRD RTC in-cluster (automated, multi-tile, staging→prod) | Drives the whole spec |
+| Goal | Productionize S1 GRD RTC in-cluster (automated, multi-tile, **staging-only**; prod deferred) | Drives the whole spec |
 | Platform | **S1A + S1C**, skip **S1D** | S1C enabled config-only; S1D skipped until upstream s1tiling support (no release/dev branch has it — `spike_s1tiling_platform_support.md`) |
 | Trigger | **Port the CDSE watcher into Argo** (data-driven) | A CronWorkflow runs query→dedup→submit; no blind-day s1tiling |
 | Tiles/DEM | **Automated DEM-fetch step** | A pipeline step fetches/builds the Copernicus DEM GLO-30 for any requested MGRS tile; no manual DEM upload |
@@ -37,7 +37,7 @@ devseed operators who run/monitor the pipeline.
 - **Multi-platform**: render `platform_list = "S1A S1C"` into the s1tiling cfg; the trigger skips S1D
   (logged), so daily runs don't attempt-and-fail S1D scenes.
 - **Multi-tile**: trigger iterates a configured tile set (AOI); each tile self-provisions its DEM.
-- **Bounded historical backfill** on enable (configurable lookback — OQ #4), alongside forward
+- **Bounded historical backfill** on enable (configurable lookback — OQ #2), alongside forward
   processing (P5).
 - **In-cluster dedup/idempotency** via STAC item-exists check (P2 — replaces the local JSON state).
 - **Quality gate** before register (P1).
@@ -54,14 +54,14 @@ devseed operators who run/monitor the pipeline.
 ## 3. Architecture (proposed)
 
 ```
-CronWorkflow (data-driven trigger, every N hours)
+CronWorkflow (data-driven trigger, every 6 h)
   └─ for each tile in AOI:
        query CDSE STAC (bbox, lookback, orbit, platform∈{S1A,S1C})  ──► new products?
           └─ for each NEW product (not already in STAC):           ──► submit child Workflow:
-               ┌─────────────────────────────────────────────────────────────┐
-               │ ensure-dem (fetch GLO-30 for tile)  →  s1tiling  →  ingest  →  register │
-               │                                                     └─ quality gate ┘   │
-               └─────────────────────────────────────────────────────────────┘
+               ┌──────────────────────────────────────────────────────────────────────┐
+               │ ensure-dem  →  s1tiling  →  ingest  →  quality-gate  →  register       │
+               │                                         (FAIL ⇒ stop, no register)     │
+               └──────────────────────────────────────────────────────────────────────┘
 ```
 
 - **Trigger**: the local `watch_cdse_and_process.py` query/dedup logic is ported into a container
@@ -74,11 +74,14 @@ CronWorkflow (data-driven trigger, every N hours)
   cached). The EGM2008 geoid is a one-time shared asset, not per-tile.
 - **Platform**: cfg render extended to set `platform_list`; trigger filters its CDSE query to
   `S1A, S1C` and explicitly skips S1D with a log line.
-- **Storage**: GeoTIFFs + Zarr to the S1 staging bucket; prod promotion path per P3.
+- **Storage**: GeoTIFFs + Zarr to the S1 **staging** bucket/collection only; prod promotion is out
+  of scope this phase (P3).
+- **Geoid**: the EGM2008 model is assumed pre-staged on the `s1-dem` PVC (as in phase-1); `ensure-dem`
+  does not fetch it per run.
 
 ---
 
-## 4. Success criteria (proposed — review)
+## 4. Success criteria (agreed)
 
 - [ ] Data-driven trigger submits a child Workflow **only** for genuinely new CDSE products
       (zero s1tiling runs on no-data days).
@@ -99,18 +102,23 @@ CronWorkflow (data-driven trigger, every N hours)
 - **P1 — Quality gate**: run the `validate_s1_grd_rtc` checks (CRS, grid_mapping, NaN fraction, dB
   ranges) as an automated **post-ingest gate**. **FAIL → do not register, fail the workflow + alert;
   WARN → register with an annotation.**
-- **P2 — Dedup**: **STAC "does this item exist?" check** (+ the ingest's own skip gate) is the dedup
-  authority — no persistent PVC/ConfigMap state. *Risk: STAC indexing latency could allow a brief
-  re-submit window; acceptable, mitigated by the ingest skip-gate.*
+- **P2 — Dedup**: the **automated trigger** skips a product whose STAC item already exists (+ the
+  ingest's own skip gate); no persistent PVC/ConfigMap state. *Risk: STAC indexing latency could
+  allow a brief re-submit window; acceptable, mitigated by the ingest skip-gate.*
+  → **Interaction with P7**: existence-dedup means the trigger **never reprocesses** an already-
+  registered product. Reprocessing is therefore an **explicit, out-of-band path** (see P7), not
+  something the daily trigger does.
 - **P3 — Promotion**: **staging only this phase.** Register to the S1 staging bucket/collection;
   **prod bucket/collection + cutover are out of scope** (deferred to a later phase). The §4 soak is
   the phase acceptance bar, not a prod gate.
 - **P4 — Acceptance soak**: **5 tiles × 14 days × ≥ 95% success** on staging.
 - **P5 — Temporal**: **forward + bounded backfill.** Process new acquisitions *and* a configurable
-  historical lookback window on enable. Backfill window size = **OQ #4**.
+  historical lookback window on enable. Backfill window size = **OQ #2**.
 - **P6 — Cadence**: trigger **every 6 h**.
-- **P7 — Reprocessing**: **overwrite (upsert)** on reprocess (orbit/DEM/data-model change); no item
-  versioning yet (revisit only if a consumer needs history).
+- **P7 — Reprocessing**: an explicit/manual path (e.g. a `force` flag or a one-off submit that
+  bypasses the P2 existence check) **overwrites (upsert)** the item; no item versioning yet (revisit
+  only if a consumer needs history). The **automated trigger never reprocesses** (P2). *Scope note:
+  the force path's UX is a plan-level detail, not required for the soak.*
 
 ---
 
@@ -147,6 +155,7 @@ hardcode credentials; blind-run s1tiling on no-data days.
 
 ## 8. Done definition (Define stage)
 
-Objectives, scope, and success criteria are unambiguous and agreed; P1–P7 defaults are confirmed or
-amended; open questions §7 have owners. Then proceed to a Plan (`claude-docs/plans/`) breaking this
-into atomic tasks (trigger port, ensure-dem, platform render, quality gate, promotion, soak).
+Objectives, scope, and success criteria are unambiguous and agreed; P1–P7 confirmed (§5); open
+questions §7 have owners. Then proceed to a Plan (`claude-docs/plans/`) breaking this into atomic
+tasks (trigger port, ensure-dem, platform render S1A+S1C, multi-tile AOI, quality gate, backfill,
+acceptance soak).
