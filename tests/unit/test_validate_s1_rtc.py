@@ -145,3 +145,27 @@ def test_validate_dataset_corrupt_fails():
     m = _mod()
     bad = _r10m(vv=np.full((1, 4, 4), np.nan, dtype="float32"), with_crs=False)  # all-NaN vv
     assert m.overall(m.validate_dataset(bad)) == m.Level.FAIL
+
+
+def test_validate_schema_is_metadata_only():
+    """Schema checks (dtype/dims/crs) don't include the finite/dB data checks."""
+    m = _mod()
+    labels = [c.label for c in m.validate_schema(_r10m())]
+    assert any("dtype/dims" in label for label in labels)
+    assert not any("finite" in label or "dB" in label for label in labels)
+
+
+def test_validate_data_catches_bad_slice():
+    """validate_data on a single corrupt acquisition slice FAILs (the per-time gate path)."""
+    m = _mod()
+    bad = _r10m(vv=np.full((1, 4, 4), np.nan, dtype="float32"))
+    assert m.overall(m.validate_data(bad)) == m.Level.FAIL
+
+
+def test_time_index_picks_nearest():
+    """time_index resolves the nearest acquisition position from the native time coord."""
+    m = _mod()
+    times = np.array(["2026-06-05T06:09:07", "2026-06-07T05:52:48"], dtype="datetime64[ns]")
+    native = xr.Dataset(coords={"time": ("time", times)})
+    assert m.time_index(native, "2026-06-07") == 1
+    assert m.time_index(native, "2026-06-05T06:09:07") == 0

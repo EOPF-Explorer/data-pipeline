@@ -100,20 +100,33 @@ def check_db_range(
     return Check(Level.PASS, f"{name} dB range", detail)
 
 
-def validate_dataset(ds: xr.Dataset) -> list[Check]:
-    """Run the per-level (r10m) data checks over an opened dataset."""
-    checks = [
+def validate_schema(ds: xr.Dataset) -> list[Check]:
+    """Cheap (metadata-only) checks: dtype/dims + CRS. Run on the native resolution."""
+    return [
         check_dtype_dims(ds, "vv", "float32"),
         check_dtype_dims(ds, "vh", "float32"),
         check_dtype_dims(ds, "border_mask", "uint8"),
         check_crs(ds),
     ]
+
+
+def validate_data(ds: xr.Dataset) -> list[Check]:
+    """Data-sanity checks (finite fraction, dB range) over vv/vh of the given dataset.
+
+    Pass a coarse overview (cheap) and/or a single ``time`` slice (gate the new acquisition).
+    """
+    checks: list[Check] = []
     for var in ("vv", "vh"):
         if var in ds:
             arr = np.asarray(ds[var].values)
             checks.append(check_finite(var, arr))
             checks.append(check_db_range(var, arr))
     return checks
+
+
+def validate_dataset(ds: xr.Dataset) -> list[Check]:
+    """Schema + data checks over one opened dataset (used by tests / simple single-level runs)."""
+    return validate_schema(ds) + validate_data(ds)
 
 
 # --- store I/O + structural check (integration; exercised in main) ----------
@@ -159,11 +172,30 @@ def _open_level(store: str, orbit: str, res: str) -> xr.Dataset:
     return ds
 
 
+def time_index(native: xr.Dataset, when: str) -> int:
+    """Nearest `time` index for `when` (ISO) from the native level's time coordinate.
+
+    Overview levels carry the `time` dimension but not always its coordinate/index, so we resolve
+    the position on the native level and `isel` it positionally on the overview.
+    """
+    tvals = np.asarray(native["time"].values).astype("datetime64[ns]")
+    target = np.datetime64(when).astype("datetime64[ns]")
+    return int(np.argmin(np.abs(tvals - target)))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--store", required=True, help="Zarr store URI (local path or https/s3)")
     ap.add_argument("--orbit", default=None, help="orbit group (default: auto-detect)")
-    ap.add_argument("--res", default="r10m")
+    ap.add_argument("--res", default="r10m", help="native resolution level for schema checks")
+    ap.add_argument(
+        "--data-res", default="r60m", help="coarse overview for data checks (avoids loading r10m)"
+    )
+    ap.add_argument(
+        "--time",
+        default=None,
+        help="acquisition datetime to gate (ISO); default validates all times in the cube",
+    )
     args = ap.parse_args()
 
     root = _open_root(args.store)
@@ -173,12 +205,21 @@ def main() -> None:
         print(f"[FAIL] orbit group — none of ascending/descending in {members}")
         sys.exit(int(Level.FAIL))
 
-    checks = [check_structural(root), *validate_dataset(_open_level(args.store, orbit, args.res))]
+    # Schema (cheap) on native; data sanity on a coarse overview, optionally one acquisition slice.
+    native = _open_level(args.store, orbit, args.res)
+    checks = [check_structural(root), *validate_schema(native)]
+    data_ds = _open_level(args.store, orbit, args.data_res)
+    if args.time is not None:
+        data_ds = data_ds.isel(time=time_index(native, args.time))
+    checks += validate_data(data_ds)
 
     worst = overall(checks)
     for c in checks:
         print(f"[{c.level.name}] {c.label} — {c.detail}")
-    print(f"OVERALL: {worst.name}  (orbit={orbit}, res={args.res})")
+    scope = f"time={args.time}" if args.time else "all times"
+    print(
+        f"OVERALL: {worst.name}  (orbit={orbit}, schema={args.res}, data={args.data_res}, {scope})"
+    )
     sys.exit(int(worst))
 
 
