@@ -39,7 +39,7 @@ merged templates + spec P1–P8
    ├── T2 platform S1A+S1C (render) ──────────────┤
    ├── T3 ensure-dem auto-fetch ──────────────────┤
    ├── T4 datacube ingest (append to per-tile cube + mutex) ─┤   ┐ P8 cube + per-acq items
-   └── T5 per-acquisition catalogue (sel=time; needs I2/opt-2) ┘ (T4 → T5)
+   └── T5 per-acquisition catalogue + notebook validation ────┘ (T4 → T5; render deferred)
                          │
                          ▼
         T6 trigger → Argo (dedup = per-acq item-exists + cube time-present)
@@ -96,8 +96,8 @@ Argo `ensure-dem` step before s1tiling, writing the `s1-dem` PVC. Geoid pre-stag
 **What**: ingest **appends the scene as a new `time` slice into the per-tile cube**
 (`s1-rtc-{tile}.zarr`, `sentinel-1-grd-rtc-staging`) via the existing `ingest_s1tiling_acquisition`
 (`mode=r+`, PoC-validated); **skip a `time` already present**; serialise per-tile writes with an **Argo
-`synchronization` mutex keyed on the tile**. *(Fallback if I2/option 2 stalls: also write a
-per-acquisition single-time store named = item-id for reconstruction-based rendering — dual storage.)*
+`synchronization` mutex keyed on the tile**. Single shared cube (rendering deferred → no per-acquisition
+stores).
 **Verify**: `uv run pytest tests/unit/test_ingest_cube.py` (append into empty/existing cube; duplicate-time skip); cluster: 2 scenes same tile → a 2-time cube; concurrent submit → no corruption.
 **Acceptance**:
 - [ ] A 2nd acquisition appends a `time` slice (cube has N times), unit-tested
@@ -105,18 +105,18 @@ per-acquisition single-time store named = item-id for reconstruction-based rende
 - [ ] Concurrent same-tile writes serialised (mutex) — no corruption
 - [ ] `xr.open_dataset(cube)` exposes all scenes on `time`
 
-### Task 5 — Per-acquisition catalogue (renders via `sel=time`)  <status: blocked by I2/option 2>
-**What**: emit **one STAC item per acquisition** (`s1-rtc-{tile}-{datetime}`, single `datetime`,
-collection `sentinel-1-grd-rtc-acquisitions`) pointing at the **per-tile cube** via asset href, with
-viz/xyz/tilejson links carrying `sel=time=nearest::{datetime}`. **Renders once I2/option 2** (titiler
-resolves the store from the href; platform-deploy `ecde99c`) **is deployed + verified** (re-tested
-2026-06-08: not yet effective). Reuse the phase-5 builder with per-acquisition ids; also (re)register
-the per-tile cube item (`sentinel-1-grd-rtc-staging`) for analysis. No upstream data-model change.
-**Verify**: `uv run pytest tests/unit/test_register_v1_s1_rtc.py` (per-acquisition ids + `sel=time` links); cluster (after option 2 live): each item's XYZ/preview renders its slice (HTTP 200); distinct dates → distinct slices.
+### Task 5 — Per-acquisition catalogue + notebook validation  <status: ready>
+**What**: emit **one queryable STAC item per acquisition** (`s1-rtc-{tile}-{datetime}`, single
+`datetime`, collection `sentinel-1-grd-rtc-acquisitions`) indexing its cube slice (asset href + time);
+also (re)register the per-tile cube item (`sentinel-1-grd-rtc-staging`). Reuse the phase-5 builder with
+per-acquisition ids (no upstream change). **Validate via the `validate_s1_grd_rtc` notebook** (open the
+cube → PASS) + STAC queries. **Explorer rendering deferred (I2/option 2)** — bake `sel=time` links into
+the items now so they render later when option 2 lands, with **no data change**.
+**Verify**: `uv run pytest tests/unit/test_register_v1_s1_rtc.py` (per-acquisition ids); cluster: items queryable in STAC; `validate_s1_grd_rtc` notebook returns PASS against the cube; distinct dates → distinct items.
 **Acceptance**:
-- [ ] One item per acquisition (id `s1-rtc-{tile}-{datetime}`, single `datetime`), `sel=time` links
-- [ ] Per-tile cube item present for analysis; per-acquisition items are the time-series index
-- [ ] Renders 200 **once I2/option 2 is live** (until then: blocked, or dual-storage fallback)
+- [ ] One queryable item per acquisition (id `s1-rtc-{tile}-{datetime}`); per-tile cube item present
+- [ ] `validate_s1_grd_rtc` notebook **PASS** against the tile cube
+- [ ] `sel=time` links baked in (explorer render deferred to I2/option 2; no later data change)
 
 > **CP-A (after T1–T5)**: a single discovered product (any tile, S1A/S1C) is quality-gated and
 > appended to the tile cube (openable as a datacube), and gets a per-acquisition item that renders its
@@ -172,9 +172,29 @@ cube time-present prevent reprocessing; per-tile mutex (T4) serialises the burst
 | 2 | Backfill lookback window (days) | T8 | Loïc |
 | 3 | Alerting path (quality-gate FAIL + persistent failures) | T1, T9 | Loïc / infra |
 | 4 | `ensure-dem` discovery (eodag vs direct) + PVC cache layout | T3 | Loïc / me (during T3) |
-| 5 | **I2 / option 2** — deploy + verify titiler resolves the store from the item asset href (platform-deploy `ecde99c` adds `TITILER_EOPF_API_ROOT_URL`; re-tested 2026-06-08 **NOT yet effective**). Blocks per-acquisition rendering; fallback = dual storage. | T5 | Loïc / infra (E. Mathot) |
+| 5 | **Titiler rendering (I2/option 2) — DEFERRED**, tracked in its own follow-up issue (see below). Not a phase-6 blocker; per-acquisition items render later with no data change. | — (deferred) | Loïc / infra |
 
-*(Resolved: P8 = shared per-tile cube + per-acquisition items rendering via `sel=time` (option 2); DEM source = public `copernicus-dem-30m`; Spike 3 = titiler currently reconstructs the store + ignores href, so option 2 (`ecde99c`) must land to enable per-acquisition rendering — dual storage is the fallback.)*
+*(Resolved: P8 = shared per-tile cube + per-acquisition items (queryable index), validated by the `validate_s1_grd_rtc` notebook; explorer/titiler rendering **deferred** off the critical path; DEM source = public `copernicus-dem-30m`; Spike 3 = titiler reconstructs the store + ignores href, so a titiler change (I2/option 2, `ecde99c`) is needed for rendering — tracked separately.)*
+
+---
+
+## Deferred follow-ups (create tracking issues)
+
+### Task D1 — **Create a tracking issue: "S1 GRD RTC — titiler rendering support (I2/option 2)"**  <status: DONE — #228>
+**What**: open a GitHub issue (linked from #226) capturing everything needed to turn on explorer
+rendering of the per-acquisition items, deferred out of phase 6. The issue body should list:
+- **Make titiler resolve the store from the STAC item asset href** (not path reconstruction) — verify
+  whether platform-deploy `ecde99c` (`TITILER_EOPF_API_ROOT_URL`) achieves it once deployed
+  (re-tested 2026-06-08: still reconstructs `…fra/tests-output/{collection}/{item_id}.zarr`); if not,
+  land titiler-eopf I-8 Option A (resolve from `asset_info["href"]`/`alternate`).
+- **Verify `sel=time` slice rendering** end-to-end: a per-acquisition item renders *its* slice of the
+  multi-time cube (HTTP 200, correct slice) — the phase-6 items already bake `sel=time` links.
+- **Per-mission bucket addressing**: confirm titiler can resolve stores across per-mission buckets
+  (the single `TITILER_EOPF_STORE_URL` base can't — this is why href resolution is needed).
+- Re-run `analysis/poc_s1_datacube_hybrid.py` render checks as the acceptance gate.
+**Verify**: issue exists, linked from #226, with the checklist above.
+**Acceptance**:
+- [x] Tracking issue created (#228) + linked from #226; referenced in the spec
 
 ---
 
@@ -183,8 +203,7 @@ cube time-present prevent reprocessing; per-tile mutex (T4) serialises the burst
 | Risk | Impact | Mitigation |
 |------|--------|------------|
 | Concurrent same-tile cube writes corrupt the Zarr | **High** | per-tile Argo `synchronization` mutex (T4); region writes; time-present skip |
-| **I2/option 2 (titiler href resolution) not effective** → per-acquisition rendering blocked | **High** (T5) | `ecde99c` adds `TITILER_EOPF_API_ROOT_URL`; deploy + re-verify (re-tested 2026-06-08: still reconstructs). Fallback = dual storage (per-acq stores named = item-id render via reconstruction). Cube + xarray load unaffected |
-| Dual-storage fallback cost (each scene written twice) | Low–Med | only if option 2 stalls; per-acq store is small, cube append incremental |
+| Titiler rendering (I2/option 2) not yet effective | **Low** (deferred) | rendering is out of scope for phase 6 — tracked in Task D1; per-acquisition items pre-bake `sel=time` so they render later with no data change; cube + xarray + notebook validation are unaffected |
 | S1C has an unforeseen RTC issue despite the orbit table | Med | T2 is a live S1C verify gate before relying on it; fall back to S1A-only |
 | s1tiling exits non-zero when off-platform (S1C/S1D) downloads fail, even though target succeeded | Med | tolerate off-platform download failures in the s1tiling step (don't fail the run if the wanted platform produced output) — observed in the PoC scene-2 run |
 | `ensure-dem` swath/tile-name derivation wrong → missing DEM | High (silent bad RTC) | unit-test vs known 31TCH set; s1tiling errors on <100% DEM coverage |
@@ -199,8 +218,8 @@ cube time-present prevent reprocessing; per-tile mutex (T4) serialises the burst
 
 CronWorkflow (6 h, data-driven) submits child Workflows only for new S1A/S1C products across the AOI;
 each tile auto-provisions its DEM; ingest **appends each scene to the per-tile cube** (per-tile writes
-serialised); ingest is quality-gated (FAIL ⇒ no register); each acquisition has a **per-acquisition
-STAC item that renders its slice via `sel=time`** once **I2/option 2** (titiler href resolution) is
-live (dual-storage fallback otherwise); a tile opens as a datacube (xarray) regardless; S1D is skipped;
-backfill ran once on enable; the acceptance soak (5 × 14 × ≥95%) passes on staging; the blind cron is
-retired. Prod promotion is Phase 7.
+serialised); ingest is quality-gated (FAIL ⇒ no register); each acquisition has a **queryable
+per-acquisition STAC item**; a tile **opens as a datacube (xarray)** and the **`validate_s1_grd_rtc`
+notebook returns PASS**; S1D is skipped; backfill ran once on enable; the acceptance soak
+(5 × 14 × ≥95%) passes on staging. Explorer/titiler rendering is **deferred** (tracked in Task D1);
+prod promotion is Phase 7. The blind cron is retired.
