@@ -23,6 +23,18 @@ Usage (after both scenes' geotiffs exist on S3):
       --scene-prefix s3://esa-zarr-sentinel-explorer-tests/s1tiling-output/31TCH/descending/2026-06-04/ \
       --scene-prefix s3://esa-zarr-sentinel-explorer-tests/s1tiling-output/31TCH/descending/2026-06-06/ \
       --tile-id 31TCH --orbit-direction descending
+
+RESULT (2026-06-08):
+  V1 PASS — append works: two acquisitions → one 2-time cube (time indices 0,1); uploaded.
+  V2 catalogue PASS — new collection + 2 per-acquisition items registered (correct datetimes).
+  V2 render FAIL — titiler-eopf 0.9.0 RECONSTRUCTS the store as
+      s3://esa-zarr-sentinel-explorer-fra/tests-output/{collection}/{item_id}.zarr
+    and IGNORES the asset href (`/info` → "No group found in store ... {item_id}.zarr"). So each
+    per-acquisition item resolves to its OWN store path — many items CANNOT share one cube. The
+    hybrid's per-acquisition rendering is **blocked until titiler resolves the store from the asset
+    href** (I-8 Option A, a titiler-eopf change). `sel=time` itself is supported.
+  => Datacube storage/append + opening the cube directly (xarray) work today; the explorer rendering
+     of per-acquisition items needs the titiler change, else fall back to per-acquisition stores.
 """
 
 from __future__ import annotations
@@ -65,6 +77,8 @@ def _slice_tilejson(item_id: str, when: dt.datetime, orbit: str) -> str:
 
 def build_cube(scene_prefixes: list[str], local_store: str, orbit: str) -> list[int]:
     """Ingest each acquisition from each prefix into one store (append). Return time values (ns)."""
+    import shutil
+
     import numpy as np
     import zarr
     from eopf_geozarr.conversion.s1_ingest import (
@@ -73,6 +87,9 @@ def build_cube(scene_prefixes: list[str], local_store: str, orbit: str) -> list[
         ingest_s1tiling_acquisition,
     )
     from ingest_v1_s1_rtc import _patch_cf_grid_mapping
+
+    # Fresh local build: ingest appends (mode r+), so a leftover store would double-append on re-run.
+    shutil.rmtree(local_store, ignore_errors=True)
 
     n = 0
     for prefix in scene_prefixes:
@@ -122,7 +139,7 @@ def ensure_acq_collection(stac_url: str) -> None:
         "Per-acquisition STAC items for S1 GRD RTC. Each item is one time slice of the "
         f"per-tile datacube in '{CUBE_COLLECTION}', rendered via titiler sel=time."
     )
-    src.pop("links", None)  # drop the source collection's self/items links; pgstac regenerates them
+    src["links"] = []  # pgstac requires the field present but regenerates self/items links
     client._stac_io.session.delete(f"{base}/collections/{ACQ_COLLECTION}", timeout=30)
     r = client._stac_io.session.post(f"{base}/collections", json=src, timeout=30)
     r.raise_for_status()
