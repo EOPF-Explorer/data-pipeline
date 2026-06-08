@@ -13,6 +13,10 @@ Move the S1 GRD RTC pipeline from the verified **single-tile (31TCH) / S1A** pro
 S1 GRD products, provisions the DEM for any requested tile automatically, and runs
 s1tiling → ingest → register, writing to **staging** (staging→prod promotion is a later phase — P3).
 
+**Hard requirement**: each tile is stored as a **multi-temporal datacube** (one Zarr per tile with a
+`time` axis) so a user can load *all scenes in a tile as a cube*, while the catalogue exposes
+**per-acquisition STAC items** (a time series) that render their slice via TiTiler `sel=time` (P8).
+
 **Target users**: the EOPF Explorer platform (STAC catalogue + raster viewer consumers) and the
 devseed operators who run/monitor the pipeline.
 
@@ -59,9 +63,10 @@ CronWorkflow (data-driven trigger, every 6 h)
        query CDSE STAC (bbox, lookback, orbit, platform∈{S1A,S1C})  ──► new products?
           └─ for each NEW product (not already in STAC):           ──► submit child Workflow:
                ┌──────────────────────────────────────────────────────────────────────┐
-               │ ensure-dem  →  s1tiling  →  ingest  →  quality-gate  →  register       │
-               │                                         (FAIL ⇒ stop, no register)     │
+               │ ensure-dem → s1tiling → ingest(insert time slice into tile cube)        │
+               │            → quality-gate(FAIL⇒stop) → register(per-acquisition item)   │
                └──────────────────────────────────────────────────────────────────────┘
+   (per-tile write serialised by an Argo synchronization mutex keyed on the tile)
 ```
 
 - **Trigger**: the local `watch_cdse_and_process.py` query/dedup logic is ported into a container
@@ -74,8 +79,14 @@ CronWorkflow (data-driven trigger, every 6 h)
   cached). The EGM2008 geoid is a one-time shared asset, not per-tile.
 - **Platform**: cfg render extended to set `platform_list`; trigger filters its CDSE query to
   `S1A, S1C` and explicitly skips S1D with a log line.
-- **Storage**: GeoTIFFs + Zarr to the S1 **staging** bucket/collection only; prod promotion is out
-  of scope this phase (P3).
+- **Storage (datacube, P8)**: one Zarr **cube per tile** on the S1 **staging** bucket; ingest
+  **inserts the acquisition as a new `time` slice** (region/append write) rather than writing a fresh
+  store. Concurrent writes to the same tile cube are **serialised by an Argo `synchronization` mutex
+  keyed on the tile**; ingest skips a time already present. Prod is out of scope (P3).
+- **Catalogue (P8)**: `register` upserts **one STAC item per acquisition** (`s1-rtc-{tile}-{datetime}`,
+  `datetime` = the scene time), whose assets point at the tile cube and whose viz/XYZ links carry
+  `sel=time=nearest::{datetime}` so TiTiler renders that slice. A user loads the whole tile by opening
+  the cube store directly; the per-acquisition items are the queryable time-series index.
 - **Geoid**: the EGM2008 model is assumed pre-staged on the `s1-dem` PVC (as in phase-1); `ensure-dem`
   does not fetch it per run.
 
@@ -88,7 +99,11 @@ CronWorkflow (data-driven trigger, every 6 h)
 - [ ] A **previously-unprocessed tile** runs end-to-end with **no manual DEM upload** (ensure-dem works).
 - [ ] An **S1C** scene processes A→B end-to-end; item queryable + validation PASS.
 - [ ] **S1D** scenes are skipped with a logged reason; no failed workflows.
-- [ ] **Idempotent**: re-trigger over the same window creates no duplicate work / items.
+- [ ] **Datacube (P8)**: after ≥2 acquisitions for a tile, the tile's Zarr opens as a cube with all
+      scenes on the `time` axis; each acquisition has its own STAC item that renders via `sel=time`.
+- [ ] **Concurrency**: two scenes for the same tile processed together both land in the cube without
+      corruption (per-tile write serialised).
+- [ ] **Idempotent**: re-trigger over the same window creates no duplicate work / items / time slices.
 - [ ] **Quality gate** blocks a deliberately-corrupted output from being registered (P1).
 - [ ] **Backfill**: the configured lookback window is processed on enable without duplicating
       forward items (P5).
@@ -102,12 +117,12 @@ CronWorkflow (data-driven trigger, every 6 h)
 - **P1 — Quality gate**: run the `validate_s1_grd_rtc` checks (CRS, grid_mapping, NaN fraction, dB
   ranges) as an automated **post-ingest gate**. **FAIL → do not register, fail the workflow + alert;
   WARN → register with an annotation.**
-- **P2 — Dedup**: the **automated trigger** skips a product whose STAC item already exists (+ the
-  ingest's own skip gate); no persistent PVC/ConfigMap state. *Risk: STAC indexing latency could
-  allow a brief re-submit window; acceptable, mitigated by the ingest skip-gate.*
+- **P2 — Dedup**: the **automated trigger** skips a product whose **per-acquisition STAC item**
+  (`s1-rtc-{tile}-{datetime}`) already exists; the ingest also skips a `time` already present in the
+  cube. No persistent PVC/ConfigMap state — STAC is the index (P8). *Risk: STAC indexing latency could
+  allow a brief re-submit window; acceptable, mitigated by the cube time-present check.*
   → **Interaction with P7**: existence-dedup means the trigger **never reprocesses** an already-
-  registered product. Reprocessing is therefore an **explicit, out-of-band path** (see P7), not
-  something the daily trigger does.
+  registered acquisition. Reprocessing is an **explicit, out-of-band path** (see P7).
 - **P3 — Promotion**: **staging only this phase.** Register to the S1 staging bucket/collection;
   **prod bucket/collection + cutover are out of scope** (deferred to a later phase). The §4 soak is
   the phase acceptance bar, not a prod gate.
@@ -115,10 +130,17 @@ CronWorkflow (data-driven trigger, every 6 h)
 - **P5 — Temporal**: **forward + bounded backfill.** Process new acquisitions *and* a configurable
   historical lookback window on enable. Backfill window size = **OQ #2**.
 - **P6 — Cadence**: trigger **every 6 h**.
-- **P7 — Reprocessing**: an explicit/manual path (e.g. a `force` flag or a one-off submit that
-  bypasses the P2 existence check) **overwrites (upsert)** the item; no item versioning yet (revisit
-  only if a consumer needs history). The **automated trigger never reprocesses** (P2). *Scope note:
-  the force path's UX is a plan-level detail, not required for the soak.*
+- **P7 — Reprocessing**: an explicit/manual path (e.g. a `force` flag bypassing the P2 check)
+  **overwrites the acquisition's `time` slice in the cube (region write) and upserts its item**; no
+  versioning yet. The **automated trigger never reprocesses** (P2). *Force-path UX is a plan detail,
+  not required for the soak.*
+- **P8 — Data model & identity** *(decided 2026-06-08; hard requirement)*: **per-tile multi-temporal
+  Zarr cube** (one store per tile, scenes inserted on the `time` axis) + **per-acquisition STAC items**
+  (`s1-rtc-{tile}-{datetime}`) that render their slice via TiTiler `sel=time`. A user can load all
+  scenes in a tile as a cube; STAC is the per-acquisition index (no separate tracking system). De-risked
+  by Spike 1 (titiler `sel`) + Spike 2 (builder sizing) — see §7. **Dependency**: the data-model
+  builder must emit one item per `time` slice (currently one-per-store with a datetime range) — an
+  upstream `eopf-geozarr` change.
 
 ---
 
@@ -142,8 +164,20 @@ hardcode credentials; blind-run s1tiling on no-data days.
 3. **Alerting path** — where do quality-gate FAILs and persistent workflow failures notify? *Owner: Loïc / infra.*
 4. **ensure-dem sub-choices** — DEM discovery via `eodag earth_search` vs. direct tile-name
    derivation; cache reuse of the existing `s1-dem` PVC. *Owner: Loïc — confirm during planning.*
+5. **Data-model builder PR (P8)** — `eopf-geozarr` must emit one STAC item per `time` slice; who lands
+   the upstream change and on what timeline? Blocks the per-acquisition register step.
+   *Owner: Loïc / data-model.*
 
 ### Resolved
+- **Spike 1 — TiTiler time selection (2026-06-08, live)**: deployed **titiler-eopf 0.9.0** exposes
+  `sel` on all render endpoints (`sel=time={value}` or `{method}::{value}`, methods nearest/pad/…).
+  Verified `sel=time=nearest::2026-06-05` → HTTP 200 on `info` + `tilejson`. → the per-acquisition-item
+  + per-tile-cube rendering (P8) works. (Also: 0.9.0 resolves the store from the item href — old I-8
+  blocker shipped.)
+- **Spike 2 — per-acquisition builder sizing (2026-06-08)**: viz/`sel=time` links are a few lines in
+  `scripts/register_v1.py` (ours); the per-acquisition item builder is a **moderate upstream
+  `eopf-geozarr` change** (loop the existing `time` axis; geometry/proj/SAR logic already present);
+  the real cost is the **cube time-slice insert + per-tile write serialisation** in ingest (OQ #5/P8).
 - **DEM source/auth (2026-06-08)** — replicate phase-1: Copernicus DEM **GLO-30** COGs from the
   **public AWS Open Data bucket `s3://copernicus-dem-30m/`** over HTTPS
   (`https://copernicus-dem-30m.s3.amazonaws.com/`), **no credentials / not requester-pays**

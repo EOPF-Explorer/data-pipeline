@@ -1,17 +1,18 @@
 # Plan: S1 GRD RTC Productionization — Phase 6 (`claude-docs/specs/s1_grd_phase6_productionization.md`)
 
 **Goal**: an automated, multi-tile, in-cluster S1 GRD RTC service on **staging** — a data-driven
-trigger discovers new CDSE S1A/S1C products, auto-provisions the DEM per tile, and runs
-s1tiling → ingest → quality-gate → register. **Tracked in #226.**
-**Constraint**: keep Script A/B + the merged Argo templates as the single source of pipeline logic
-(new work only *orchestrates* and *gates*); path-guard every destructive op; tests at each new-code
-boundary; **staging only** (prod = Phase 7).
+trigger discovers new CDSE S1A/S1C products, auto-provisions the DEM per tile, runs
+s1tiling → ingest → quality-gate → register, storing each tile as a **multi-temporal datacube** with
+**per-acquisition STAC items** (P8). **Tracked in #226.**
+**Constraint**: keep Script A/B + merged Argo templates as the single source of pipeline logic (new
+work *orchestrates*, *gates*, and *accumulates the cube*); path-guard every destructive op; serialise
+per-tile cube writes; tests at each new-code boundary; **staging only** (prod = Phase 7).
 
-> **Repo split** (as in `subissue_8_cron_sensor.md`): plan authored here (spec lives here); new
-> **scripts** (`ensure_dem.py`, `validate_s1_rtc.py`, trigger entrypoint) ship in **data-pipeline**
-> and bake into the image; new **Argo manifests** (CronWorkflow, ensure-dem step, quality-gate step)
-> ship in **platform-deploy** (`workspaces/devseed-staging/data-pipeline/`). Branch off `main` in each
-> repo *after* the phase-5 PRs (#186 + platform-deploy #207/#208) are merged.
+> **Repo split**: plan authored here; new **scripts** (`ensure_dem.py`, `validate_s1_rtc.py`, cube
+> time-slice insert, trigger entrypoint) + the **`eopf-geozarr` per-acquisition builder** ship in
+> data-pipeline / the data-model repo; new **Argo manifests** (CronWorkflow, ensure-dem + quality-gate
+> steps, per-tile mutex) ship in **platform-deploy**. Branch off `main` once phase-5 (#186 +
+> platform-deploy #207/#208) is merged.
 
 ---
 
@@ -19,150 +20,139 @@ boundary; **staging only** (prod = Phase 7).
 
 | Resource | Status |
 |----------|--------|
-| `eopf-explorer-s1tiling` / `ingest-v1-s1rtc` WorkflowTemplates | ✅ merged (PR#207) — child Workflows for decision B |
-| s1tiling cfg render (tile/orbit/date) in template | ✅ exists; **platform_list not yet parametrized** (Task 2) |
-| `s1-dem` PVC (31TCH swath only, manual) + EGM2008 geoid | ✅ bound; **no auto-fetch** (Task 3) |
-| Local watcher `watch_cdse_and_process.py` (query/bbox/dedup) | ✅ logic to port; dedup is file-based → STAC-existence (Task 4) |
-| `validate_s1_grd_rtc` notebook (PASS/WARN/FAIL checks) | ✅ logic to wrap as a CLI gate (Task 1) |
-| Blind daily cron + webhook sensor (sub-issue 8) | ✅ shipped, **suspended** — replaced by the data-driven trigger (Task 4) |
-| Data-driven trigger / ensure-dem / quality-gate steps | ❌ this plan |
+| `eopf-explorer-s1tiling` / `ingest-v1-s1rtc` WorkflowTemplates | ✅ merged (PR#207) |
+| s1tiling cfg render (tile/orbit/date) | ✅ exists; `platform_list` not parametrized (T2) |
+| `s1-dem` PVC (31TCH only, manual) + EGM2008 geoid | ✅ bound; no auto-fetch (T3) |
+| Ingest = **fresh store per run** | ⚠️ must become **time-slice insert into a per-tile cube** (T4) |
+| `eopf_geozarr.build_s1_rtc_stac_item` = **one item per store (datetime range)** | ⚠️ must emit **one item per `time` slice** (T5, upstream) |
+| titiler-eopf `sel=time` rendering | ✅ verified 0.9.0 (Spike 1) |
+| Local watcher query/bbox/dedup logic | ✅ port; dedup → per-acquisition STAC item-exists (T6) |
+| Blind daily cron + sensor (sub-issue 8) | ✅ shipped, suspended — replaced by the data-driven trigger (T6) |
 
 ---
 
 ## Dependency graph
 
 ```
-merged templates (s1tiling, ingest)            spec decisions (P1–P7)
-        │                                              │
-        ├── Task 1  quality-gate step (ingest)  ───────┐
-        ├── Task 2  platform S1A+S1C (render)   ───────┤
-        ├── Task 3  ensure-dem auto-fetch       ──┐    │
-        │                                         ▼    ▼
-        └── Task 4  trigger → Argo (query→dedup→submit) ──► Task 5  multi-tile AOI ──┐
-                                  │                                                  ├─► Task 7  soak
-                                  └── Task 6  bounded backfill ──────────────────────┘
-        CP-A after T1–T3 (single product, any tile, S1A+S1C, gated)
-        CP-B after T6   (full automated data-driven multi-tile + backfill)
-        CP-C  = Task 7  (acceptance soak → phase done)
+merged templates + spec P1–P8
+   ├── T1 quality-gate step (ingest) ─────────────┐
+   ├── T2 platform S1A+S1C (render) ──────────────┤
+   ├── T3 ensure-dem auto-fetch ──────────────────┤
+   ├── T4 cube ingest (time-slice insert + mutex) ─┤   ┐ P8 datacube
+   └── T5 per-acquisition catalogue (builder PR + sel links) ┘ (T4 ⟂ T5)
+                         │
+                         ▼
+        T6 trigger → Argo (dedup = per-acq item-exists + cube time-present)
+                         │                                   │
+                         ├── T7 multi-tile AOI ──────────────┤
+                         └── T8 bounded backfill ────────────┴──► T9 acceptance soak
+   CP-A after T1–T5 (one acquisition → cube slice + per-acq item, gated, any tile, S1A/S1C)
+   CP-B after T8   (automated multi-tile data-driven trigger + backfill; cube accumulates)
+   CP-C  = T9      (acceptance soak → phase done)
 ```
 
-Build order favours **vertical slices that ship value early**: each of T1–T3 improves the *existing*
-single-tile pipeline independently; T4 adds the trigger; T5/T6 scale it; T7 proves it.
+Vertical slices: T1–T3 improve the existing pipeline independently; **T4+T5 deliver the datacube
+model** (P8); T6 adds the trigger; T7/T8 scale; T9 proves it.
 
 ---
 
 ## Tasks
 
-> Each task: code/manifest + tests; cluster `Verify` steps are run by an operator (no cluster in the
-> dev env). Unit tests for new **scripts** run in CI (`uv run pytest`).
-
 ### Task 1 — Quality-gate step (gate register on validation FAIL)  <status: ready>
-**What**: wrap the `validate_s1_grd_rtc` checks into `scripts/validate_s1_rtc.py` — a CLI taking a
-store URI, exiting **0=PASS / 1=WARN / 2=FAIL** with a structured summary. Add a `quality-gate` step
-to the **ingest template** *between* ingest and register: exit 2 → fail the workflow (no register) +
-alert; exit 1 → register + annotate; exit 0 → register. (Mirrors spec P1; **needs OQ #3** for the
-alert path.)
-**Verify**:
-```bash
-uv run pytest tests/unit/test_validate_s1_rtc.py          # PASS/WARN/FAIL on fixtures
-# cluster: run ingest on a good store (registers) and a corrupted store (fails, no item)
-```
-**Acceptance criteria**:
-- [ ] CLI returns 0/1/2 for PASS/WARN/FAIL, unit-tested on good + corrupted fixtures
-- [ ] FAIL → workflow fails, **no STAC item registered**; PASS → item registered
-- [ ] WARN → item registered with an annotation
-- [ ] FAIL emits an alert via the OQ #3 path
+**What**: `scripts/validate_s1_rtc.py` CLI (wrap the notebook checks) → exit **0=PASS/1=WARN/2=FAIL**.
+Add a `quality-gate` step in the ingest template *between* ingest and register: 2 → fail (no register)
++ alert; 1 → register + annotate; 0 → register. (P1; alert path = OQ #3.)
+**Verify**: `uv run pytest tests/unit/test_validate_s1_rtc.py`; cluster: good store registers, corrupted store fails (no item).
+**Acceptance**:
+- [ ] CLI returns 0/1/2, unit-tested on good + corrupted fixtures
+- [ ] FAIL → no item registered; PASS → registered; WARN → registered + annotated
+- [ ] FAIL alerts via OQ #3
 
 ### Task 2 — Enable S1A + S1C (platform render)  <status: ready>
-**What**: parametrize `platform_list` in the s1tiling template's `sed` render (default `S1A S1C`), so
-s1tiling will process an S1C scene. (Spec §3; spike confirms S1C is in the orbit table, S1D is not.)
-The query-side **S1D skip** lives in the trigger (Task 4) — this task only proves s1tiling itself
-handles S1C, by a direct submit.
-**Verify**:
-```bash
-# cluster: submit s1tiling for a live S1C scene (e.g. 31TCH 2026-06-06) → A→B → item + validation PASS
-```
-**Acceptance criteria**:
-- [ ] An **S1C** scene processes A→B end-to-end; item queryable + `validate_s1_rtc` PASS
-- [ ] `platform_list` is rendered from a param (not hardcoded), default `S1A S1C`
+**What**: parametrize `platform_list` in the s1tiling template `sed` render (default `S1A S1C`); prove
+s1tiling handles S1C by a direct submit. (Query-side S1D skip = T6.)
+**Verify**: cluster — live S1C scene (31TCH 2026-06-06) → A→B → item + `validate_s1_rtc` PASS.
+**Acceptance**:
+- [ ] S1C scene processes A→B end-to-end; item queryable + PASS
+- [ ] `platform_list` rendered from a param (default `S1A S1C`), not hardcoded
 
-### Task 3 — `ensure-dem` auto-fetch step (any tile)  <status: blocked by OQ #4>
-**What**: `scripts/ensure_dem.py` — given a tile, compute the S1 IW **swath** bbox, fetch missing
-GLO-30 COGs from the public **`copernicus-dem-30m`** bucket over HTTPS (anon), rename to the
-`Product10` convention, (re)build `DEM_Union.gpkg`; **idempotent** (skip cached tiles). Add an
-`ensure-dem` step before s1tiling writing to the `s1-dem` PVC. Geoid is pre-staged (not fetched).
-**Verify**:
-```bash
-uv run pytest tests/unit/test_ensure_dem.py     # tile→bbox→tile-name derivation; skip-existing; bad tile rejected
-# cluster: run for a NEW tile (not 31TCH) → DEM tiles appear, s1tiling proceeds; re-run skips
-```
-**Acceptance criteria**:
-- [ ] Tile → swath-bbox → GLO-30 tile-name derivation, unit-tested (incl. malformed tile rejected)
-- [ ] A previously-unprovisioned tile runs end-to-end with **no manual DEM upload**
-- [ ] Idempotent: re-run fetches nothing; `DEM_Union.gpkg` consistent
-- [ ] OQ #4 resolved (discovery method; PVC cache layout) and reflected in the step
+### Task 3 — `ensure-dem` auto-fetch step  <status: blocked by OQ #4>
+**What**: `scripts/ensure_dem.py` — tile → swath bbox → fetch missing GLO-30 COGs from public
+`copernicus-dem-30m` (HTTPS, anon) → rename to `Product10` → rebuild `DEM_Union.gpkg`; idempotent.
+Argo `ensure-dem` step before s1tiling, writing the `s1-dem` PVC. Geoid pre-staged.
+**Verify**: `uv run pytest tests/unit/test_ensure_dem.py` (bbox/tile-name derivation; skip-existing; bad tile rejected); cluster: a NEW tile provisions + processes; re-run skips.
+**Acceptance**:
+- [ ] tile→swath-bbox→tile-name derivation unit-tested (malformed tile rejected)
+- [ ] previously-unprovisioned tile runs end-to-end, no manual DEM upload
+- [ ] idempotent re-run fetches nothing; OQ #4 resolved
 
-> **CP-A (after T1–T3)**: a single discovered product, *any* tile, S1A or S1C, runs end-to-end on
-> staging and is quality-gated. The pipeline is no longer 31TCH/S1A-bound. Smallest shippable phase-6 slice.
+### Task 4 — Datacube ingest: insert acquisition as a `time` slice  <status: blocked by spec P8>
+**What**: change ingest from *fresh store per run* to **inserting the scene as a new `time` slice into
+the per-tile cube** (`s1-grd-rtc-{tile}.zarr`) via a Zarr region/append write; **skip if the time is
+already present** (idempotency). Serialise concurrent writes to the same tile with an **Argo
+`synchronization` mutex keyed on the tile**. (P8 storage; the contamination-fix cleanup logic adapts —
+no wholesale overwrite.)
+**Verify**: `uv run pytest tests/unit/test_ingest_cube_insert.py` (insert into empty/existing cube; duplicate-time skip); cluster: 2 scenes same tile → both time slices present, store opens as a cube; concurrent submit → no corruption.
+**Acceptance**:
+- [ ] A 2nd acquisition appends a `time` slice (cube has N times), unit-tested
+- [ ] Re-ingesting an existing time is a no-op (no duplicate slice)
+- [ ] Concurrent same-tile writes serialised (mutex) — no corruption
+- [ ] `xr.open_dataset(cube)` exposes all scenes on `time`
 
-### Task 4 — Port the CDSE watcher to an Argo CronWorkflow (data-driven trigger)  <status: blocked by 1,2,3>
-**What**: a trigger entrypoint (reuse `tile_bbox`/`query_cdse` from `watch_cdse_and_process.py`) that
-queries CDSE for a tile+window, **filters platform to {S1A,S1C} (skips S1D, logged)**, and emits the
-**new** products — dedup switched from the local JSON state file to a **STAC item-exists check**
-(spec P2). A **CronWorkflow** (every **6 h**) runs the query step and submits one child `Workflow` per
-new product via `workflowTemplateRef` (decision B), **replacing** the suspended blind cron.
-**Verify**:
-```bash
-uv run pytest tests/unit/test_trigger.py        # query→dedup (mocked STAC); new vs already-registered
-# cluster: argo submit --from cronworkflow/... over a data-bearing window → submits only NEW products;
-#          no-data window → submits nothing; immediate re-run → 0 submitted (existence-dedup)
-```
-**Acceptance criteria**:
-- [ ] Submits a child Workflow **only** for products with no existing STAC item (dedup), unit-tested
-- [ ] No-data window submits nothing (zero blind s1tiling runs)
-- [ ] Re-run over the same window submits 0 (idempotent)
-- [ ] S1D products are filtered out at query time with a logged reason (no child Workflow)
-- [ ] The suspended sub-issue-8 cron is retired/replaced (one trigger of record)
+### Task 5 — Per-acquisition catalogue (builder + `sel=time` links)  <status: blocked by OQ #5>
+**What**: (a) **upstream `eopf-geozarr`**: emit **one STAC item per `time` slice**
+(`s1-rtc-{tile}-{datetime}`, `datetime`=scene time, assets → cube) instead of one-per-store; (b)
+`scripts/register_v1.py`: append `&sel=time=nearest::{datetime}` to the S1 viz/xyz/tilejson/thumbnail
+links (~few lines); (c) `register_v1_s1_rtc.py`: upsert the **list** of per-acquisition items. (P8 catalogue.)
+**Verify**: `uv run pytest tests/unit/test_register_v1_s1_rtc.py` (per-acquisition ids + `sel=time` in links); cluster: an item's XYZ/preview renders its slice (`sel=time`), distinct dates → distinct items.
+**Acceptance**:
+- [ ] Builder emits one item per `time` slice (id `s1-rtc-{tile}-{datetime}`, single `datetime`)
+- [ ] Viz/XYZ/tilejson/thumbnail links carry `sel=time=nearest::{datetime}` and render the right slice
+- [ ] Register upserts all per-acquisition items; OQ #5 (data-model PR) landed
 
-### Task 5 — Multi-tile AOI iteration  <status: blocked by 3,4; OQ #1>
-**What**: the CronWorkflow iterates the configured **AOI** tile set; each tile self-provisions its DEM
-(T3) and is queried/deduped/submitted independently (T4). Per-tile failure must not abort the others.
-**Verify**:
-```bash
-# cluster: cron over a ≥2-tile AOI → per-tile child Workflows; a never-seen tile auto-provisions DEM;
-#          one tile failing does not stop the others
-```
-**Acceptance criteria**:
-- [ ] Cron processes every tile in the AOI; per-tile isolation (one failure ≠ whole-run failure)
-- [ ] A new AOI tile auto-provisions its DEM (no manual step)
-- [ ] AOI is config-driven (OQ #1 set)
+> **CP-A (after T1–T5)**: a single discovered product (any tile, S1A/S1C) lands as a `time` slice in
+> the tile cube, is quality-gated, and gets a per-acquisition item that renders via `sel=time`. The
+> datacube model is proven on one product.
 
-### Task 6 — Bounded backfill on enable  <status: blocked by 4; OQ #2>
-**What**: the trigger accepts a **backfill lookback** (distinct from the steady-state 6 h window) used
-once on enable; existence-dedup (P2) prevents reprocessing already-registered items.
-**Verify**:
-```bash
-# cluster: enable with backfill=N days → the historical window is processed once;
-#          subsequent scheduled runs only pick up forward products
-```
-**Acceptance criteria**:
-- [ ] The configured lookback is processed on enable **without duplicating** forward items
-- [ ] Backfill volume respects the concurrency limits (no thundering herd) — semaphore honoured
-- [ ] OQ #2 (window size) set
+### Task 6 — Port the CDSE watcher to an Argo CronWorkflow (data-driven trigger)  <status: blocked by 1–5>
+**What**: trigger entrypoint (reuse `tile_bbox`/`query_cdse`) queries CDSE for a tile+window, filters
+platform to {S1A,S1C} (**skips S1D**, logged), and emits **new** products — dedup = **per-acquisition
+STAC item-exists** + cube time-present (P2). CronWorkflow (**6 h**) submits one child Workflow per new
+product (decision B), **replacing** the suspended blind cron.
+**Verify**: `uv run pytest tests/unit/test_trigger.py` (query→dedup, mocked STAC); cluster: data-bearing window submits only new products; no-data → nothing; re-run → 0.
+**Acceptance**:
+- [ ] Submits only for acquisitions with no existing per-acquisition item (dedup), unit-tested
+- [ ] No-data window → 0 submissions; re-run → 0 (idempotent)
+- [ ] S1D filtered at query time (logged), no child Workflow
+- [ ] Suspended sub-issue-8 cron retired (one trigger of record)
 
-> **CP-B (after T6)**: full automated, data-driven, multi-tile trigger with backfill running on
-> staging. Functionally complete — ready to soak.
+### Task 7 — Multi-tile AOI iteration  <status: blocked by 3,6; OQ #1>
+**What**: CronWorkflow iterates the configured AOI; each tile self-provisions DEM (T3), accumulates its
+own cube (T4), queried/deduped independently (T6); per-tile failure isolation.
+**Verify**: cluster — cron over ≥2-tile AOI → per-tile child Workflows; new tile auto-provisions DEM; one failure ≠ whole-run failure.
+**Acceptance**:
+- [ ] Every AOI tile processed; per-tile isolation
+- [ ] New AOI tile auto-provisions DEM; AOI config-driven (OQ #1)
 
-### Task 7 — Acceptance soak  <status: blocked by 5,6; OQ #1,#3>
-**What**: run the full system on staging for the soak window; track success rate per the spec bar.
-**Verify**:
-```bash
-# cluster: observe ≥ 14 days across the 5 soak tiles; tally workflow success/fail from Argo + STAC
-```
-**Acceptance criteria**:
+### Task 8 — Bounded backfill on enable  <status: blocked by 6; OQ #2>
+**What**: trigger accepts a one-time **backfill lookback** (distinct from the 6 h window); dedup +
+cube time-present prevent reprocessing; per-tile mutex (T4) serialises the burst into each cube.
+**Verify**: cluster — enable with backfill=N days → historical window processed once into the cubes; later runs only forward.
+**Acceptance**:
+- [ ] Configured lookback processed without duplicate items/time slices
+- [ ] Backfill respects the semaphore + per-tile mutex (no thundering herd / no cube corruption)
+- [ ] OQ #2 (window) set
+
+> **CP-B (after T8)**: automated, data-driven, multi-tile trigger + backfill; tile cubes accumulate
+> over time. Functionally complete — ready to soak.
+
+### Task 9 — Acceptance soak  <status: blocked by 7,8; OQ #1,#3>
+**What**: run the full system on staging for the soak window; track success rate.
+**Verify**: cluster — ≥14 days × 5 soak tiles; tally success/fail from Argo + STAC; spot-check a tile opens as a multi-time cube.
+**Acceptance**:
 - [ ] **5 tiles × 14 days × ≥ 95% success** on staging
-- [ ] Failures alert via the OQ #3 path and are triaged (no silent drops)
-- [ ] Outcome recorded on #226; phase declared done (staging)
+- [ ] Each soak tile opens as a cube with all its scenes; failures alert (OQ #3) + triaged
+- [ ] Outcome recorded on #226; phase done (staging)
 
 ---
 
@@ -170,12 +160,13 @@ once on enable; existence-dedup (P2) prevents reprocessing already-registered it
 
 | OQ | Question | Blocks | Owner |
 |----|----------|--------|-------|
-| 1 | AOI tile set (+ the 5 soak tiles) | T5, T7 | Loïc / science |
-| 2 | Backfill lookback window (days) | T6 | Loïc |
-| 3 | Alerting path (quality-gate FAIL + persistent failures) | T1, T7 | Loïc / infra |
-| 4 | `ensure-dem` discovery (eodag earth_search vs direct names) + PVC cache layout | T3 | Loïc / me, during T3 |
+| 1 | AOI tile set (+ 5 soak tiles) | T7, T9 | Loïc / science |
+| 2 | Backfill lookback window (days) | T8 | Loïc |
+| 3 | Alerting path (quality-gate FAIL + persistent failures) | T1, T9 | Loïc / infra |
+| 4 | `ensure-dem` discovery (eodag vs direct) + PVC cache layout | T3 | Loïc / me (during T3) |
+| 5 | **`eopf-geozarr` per-acquisition builder PR** — owner + timeline | T5 | Loïc / data-model |
 
-*(Resolved in spec §7: DEM source = public `copernicus-dem-30m` over HTTPS, no auth.)*
+*(Resolved in spec §7: DEM source = public `copernicus-dem-30m`; Spike 1 titiler `sel=time`; Spike 2 sizing.)*
 
 ---
 
@@ -183,16 +174,22 @@ once on enable; existence-dedup (P2) prevents reprocessing already-registered it
 
 | Risk | Impact | Mitigation |
 |------|--------|------------|
-| S1C has an unforeseen RTC issue despite being in the orbit table | Med — Task 2 stalls | Task 2 is a *live* S1C verify gate before relying on it; fall back to S1A-only if it fails |
-| `ensure-dem` swath-bbox / tile-name derivation wrong → missing DEM coverage | High — silent bad RTC | Unit-test the derivation against the known 31TCH tile set; s1tiling already errors on <100% DEM coverage |
-| STAC-existence dedup races indexing latency → duplicate submit | Low | ingest skip-gate is the backstop; child Workflow self-skips (exit-2 contract) |
-| Backfill thundering herd overwhelms the cluster | Med | honour the `v1-s1rtc`/cron semaphores; cap backfill concurrency (Task 6) |
-| `copernicus-dem-30m` anon HTTPS unavailable/rate-limited in-cluster | Med — Task 3 | retry/backoff in `ensure_dem.py`; cache on the PVC so it's a one-time cost per tile |
-| Cross-repo drift (data-pipeline image vs platform-deploy template pin) | Med | pin `pipeline_image_version` to the merged-`main` SHA; document the bump (per #186 follow-up) |
+| Concurrent same-tile cube writes corrupt the Zarr | **High** | per-tile Argo `synchronization` mutex (T4); region writes; time-present skip |
+| `eopf-geozarr` per-acquisition builder slips (upstream) | **High** — T5 blocks T6 register | land OQ #5 early; interim: a local builder wrapper over the existing geometry/proj logic |
+| S1C has an unforeseen RTC issue despite the orbit table | Med | T2 is a live S1C verify gate before relying on it; fall back to S1A-only |
+| `ensure-dem` swath/tile-name derivation wrong → missing DEM | High (silent bad RTC) | unit-test vs known 31TCH set; s1tiling errors on <100% DEM coverage |
+| STAC-existence dedup races indexing latency | Low | cube time-present check is the backstop |
+| Backfill thundering herd | Med | semaphore + per-tile mutex; cap backfill concurrency (T8) |
+| `copernicus-dem-30m` anon HTTPS unavailable/rate-limited | Med (T3) | retry/backoff; PVC cache = one-time per tile |
+| Cross-repo drift (image SHA vs template pin) | Med | pin `pipeline_image_version` to merged-`main` SHA (#186 follow-up) |
+
+---
 
 ## Done definition
 
 CronWorkflow (6 h, data-driven) submits child Workflows only for new S1A/S1C products across the AOI;
-each tile auto-provisions its DEM; ingest is quality-gated (FAIL ⇒ no register); S1D is skipped;
-backfill ran once on enable; the acceptance soak (5 × 14 × ≥95%) passes on staging; the blind cron is
-retired. Prod promotion is Phase 7.
+each tile auto-provisions its DEM and **accumulates a multi-temporal cube** (one `time` slice per
+acquisition, per-tile writes serialised); ingest is quality-gated (FAIL ⇒ no register); each
+acquisition has a **per-acquisition STAC item** rendering via `sel=time`; S1D is skipped; backfill ran
+once on enable; the acceptance soak (5 × 14 × ≥95%) passes on staging and a tile opens as a cube; the
+blind cron is retired. Prod promotion is Phase 7.
