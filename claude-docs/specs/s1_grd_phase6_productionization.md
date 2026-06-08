@@ -13,9 +13,11 @@ Move the S1 GRD RTC pipeline from the verified **single-tile (31TCH) / S1A** pro
 S1 GRD products, provisions the DEM for any requested tile automatically, and runs
 s1tiling → ingest → register, writing to **staging** (staging→prod promotion is a later phase — P3).
 
-**Hard requirement**: each tile is stored as a **multi-temporal datacube** (one Zarr per tile with a
-`time` axis) so a user can load *all scenes in a tile as a cube*, while the catalogue exposes
-**per-acquisition STAC items** (a time series) that render their slice via TiTiler `sel=time` (P8).
+**Hard requirement**: a user can load *all scenes in a tile as a datacube*. Met via **dual storage**
+(P8): a **per-tile multi-temporal cube** for analysis (xarray), plus **per-acquisition single-time
+stores + STAC items** that render directly in the explorer (titiler reconstructs `store = item-id`, so
+no `sel=time` / titiler change is needed). The PoC proved titiler ignores the asset href, so a single
+shared cube cannot back the per-acquisition rendering — hence dual storage (§7 Spike 3, P8).
 
 **Target users**: the EOPF Explorer platform (STAC catalogue + raster viewer consumers) and the
 devseed operators who run/monitor the pipeline.
@@ -63,10 +65,11 @@ CronWorkflow (data-driven trigger, every 6 h)
        query CDSE STAC (bbox, lookback, orbit, platform∈{S1A,S1C})  ──► new products?
           └─ for each NEW product (not already in STAC):           ──► submit child Workflow:
                ┌──────────────────────────────────────────────────────────────────────┐
-               │ ensure-dem → s1tiling → ingest(insert time slice into tile cube)        │
+               │ ensure-dem → s1tiling → ingest ──┬─ per-acquisition store (renders)     │
+               │                                  └─ append to per-tile cube (analysis)  │
                │            → quality-gate(FAIL⇒stop) → register(per-acquisition item)   │
                └──────────────────────────────────────────────────────────────────────┘
-   (per-tile write serialised by an Argo synchronization mutex keyed on the tile)
+   (cube append serialised by an Argo synchronization mutex keyed on the tile)
 ```
 
 - **Trigger**: the local `watch_cdse_and_process.py` query/dedup logic is ported into a container
@@ -79,14 +82,16 @@ CronWorkflow (data-driven trigger, every 6 h)
   cached). The EGM2008 geoid is a one-time shared asset, not per-tile.
 - **Platform**: cfg render extended to set `platform_list`; trigger filters its CDSE query to
   `S1A, S1C` and explicitly skips S1D with a log line.
-- **Storage (datacube, P8)**: one Zarr **cube per tile** on the S1 **staging** bucket; ingest
-  **inserts the acquisition as a new `time` slice** (region/append write) rather than writing a fresh
-  store. Concurrent writes to the same tile cube are **serialised by an Argo `synchronization` mutex
-  keyed on the tile**; ingest skips a time already present. Prod is out of scope (P3).
-- **Catalogue (P8)**: `register` upserts **one STAC item per acquisition** (`s1-rtc-{tile}-{datetime}`,
-  `datetime` = the scene time), whose assets point at the tile cube and whose viz/XYZ links carry
-  `sel=time=nearest::{datetime}` so TiTiler renders that slice. A user loads the whole tile by opening
-  the cube store directly; the per-acquisition items are the queryable time-series index.
+- **Storage (dual, P8)**: ingest writes **two** artifacts per scene on the S1 **staging** bucket —
+  (1) a **per-acquisition single-time store** named = its item id (`s1-rtc-{tile}-{datetime}.zarr`) for
+  rendering, and (2) an **append of the scene as a new `time` slice into the per-tile cube**
+  (`s1-rtc-{tile}.zarr`) for analysis. The cube append is **serialised by an Argo `synchronization`
+  mutex keyed on the tile**; ingest skips a time already present. Prod is out of scope (P3).
+- **Catalogue (P8)**: `register` upserts **one STAC item per acquisition** (`s1-rtc-{tile}-{datetime}`),
+  pointing at its per-acquisition store → **renders directly** (store-name = item-id matches titiler's
+  reconstruction; no `sel=time`). The per-tile cube is catalogued as the per-tile item for analysis;
+  a user loads the whole tile by opening the cube store (xarray). The per-acquisition items are the
+  queryable time-series index (dedup authority).
 - **Geoid**: the EGM2008 model is assumed pre-staged on the `s1-dem` PVC (as in phase-1); `ensure-dem`
   does not fetch it per run.
 
@@ -99,11 +104,13 @@ CronWorkflow (data-driven trigger, every 6 h)
 - [ ] A **previously-unprocessed tile** runs end-to-end with **no manual DEM upload** (ensure-dem works).
 - [ ] An **S1C** scene processes A→B end-to-end; item queryable + validation PASS.
 - [ ] **S1D** scenes are skipped with a logged reason; no failed workflows.
-- [ ] **Datacube (P8)**: after ≥2 acquisitions for a tile, the tile's Zarr opens as a cube with all
-      scenes on the `time` axis; each acquisition has its own STAC item that renders via `sel=time`.
+- [ ] **Per-acquisition rendering (P8)**: each acquisition has its own single-time store + STAC item
+      that **renders directly** in the explorer (store-name = item-id; no `sel=time`/titiler change).
+- [ ] **Datacube (P8)**: after ≥2 acquisitions for a tile, the per-tile cube opens as a datacube with
+      all scenes on the `time` axis (xarray) — "load all scenes in a tile" works.
 - [ ] **Concurrency**: two scenes for the same tile processed together both land in the cube without
       corruption (per-tile write serialised).
-- [ ] **Idempotent**: re-trigger over the same window creates no duplicate work / items / time slices.
+- [ ] **Idempotent**: re-trigger over the same window creates no duplicate stores / items / time slices.
 - [ ] **Quality gate** blocks a deliberately-corrupted output from being registered (P1).
 - [ ] **Backfill**: the configured lookback window is processed on enable without duplicating
       forward items (P5).
@@ -134,13 +141,23 @@ CronWorkflow (data-driven trigger, every 6 h)
   **overwrites the acquisition's `time` slice in the cube (region write) and upserts its item**; no
   versioning yet. The **automated trigger never reprocesses** (P2). *Force-path UX is a plan detail,
   not required for the soak.*
-- **P8 — Data model & identity** *(decided 2026-06-08; hard requirement)*: **per-tile multi-temporal
-  Zarr cube** (one store per tile, scenes inserted on the `time` axis) + **per-acquisition STAC items**
-  (`s1-rtc-{tile}-{datetime}`) that render their slice via TiTiler `sel=time`. A user can load all
-  scenes in a tile as a cube; STAC is the per-acquisition index (no separate tracking system). De-risked
-  by Spike 1 (titiler `sel`) + Spike 2 (builder sizing) — see §7. **Dependency**: the data-model
-  builder must emit one item per `time` slice (currently one-per-store with a datetime range) — an
-  upstream `eopf-geozarr` change.
+- **P8 — Data model & identity** *(decided 2026-06-08; revised after the PoC; hard requirement)*:
+  **dual storage**, because the PoC proved titiler-eopf reconstructs the store path from
+  `{base}/{collection}/{item_id}.zarr` and **ignores the asset href** (so per-acquisition items
+  *cannot* share one cube for rendering — see §7 Spike 3). Therefore:
+  1. **Per-acquisition stores + items** (rendering path): each acquisition → its own single-time Zarr
+     named = its item id (`s1-rtc-{tile}-{datetime}.zarr`) in a per-acquisition collection, + one STAC
+     item. Renders **directly today** (store-name = item-id matches titiler's reconstruction; **no
+     `sel=time`, no titiler change** — it's the proven phase-5 store pattern with per-acquisition ids).
+  2. **Per-tile cube** (analysis path): scenes also appended to one multi-temporal Zarr per tile
+     (`s1-rtc-{tile}.zarr`, existing `sentinel-1-grd-rtc-staging`) so a user can **load all scenes in a
+     tile as a datacube** (xarray). Catalogued as the per-tile item.
+  STAC is the per-acquisition index (no separate tracking system). **Cost**: each scene is written
+  twice (its own store + appended to the cube); the cube append needs per-tile write serialisation.
+  **Deferred**: a future titiler "resolve store from asset href" change (I-8 Option A) would let the
+  per-acquisition items render *from the shared cube*, collapsing dual storage to single — out of scope
+  here. **Dependency**: per-acquisition item builder (one item per scene) — small (the phase-5 builder
+  already emits per-store items; just per-acquisition ids).
 
 ---
 
@@ -164,20 +181,24 @@ hardcode credentials; blind-run s1tiling on no-data days.
 3. **Alerting path** — where do quality-gate FAILs and persistent workflow failures notify? *Owner: Loïc / infra.*
 4. **ensure-dem sub-choices** — DEM discovery via `eodag earth_search` vs. direct tile-name
    derivation; cache reuse of the existing `s1-dem` PVC. *Owner: Loïc — confirm during planning.*
-5. **Data-model builder PR (P8)** — `eopf-geozarr` must emit one STAC item per `time` slice; who lands
-   the upstream change and on what timeline? Blocks the per-acquisition register step.
-   *Owner: Loïc / data-model.*
+5. **Dual-storage write cost (P8)** — confirm acceptance of writing each scene twice (per-acquisition
+   store + per-tile cube append). *Owner: Loïc — confirmed 2026-06-08 (chose dual storage).*
 
 ### Resolved
-- **Spike 1 — TiTiler time selection (2026-06-08, live)**: deployed **titiler-eopf 0.9.0** exposes
-  `sel` on all render endpoints (`sel=time={value}` or `{method}::{value}`, methods nearest/pad/…).
-  Verified `sel=time=nearest::2026-06-05` → HTTP 200 on `info` + `tilejson`. → the per-acquisition-item
-  + per-tile-cube rendering (P8) works. (Also: 0.9.0 resolves the store from the item href — old I-8
-  blocker shipped.)
-- **Spike 2 — per-acquisition builder sizing (2026-06-08)**: viz/`sel=time` links are a few lines in
-  `scripts/register_v1.py` (ours); the per-acquisition item builder is a **moderate upstream
-  `eopf-geozarr` change** (loop the existing `time` axis; geometry/proj/SAR logic already present);
-  the real cost is the **cube time-slice insert + per-tile write serialisation** in ingest (OQ #5/P8).
+- **Spike 1 — TiTiler `sel` param (2026-06-08)**: titiler-eopf **0.9.0** exposes `sel` on all render
+  endpoints (`sel=time={value}` / `{method}::{value}`). `sel=time=nearest::…` returns 200. *(Caveat:
+  the 200 was against a store sitting at titiler's reconstructed path — it did not prove href
+  resolution; see Spike 3.)*
+- **Spike 2 — per-acquisition builder sizing (2026-06-08)**: the per-acquisition item builder is a
+  **small** change (the phase-5 builder already emits per-store items; just use per-acquisition ids);
+  viz links are a few lines in `scripts/register_v1.py`.
+- **Spike 3 — titiler store resolution (2026-06-08, PoC, decisive)**: the datacube PoC proved
+  titiler-eopf **reconstructs the store path as `s3://esa-zarr-sentinel-explorer-fra/tests-output/
+  {collection}/{item_id}.zarr` and IGNORES the asset href** (`/info` → *"No group found in store …
+  {item_id}.zarr"*); there is **no URL-based render endpoint**. So per-acquisition items **cannot share
+  one cube** for rendering (I-8 not fixed). → drove the **P8 revision to dual storage**: per-acquisition
+  single-time stores (store-name = item-id → render directly today, no titiler change) + a per-tile cube
+  for analysis. The PoC *did* validate the cube **append** works (2 acquisitions → 2-time cube).
 - **DEM source/auth (2026-06-08)** — replicate phase-1: Copernicus DEM **GLO-30** COGs from the
   **public AWS Open Data bucket `s3://copernicus-dem-30m/`** over HTTPS
   (`https://copernicus-dem-30m.s3.amazonaws.com/`), **no credentials / not requester-pays**
