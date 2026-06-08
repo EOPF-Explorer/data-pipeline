@@ -9,10 +9,10 @@ work *orchestrates*, *gates*, and *accumulates the cube*); path-guard every dest
 per-tile cube writes; tests at each new-code boundary; **staging only** (prod = Phase 7).
 
 > **Repo split**: plan authored here; new **scripts** (`ensure_dem.py`, `validate_s1_rtc.py`, cube
-> time-slice insert, trigger entrypoint) + the **`eopf-geozarr` per-acquisition builder** ship in
-> data-pipeline / the data-model repo; new **Argo manifests** (CronWorkflow, ensure-dem + quality-gate
-> steps, per-tile mutex) ship in **platform-deploy**. Branch off `main` once phase-5 (#186 +
-> platform-deploy #207/#208) is merged.
+> time-slice append, per-acquisition register, trigger entrypoint) ship in **data-pipeline** (reusing
+> the existing `eopf_geozarr` builder with per-acquisition ids — no upstream data-model change); new
+> **Argo manifests** (CronWorkflow, ensure-dem + quality-gate steps, per-tile mutex) ship in
+> **platform-deploy**. Branch off `main` once phase-5 (#186 + platform-deploy #207/#208) is merged.
 
 ---
 
@@ -25,7 +25,7 @@ per-tile cube writes; tests at each new-code boundary; **staging only** (prod = 
 | `s1-dem` PVC (31TCH only, manual) + EGM2008 geoid | ✅ bound; no auto-fetch (T3) |
 | Ingest = **fresh store per run** | ⚠️ → **append scene to per-tile cube** (T4); append validated by PoC |
 | `eopf_geozarr.build_s1_rtc_stac_item` = one item per store | ✅ reuse with **per-acquisition ids** + `sel=time` links (T5; no upstream change) |
-| titiler store resolution | ⚠️ reconstructs + ignores href (Spike 3); **I2/option 2** (`ecde99c`) to fix it — not yet effective; blocks per-acq rendering |
+| titiler store resolution | ⚠️ reconstructs + ignores href (Spike 3); explorer rendering **deferred (#228)** — not a phase blocker (validation is via notebook) |
 | Local watcher query/bbox/dedup logic | ✅ port; dedup → per-acquisition STAC item-exists (T6) |
 | Blind daily cron + sensor (sub-issue 8) | ✅ shipped, suspended — replaced by the data-driven trigger (T6) |
 
@@ -115,12 +115,14 @@ the items now so they render later when option 2 lands, with **no data change**.
 **Verify**: `uv run pytest tests/unit/test_register_v1_s1_rtc.py` (per-acquisition ids); cluster: items queryable in STAC; `validate_s1_grd_rtc` notebook returns PASS against the cube; distinct dates → distinct items.
 **Acceptance**:
 - [ ] One queryable item per acquisition (id `s1-rtc-{tile}-{datetime}`); per-tile cube item present
-- [ ] `validate_s1_grd_rtc` notebook **PASS** against the tile cube
-- [ ] `sel=time` links baked in (explorer render deferred to I2/option 2; no later data change)
+- [ ] **`validate_s1_grd_rtc` confirmed/extended for a *multi-time* cube** (it was written for a
+      single-acquisition store — verify it validates every `time`, or update it) and returns **PASS**
+- [ ] `sel=time` links baked in (explorer render deferred to #228; no later data change)
 
-> **CP-A (after T1–T5)**: a single discovered product (any tile, S1A/S1C) is quality-gated and
-> appended to the tile cube (openable as a datacube), and gets a per-acquisition item that renders its
-> slice via `sel=time` **once I2/option 2 is live** (else dual-storage fallback). Model proven on one product.
+> **CP-A (after T1–T5)**: a single discovered product (any tile, S1A/S1C) is quality-gated, **appended
+> to the tile cube** (which opens as a datacube), and gets a **queryable per-acquisition STAC item**;
+> the `validate_s1_grd_rtc` notebook **PASSes** against the cube. Model proven on one product.
+> (Explorer rendering deferred — #228.)
 
 ### Task 6 — Port the CDSE watcher to an Argo CronWorkflow (data-driven trigger)  <status: blocked by 1–5>
 **What**: trigger entrypoint (reuse `tile_bbox`/`query_cdse`) queries CDSE for a tile+window, filters
@@ -156,10 +158,11 @@ cube time-present prevent reprocessing; per-tile mutex (T4) serialises the burst
 
 ### Task 9 — Acceptance soak  <status: blocked by 7,8; OQ #1,#3>
 **What**: run the full system on staging for the soak window; track success rate.
-**Verify**: cluster — ≥14 days × 5 soak tiles; tally success/fail from Argo + STAC; spot-check a tile opens as a multi-time cube.
+**Verify**: cluster — ≥14 days × 5 soak tiles; tally success/fail from Argo + STAC; run `validate_s1_grd_rtc` on each soak tile's cube.
 **Acceptance**:
 - [ ] **5 tiles × 14 days × ≥ 95% success** on staging
-- [ ] Each soak tile opens as a cube with all its scenes; failures alert (OQ #3) + triaged
+- [ ] Each soak tile opens as a cube with all its scenes **and `validate_s1_grd_rtc` PASSes**;
+      failures alert (OQ #3) + triaged
 - [ ] Outcome recorded on #226; phase done (staging)
 
 ---

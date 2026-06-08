@@ -76,7 +76,7 @@ CronWorkflow (data-driven trigger, every 6 h)
                ┌──────────────────────────────────────────────────────────────────────┐
                │ ensure-dem → s1tiling → ingest(append scene as a time slice to the      │
                │   per-tile cube) → quality-gate(FAIL⇒stop) → register(per-acquisition   │
-               │   item → cube via asset href + sel=time)                                │
+               │   item → cube via href; sel=time links baked, render deferred #228)     │
                └──────────────────────────────────────────────────────────────────────┘
    (cube append serialised by an Argo synchronization mutex keyed on the tile;
     validation via the validate_s1_grd_rtc notebook; explorer rendering deferred — I2/option 2)
@@ -124,7 +124,7 @@ CronWorkflow (data-driven trigger, every 6 h)
       all scenes on the `time` axis (xarray) — "load all scenes in a tile" works (independent of titiler).
 - [ ] **Concurrency**: two scenes for the same tile processed together both land in the cube without
       corruption (per-tile write serialised).
-- [ ] **Idempotent**: re-trigger over the same window creates no duplicate stores / items / time slices.
+- [ ] **Idempotent**: re-trigger over the same window creates no duplicate items / `time` slices.
 - [ ] **Quality gate** blocks a deliberately-corrupted output from being registered (P1).
 - [ ] **Backfill**: the configured lookback window is processed on enable without duplicating
       forward items (P5).
