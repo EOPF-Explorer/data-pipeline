@@ -122,6 +122,7 @@ def ensure_acq_collection(stac_url: str) -> None:
         "Per-acquisition STAC items for S1 GRD RTC. Each item is one time slice of the "
         f"per-tile datacube in '{CUBE_COLLECTION}', rendered via titiler sel=time."
     )
+    src.pop("links", None)  # drop the source collection's self/items links; pgstac regenerates them
     client._stac_io.session.delete(f"{base}/collections/{ACQ_COLLECTION}", timeout=30)
     r = client._stac_io.session.post(f"{base}/collections", json=src, timeout=30)
     r.raise_for_status()
@@ -135,8 +136,9 @@ def register_per_acquisition(
     from eopf_geozarr.stac.s1_rtc import build_s1_rtc_stac_item
     from pystac_client import Client
 
-    base_item = build_s1_rtc_stac_item(cube_store, ACQ_COLLECTION)  # real geometry/bbox/proj/sar
-    https_store = _https_store(cube_store)
+    # open via the public HTTPS gateway (no s3 creds needed; same path titiler reads) — the builder
+    # sets the item's asset hrefs to this store, so the per-acquisition items point at the cube.
+    base_item = build_s1_rtc_stac_item(_https_store(cube_store), ACQ_COLLECTION)
 
     client = Client.open(stac_url)
     base = str(client.self_href).rstrip("/")
@@ -155,8 +157,6 @@ def register_per_acquisition(
             },
             "datetime": when.isoformat(),
         }
-        for asset in d.get("assets", {}).values():  # point every asset at the shared cube
-            asset["href"] = https_store if asset["href"].startswith("http") else asset["href"]
         d["links"] = [
             {
                 "rel": "tilejson",
