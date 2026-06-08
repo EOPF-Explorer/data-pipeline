@@ -23,9 +23,9 @@ per-tile cube writes; tests at each new-code boundary; **staging only** (prod = 
 | `eopf-explorer-s1tiling` / `ingest-v1-s1rtc` WorkflowTemplates | ✅ merged (PR#207) |
 | s1tiling cfg render (tile/orbit/date) | ✅ exists; `platform_list` not parametrized (T2) |
 | `s1-dem` PVC (31TCH only, manual) + EGM2008 geoid | ✅ bound; no auto-fetch (T3) |
-| Ingest = **fresh store per run** | ⚠️ must become **time-slice insert into a per-tile cube** (T4) |
-| `eopf_geozarr.build_s1_rtc_stac_item` = **one item per store (datetime range)** | ⚠️ must emit **one item per `time` slice** (T5, upstream) |
-| titiler-eopf `sel=time` rendering | ✅ verified 0.9.0 (Spike 1) |
+| Ingest = **fresh store per run** | ⚠️ → **dual**: per-acq store + append to per-tile cube (T4); append validated by PoC |
+| `eopf_geozarr.build_s1_rtc_stac_item` = one item per store | ✅ reuse as-is with **per-acquisition ids** (T5; no upstream change) |
+| titiler store resolution | ⚠️ reconstructs `{base}/{collection}/{item_id}.zarr`, ignores href (Spike 3) → stores must be named = item-id |
 | Local watcher query/bbox/dedup logic | ✅ port; dedup → per-acquisition STAC item-exists (T6) |
 | Blind daily cron + sensor (sub-issue 8) | ✅ shipped, suspended — replaced by the data-driven trigger (T6) |
 
@@ -38,8 +38,8 @@ merged templates + spec P1–P8
    ├── T1 quality-gate step (ingest) ─────────────┐
    ├── T2 platform S1A+S1C (render) ──────────────┤
    ├── T3 ensure-dem auto-fetch ──────────────────┤
-   ├── T4 cube ingest (time-slice insert + mutex) ─┤   ┐ P8 datacube
-   └── T5 per-acquisition catalogue (builder PR + sel links) ┘ (T4 ⟂ T5)
+   ├── T4 dual ingest (per-acq store + cube append + mutex) ─┤   ┐ P8 dual storage
+   └── T5 per-acquisition catalogue (renders directly) ──────┘ (T4 → T5)
                          │
                          ▼
         T6 trigger → Argo (dedup = per-acq item-exists + cube time-present)
@@ -86,33 +86,35 @@ Argo `ensure-dem` step before s1tiling, writing the `s1-dem` PVC. Geoid pre-stag
 - [ ] previously-unprovisioned tile runs end-to-end, no manual DEM upload
 - [ ] idempotent re-run fetches nothing; OQ #4 resolved
 
-### Task 4 — Datacube ingest: insert acquisition as a `time` slice  <status: blocked by spec P8>
-**What**: change ingest from *fresh store per run* to **inserting the scene as a new `time` slice into
-the per-tile cube** (`s1-grd-rtc-{tile}.zarr`) via a Zarr region/append write; **skip if the time is
-already present** (idempotency). Serialise concurrent writes to the same tile with an **Argo
-`synchronization` mutex keyed on the tile**. (P8 storage; the contamination-fix cleanup logic adapts —
-no wholesale overwrite.)
-**Verify**: `uv run pytest tests/unit/test_ingest_cube_insert.py` (insert into empty/existing cube; duplicate-time skip); cluster: 2 scenes same tile → both time slices present, store opens as a cube; concurrent submit → no corruption.
+### Task 4 — Dual-storage ingest: per-acquisition store + per-tile cube append  <status: ready (PoC-validated mechanics)>
+**What**: ingest writes **two** artifacts per scene (P8): (a) a **per-acquisition single-time store**
+named = its item id (`s1-rtc-{tile}-{datetime}.zarr`) for rendering, and (b) **append the scene as a
+new `time` slice into the per-tile cube** (`s1-rtc-{tile}.zarr`) for analysis (Zarr region/append;
+**skip a time already present**). Serialise cube writes with an **Argo `synchronization` mutex keyed on
+the tile**. The PoC proved the append works via the existing `ingest_s1tiling_acquisition` (`mode=r+`);
+the per-acquisition store is the proven phase-5 single-acquisition store.
+**Verify**: `uv run pytest tests/unit/test_ingest_dual.py` (per-acq store + cube append; duplicate-time skip); cluster: 2 scenes same tile → 2 per-acq stores + a 2-time cube; concurrent submit → no corruption.
 **Acceptance**:
-- [ ] A 2nd acquisition appends a `time` slice (cube has N times), unit-tested
-- [ ] Re-ingesting an existing time is a no-op (no duplicate slice)
-- [ ] Concurrent same-tile writes serialised (mutex) — no corruption
+- [ ] Each scene yields its own single-time store (name = item id) **and** a `time` slice in the cube
+- [ ] Re-ingesting an existing time is a no-op (no duplicate slice/store)
+- [ ] Concurrent same-tile cube writes serialised (mutex) — no corruption
 - [ ] `xr.open_dataset(cube)` exposes all scenes on `time`
 
-### Task 5 — Per-acquisition catalogue (builder + `sel=time` links)  <status: blocked by OQ #5>
-**What**: (a) **upstream `eopf-geozarr`**: emit **one STAC item per `time` slice**
-(`s1-rtc-{tile}-{datetime}`, `datetime`=scene time, assets → cube) instead of one-per-store; (b)
-`scripts/register_v1.py`: append `&sel=time=nearest::{datetime}` to the S1 viz/xyz/tilejson/thumbnail
-links (~few lines); (c) `register_v1_s1_rtc.py`: upsert the **list** of per-acquisition items. (P8 catalogue.)
-**Verify**: `uv run pytest tests/unit/test_register_v1_s1_rtc.py` (per-acquisition ids + `sel=time` in links); cluster: an item's XYZ/preview renders its slice (`sel=time`), distinct dates → distinct items.
+### Task 5 — Per-acquisition catalogue (renders directly)  <status: ready>
+**What**: emit **one STAC item per acquisition** (`s1-rtc-{tile}-{datetime}`, single `datetime`)
+pointing at its **per-acquisition store** → **renders directly** (store-name = item-id matches titiler
+reconstruction; **no `sel=time`, no titiler change** — Spike 3). Reuse the phase-5 builder with
+per-acquisition ids; `register_v1_s1_rtc.py` upserts each. Also (re)register the per-tile cube item
+for analysis. **No upstream data-model change required.**
+**Verify**: `uv run pytest tests/unit/test_register_v1_s1_rtc.py` (per-acquisition ids); cluster: each item's XYZ/preview renders (HTTP 200); distinct dates → distinct items.
 **Acceptance**:
-- [ ] Builder emits one item per `time` slice (id `s1-rtc-{tile}-{datetime}`, single `datetime`)
-- [ ] Viz/XYZ/tilejson/thumbnail links carry `sel=time=nearest::{datetime}` and render the right slice
-- [ ] Register upserts all per-acquisition items; OQ #5 (data-model PR) landed
+- [ ] One item per acquisition (id `s1-rtc-{tile}-{datetime}`, single `datetime`), renders directly (200)
+- [ ] Per-tile cube item present for analysis; per-acquisition items are the time-series index
+- [ ] No `sel=time` / titiler dependency on the per-acquisition render path
 
-> **CP-A (after T1–T5)**: a single discovered product (any tile, S1A/S1C) lands as a `time` slice in
-> the tile cube, is quality-gated, and gets a per-acquisition item that renders via `sel=time`. The
-> datacube model is proven on one product.
+> **CP-A (after T1–T5)**: a single discovered product (any tile, S1A/S1C) yields a per-acquisition
+> store + item that **renders directly**, is quality-gated, and is also appended to the tile cube
+> (openable as a datacube). The dual-storage model is proven on one product.
 
 ### Task 6 — Port the CDSE watcher to an Argo CronWorkflow (data-driven trigger)  <status: blocked by 1–5>
 **What**: trigger entrypoint (reuse `tile_bbox`/`query_cdse`) queries CDSE for a tile+window, filters
@@ -164,9 +166,9 @@ cube time-present prevent reprocessing; per-tile mutex (T4) serialises the burst
 | 2 | Backfill lookback window (days) | T8 | Loïc |
 | 3 | Alerting path (quality-gate FAIL + persistent failures) | T1, T9 | Loïc / infra |
 | 4 | `ensure-dem` discovery (eodag vs direct) + PVC cache layout | T3 | Loïc / me (during T3) |
-| 5 | **`eopf-geozarr` per-acquisition builder PR** — owner + timeline | T5 | Loïc / data-model |
+| 5 | Per-acquisition store path must match titiler's reconstructed `{base}/{collection}/{item_id}.zarr` — confirm the titiler store base + collection for the per-acquisition collection | T4, T5 | Loïc / infra |
 
-*(Resolved in spec §7: DEM source = public `copernicus-dem-30m`; Spike 1 titiler `sel=time`; Spike 2 sizing.)*
+*(Resolved: P8 = dual storage; DEM source = public `copernicus-dem-30m`; Spike 3 = titiler reconstructs store from `{base}/{collection}/{item_id}.zarr` (ignores href) → per-acq stores named = item-id render directly, no titiler change. Dual-storage write cost accepted.)*
 
 ---
 
@@ -175,8 +177,10 @@ cube time-present prevent reprocessing; per-tile mutex (T4) serialises the burst
 | Risk | Impact | Mitigation |
 |------|--------|------------|
 | Concurrent same-tile cube writes corrupt the Zarr | **High** | per-tile Argo `synchronization` mutex (T4); region writes; time-present skip |
-| `eopf-geozarr` per-acquisition builder slips (upstream) | **High** — T5 blocks T6 register | land OQ #5 early; interim: a local builder wrapper over the existing geometry/proj logic |
+| Dual-storage cost (each scene written twice) | Med | accepted (P8); per-acq store is small; cube append is incremental. If titiler later resolves the asset href (I-8 Option A), collapse to single storage |
+| Per-acquisition store not at titiler's reconstructed path → 500 | **High** | stores MUST land at `{titiler-base}/{collection}/{item_id}.zarr` (store-name = item-id); validate one render early (PoC showed the reconstruction rule) |
 | S1C has an unforeseen RTC issue despite the orbit table | Med | T2 is a live S1C verify gate before relying on it; fall back to S1A-only |
+| s1tiling exits non-zero when off-platform (S1C/S1D) downloads fail, even though target succeeded | Med | tolerate off-platform download failures in the s1tiling step (don't fail the run if the wanted platform produced output) — observed in the PoC scene-2 run |
 | `ensure-dem` swath/tile-name derivation wrong → missing DEM | High (silent bad RTC) | unit-test vs known 31TCH set; s1tiling errors on <100% DEM coverage |
 | STAC-existence dedup races indexing latency | Low | cube time-present check is the backstop |
 | Backfill thundering herd | Med | semaphore + per-tile mutex; cap backfill concurrency (T8) |
@@ -188,8 +192,9 @@ cube time-present prevent reprocessing; per-tile mutex (T4) serialises the burst
 ## Done definition
 
 CronWorkflow (6 h, data-driven) submits child Workflows only for new S1A/S1C products across the AOI;
-each tile auto-provisions its DEM and **accumulates a multi-temporal cube** (one `time` slice per
-acquisition, per-tile writes serialised); ingest is quality-gated (FAIL ⇒ no register); each
-acquisition has a **per-acquisition STAC item** rendering via `sel=time`; S1D is skipped; backfill ran
-once on enable; the acceptance soak (5 × 14 × ≥95%) passes on staging and a tile opens as a cube; the
-blind cron is retired. Prod promotion is Phase 7.
+each tile auto-provisions its DEM; ingest writes a **per-acquisition store** (renders directly) **and
+appends to a per-tile cube** (per-tile writes serialised); ingest is quality-gated (FAIL ⇒ no
+register); each acquisition has a **per-acquisition STAC item that renders directly** (store-name =
+item-id, no titiler change); S1D is skipped; backfill ran once on enable; the acceptance soak
+(5 × 14 × ≥95%) passes on staging and a tile opens as a datacube; the blind cron is retired. Prod
+promotion is Phase 7.
