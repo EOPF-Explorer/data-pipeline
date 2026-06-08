@@ -118,16 +118,37 @@ state write. Summary: `N found, M new, K processed, L failed`.
 - [x] `ruff` + `mypy` (pre-commit) pass
 - [x] `--dry-run` runs end-to-end — lists real S1 GRD products for 31TCH + planned A/B runs
 
-### Task 6 — Live verification + `sat:orbit_state` casing  🟡 PARTIAL
+### Task 6 — Live verification + `sat:orbit_state` casing  🟢 all criteria met (pending report to Emmanuel)
 **Query side resolved (2026-06-05, verified live)**: collection id is lowercase `sentinel-1-grd`
 (`SENTINEL-1-GRD` → 0); `sat:orbit_state` is lowercase; the `query` extension filters correctly
 (descending→6 / ascending→8, no cross-contamination). All pinned in code.
-**Remaining (needs the Sub-issue 4 environment: CDSE creds + DEM + Docker + S3 write):**
+
+> **Live-run findings (2026-06-08)** — the first end-to-end attempt surfaced two real blockers the
+> offline/mocked tests could not catch (they mock `subprocess.run`, so they assert Script A is
+> *called* with the dates, never that S1Processor *consumes* them):
+> 1. **`run_s1tiling.py` ignored the date window (BUG, fixed).** It copied `S1GRD_RTC.cfg` verbatim
+>    and only used `--date-start` for the S3 *output prefix*; S1Processor ran the cfg's static
+>    `first_date 2025-02-01 / last_date 2025-02-14`, reprocessing the old Feb-2025 test data. Fixed by
+>    `_render_cfg()` which patches `roi_by_tiles`/`tiles`/`orbit_direction`/`first_date`/`last_date`
+>    into a per-run cfg — mirrors the merged Argo `eopf-explorer-s1tiling` template's `sed` step.
+>    Covered by 4 new tests in `tests/unit/test_run_s1tiling.py`.
+> 2. **Pipeline is S1A-only.** Both the local cfg and the Argo `cfg-base` pin `platform_list : S1A`
+>    and neither patches it, so S1C/S1D scenes the watcher discovers won't process. Live test target
+>    must be an S1A product (chosen: `S1A…BB4B`, 2026-06-05, window 06-04→06-06). Making platform
+>    selectable is out of scope here (deferred — see [[project_s1_watcher_s3_targets]]).
+
+**Live target/config (2026-06-08)**: tests bucket `esa-zarr-sentinel-explorer-tests` on OVH
+(`s3.de.io.cloud.ovh.net`, AWS profile `eopfexplorer`), collection `sentinel-1-grd-rtc-staging`,
+explorer STAC/raster APIs. State seeded so all but the S1A target are pre-marked processed.
 **Verify**: two consecutive real runs; second reports `0 new`.
 **Acceptance criteria**:
 - [x] Correct `sat:orbit_state` casing + filter mechanism verified live and pinned in code
-- [ ] ≥ 1 new product processed A→B end-to-end (item queryable in staging STAC)
-- [ ] Idempotent re-run reports `0 new`, runs nothing
+- [x] `run_s1tiling.py` renders the requested date window into the cfg (verified live: s1tiling ran
+      `first_date 2026-06-04 / last_date 2026-06-06`); fix + 4 unit tests landed
+- [x] ≥ 1 new product processed A→B end-to-end — S1A 2026-06-05 (`…BB4B`) → `s1-rtc-31TCH` registered
+      (HTTP 201), queryable in `sentinel-1-grd-rtc-staging`, `datetime 2026-06-05T06:09:07Z`
+      (2026-06-08, after the output-contamination fix — see `fix_s1tiling_output_contamination.md`)
+- [x] Idempotent re-run reports `0 new`, runs nothing — `Summary: 7 found, 0 new, 0 processed, 0 failed`
 - [ ] Outcome reported to Emmanuel
 
 ---
