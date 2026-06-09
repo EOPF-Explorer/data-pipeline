@@ -25,6 +25,8 @@ per-tile cube writes; tests at each new-code boundary; **staging only** (prod = 
 | `s1-dem` PVC (31TCH only, manual) + EGM2008 geoid | ✅ bound; no auto-fetch (T3) |
 | Ingest = **fresh store per run** | ⚠️ → **append scene to per-tile cube** (T4); append validated by PoC |
 | `eopf_geozarr.build_s1_rtc_stac_item` = one item per store | ✅ reuse with **per-acquisition ids** + `sel=time` links (T5; no upstream change) |
+| `scripts/validate_s1_rtc.py` quality-gate CLI (T1) | ✅ shipped (#229); unit-tested + **verified tile-agnostic** on 31TDH; Argo step pending |
+| `scripts/register_per_acquisition.py` per-acq register (T5) | ✅ shipped (#229); unit-tested + live (31TCH ×2 items); P-3 multi-time notebook pending |
 | titiler store resolution | ⚠️ reconstructs + ignores href (Spike 3); explorer rendering **deferred (#228)** — not a phase blocker (validation is via notebook) |
 | Local watcher query/bbox/dedup logic | ✅ port; dedup → per-acquisition STAC item-exists (T6) |
 | Blind daily cron + sensor (sub-issue 8) | ✅ shipped, suspended — replaced by the data-driven trigger (T6) |
@@ -58,15 +60,18 @@ model** (P8); T6 adds the trigger; T7/T8 scale; T9 proves it.
 
 ## Tasks
 
-### Task 1 — Quality-gate step (gate register on validation FAIL)  <status: ready>
+### Task 1 — Quality-gate step (gate register on validation FAIL)  <status: CLI shipped (#229); Argo step pending>
 **What**: `scripts/validate_s1_rtc.py` CLI (wrap the notebook checks) → exit **0=PASS/1=WARN/2=FAIL**.
 Add a `quality-gate` step in the ingest template *between* ingest and register: 2 → fail (no register)
 + alert; 1 → register + annotate; 0 → register. (P1; alert path = OQ #3.)
 **Verify**: `uv run pytest tests/unit/test_validate_s1_rtc.py`; cluster: good store registers, corrupted store fails (no item).
 **Acceptance**:
-- [ ] CLI returns 0/1/2, unit-tested on good + corrupted fixtures
-- [ ] FAIL → no item registered; PASS → registered; WARN → registered + annotated
-- [ ] FAIL alerts via OQ #3
+- [x] CLI returns 0/1/2, unit-tested on good + corrupted fixtures — `scripts/validate_s1_rtc.py`
+      (17 tests in `test_validate_s1_rtc.py`); **verified tile-agnostic** on a live cross-tile run:
+      31TDH store → OVERALL WARN (EPSG:32631, vv/vh 100% finite, dB p2..p98 plausible, orbit auto-
+      detected; WARN only from benign `S1RtcRoot` coord drift — same signature as 31TCH). 2026-06-09.
+- [ ] FAIL → no item registered; PASS → registered; WARN → registered + annotated *(Argo step — pending)*
+- [ ] FAIL alerts via OQ #3 *(Argo step — pending)*
 
 ### Task 2 — Enable S1A + S1C (platform render) + off-platform-download tolerance  <status: ready>
 **What**: (a) parametrize `platform_list` in the s1tiling template `sed` render (default `S1A S1C`);
@@ -105,19 +110,24 @@ stores).
 - [ ] Concurrent same-tile writes serialised (mutex) — no corruption
 - [ ] `xr.open_dataset(cube)` exposes all scenes on `time`
 
-### Task 5 — Per-acquisition catalogue + notebook validation  <status: ready>
+### Task 5 — Per-acquisition catalogue + notebook validation  <status: register CLI shipped (#229); P-3 multi-time notebook pending>
 **What**: emit **one queryable STAC item per acquisition** (`s1-rtc-{tile}-{datetime}`, single
 `datetime`, collection `sentinel-1-grd-rtc-acquisitions`) indexing its cube slice (asset href + time);
 also (re)register the per-tile cube item (`sentinel-1-grd-rtc-staging`). Reuse the phase-5 builder with
 per-acquisition ids (no upstream change). **Validate via the `validate_s1_grd_rtc` notebook** (open the
 cube → PASS) + STAC queries. **Explorer rendering deferred (I2/option 2)** — bake `sel=time` links into
 the items now so they render later when option 2 lands, with **no data change**.
-**Verify**: `uv run pytest tests/unit/test_register_v1_s1_rtc.py` (per-acquisition ids); cluster: items queryable in STAC; `validate_s1_grd_rtc` notebook returns PASS against the cube; distinct dates → distinct items.
+**Verify**: `uv run pytest tests/unit/test_register_per_acquisition.py` (per-acquisition ids); cluster: items queryable in STAC; `validate_s1_grd_rtc` notebook returns PASS against the cube; distinct dates → distinct items.
 **Acceptance**:
-- [ ] One queryable item per acquisition (id `s1-rtc-{tile}-{datetime}`); per-tile cube item present
+- [x] One queryable item per acquisition (id `s1-rtc-{tile}-{datetime}`); per-tile cube item present —
+      `scripts/register_per_acquisition.py` (6 tests in `test_register_per_acquisition.py`); live:
+      registered `s1-rtc-31TCH-20260605t060907` + `s1-rtc-31TCH-20260607t055248` in
+      `sentinel-1-grd-rtc-acquisitions`, per-tile `s1-rtc-31TCH` present in `…-staging`. Builder is
+      tile/orbit-parametrized (tile-agnostic by construction; confirmed alongside T1's 31TDH run).
 - [ ] **`validate_s1_grd_rtc` confirmed/extended for a *multi-time* cube** (it was written for a
-      single-acquisition store — verify it validates every `time`, or update it) and returns **PASS**
-- [ ] `sel=time` links baked in (explorer render deferred to #228; no later data change)
+      single-acquisition store — verify it validates every `time`, or update it) and returns **PASS** *(P-3 — pending)*
+- [x] `sel=time` links baked in (explorer render deferred to #228; no later data change) —
+      `sel_time_tilejson()` / `per_acquisition_items()`, unit-tested
 
 > **CP-A (after T1–T5)**: a single discovered product (any tile, S1A/S1C) is quality-gated, **appended
 > to the tile cube** (which opens as a datacube), and gets a **queryable per-acquisition STAC item**;
