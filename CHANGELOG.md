@@ -1,5 +1,44 @@
 # Changelog
 
+## 1.9.0 (2026-06-09)
+
+## What's Changed
+* ci: harden Docker image — switch to Alpine, fix CVE surface, clean Trivy scanning by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/160
+* perf: improve eodc zarr store read reliability by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/168
+* build(deps): bump uv from 0.11.2 to 0.11.3 in /docker in the all group by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/164
+* build(deps): bump python from `18f00d3` to `70dd893` in /docker by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/165
+* build(deps): bump docker/login-action from 3.7.0 to 4.1.0 in the all group by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/166
+* build(deps): bump the minor-and-patch group across 1 directory with 5 updates by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/167
+* fix: defer TCPConnector creation to async context (Python 3.13 crash) by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/170
+* build(deps): bump uv from 0.11.3 to 0.11.6 in /docker by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/171
+* fix: skip registry login on forks by @wietzesuijker in https://github.com/EOPF-Explorer/data-pipeline/pull/65
+* fix: exclude dependabot from PUSH_IMAGE to prevent login failures by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/180
+* build(deps): bump the all group across 1 directory with 4 updates by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/178
+* build(deps): bump python from `70dd893` to `420cd0b` in /docker by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/175
+* fix: fail fast when delete of existing item fails by @wietzesuijker in https://github.com/EOPF-Explorer/data-pipeline/pull/64
+* fix: allow disabling sharding/dask/validation flags by @wietzesuijker in https://github.com/EOPF-Explorer/data-pipeline/pull/63
+* build(deps): bump the minor-and-patch group across 1 directory with 7 updates by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/188
+* build(deps): bump uv from 0.11.6 to 0.11.7 in /docker in the all group by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/187
+* build(deps): bump nbconvert from 7.17.0 to 7.17.1 by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/183
+* fix: handle None return from get_item in upsert_item existence check by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/191
+* build(deps): bump pip from 26.0.1 to 26.1 by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/194
+* build(deps-dev): bump notebook from 7.5.5 to 7.5.6 by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/195
+* build(deps): bump the all group across 1 directory with 9 updates by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/214
+* build(deps): bump python from 3.13-alpine to 3.14.5-alpine in /docker in the minor-and-patch group by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/208
+* build(deps): bump the minor-and-patch group across 1 directory with 12 updates by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/209
+* build(deps): bump idna from 3.11 to 3.15 by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/207
+* build(deps): bump jupyter-server from 2.17.0 to 2.18.0 by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/197
+* build(deps): bump mistune from 3.2.0 to 3.2.1 by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/200
+* build(deps): bump urllib3 from 2.6.3 to 2.7.0 by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/203
+* build(deps): bump uv from 0.11.14 to 0.11.15 by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/213
+* fix(security): bump pip 26.0.1 -> 26.1.2 to clear pip-audit CVEs by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/216
+* fix(deps): bump pillow + aiohttp to clear 7 GHAS alerts by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/222
+* feat: pin data-model to scale-offset codec commit and add experimental flag by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/189
+* chore: pin data-model to v0.10.1 for release by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/234
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.8.1...v1.9.0
+
 ## 1.8.1 (2026-04-08)
 
 ## What's Changed
