@@ -356,28 +356,33 @@ def test_run_ingest_local_does_not_fetch(tmp_path) -> None:
 
 
 def test_drop_consolidated_metadata_enables_resize(tmp_path) -> None:
-    """A consolidated v3 store can't be grown via resize+write on reopen; dropping the root
-    consolidated_metadata restores it (the cross-run append path, T4)."""
+    """A cube consolidated at the *orbit-group* level (as eopf_geozarr does) can't be grown via
+    resize+write on reopen — the group serves the stale length-1 shape. Stripping consolidated
+    metadata from *every* group (not just the root) restores the append (the cross-run path, T4)."""
     import numpy as np
+    import pytest
     from ingest_v1_s1_rtc import _drop_consolidated_metadata
 
     store = str(tmp_path / "cube.zarr")
     root = zarr.open_group(store, mode="w", zarr_format=3)
-    g = root.create_group("descending").create_group("r10m")
-    g.create_array("vv", shape=(1, 4, 4), dtype="float32", dimension_names=("time", "y", "x"))[
-        0
-    ] = 1
-    zarr.consolidate_metadata(store)
+    root.create_group("descending").create_group("r10m").create_array(
+        "vv", shape=(1, 4, 4), dtype="float32", dimension_names=("time", "y", "x")
+    )[0] = 1
+    # eopf_geozarr consolidates the orbit group, not the root.
+    zarr.consolidate_metadata(store, path="descending")
+    import json
 
-    # Without the fix, resize-then-write on the consolidated store is out of bounds.
-    import pytest
+    assert "consolidated_metadata" in json.loads(
+        (tmp_path / "cube.zarr" / "descending" / "zarr.json").read_text()
+    )
 
+    # Bug: with the orbit group consolidated, resize is not seen on re-navigation -> out of bounds.
     r = zarr.open_group(store, mode="r+", zarr_format=3)["descending"]["r10m"]
     r["vv"].resize((2, 4, 4))
-    with pytest.raises(Exception):  # noqa: B017 -- zarr BoundsCheckError on consolidated store
+    with pytest.raises(Exception):  # noqa: B017 -- zarr BoundsCheckError on the consolidated group
         r["vv"][1, :, :] = np.zeros((4, 4), dtype="float32")
 
-    # After dropping consolidated metadata, the same append succeeds.
+    # Fix: a root-only strip would miss descending/; the recursive strip clears it everywhere.
     _drop_consolidated_metadata(store)
     r2 = zarr.open_group(store, mode="r+", zarr_format=3)["descending"]["r10m"]
     r2["vv"].resize((2, 4, 4))
