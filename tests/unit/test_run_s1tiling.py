@@ -202,7 +202,7 @@ def _render(tmp_path: Path, **kwargs) -> str:
         kwargs.get("orbit_direction", "ascending"),
         kwargs.get("date_start", "2026-06-04"),
         kwargs.get("date_end", "2026-06-06"),
-        kwargs.get("platform_list", "S1A S1C"),
+        kwargs.get("platform_list", "S1A"),
     )
     return dst.read_text()
 
@@ -229,15 +229,17 @@ def test_render_cfg_descending_maps_to_des(tmp_path):
 
 
 def test_render_cfg_injects_platform(tmp_path):
-    """platform_list is now run-specific (T2): default S1A S1C, overwriting the base cfg value."""
+    """platform_list is run-specific (T2); default is a single platform (S1A) — s1tiling 1.4.0's
+    multi-platform filter is broken, so platforms are run one at a time."""
     out = _render(tmp_path)
-    assert "platform_list : S1A S1C" in out
+    assert "platform_list : S1A" in out
 
 
 def test_render_cfg_platform_list_configurable(tmp_path):
-    out = _render(tmp_path, platform_list="S1A")
-    assert "platform_list : S1A" in out
-    assert "platform_list : S1A S1C" not in out
+    """A different single platform (e.g. S1C) renders too — the way S1C is processed (one per run)."""
+    out = _render(tmp_path, platform_list="S1C")
+    assert "platform_list : S1C" in out
+    assert "platform_list : S1A" not in out
 
 
 # ---------------------------------------------------------------------------
@@ -585,3 +587,15 @@ def test_dry_run_s3_sync_uses_aws_profile_when_given(tmp_path):
     out = _dry_run(tmp_path, ["--aws-profile", "myprof"]).stdout
     assert "--profile" in out
     assert "myprof" in out
+
+
+def test_multi_platform_list_rejected(tmp_path):
+    """A combined platform list silently yields 0 products on s1tiling 1.4.0 -> fail fast."""
+    result = _dry_run(tmp_path, ["--platform-list", "S1A S1C"])
+    assert result.returncode != 0
+    assert "single platform" in (result.stderr + result.stdout)
+
+
+def test_single_platform_list_accepted(tmp_path):
+    """A single platform passes the guard (dry-run reaches normal exit 0)."""
+    assert _dry_run(tmp_path, ["--platform-list", "S1C"]).returncode == 0

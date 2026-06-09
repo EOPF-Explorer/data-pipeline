@@ -27,6 +27,41 @@ import tempfile
 
 log = logging.getLogger(__name__)
 
+# Per-environment S3 buckets and STAC collections are matched pairs: a tile ingested for
+# `staging` must land in BOTH the staging bucket and the staging collection. Crossing them
+# (e.g. the `-tests` bucket with the `-staging` collection) produces an item whose Zarr lives
+# where the gateway/TiTiler won't serve it for that collection -- the 32TLR footgun, where a
+# staging-collection item was written to the local tests bucket and rendered broken. We can only
+# judge consistency when BOTH names are recognized per-env values; ad-hoc names (CI fixtures,
+# one-off buckets, the cross-env `-acquisitions` collection) are unrecognized and pass through.
+_BUCKET_ENV = {
+    "esa-zarr-sentinel-explorer-tests": "test",
+    "esa-zarr-sentinel-explorer-s1-l1grd-staging": "staging",
+    "esa-zarr-sentinel-explorer-s1-l1grd-prod": "prod",
+}
+_COLLECTION_ENV = {
+    "sentinel-1-grd-rtc-tests": "test",
+    "sentinel-1-grd-rtc-staging": "staging",
+    "sentinel-1-grd-rtc-prod": "prod",
+}
+
+
+def check_env_consistency(collection: str, s3_output_bucket: str) -> None:
+    """Reject a collection/bucket pair that mixes environments.
+
+    Raises ``ValueError`` when both names are recognized per-env values but disagree on the
+    environment. Unrecognized names pass through unchecked (their environment is unknown).
+    """
+    bucket_env = _BUCKET_ENV.get(s3_output_bucket)
+    collection_env = _COLLECTION_ENV.get(collection)
+    if bucket_env and collection_env and bucket_env != collection_env:
+        raise ValueError(
+            f"environment mismatch: bucket {s3_output_bucket!r} is '{bucket_env}' but collection "
+            f"{collection!r} is '{collection_env}'. Per-env buckets and collections must match "
+            f"(the 32TLR footgun: a staging item written to the tests bucket renders broken). "
+            f"Use a '{collection_env}' bucket, or the collection matching this bucket's environment."
+        )
+
 
 def run_pipeline(
     s3_geotiff_prefix: str,
@@ -45,6 +80,7 @@ def run_pipeline(
         raise ValueError(
             f"collection must be a non-empty single path segment (no '/'), got: {collection!r}"
         )
+    check_env_consistency(collection, s3_output_bucket)
     s3_zarr = f"s3://{s3_output_bucket}/{collection}/s1-grd-rtc-{tile_id}.zarr"
     # eopf_geozarr uses pathlib.Path internally, which collapses s3:// to s3:/ and
     # writes the zarr to a local directory. Use a local temp path for ingest, then

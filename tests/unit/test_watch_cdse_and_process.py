@@ -346,3 +346,17 @@ def test_run_watch_counts_failures_and_does_not_persist_them(tmp_path: Path) -> 
     state = load_processed(state_file)
     assert is_processed(state, "31TCH", "descending", "ok")
     assert not is_processed(state, "31TCH", "descending", "boom")
+
+
+def test_run_watch_rejects_env_mismatch_before_querying_cdse() -> None:
+    """A cross-env bucket/collection pair fails fast -- before any CDSE query or s1tiling run."""
+    args = _args(
+        collection="sentinel-1-grd-rtc-staging",
+        s3_zarr_bucket="esa-zarr-sentinel-explorer-tests",
+    )
+    with (
+        patch(f"{_MOD}.query_cdse") as mock_query,
+        pytest.raises(ValueError, match="mismatch"),
+    ):
+        run_watch(args)
+    mock_query.assert_not_called()
