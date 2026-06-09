@@ -14,8 +14,10 @@ import os
 import shutil
 import sys
 import tempfile
+from pathlib import Path
 from typing import Any
 
+import numpy as np
 import zarr
 from eopf_geozarr.conversion.s1_ingest import (
     consolidate_s1_store,
@@ -78,10 +80,46 @@ def _patch_cf_grid_mapping(store_path: str, orbit_direction: str) -> list[str]:
     return patched
 
 
-def ingest_all(s3_geotiff_prefix: str, store_path: str, orbit_direction: str) -> int:
-    """Run the 5-step S1 ingest pipeline.
+def acq_time_ns(acq_stamp: str) -> int:
+    """ns-since-epoch for an S1Tiling ``acq_stamp`` (``YYYYMMDDtHHMMSS``).
 
-    Returns exit code: 0 = success, 1 = ingest error, 2 = no acquisitions.
+    Matches how the cube stores ``time``: ``eopf_geozarr`` writes
+    ``np.datetime64(<ACQUISITION_DATETIME tag>)`` — the same instant the stamp encodes — so this is
+    the idempotency key for "is this acquisition already a slice in the cube?".
+    """
+    s = acq_stamp
+    iso = f"{s[0:4]}-{s[4:6]}-{s[6:8]}T{s[9:11]}:{s[11:13]}:{s[13:15]}"
+    return int(np.datetime64(iso).astype("datetime64[ns]").astype("int64"))
+
+
+def store_times_ns(store_path: str, orbit_direction: str) -> set[int]:
+    """`time` values (ns) already present in the cube's r10m level; empty if the store, the orbit
+    group, or its r10m/time are absent (a fresh tile has none)."""
+    if not Path(store_path).exists():
+        return set()
+    root = zarr.open_group(str(store_path), mode="r", zarr_format=3)
+    if orbit_direction not in root:
+        return set()
+    orbit: Any = root[orbit_direction]
+    if "r10m" not in orbit or "time" not in orbit["r10m"]:
+        return set()
+    times = np.asarray(orbit["r10m"]["time"]).astype("datetime64[ns]").astype("int64")
+    return {int(t) for t in times}
+
+
+def new_acquisitions(acquisitions: list[dict], present_ns: set[int]) -> list[dict]:
+    """Acquisitions whose ``time`` is not already a slice in the cube (idempotent re-ingest)."""
+    return [a for a in acquisitions if acq_time_ns(a["acq_stamp"]) not in present_ns]
+
+
+def ingest_all(s3_geotiff_prefix: str, store_path: str, orbit_direction: str) -> int:
+    """Run the 5-step S1 ingest pipeline, appending new acquisitions to the per-tile cube.
+
+    Each new acquisition is appended as a ``time`` slice (``ingest_s1tiling_acquisition`` opens the
+    store ``mode=r+``); acquisitions whose ``time`` is already in the cube are skipped, so a re-run
+    is a no-op (T4 idempotency).
+
+    Returns exit code: 0 = success (or nothing new to ingest), 1 = ingest error, 2 = no acquisitions.
     """
     # Step 1 -- discover acquisitions
     acquisitions = discover_s1tiling_acquisitions(s3_geotiff_prefix)
@@ -89,8 +127,21 @@ def ingest_all(s3_geotiff_prefix: str, store_path: str, orbit_direction: str) ->
         log.warning("No acquisitions found in %s", s3_geotiff_prefix)
         return 2
 
-    # Step 2 -- ingest each acquisition (abort on first error)
-    for acq in acquisitions:
+    # Step 1b -- drop acquisitions already present in the cube (idempotent append)
+    present = store_times_ns(store_path, orbit_direction)
+    acquisitions_to_ingest = new_acquisitions(acquisitions, present)
+    skipped = len(acquisitions) - len(acquisitions_to_ingest)
+    if skipped:
+        log.info("Skipping %d acquisition(s) already present in the cube", skipped)
+    if not acquisitions_to_ingest:
+        log.info(
+            "All %d discovered acquisition(s) already in the cube; nothing to ingest",
+            len(acquisitions),
+        )
+        return 0
+
+    # Step 2 -- ingest each new acquisition (abort on first error)
+    for acq in acquisitions_to_ingest:
         try:
             ingest_s1tiling_acquisition(
                 vv_path=acq["vv"],
@@ -166,12 +217,41 @@ def _put_tree(fs: Any, local_store: str, dest: str) -> None:
             fs.put_file(lpath, rpath)
 
 
+def _get_tree(fs: Any, src: str, local_store: str) -> None:
+    """Download every object under ``src`` to ``local_store/<relpath>`` (mirror of ``_put_tree``)."""
+    for key in fs.find(src):
+        rel = key[len(src) :].lstrip("/")
+        lpath = os.path.join(local_store, rel.replace("/", os.sep))
+        os.makedirs(os.path.dirname(lpath), exist_ok=True)
+        fs.get_file(key, lpath)
+
+
+def _fetch_store_from_s3(s3_uri: str, local_store: str) -> None:
+    """Download an existing cube from S3 into ``local_store`` so new scenes **append** to it.
+
+    No-op if the destination cube doesn't exist yet (the first acquisition for a tile). This is what
+    turns the pipeline from "fresh store per run" into a per-tile datacube that accumulates over runs
+    (T4); concurrent same-tile writes are serialised by the Argo per-tile mutex.
+    """
+    import s3fs
+
+    endpoint = os.environ.get("AWS_ENDPOINT_URL")
+    fs = s3fs.S3FileSystem(client_kwargs={"endpoint_url": endpoint} if endpoint else None)
+    src = s3_uri[len("s3://") :].rstrip("/")
+    if not fs.exists(src):
+        return
+    log.info("Fetching existing cube %s -> %s (append mode)", s3_uri, local_store)
+    _get_tree(fs, src, local_store)
+
+
 def _upload_store_to_s3(local_store: str, s3_uri: str) -> None:
     """Upload a local Zarr store directory to an ``s3://`` URI via s3fs.
 
     The endpoint is taken from ``AWS_ENDPOINT_URL`` (OVH S3 is not AWS-default);
     credentials come from the ambient ``AWS_ACCESS_KEY_ID`` / ``AWS_SECRET_ACCESS_KEY``.
-    Any existing store at the destination is removed first so re-runs are clean.
+    The destination is removed first, then re-uploaded; for an appended cube the local store is the
+    full superset (existing slices fetched by ``_fetch_store_from_s3`` + the new one), so this writes
+    the accumulated cube, not a fresh single-acquisition store.
     """
     import s3fs
 
@@ -187,8 +267,9 @@ def run_ingest(s3_geotiff_prefix: str, store: str, orbit_direction: str) -> int:
     """Ingest into ``store``, handling ``s3://`` destinations.
 
     eopf_geozarr writes the store via ``pathlib.Path``, which collapses ``s3://``
-    to a local path. So for an ``s3://`` destination we ingest into a local temp
-    store and upload the result with s3fs. Local destinations pass straight through.
+    to a local path. So for an ``s3://`` destination we fetch any existing cube into a local temp
+    store, append the new acquisition(s), and upload the result with s3fs. Local destinations pass
+    straight through.
     """
     if not store.startswith("s3://"):
         return ingest_all(s3_geotiff_prefix, store, orbit_direction)
@@ -196,6 +277,7 @@ def run_ingest(s3_geotiff_prefix: str, store: str, orbit_direction: str) -> int:
     tmp_dir = tempfile.mkdtemp(prefix="s1-ingest-")
     local_store = os.path.join(tmp_dir, os.path.basename(store.rstrip("/")))
     try:
+        _fetch_store_from_s3(store, local_store)  # append to the existing per-tile cube (T4)
         rc = ingest_all(s3_geotiff_prefix, local_store, orbit_direction)
         if rc != 0:
             return rc
