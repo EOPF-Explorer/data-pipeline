@@ -21,10 +21,12 @@ per-tile cube writes; tests at each new-code boundary; **staging only** (prod = 
 | Resource | Status |
 |----------|--------|
 | `eopf-explorer-s1tiling` / `ingest-v1-s1rtc` WorkflowTemplates | ✅ merged (PR#207) |
-| s1tiling cfg render (tile/orbit/date) | ✅ exists; `platform_list` not parametrized (T2) |
-| `s1-dem` PVC (31TCH only, manual) + EGM2008 geoid | ✅ bound; no auto-fetch (T3) |
-| Ingest = **fresh store per run** | ⚠️ → **append scene to per-tile cube** (T4); append validated by PoC |
+| s1tiling cfg render (tile/orbit/date/**platform**) | ✅ `--platform-list` + success-contract merged (#233); cluster S1C verify pending |
+| `s1-dem` PVC (31TCH only, manual) + EGM2008 geoid | ✅ bound; **`scripts/ensure_dem.py` auto-fetch merged** (#230); Argo `ensure-dem` step + cluster run pending |
+| Ingest = ~~fresh store per run~~ | ✅ **append+idempotency merged** (#231): `ingest_all` skips present times, `run_ingest` fetches+appends the S3 cube; Argo mutex + cluster run pending |
 | `eopf_geozarr.build_s1_rtc_stac_item` = one item per store | ✅ reuse with **per-acquisition ids** + `sel=time` links (T5; no upstream change) |
+| `scripts/validate_s1_rtc.py` quality-gate CLI (T1) | ✅ shipped (#229); unit-tested + **verified tile-agnostic** on 31TDH; Argo step pending |
+| `scripts/register_per_acquisition.py` per-acq register (T5) | ✅ shipped (#229); unit-tested + live (31TCH ×2 items); P-3 multi-time notebook pending |
 | titiler store resolution | ⚠️ reconstructs + ignores href (Spike 3); explorer rendering **deferred (#228)** — not a phase blocker (validation is via notebook) |
 | Local watcher query/bbox/dedup logic | ✅ port; dedup → per-acquisition STAC item-exists (T6) |
 | Blind daily cron + sensor (sub-issue 8) | ✅ shipped, suspended — replaced by the data-driven trigger (T6) |
@@ -58,71 +60,105 @@ model** (P8); T6 adds the trigger; T7/T8 scale; T9 proves it.
 
 ## Tasks
 
-### Task 1 — Quality-gate step (gate register on validation FAIL)  <status: ready>
+### Task 1 — Quality-gate step (gate register on validation FAIL)  <status: CLI shipped (#229); Argo step pending>
 **What**: `scripts/validate_s1_rtc.py` CLI (wrap the notebook checks) → exit **0=PASS/1=WARN/2=FAIL**.
 Add a `quality-gate` step in the ingest template *between* ingest and register: 2 → fail (no register)
 + alert; 1 → register + annotate; 0 → register. (P1; alert path = OQ #3.)
 **Verify**: `uv run pytest tests/unit/test_validate_s1_rtc.py`; cluster: good store registers, corrupted store fails (no item).
 **Acceptance**:
-- [ ] CLI returns 0/1/2, unit-tested on good + corrupted fixtures
-- [ ] FAIL → no item registered; PASS → registered; WARN → registered + annotated
-- [ ] FAIL alerts via OQ #3
+- [x] CLI returns 0/1/2, unit-tested on good + corrupted fixtures — `scripts/validate_s1_rtc.py`
+      (17 tests in `test_validate_s1_rtc.py`); **verified tile-agnostic** on a live cross-tile run:
+      31TDH store → OVERALL WARN (EPSG:32631, vv/vh 100% finite, dB p2..p98 plausible, orbit auto-
+      detected; WARN only from benign `S1RtcRoot` coord drift — same signature as 31TCH). 2026-06-09.
+- [ ] FAIL → no item registered; PASS → registered; WARN → registered + annotated *(Argo step — pending)*
+- [ ] FAIL alerts via OQ #3 *(Argo step — pending)*
 
-### Task 2 — Enable S1A + S1C (platform render) + off-platform-download tolerance  <status: ready>
+### Task 2 — Enable S1A + S1C (platform render) + off-platform-download tolerance  <status: in-repo halves shipped (#233); cluster S1C verify pending>
 **What**: (a) parametrize `platform_list` in the s1tiling template `sed` render (default `S1A S1C`);
 prove s1tiling handles S1C by a direct submit (query-side S1D skip = T6). (b) **Tolerate off-platform
 download failures** — the PoC showed s1tiling downloads *all* platforms in the window and exits
 non-zero if S1D/S1C downloads fail, even when the requested platform produced output (and that
 non-zero exit then skips the S3 sync). Change the s1tiling step's success contract to **"requested-
 platform GeoTIFFs present in `data_out/{tile}`"** rather than "S1Processor exit 0".
-**Verify**: cluster — live S1C scene (clean window) → A→B → item + `validate_s1_rtc` PASS; a window with a failing S1D download still succeeds (target output synced).
+*(Impl in `scripts/run_s1tiling.py`: `--platform-list` rendered into the cfg; the docker step runs
+with `check=False` and continues iff `_requested_platform_outputs_present(data_out/{tile})`.)*
+**Verify**: `uv run pytest tests/unit/test_run_s1tiling.py` (platform render+configurability; output-presence predicate; main() tolerates rc≠0 with output / hard-fails without); cluster — live S1C scene → A→B → item + `validate_s1_rtc` PASS; a window with a failing S1D download still succeeds (target output synced).
 **Acceptance**:
-- [ ] S1C scene processes A→B end-to-end; item queryable + PASS
-- [ ] `platform_list` rendered from a param (default `S1A S1C`), not hardcoded
-- [ ] s1tiling step succeeds (and syncs) when the requested platform produced output despite
-      off-platform download failures
+- [ ] S1C scene processes A→B end-to-end; item queryable + PASS *(cluster — pending)*
+- [x] `platform_list` rendered from a param (default `S1A S1C`), not hardcoded —
+      `_render_cfg` renders `--platform-list`; `test_render_cfg_injects_platform` + configurability test
+- [x] s1tiling step succeeds (and syncs) when the requested platform produced output despite
+      off-platform download failures — `_requested_platform_outputs_present` + `check=False`;
+      `test_main_tolerates_nonzero_docker_when_output_present` / `…_exits_when_docker_fails_and_no_output`
 
-### Task 3 — `ensure-dem` auto-fetch step  <status: blocked by OQ #4>
-**What**: `scripts/ensure_dem.py` — tile → swath bbox → fetch missing GLO-30 COGs from public
-`copernicus-dem-30m` (HTTPS, anon) → rename to `Product10` → rebuild `DEM_Union.gpkg`; idempotent.
-Argo `ensure-dem` step before s1tiling, writing the `s1-dem` PVC. Geoid pre-staged.
-**Verify**: `uv run pytest tests/unit/test_ensure_dem.py` (bbox/tile-name derivation; skip-existing; bad tile rejected); cluster: a NEW tile provisions + processes; re-run skips.
+### Task 3 — `ensure-dem` auto-fetch step  <status: merged (#230); Argo step + cluster run pending>
+**What**: `scripts/ensure_dem.py` — tile → swath bbox (lon±4°/lat±1.5° margin) → integer GLO-30 cells
+→ keep the land cells the **static `eotile` `DEM_Union.gpkg`** knows (ocean cells don't exist in
+GLO-30) → skip cells already on disk → download the rest from public anon `copernicus-dem-30m`,
+renaming each COG to the `Product10` stem s1tiling matches. (`DEM_Union.gpkg` is *staged once* from
+`eotile`, not rebuilt per tile.) Argo `ensure-dem` step before s1tiling, writing the `s1-dem` PVC.
+Geoid pre-staged.
+**Verify**: `uv run pytest tests/unit/test_ensure_dem.py` (10 tests: derivation, naming, gpkg read, skip-existing, bad tile rejected); cluster: a NEW tile provisions + processes; re-run skips.
 **Acceptance**:
-- [ ] tile→swath-bbox→tile-name derivation unit-tested (malformed tile rejected)
-- [ ] previously-unprovisioned tile runs end-to-end, no manual DEM upload
-- [ ] idempotent re-run fetches nothing; OQ #4 resolved
+- [x] tile→swath-bbox→tile-name derivation unit-tested (malformed tile rejected) — `scripts/ensure_dem.py`;
+      convention ground-truthed vs the real `eotile` gpkg: 31TCH → **41 land cells incl N44W001/N44W002**
+      (the cells phase-5 saw the swath need), matching the ≥31-tile 31TCH PVC; anon HEAD on
+      `copernicus-dem-30m` confirmed key/region (42.6 MB tiff). 2026-06-09.
+- [ ] previously-unprovisioned tile runs end-to-end, no manual DEM upload *(cluster — pending)*
+- [x] idempotent re-run fetches nothing — `tiles_to_fetch` excludes on-disk stems (verified: full set present → `[]`)
+- [x] **OQ #4 resolved** (script-side): direct anon HTTPS from `copernicus-dem-30m`; static `eotile`
+      gpkg (no eodag); configurable margin (lon±4/lat±1.5); skip-existing for idempotency. PVC cache
+      *layout* is an Argo-manifest detail (platform-deploy).
 
-### Task 4 — Datacube ingest: append scene to the per-tile cube  <status: ready (PoC-validated)>
+### Task 4 — Datacube ingest: append scene to the per-tile cube  <status: merged (#231); Argo mutex + cluster run pending>
 **What**: ingest **appends the scene as a new `time` slice into the per-tile cube**
 (`s1-rtc-{tile}.zarr`, `sentinel-1-grd-rtc-staging`) via the existing `ingest_s1tiling_acquisition`
 (`mode=r+`, PoC-validated); **skip a `time` already present**; serialise per-tile writes with an **Argo
 `synchronization` mutex keyed on the tile**. Single shared cube (rendering deferred → no per-acquisition
-stores).
-**Verify**: `uv run pytest tests/unit/test_ingest_cube.py` (append into empty/existing cube; duplicate-time skip); cluster: 2 scenes same tile → a 2-time cube; concurrent submit → no corruption.
+stores). *(Impl in `scripts/ingest_v1_s1_rtc.py`: `ingest_all` drops already-present times; `run_ingest`
+fetches the existing cube into the temp store before ingest so an `s3://` cube **accumulates** instead
+of being replaced.)*
+**Verify**: `uv run pytest tests/unit/test_ingest_v1_s1_rtc.py` (idempotent skip; append-only-new; acq_stamp→ns matches cube; s3 fetch-before-ingest); cluster: 2 scenes same tile → a 2-time cube; concurrent submit → no corruption.
 **Acceptance**:
-- [ ] A 2nd acquisition appends a `time` slice (cube has N times), unit-tested
-- [ ] Re-ingesting an existing time is a no-op
-- [ ] Concurrent same-tile writes serialised (mutex) — no corruption
-- [ ] `xr.open_dataset(cube)` exposes all scenes on `time`
+- [x] A 2nd acquisition appends a `time` slice (cube has N times), unit-tested —
+      `test_ingest_all_appends_only_new_acquisition` (ingest called once, for the new time only)
+- [x] Re-ingesting an existing time is a no-op — `test_ingest_all_skips_acquisition_already_in_cube`
+      (no ingest, no consolidation); `acq_time_ns`/`store_times_ns`/`new_acquisitions` unit-tested
+- [ ] Concurrent same-tile writes serialised (mutex) — no corruption *(Argo `synchronization` — platform-deploy, cluster-pending)*
+- [ ] `xr.open_dataset(cube)` exposes all scenes on `time` *(cluster — real multi-time S3 cube; append
+      path = `_fetch_store_from_s3` → append → upload-superset)*
 
-### Task 5 — Per-acquisition catalogue + notebook validation  <status: ready>
+### Task 5 — Per-acquisition catalogue + notebook validation  <status: register CLI shipped (#229); P-3 multi-time notebook pending>
 **What**: emit **one queryable STAC item per acquisition** (`s1-rtc-{tile}-{datetime}`, single
 `datetime`, collection `sentinel-1-grd-rtc-acquisitions`) indexing its cube slice (asset href + time);
 also (re)register the per-tile cube item (`sentinel-1-grd-rtc-staging`). Reuse the phase-5 builder with
 per-acquisition ids (no upstream change). **Validate via the `validate_s1_grd_rtc` notebook** (open the
 cube → PASS) + STAC queries. **Explorer rendering deferred (I2/option 2)** — bake `sel=time` links into
 the items now so they render later when option 2 lands, with **no data change**.
-**Verify**: `uv run pytest tests/unit/test_register_v1_s1_rtc.py` (per-acquisition ids); cluster: items queryable in STAC; `validate_s1_grd_rtc` notebook returns PASS against the cube; distinct dates → distinct items.
+**Verify**: `uv run pytest tests/unit/test_register_per_acquisition.py` (per-acquisition ids); cluster: items queryable in STAC; `validate_s1_grd_rtc` notebook returns PASS against the cube; distinct dates → distinct items.
 **Acceptance**:
-- [ ] One queryable item per acquisition (id `s1-rtc-{tile}-{datetime}`); per-tile cube item present
+- [x] One queryable item per acquisition (id `s1-rtc-{tile}-{datetime}`); per-tile cube item present —
+      `scripts/register_per_acquisition.py` (6 tests in `test_register_per_acquisition.py`); live:
+      registered `s1-rtc-31TCH-20260605t060907` + `s1-rtc-31TCH-20260607t055248` in
+      `sentinel-1-grd-rtc-acquisitions`, per-tile `s1-rtc-31TCH` present in `…-staging`. Builder is
+      tile/orbit-parametrized (tile-agnostic by construction; confirmed alongside T1's 31TDH run).
 - [ ] **`validate_s1_grd_rtc` confirmed/extended for a *multi-time* cube** (it was written for a
-      single-acquisition store — verify it validates every `time`, or update it) and returns **PASS**
-- [ ] `sel=time` links baked in (explorer render deferred to #228; no later data change)
+      single-acquisition store — verify it validates every `time`, or update it) and returns **PASS** *(P-3 — pending)*
+- [x] `sel=time` links baked in (explorer render deferred to #228; no later data change) —
+      `sel_time_tilejson()` / `per_acquisition_items()`, unit-tested
 
 > **CP-A (after T1–T5)**: a single discovered product (any tile, S1A/S1C) is quality-gated, **appended
 > to the tile cube** (which opens as a datacube), and gets a **queryable per-acquisition STAC item**;
 > the `validate_s1_grd_rtc` notebook **PASSes** against the cube. Model proven on one product.
 > (Explorer rendering deferred — #228.)
+>
+> **"Run the whole chain on a *different* tile" lives here (CP-A).** It was gated solely on the DEM:
+> T1 (gate) is tile-agnostic (verified on 31TDH), T5 (register) is tile-parametrized, and **T3 now
+> auto-provisions the DEM for any tile** — so a new tile no longer needs a manual DEM upload. A
+> *single-acquisition* CP-A on a new tile needs only **T3** (fresh cube, no append); making it a true
+> *multi-time* datacube exercises **T4** on the 2nd acquisition. **CP-A-local** (run before the Argo
+> wiring): `ensure_dem.py` → `run_s1tiling.py` → ingest → `validate_s1_rtc.py` → `register_per_acquisition.py`
+> on a chosen tile (tile choice = OQ #1).
 
 ### Task 6 — Port the CDSE watcher to an Argo CronWorkflow (data-driven trigger)  <status: blocked by 1–5>
 **What**: trigger entrypoint (reuse `tile_bbox`/`query_cdse`) queries CDSE for a tile+window, filters
@@ -174,7 +210,7 @@ cube time-present prevent reprocessing; per-tile mutex (T4) serialises the burst
 | 1 | AOI tile set (+ 5 soak tiles) | T7, T9 | Loïc / science |
 | 2 | Backfill lookback window (days) | T8 | Loïc |
 | 3 | Alerting path (quality-gate FAIL + persistent failures) | T1, T9 | Loïc / infra |
-| 4 | `ensure-dem` discovery (eodag vs direct) + PVC cache layout | T3 | Loïc / me (during T3) |
+| 4 | ~~`ensure-dem` discovery (eodag vs direct) + PVC cache layout~~ **RESOLVED (script-side, 2026-06-09)**: direct anon HTTPS from `copernicus-dem-30m`; static `eotile` `DEM_Union.gpkg` (no eodag); margin lon±4/lat±1.5; skip-existing. PVC cache *layout* → Argo manifest (platform-deploy). | T3 ✅ | Loïc / me |
 | 5 | **Titiler rendering (I2/option 2) — DEFERRED**, tracked in its own follow-up issue (see below). Not a phase-6 blocker; per-acquisition items render later with no data change. | — (deferred) | Loïc / infra |
 
 *(Resolved: P8 = shared per-tile cube + per-acquisition items (queryable index), validated by the `validate_s1_grd_rtc` notebook; explorer/titiler rendering **deferred** off the critical path; DEM source = public `copernicus-dem-30m`; Spike 3 = titiler reconstructs the store + ignores href, so a titiler change (I2/option 2, `ecde99c`) is needed for rendering — tracked separately.)*
