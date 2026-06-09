@@ -181,7 +181,7 @@ def _s1_rgb_renders() -> dict:
         "rgb": {
             "title": "VV, VH, VV/VH composite",
             "expression": S1_RGB_EXPR,
-            "rescale": [[0.0, 0.1], [0.0, 0.1], [0.0, 0.1]],
+            "rescale": [[0.0, 0.1]],
             "bidx": [1],
             "tilesize": 256,
         }
@@ -202,9 +202,8 @@ class TestSelectRender:
 
 
 class TestRenderToQuery:
-    def test_collapses_identical_rescale_pairs(self):
+    def test_serializes_render_fields(self):
         q = _render_to_query(_s1_rgb_renders()["rgb"], include_tilesize=True)
-        # identical [0,0.1] pairs collapse to a single rescale param
         assert q.count("rescale=") == 1
         assert "rescale=0.0%2C0.1" in q
         assert "bidx=1" in q
@@ -215,7 +214,7 @@ class TestRenderToQuery:
         q = _render_to_query(_s1_rgb_renders()["rgb"], include_tilesize=False)
         assert "tilesize" not in q
 
-    def test_per_band_rescale_preserved_when_differing(self):
+    def test_one_rescale_param_per_pair(self):
         render = {"expression": "a;b", "rescale": [[0, 1], [0, 2]]}
         q = _render_to_query(render, include_tilesize=False)
         assert q.count("rescale=") == 2

@@ -196,38 +196,17 @@ def _select_render(item: Item) -> dict | None:
 def _render_to_query(render: dict, *, include_tilesize: bool) -> str:
     """Convert a render-extension config into a titiler query string.
 
-    Mirrors titiler's parameter names. ``rescale`` may be a list of ``[min, max]``
-    pairs (one per band) or a single pair; identical pairs are collapsed to one
-    ``rescale`` param (titiler then applies it to every band). ``tilesize`` is
-    only meaningful for the tiles/tilejson endpoints, not ``/preview``.
+    Serializes the fields S1 RTC renders use: ``expression``, ``rescale`` (a
+    list of ``[min, max]`` pairs — a single pair applies to all bands) and
+    ``bidx``. ``tilesize`` is only valid on the tiles/tilejson endpoints, not
+    ``/preview``.
     """
     q = urllib.parse.quote
-    parts: list[str] = []
-    for var in render.get("variables") or []:
-        parts.append(f"variables={q(str(var), safe='')}")
-    if expression := render.get("expression"):
-        parts.append(f"expression={q(str(expression), safe='')}")
-    for asset in render.get("assets") or []:
-        parts.append(f"assets={q(str(asset), safe='')}")
-    bidx = render.get("bidx")
-    if bidx is not None:
-        for b in bidx if isinstance(bidx, list) else [bidx]:
-            parts.append(f"bidx={b}")
-    rescale = render.get("rescale")
-    if rescale:
-        pairs = rescale if isinstance(rescale[0], list | tuple) else [rescale]
-        if len({tuple(p) for p in pairs}) == 1:
-            pairs = [pairs[0]]
-        for mn, mx in pairs:
-            parts.append(f"rescale={q(f'{mn},{mx}', safe='')}")
-    if color_formula := render.get("color_formula"):
-        parts.append(f"color_formula={q(str(color_formula), safe='')}")
-    if colormap_name := render.get("colormap_name"):
-        parts.append(f"colormap_name={q(str(colormap_name), safe='')}")
-    if (nodata := render.get("nodata")) is not None:
-        parts.append(f"nodata={q(str(nodata), safe='')}")
-    if resampling := render.get("resampling"):
-        parts.append(f"resampling={q(str(resampling), safe='')}")
+    parts = [f"expression={q(render['expression'], safe='')}"]
+    for mn, mx in render.get("rescale", []):
+        parts.append(f"rescale={q(f'{mn},{mx}', safe='')}")
+    for b in render.get("bidx", []):
+        parts.append(f"bidx={b}")
     if include_tilesize and (tilesize := render.get("tilesize")):
         parts.append(f"tilesize={tilesize}")
     return "&".join(parts)
