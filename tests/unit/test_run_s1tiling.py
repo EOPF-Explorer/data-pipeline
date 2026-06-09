@@ -202,6 +202,7 @@ def _render(tmp_path: Path, **kwargs) -> str:
         kwargs.get("orbit_direction", "ascending"),
         kwargs.get("date_start", "2026-06-04"),
         kwargs.get("date_end", "2026-06-06"),
+        kwargs.get("platform_list", "S1A S1C"),
     )
     return dst.read_text()
 
@@ -227,10 +228,16 @@ def test_render_cfg_descending_maps_to_des(tmp_path):
     assert "orbit_direction : DES" in out
 
 
-def test_render_cfg_leaves_platform_untouched(tmp_path):
-    """platform_list is not a run-specific key (S1A-only pipeline) — must be preserved."""
+def test_render_cfg_injects_platform(tmp_path):
+    """platform_list is now run-specific (T2): default S1A S1C, overwriting the base cfg value."""
     out = _render(tmp_path)
+    assert "platform_list : S1A S1C" in out
+
+
+def test_render_cfg_platform_list_configurable(tmp_path):
+    out = _render(tmp_path, platform_list="S1A")
     assert "platform_list : S1A" in out
+    assert "platform_list : S1A S1C" not in out
 
 
 # ---------------------------------------------------------------------------
@@ -325,9 +332,10 @@ def test_safe_clean_refuses_absolute_escape(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def _invoke_main(tmp_path, monkeypatch, extra_args=None):
-    """Run run_s1tiling.main() with the docker/aws boundary (_run) stubbed to a no-op.
+def _invoke_main(tmp_path, monkeypatch, extra_args=None, run_stub=None):
+    """Run run_s1tiling.main() with the docker/aws boundary (_run) stubbed.
 
+    Defaults to a no-op stub; pass ``run_stub`` to simulate docker exit codes / output.
     Returns the workdir data_dir so callers can assert on-disk cleanup effects.
     """
     mod = _import_script()
@@ -371,7 +379,7 @@ def _invoke_main(tmp_path, monkeypatch, extra_args=None):
         *(extra_args or []),
     ]
     monkeypatch.setattr(sys, "argv", argv)
-    monkeypatch.setattr(mod, "_run", lambda *a, **k: None)  # stub docker + aws
+    monkeypatch.setattr(mod, "_run", run_stub or (lambda *a, **k: None))  # stub docker + aws
     mod.main()
     return data_dir
 
@@ -498,3 +506,63 @@ def test_s3_sync_not_attempted_after_docker_failure(tmp_path, monkeypatch):
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)  # noqa: S603
     assert result.returncode != 0, "Expected non-zero exit when Docker fails"
     assert "aws" not in result.stdout, "S3 sync should not be attempted after Docker failure"
+
+
+# ---------------------------------------------------------------------------
+# T2: platform-render success contract — tolerate off-platform download failures
+# ---------------------------------------------------------------------------
+
+
+def test_requested_platform_outputs_present_true_for_requested(tmp_path):
+    mod = _import_script()
+    out = tmp_path / "data_out" / "31TCH"
+    out.mkdir(parents=True)
+    (out / "s1a_31TCH_vv_DES_037_20250210t060920_GammaNaughtRTC.tif").write_text("x")
+    assert mod._requested_platform_outputs_present(out, ["S1A", "S1C"]) is True
+
+
+def test_requested_platform_outputs_present_false_for_other_platform(tmp_path):
+    """Only an off-platform (S1B) GeoTIFF present while S1A/S1C were requested -> not a success."""
+    mod = _import_script()
+    out = tmp_path / "data_out" / "31TCH"
+    out.mkdir(parents=True)
+    (out / "s1b_31TCH_vv_DES_037_20250210t060920_GammaNaughtRTC.tif").write_text("x")
+    assert mod._requested_platform_outputs_present(out, ["S1A", "S1C"]) is False
+
+
+def test_requested_platform_outputs_present_false_when_absent(tmp_path):
+    mod = _import_script()
+    assert mod._requested_platform_outputs_present(tmp_path / "nope", ["S1A", "S1C"]) is False
+
+
+def test_main_tolerates_nonzero_docker_when_output_present(tmp_path, monkeypatch):
+    """S1Processor exits non-zero (off-platform download failed) but the requested platform
+    produced output -> the run continues and the aws sync is attempted (T2 success contract)."""
+    data_dir = tmp_path / "workdir"
+    calls = []
+
+    def fake_run(cmd, dry_run, *, check=True):
+        calls.append(cmd)
+        if cmd[0] == "docker":
+            out = data_dir / "data_out" / "31TCH"
+            out.mkdir(parents=True, exist_ok=True)
+            (out / "s1a_31TCH_vv_DES_037_20250210t060920_GammaNaughtRTC.tif").write_text("x")
+            return 2  # off-platform (e.g. S1D) download failed
+        return 0
+
+    _invoke_main(tmp_path, monkeypatch, run_stub=fake_run)
+    assert any(c[0] == "aws" and "sync" in c for c in calls), "sync should proceed despite rc=2"
+
+
+def test_main_exits_when_docker_fails_and_no_output(tmp_path, monkeypatch):
+    """Non-zero docker exit with no requested-platform output -> hard failure, no sync."""
+    calls = []
+
+    def fake_run(cmd, dry_run, *, check=True):
+        calls.append(cmd)
+        return 2 if cmd[0] == "docker" else 0
+
+    with pytest.raises(SystemExit) as exc:
+        _invoke_main(tmp_path, monkeypatch, run_stub=fake_run)
+    assert exc.value.code == 2
+    assert not any(c[0] == "aws" and "sync" in c for c in calls), "no sync after a true failure"

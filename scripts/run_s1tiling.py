@@ -47,12 +47,19 @@ def _safe_clean(target: Path, data_dir: Path, dry_run: bool) -> None:
 
 
 def _render_cfg(
-    src: Path, dst: Path, tile_id: str, orbit_direction: str, date_start: str, date_end: str
+    src: Path,
+    dst: Path,
+    tile_id: str,
+    orbit_direction: str,
+    date_start: str,
+    date_end: str,
+    platform_list: str,
 ) -> None:
     """Render a per-run S1Tiling cfg from the committed base, patching only the run-specific keys.
 
     Mirrors the Argo eopf-explorer-s1tiling template: without this, S1Processor would use the
-    base cfg's static first_date/last_date and ignore the requested window.
+    base cfg's static first_date/last_date and ignore the requested window. ``platform_list``
+    (e.g. ``S1A S1C``) is rendered too so the enabled platforms aren't hardcoded in the base cfg.
     """
     oc = "DES" if orbit_direction == "descending" else "ASC"
     subs = {
@@ -61,6 +68,7 @@ def _render_cfg(
         "orbit_direction": oc,
         "first_date": date_start,
         "last_date": date_end,
+        "platform_list": platform_list,
     }
     text = src.read_text()
     for key, val in subs.items():
@@ -68,12 +76,37 @@ def _render_cfg(
     dst.write_text(text)
 
 
-def _run(cmd: list[str], dry_run: bool) -> None:
+_GAMMA_PLATFORM_RE = re.compile(r"^(s1[abc])_", re.IGNORECASE)  # platform prefix of an output tif
+
+
+def _requested_platform_outputs_present(tile_out_dir: Path, platforms: list[str]) -> bool:
+    """True if ``data_out/{tile}`` holds a GammaNaughtRTC GeoTIFF for a requested platform.
+
+    s1tiling downloads *every* platform in the window and exits non-zero if an off-platform
+    download (e.g. S1D) fails, even when the requested platform produced output. The run is a
+    success when the requested platform's GeoTIFFs are present, regardless of that exit code.
+    """
+    if not tile_out_dir.is_dir():
+        return False
+    wanted = {p.lower() for p in platforms}
+    for tif in tile_out_dir.glob("*GammaNaughtRTC.tif"):
+        m = _GAMMA_PLATFORM_RE.match(tif.name)
+        if m and m.group(1).lower() in wanted:
+            return True
+    return False
+
+
+def _run(cmd: list[str], dry_run: bool, *, check: bool = True) -> int:
+    """Print and run ``cmd``; return its exit code. With ``check`` (default), a non-zero exit aborts
+    the script (used for the aws steps). Pass ``check=False`` to inspect the code instead — the
+    s1tiling step does this to apply its own success contract."""
     print(" \\\n  ".join(str(c) for c in cmd))
-    if not dry_run:
-        result = subprocess.run(cmd)  # noqa: S603
-        if result.returncode != 0:
-            sys.exit(result.returncode)
+    if dry_run:
+        return 0
+    result = subprocess.run(cmd)  # noqa: S603
+    if check and result.returncode != 0:
+        sys.exit(result.returncode)
+    return result.returncode
 
 
 def main() -> None:
@@ -89,6 +122,11 @@ def main() -> None:
     ap.add_argument("--dem-dir", required=True, type=Path)
     ap.add_argument("--data-dir", required=True, type=Path)
     ap.add_argument("--cfg", required=True, type=Path)
+    ap.add_argument(
+        "--platform-list",
+        default="S1A S1C",
+        help="space-separated S1Tiling platform_list (default: S1A S1C; S1D unsupported)",
+    )
     ap.add_argument(
         "--keep-output",
         action="store_true",
@@ -127,7 +165,13 @@ def main() -> None:
     workdir_cfg = data_dir / "config" / "S1GRD_RTC.cfg"
     workdir_cfg.parent.mkdir(parents=True, exist_ok=True)
     _render_cfg(
-        abs_cfg, workdir_cfg, args.tile_id, args.orbit_direction, args.date_start, args.date_end
+        abs_cfg,
+        workdir_cfg,
+        args.tile_id,
+        args.orbit_direction,
+        args.date_start,
+        args.date_end,
+        args.platform_list,
     )
 
     # Step 1b: clean prior-run outputs so only this window's products get synced. The prototype
@@ -142,8 +186,11 @@ def main() -> None:
     if args.prune_raw:
         _safe_clean(data_dir / "data_raw", data_dir, args.dry_run)
 
-    # Step 2: docker run
-    _run(
+    # Step 2: docker run. Apply the success contract: S1Processor downloads every platform in the
+    # window and exits non-zero if an off-platform (e.g. S1D) download fails, even when the requested
+    # platform produced output. So we don't fail the run on a non-zero exit alone — only if the
+    # requested-platform GeoTIFFs are absent from data_out/{tile}.
+    rc = _run(
         [
             "docker",
             "run",
@@ -169,7 +216,17 @@ def main() -> None:
             "python3 /patch/s1tiling_eodag4_patch.py && S1Processor /data/config/S1GRD_RTC.cfg",
         ],
         args.dry_run,
+        check=False,
     )
+    if rc:
+        tile_out = data_dir / "data_out" / args.tile_id
+        if _requested_platform_outputs_present(tile_out, args.platform_list.split()):
+            print(
+                f"WARN: S1Processor exited {rc}, but requested-platform output is present in "
+                f"{tile_out}; continuing (off-platform download failures tolerated)"
+            )
+        else:
+            sys.exit(rc)
 
     # Step 3: purge the destination prefix, then sync GeoTIFFs + GAMMA_AREA into it. Purging first
     # makes the sync authoritative (a re-run of the same window self-heals); --delete is unusable
