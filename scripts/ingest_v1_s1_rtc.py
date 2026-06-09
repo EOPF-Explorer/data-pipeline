@@ -9,6 +9,7 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import shutil
@@ -244,6 +245,29 @@ def _fetch_store_from_s3(s3_uri: str, local_store: str) -> None:
     _get_tree(fs, src, local_store)
 
 
+def _drop_consolidated_metadata(local_store: str) -> None:
+    """Strip zarr-v3 consolidated metadata from a fetched cube so the append can grow `time`.
+
+    Reopening a *consolidated* store ``mode="r+"`` serves the consolidated (stale, length-1) array
+    shapes, so ``eopf_geozarr``'s resize-then-write raises ``BoundsCheckError`` ("index out of bounds
+    for dimension with length 1"). ``eopf_geozarr`` consolidates at the **orbit-group** level (not the
+    root), so we strip ``consolidated_metadata`` from *every* group node, not just the root; zarr then
+    reads per-array metadata and honours ``resize``. ``ingest_all`` re-consolidates at the end.
+    """
+    dropped = 0
+    for zj in Path(local_store).rglob("zarr.json"):
+        meta = json.loads(zj.read_text())
+        if meta.get("node_type") == "group" and meta.pop("consolidated_metadata", None) is not None:
+            zj.write_text(json.dumps(meta))
+            dropped += 1
+    if dropped:
+        log.info(
+            "Dropped consolidated metadata from %d group(s) in %s (so append can resize)",
+            dropped,
+            local_store,
+        )
+
+
 def _upload_store_to_s3(local_store: str, s3_uri: str) -> None:
     """Upload a local Zarr store directory to an ``s3://`` URI via s3fs.
 
@@ -278,6 +302,7 @@ def run_ingest(s3_geotiff_prefix: str, store: str, orbit_direction: str) -> int:
     local_store = os.path.join(tmp_dir, os.path.basename(store.rstrip("/")))
     try:
         _fetch_store_from_s3(store, local_store)  # append to the existing per-tile cube (T4)
+        _drop_consolidated_metadata(local_store)  # so eopf_geozarr can resize `time` on append
         rc = ingest_all(s3_geotiff_prefix, local_store, orbit_direction)
         if rc != 0:
             return rc
