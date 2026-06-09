@@ -12,7 +12,13 @@ import requests
 scripts_dir = Path(__file__).parent.parent.parent / "scripts"
 sys.path.insert(0, str(scripts_dir))
 
-from register_v1 import upsert_item  # noqa: E402
+from register_v1 import (  # noqa: E402
+    _render_to_query,
+    _select_render,
+    add_thumbnail_asset,
+    add_visualization_links,
+    upsert_item,
+)
 
 
 def _make_client(item_exists: bool, base_url: str = "https://stac.example.com") -> MagicMock:
@@ -138,3 +144,110 @@ class TestUpsertItemNewItem:
 
         with pytest.raises(requests.HTTPError):
             upsert_item(client, "my-collection", _make_item())
+
+
+# =============================================================================
+# Render-extension visualization
+# =============================================================================
+
+import datetime as _dt  # noqa: E402
+
+from pystac import Asset, Item  # noqa: E402
+
+RASTER_BASE = "https://api.example.com/raster"
+S1_RGB_EXPR = "/descending:vv;/descending:vh;(/descending:vv)/(/descending:vh)"
+
+
+def _real_item(renders: dict | None = None) -> Item:
+    """A real pystac Item with vv/vh assets and an optional renders property."""
+    props: dict = {}
+    if renders is not None:
+        props["renders"] = renders
+    item = Item(
+        id="s1-rtc-31TCH",
+        geometry=None,
+        bbox=None,
+        datetime=_dt.datetime(2026, 6, 7, tzinfo=_dt.UTC),
+        properties=props,
+    )
+    href = "s3://bucket/s1-grd-rtc-31TCH.zarr/descending"
+    for pol in ("vv", "vh"):
+        item.add_asset(pol, Asset(href=href, roles=["data"]))
+    return item
+
+
+def _s1_rgb_renders() -> dict:
+    return {
+        "rgb": {
+            "title": "VV, VH, VV/VH composite",
+            "expression": S1_RGB_EXPR,
+            "rescale": [[0.0, 0.1], [0.0, 0.1], [0.0, 0.1]],
+            "bidx": [1],
+            "tilesize": 256,
+        }
+    }
+
+
+class TestSelectRender:
+    def test_returns_none_without_renders(self):
+        assert _select_render(_real_item()) is None
+
+    def test_prefers_rgb_name(self):
+        renders = {"other": {"expression": "x"}, "rgb": {"expression": "y"}}
+        assert _select_render(_real_item(renders))["expression"] == "y"
+
+    def test_falls_back_to_first_render(self):
+        renders = {"only": {"expression": "z"}}
+        assert _select_render(_real_item(renders))["expression"] == "z"
+
+
+class TestRenderToQuery:
+    def test_collapses_identical_rescale_pairs(self):
+        q = _render_to_query(_s1_rgb_renders()["rgb"], include_tilesize=True)
+        # identical [0,0.1] pairs collapse to a single rescale param
+        assert q.count("rescale=") == 1
+        assert "rescale=0.0%2C0.1" in q
+        assert "bidx=1" in q
+        assert "tilesize=256" in q
+        assert "expression=" in q
+
+    def test_tilesize_excluded_when_requested(self):
+        q = _render_to_query(_s1_rgb_renders()["rgb"], include_tilesize=False)
+        assert "tilesize" not in q
+
+    def test_per_band_rescale_preserved_when_differing(self):
+        render = {"expression": "a;b", "rescale": [[0, 1], [0, 2]]}
+        q = _render_to_query(render, include_tilesize=False)
+        assert q.count("rescale=") == 2
+
+
+class TestVisualizationFromRenders:
+    def test_xyz_and_tilejson_use_render_expression(self):
+        item = _real_item(_s1_rgb_renders())
+        add_visualization_links(item, RASTER_BASE, "sentinel-1-grd-rtc-staging")
+
+        xyz = next(link for link in item.links if link.rel == "xyz")
+        tilejson = next(link for link in item.links if link.rel == "tilejson")
+        # render expression is used, NOT the old VH-grayscale rescale=0,219
+        for link in (xyz, tilejson):
+            assert "expression=" in link.href
+            assert "rescale=0%2C219" not in link.href
+            assert "0.1" in link.href
+        assert "/tiles/WebMercatorQuad/{z}/{x}/{y}.png" in xyz.href
+        assert "tilejson.json" in tilejson.href
+
+    def test_thumbnail_uses_render_expression(self):
+        item = _real_item(_s1_rgb_renders())
+        add_thumbnail_asset(item, RASTER_BASE, "sentinel-1-grd-rtc-staging")
+
+        thumb = item.assets["thumbnail"]
+        assert "expression=" in thumb.href
+        assert "rescale=0%2C219" not in thumb.href
+        assert "tilesize" not in thumb.href  # not valid on /preview
+        assert thumb.href.startswith(f"{RASTER_BASE}/collections/")
+
+    def test_falls_back_to_mission_default_without_renders(self):
+        item = _real_item()  # no renders property
+        add_thumbnail_asset(item, RASTER_BASE, "sentinel-1-grd-rtc-staging")
+        # legacy VH grayscale path still applies when no render config present
+        assert "thumbnail" in item.assets

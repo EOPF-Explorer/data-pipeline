@@ -169,10 +169,97 @@ def add_projection_from_zarr(item: Item) -> None:
                 logger.debug(f"Could not read zarr projection: {e}")
 
 
+# Render names preferred when an item declares the STAC `render` extension,
+# in priority order. The first match wins; otherwise the first render is used.
+_PREFERRED_RENDERS = ("rgb", "visual", "thumbnail", "default")
+
+
+def _select_render(item: Item) -> dict | None:
+    """Return the preferred render config from a render-extension ``renders`` dict.
+
+    Items built with the render extension carry ``properties.renders`` mapping a
+    render name to a config (expression/variables, rescale, bidx, ...). This lets
+    the data producer own the visualization rather than hardcoding it here.
+    Returns ``None`` when no usable renders are present.
+    """
+    renders = item.properties.get("renders")
+    if not isinstance(renders, dict) or not renders:
+        return None
+    for name in _PREFERRED_RENDERS:
+        if isinstance(renders.get(name), dict):
+            return renders[name]
+    first = next(iter(renders.values()))
+    return first if isinstance(first, dict) else None
+
+
+def _render_to_query(render: dict, *, include_tilesize: bool) -> str:
+    """Convert a render-extension config into a titiler query string.
+
+    Mirrors titiler's parameter names. ``rescale`` may be a list of ``[min, max]``
+    pairs (one per band) or a single pair; identical pairs are collapsed to one
+    ``rescale`` param (titiler then applies it to every band). ``tilesize`` is
+    only meaningful for the tiles/tilejson endpoints, not ``/preview``.
+    """
+    q = urllib.parse.quote
+    parts: list[str] = []
+    for var in render.get("variables") or []:
+        parts.append(f"variables={q(str(var), safe='')}")
+    if expression := render.get("expression"):
+        parts.append(f"expression={q(str(expression), safe='')}")
+    for asset in render.get("assets") or []:
+        parts.append(f"assets={q(str(asset), safe='')}")
+    bidx = render.get("bidx")
+    if bidx is not None:
+        for b in bidx if isinstance(bidx, list) else [bidx]:
+            parts.append(f"bidx={b}")
+    rescale = render.get("rescale")
+    if rescale:
+        pairs = rescale if isinstance(rescale[0], (list, tuple)) else [rescale]
+        if len({tuple(p) for p in pairs}) == 1:
+            pairs = [pairs[0]]
+        for mn, mx in pairs:
+            parts.append(f"rescale={q(f'{mn},{mx}', safe='')}")
+    if color_formula := render.get("color_formula"):
+        parts.append(f"color_formula={q(str(color_formula), safe='')}")
+    if colormap_name := render.get("colormap_name"):
+        parts.append(f"colormap_name={q(str(colormap_name), safe='')}")
+    if (nodata := render.get("nodata")) is not None:
+        parts.append(f"nodata={q(str(nodata), safe='')}")
+    if resampling := render.get("resampling"):
+        parts.append(f"resampling={q(str(resampling), safe='')}")
+    if include_tilesize and (tilesize := render.get("tilesize")):
+        parts.append(f"tilesize={tilesize}")
+    return "&".join(parts)
+
+
 def add_visualization_links(item: Item, raster_base: str, collection_id: str) -> None:
     """Add viewer/xyz/tilejson links for TiTiler visualization."""
     base_url = f"{raster_base}/collections/{collection_id}/items/{item.id}"
     item.add_link(Link("viewer", f"{base_url}/viewer", "text/html", f"Viewer for {item.id}"))
+
+    # Prefer a producer-declared render config (STAC render extension) over the
+    # hardcoded mission defaults below.
+    if render := _select_render(item):
+        query = _render_to_query(render, include_tilesize=True)
+        title = render.get("title") or f"Visualization for {item.id}"
+        item.add_link(
+            Link(
+                "xyz",
+                f"{base_url}/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png?{query}",
+                "image/png",
+                title,
+            )
+        )
+        item.add_link(
+            Link(
+                "tilejson",
+                f"{base_url}/WebMercatorQuad/tilejson.json?{query}",
+                "application/json",
+                f"TileJSON for {item.id}",
+            )
+        )
+        _add_explorer_link(item, collection_id)
+        return
 
     # Mission-specific tile configurations
     coll_lower = collection_id.lower()
@@ -221,7 +308,11 @@ def add_visualization_links(item: Item, raster_base: str, collection_id: str) ->
             )
         )
 
-    # Add EOPF Explorer link
+    _add_explorer_link(item, collection_id)
+
+
+def _add_explorer_link(item: Item, collection_id: str) -> None:
+    """Add the EOPF Explorer ``via`` link for the item."""
     item.add_link(
         Link(
             "via",
@@ -238,6 +329,22 @@ def add_thumbnail_asset(item: Item, raster_base: str, collection_id: str) -> Non
 
     base_url = f"{raster_base}/collections/{collection_id}/items/{item.id}"
     coll_lower = collection_id.lower()
+
+    # Prefer a producer-declared render config (STAC render extension).
+    if render := _select_render(item):
+        params = "format=png&" + _render_to_query(render, include_tilesize=False)
+        title = render.get("title") or f"{item.id} preview"
+        item.add_asset(
+            "thumbnail",
+            Asset(
+                href=f"{base_url}/preview?{params}",
+                media_type="image/png",
+                roles=["thumbnail"],
+                title=title,
+            ),
+        )
+        logger.debug(f"Added thumbnail asset from render config: {title}")
+        return
 
     # Mission-specific thumbnail parameters
     if coll_lower.startswith(("sentinel-2", "sentinel2")):
