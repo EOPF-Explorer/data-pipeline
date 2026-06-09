@@ -833,7 +833,7 @@ requires-dist = [
     { name = "boto3", specifier = "==1.42.89" },
     { name = "cf-xarray", specifier = "==0.11.1" },
     { name = "click", specifier = "==8.3.3" },
-    { name = "eopf-geozarr", git = "https://github.com/EOPF-Explorer/data-model.git?rev=0b45dea2aa8c2d447f39a93a7c2ee77b456324c3" },
+    { name = "eopf-geozarr", git = "https://github.com/EOPF-Explorer/data-model.git?rev=8c8ee8142b90fd98e0f8f8deea31148d40b729ed" },
     { name = "httpx", specifier = "==0.28.1" },
     { name = "mgrs", specifier = "==1.5.4" },
     { name = "morecantile", specifier = "==7.0.3" },
@@ -954,7 +954,7 @@ wheels = [
 [[package]]
 name = "eopf-geozarr"
 version = "0.10.0"
-source = { git = "https://github.com/EOPF-Explorer/data-model.git?rev=0b45dea2aa8c2d447f39a93a7c2ee77b456324c3#0b45dea2aa8c2d447f39a93a7c2ee77b456324c3" }
+source = { git = "https://github.com/EOPF-Explorer/data-model.git?rev=8c8ee8142b90fd98e0f8f8deea31148d40b729ed#8c8ee8142b90fd98e0f8f8deea31148d40b729ed" }
 dependencies = [
     { name = "aiohttp" },
     { name = "boto3" },
