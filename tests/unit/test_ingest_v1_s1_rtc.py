@@ -348,3 +348,38 @@ def test_run_ingest_local_does_not_fetch(tmp_path) -> None:
     ):
         run_ingest("/input", local_store, "descending")
     mock_fetch.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# T4 fix -- appending to a *consolidated* fetched cube must resize `time`
+# ---------------------------------------------------------------------------
+
+
+def test_drop_consolidated_metadata_enables_resize(tmp_path) -> None:
+    """A consolidated v3 store can't be grown via resize+write on reopen; dropping the root
+    consolidated_metadata restores it (the cross-run append path, T4)."""
+    import numpy as np
+    from ingest_v1_s1_rtc import _drop_consolidated_metadata
+
+    store = str(tmp_path / "cube.zarr")
+    root = zarr.open_group(store, mode="w", zarr_format=3)
+    g = root.create_group("descending").create_group("r10m")
+    g.create_array("vv", shape=(1, 4, 4), dtype="float32", dimension_names=("time", "y", "x"))[
+        0
+    ] = 1
+    zarr.consolidate_metadata(store)
+
+    # Without the fix, resize-then-write on the consolidated store is out of bounds.
+    import pytest
+
+    r = zarr.open_group(store, mode="r+", zarr_format=3)["descending"]["r10m"]
+    r["vv"].resize((2, 4, 4))
+    with pytest.raises(Exception):  # noqa: B017 -- zarr BoundsCheckError on consolidated store
+        r["vv"][1, :, :] = np.zeros((4, 4), dtype="float32")
+
+    # After dropping consolidated metadata, the same append succeeds.
+    _drop_consolidated_metadata(store)
+    r2 = zarr.open_group(store, mode="r+", zarr_format=3)["descending"]["r10m"]
+    r2["vv"].resize((2, 4, 4))
+    r2["vv"][1, :, :] = np.zeros((4, 4), dtype="float32")
+    assert r2["vv"].shape == (2, 4, 4)
