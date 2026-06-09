@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pystac
+import pytest
 
 scripts_dir = Path(__file__).parent.parent.parent / "scripts"
 sys.path.insert(0, str(scripts_dir))
@@ -156,3 +157,50 @@ def test_exits_nonzero_on_bad_store() -> None:
 
     assert result != 0
     mock_upsert.assert_not_called()
+
+
+def test_env_mismatch_rejected_before_build() -> None:
+    """A staging collection paired with a tests-bucket store is the 32TLR footgun on the
+    standalone register path -> reject before building or upserting anything."""
+    bad_store = (
+        "s3://esa-zarr-sentinel-explorer-tests/sentinel-1-grd-rtc-staging/s1-grd-rtc-31TCH.zarr"
+    )
+    with (
+        patch(f"{_MOD}.build_s1_rtc_stac_item") as mock_build,
+        patch(f"{_MOD}.upsert_item") as mock_upsert,
+        pytest.raises(ValueError, match="mismatch"),
+    ):
+        register(
+            bad_store,
+            "sentinel-1-grd-rtc-staging",
+            "https://stac.example.com",
+            "https://raster.example.com",
+            "https://s3.example.com",
+        )
+
+    mock_build.assert_not_called()
+    mock_upsert.assert_not_called()
+
+
+def test_matched_env_store_allowed() -> None:
+    """A staging-bucket store + staging collection passes the guard and registers normally."""
+    good_store = (
+        "s3://esa-zarr-sentinel-explorer-s1-l1grd-staging/"
+        "sentinel-1-grd-rtc-staging/s1-grd-rtc-31TCH.zarr"
+    )
+    with (
+        patch(f"{_MOD}.build_s1_rtc_stac_item", return_value=_make_item()),
+        patch(f"{_MOD}.warm_thumbnail_cache"),
+        patch(f"{_MOD}.upsert_item") as mock_upsert,
+        patch(f"{_MOD}.Client"),
+    ):
+        result = register(
+            good_store,
+            "sentinel-1-grd-rtc-staging",
+            "https://stac.example.com",
+            "https://raster.example.com",
+            "https://s3.example.com",
+        )
+
+    assert result == 0
+    mock_upsert.assert_called_once()

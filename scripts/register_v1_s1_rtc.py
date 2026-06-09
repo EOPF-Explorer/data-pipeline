@@ -15,6 +15,7 @@ import argparse
 import logging
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -29,6 +30,7 @@ from register_v1 import (
     upsert_item,
     warm_thumbnail_cache,
 )
+from run_ingest_register import check_env_consistency
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +46,13 @@ def register(
 
     Returns exit code: 0 = success, 1 = failure.
     """
+    # Fail fast on a per-env bucket/collection mismatch (the 32TLR footgun): the standalone
+    # register path takes a hand-typed --store + --collection, so it needs the same guard as
+    # run_ingest_register. Only s3:// stores carry an identifiable bucket in the netloc.
+    parsed = urlparse(store)
+    if parsed.scheme == "s3":
+        check_env_consistency(collection, parsed.netloc)
+
     try:
         item = build_s1_rtc_stac_item(store, collection)
     except Exception:
