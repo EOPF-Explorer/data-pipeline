@@ -130,8 +130,11 @@ def main() -> None:
     ap.add_argument("--cfg", required=True, type=Path)
     ap.add_argument(
         "--platform-list",
-        default="S1A S1C",
-        help="space-separated S1Tiling platform_list (default: S1A S1C; S1D unsupported)",
+        default="S1A",
+        help="S1Tiling platform_list — run ONE platform at a time (e.g. S1A or S1C). s1tiling 1.4.0's "
+        "multi-platform post-filter is broken (a 'S1A S1C' list yields 0 products), so combined "
+        "lists are unsupported here; the data-driven trigger submits one product (one platform) per "
+        "run anyway. S1D unsupported (#223).",
     )
     ap.add_argument(
         "--keep-output",
