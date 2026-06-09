@@ -118,6 +118,12 @@ def main() -> None:
     ap.add_argument("--s3-bucket", required=True)
     ap.add_argument("--s3-prefix", required=True)
     ap.add_argument("--s3-endpoint", required=True)
+    ap.add_argument(
+        "--aws-profile",
+        default=None,
+        help="aws CLI profile for the S3 sync; omit to use ambient AWS_* creds (default — matches "
+        "the op-sourced eopfexplorer keys). Pass a profile name only if your setup still uses one.",
+    )
     ap.add_argument("--eodag-cfg", required=True, type=Path)
     ap.add_argument("--dem-dir", required=True, type=Path)
     ap.add_argument("--data-dir", required=True, type=Path)
@@ -235,7 +241,9 @@ def main() -> None:
         f"s3://{args.s3_bucket}/{args.s3_prefix}"
         f"/{args.tile_id}/{args.orbit_direction}/{args.date_start}/"
     )
-    s3_flags = ["--endpoint-url", args.s3_endpoint, "--profile", "eopfexplorer"]
+    s3_flags = ["--endpoint-url", args.s3_endpoint]
+    if args.aws_profile:
+        s3_flags += ["--profile", args.aws_profile]
     if not args.keep_output:
         if not all([args.s3_bucket, args.s3_prefix, args.tile_id, args.date_start]):
             sys.exit("Error: refusing S3 purge with an empty bucket/prefix/tile/date-start")

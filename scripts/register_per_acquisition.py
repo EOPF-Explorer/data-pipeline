@@ -136,8 +136,15 @@ def main() -> None:
     args = ap.parse_args()
 
     from eopf_geozarr.stac.s1_rtc import build_s1_rtc_stac_item
+    from register_v1 import s3_to_https
 
     base = build_s1_rtc_stac_item(args.store, args.collection).to_dict()
+    # build_s1_rtc_stac_item emits s3:// hrefs for an s3 store; rewrite to the https gateway so the
+    # per-acquisition items match the cube item (register_v1 does the same). Reading times below
+    # still uses the s3 store, which is authoritative and avoids the gateway's read-cache lag.
+    for asset in base.get("assets", {}).values():
+        if isinstance(asset.get("href"), str) and asset["href"].startswith("s3://"):
+            asset["href"] = s3_to_https(asset["href"])
     times = read_times_ns(args.store, args.orbit_direction)
     items = per_acquisition_items(
         base,

@@ -37,6 +37,7 @@ def run_pipeline(
     s3_endpoint: str,
     stac_api_url: str,
     raster_api_url: str,
+    acquisitions_collection: str = "sentinel-1-grd-rtc-acquisitions",
 ) -> int:
     # Store key prefix is the STAC collection, so per-mission/per-env buckets stay
     # self-describing: s3://{bucket}/{collection}/s1-grd-rtc-{tile}.zarr
@@ -107,6 +108,32 @@ def run_pipeline(
         s3_endpoint,
     ]
     result = subprocess.run(register_cmd)  # noqa: S603
+    if result.returncode != 0:
+        return result.returncode
+
+    # Step 4 — register the per-acquisition items (the -acquisitions collection). The data model
+    # has TWO registrations — the per-tile cube item (Step 3, -staging) AND one item per acquisition
+    # (here). Running both from this single stage keeps the collections in sync; skipping either is
+    # the kind of gap that leaves a tile invisible in one collection.
+    peracq_cmd = [  # noqa: S607
+        "uv",
+        "run",
+        "python",
+        "scripts/register_per_acquisition.py",
+        "--store",
+        s3_zarr,
+        "--tile-id",
+        tile_id,
+        "--orbit-direction",
+        orbit_direction,
+        "--collection",
+        acquisitions_collection,
+        "--stac-api-url",
+        stac_api_url,
+        "--raster-api-url",
+        raster_api_url,
+    ]
+    result = subprocess.run(peracq_cmd)  # noqa: S603
     return result.returncode
 
 
@@ -122,6 +149,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--s3-endpoint", required=True, help="S3 endpoint URL")
     parser.add_argument("--stac-api-url", required=True, help="STAC API base URL")
     parser.add_argument("--raster-api-url", required=True, help="TiTiler raster API base URL")
+    parser.add_argument(
+        "--acquisitions-collection",
+        default="sentinel-1-grd-rtc-acquisitions",
+        help="STAC collection for the per-acquisition items (registered alongside the cube item)",
+    )
     return parser
 
 
@@ -138,6 +170,7 @@ def main() -> None:
             s3_endpoint=args.s3_endpoint,
             stac_api_url=args.stac_api_url,
             raster_api_url=args.raster_api_url,
+            acquisitions_collection=args.acquisitions_collection,
         )
     )
 

@@ -24,6 +24,7 @@ from eopf_geozarr.conversion.s1_ingest import (
     consolidate_s1_store,
     discover_s1tiling_acquisitions,
     discover_s1tiling_conditions,
+    extract_geotiff_metadata,
     ingest_s1tiling_acquisition,
     ingest_s1tiling_conditions,
 )
@@ -113,6 +114,34 @@ def new_acquisitions(acquisitions: list[dict], present_ns: set[int]) -> list[dic
     return [a for a in acquisitions if acq_time_ns(a["acq_stamp"]) not in present_ns]
 
 
+def _normalize_masked_stamps(geotiff_prefix: str) -> int:
+    """Rename s1tiling daily-concatenated products whose time is masked (``…txxxxxx…``) using the
+    real ``ACQUISITION_DATETIME`` GeoTIFF tag, so ``discover_s1tiling_acquisitions`` can parse them.
+
+    A pass spanning two frames is concatenated into a *daily* product whose filename masks the time
+    as ``txxxxxx``; eopf_geozarr's filename regex requires ``\\d{6}`` and would otherwise skip it
+    (F1). Each ``GammaNaughtRTC`` data file is renamed with the tag's HH:MM:SS, and its companion
+    ``_BorderMask`` in lockstep. No-op on a non-local prefix (e.g. ``s3://``) — the durable fix is
+    upstream in eopf_geozarr's discover/parse. Returns the number of data files normalized.
+    """
+    base = Path(geotiff_prefix)
+    if not base.is_dir():
+        return 0
+    renamed = 0
+    for data in sorted(base.glob("*txxxxxx*GammaNaughtRTC.tif")):
+        hhmmss = extract_geotiff_metadata(data).datetime.split("T")[1].replace(":", "")[:6]
+        mask = data.with_name(
+            data.name.replace("GammaNaughtRTC.tif", "GammaNaughtRTC_BorderMask.tif")
+        )
+        for f in (data, mask):
+            if f.exists():
+                f.rename(f.with_name(f.name.replace("txxxxxx", f"t{hhmmss}")))
+        renamed += 1
+    if renamed:
+        log.info("Normalized %d masked daily-product stamp(s) in %s (F1)", renamed, geotiff_prefix)
+    return renamed
+
+
 def ingest_all(s3_geotiff_prefix: str, store_path: str, orbit_direction: str) -> int:
     """Run the 5-step S1 ingest pipeline, appending new acquisitions to the per-tile cube.
 
@@ -122,6 +151,9 @@ def ingest_all(s3_geotiff_prefix: str, store_path: str, orbit_direction: str) ->
 
     Returns exit code: 0 = success (or nothing new to ingest), 1 = ingest error, 2 = no acquisitions.
     """
+    # Step 0 -- normalize masked daily-product stamps so discover can parse multi-frame passes (F1)
+    _normalize_masked_stamps(s3_geotiff_prefix)
+
     # Step 1 -- discover acquisitions
     acquisitions = discover_s1tiling_acquisitions(s3_geotiff_prefix)
     if not acquisitions:

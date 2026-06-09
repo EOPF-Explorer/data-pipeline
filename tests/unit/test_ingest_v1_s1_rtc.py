@@ -388,3 +388,51 @@ def test_drop_consolidated_metadata_enables_resize(tmp_path) -> None:
     r2["vv"].resize((2, 4, 4))
     r2["vv"][1, :, :] = np.zeros((4, 4), dtype="float32")
     assert r2["vv"].shape == (2, 4, 4)
+
+
+# ---------------------------------------------------------------------------
+# F1 -- normalize multi-frame "daily" products whose time is masked (…txxxxxx…)
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_masked_stamps_renames_via_tag(tmp_path, monkeypatch) -> None:
+    """A concatenated daily product (…txxxxxx…) is renamed using the GeoTIFF ACQUISITION_DATETIME
+    tag so discover_s1tiling_acquisitions can parse it; its BorderMask is renamed in lockstep."""
+    from types import SimpleNamespace
+
+    import ingest_v1_s1_rtc as m
+
+    d = tmp_path / "out"
+    d.mkdir()
+    data = d / "s1a_32TLR_vv_DES_139_20260602txxxxxx_GammaNaughtRTC.tif"
+    mask = d / "s1a_32TLR_vv_DES_139_20260602txxxxxx_GammaNaughtRTC_BorderMask.tif"
+    data.write_text("x")
+    mask.write_text("x")
+    monkeypatch.setattr(
+        m, "extract_geotiff_metadata", lambda p: SimpleNamespace(datetime="2026-06-02T05:43:23")
+    )
+
+    assert m._normalize_masked_stamps(str(d)) == 1
+    assert (d / "s1a_32TLR_vv_DES_139_20260602t054323_GammaNaughtRTC.tif").exists()
+    assert (d / "s1a_32TLR_vv_DES_139_20260602t054323_GammaNaughtRTC_BorderMask.tif").exists()
+    assert not data.exists() and not mask.exists()
+
+
+def test_normalize_masked_stamps_noop_when_unmasked(tmp_path, monkeypatch) -> None:
+    """Already-real stamps (single-frame tiles like 31TCH) are untouched."""
+    import ingest_v1_s1_rtc as m
+
+    d = tmp_path / "out"
+    d.mkdir()
+    (d / "s1a_31TCH_vv_DES_037_20230115t061234_GammaNaughtRTC.tif").write_text("x")
+    called = []
+    monkeypatch.setattr(m, "extract_geotiff_metadata", lambda p: called.append(p))
+    assert m._normalize_masked_stamps(str(d)) == 0
+    assert called == []  # no tag reads when nothing is masked
+
+
+def test_normalize_masked_stamps_noop_on_non_local_prefix() -> None:
+    """An s3:// prefix can't be renamed locally -> no-op (durable fix is upstream)."""
+    import ingest_v1_s1_rtc as m
+
+    assert m._normalize_masked_stamps("s3://bucket/s1tiling-output/32TLR") == 0

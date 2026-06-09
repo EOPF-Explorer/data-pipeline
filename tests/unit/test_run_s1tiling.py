@@ -566,3 +566,22 @@ def test_main_exits_when_docker_fails_and_no_output(tmp_path, monkeypatch):
         _invoke_main(tmp_path, monkeypatch, run_stub=fake_run)
     assert exc.value.code == 2
     assert not any(c[0] == "aws" and "sync" in c for c in calls), "no sync after a true failure"
+
+
+# ---------------------------------------------------------------------------
+# Migration: S3 sync uses ambient creds by default (no hardcoded --profile)
+# ---------------------------------------------------------------------------
+
+
+def test_dry_run_s3_sync_has_no_profile_by_default(tmp_path):
+    """New S3 access is op-sourced AWS_* creds, not a profile — aws calls must omit --profile."""
+    out = _dry_run(tmp_path).stdout
+    assert "--profile" not in out
+    assert "eopfexplorer" not in out
+
+
+def test_dry_run_s3_sync_uses_aws_profile_when_given(tmp_path):
+    """--aws-profile is still honoured for setups that use a named profile."""
+    out = _dry_run(tmp_path, ["--aws-profile", "myprof"]).stdout
+    assert "--profile" in out
+    assert "myprof" in out
