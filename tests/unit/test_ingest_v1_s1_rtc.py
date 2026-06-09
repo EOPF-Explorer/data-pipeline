@@ -14,8 +14,11 @@ sys.path.insert(0, str(scripts_dir))
 from ingest_v1_s1_rtc import (  # noqa: E402
     _patch_cf_grid_mapping,
     _put_tree,
+    acq_time_ns,
     ingest_all,
+    new_acquisitions,
     run_ingest,
+    store_times_ns,
 )
 
 # ---------------------------------------------------------------------------
@@ -208,6 +211,7 @@ def test_run_ingest_s3_uploads_on_success() -> None:
     """An s3:// store ingests into a local temp store, then uploads it to S3."""
     s3_store = "s3://out-bucket/sentinel-1-grd-rtc-staging/s1-grd-rtc-31TCH.zarr"
     with (
+        patch(f"{_MOD}._fetch_store_from_s3") as mock_fetch,
         patch(f"{_MOD}.ingest_all", return_value=0) as mock_ingest,
         patch(f"{_MOD}._upload_store_to_s3") as mock_upload,
     ):
@@ -217,6 +221,9 @@ def test_run_ingest_s3_uploads_on_success() -> None:
     local_store = mock_ingest.call_args.args[1]
     assert local_store.endswith("s1-grd-rtc-31TCH.zarr")
     assert not local_store.startswith("s3://")
+    # the existing cube is fetched into the temp store BEFORE ingest, so a new
+    # acquisition appends instead of replacing (cross-run cube accumulation, T4)
+    mock_fetch.assert_called_once_with(s3_store, local_store)
     mock_upload.assert_called_once_with(local_store, s3_store)
 
 
@@ -225,6 +232,7 @@ def test_run_ingest_s3_skips_upload_on_failure() -> None:
     s3_store = "s3://out-bucket/coll/s1-grd-rtc-31TCH.zarr"
     for code in (1, 2):
         with (
+            patch(f"{_MOD}._fetch_store_from_s3"),
             patch(f"{_MOD}.ingest_all", return_value=code),
             patch(f"{_MOD}._upload_store_to_s3") as mock_upload,
         ):
@@ -251,3 +259,92 @@ def test_put_tree_lands_at_dest_without_nesting(tmp_path) -> None:
     assert (dest_root / "descending" / "r10m" / "c" / "0.0").is_file()
     # the basename must NOT be nested a second time under dest
     assert not (dest_root / "s1-grd-rtc-31TCH.zarr").exists()
+
+
+# ---------------------------------------------------------------------------
+# T4 -- datacube append + idempotency (skip a `time` already in the cube)
+# ---------------------------------------------------------------------------
+
+
+def _store_with_times(store_path: str, times_ns: list[int], orbit: str = "descending") -> None:
+    """Minimal cube whose r10m level carries the given `time` values (ns since epoch)."""
+    import numpy as np
+
+    root = zarr.open_group(store_path, mode="w-", zarr_format=3)
+    r10m = root.create_group(orbit).create_group("r10m")
+    t = r10m.create_array("time", shape=(len(times_ns),), dtype="int64", dimension_names=("time",))
+    t[...] = np.asarray(times_ns, dtype="int64")
+
+
+def test_acq_time_ns_matches_cube_datetime_encoding() -> None:
+    """`acq_stamp` -> ns equals how the cube stores `time` (np.datetime64 of the ISO datetime)."""
+    import numpy as np
+
+    # acq_stamp 'YYYYMMDDtHHMMSS' is the same instant the GeoTIFF ACQUISITION_DATETIME tag carries
+    expected = int(np.datetime64("2023-01-15T06:12:34").astype("datetime64[ns]").astype("int64"))
+    assert acq_time_ns("20230115t061234") == expected
+
+
+def test_store_times_ns_reads_existing_and_handles_absent(tmp_path) -> None:
+    t0 = acq_time_ns("20230115t061234")
+    t1 = acq_time_ns("20230127t061230")
+    store = str(tmp_path / "cube.zarr")
+    _store_with_times(store, [t0, t1])
+    assert store_times_ns(store, "descending") == {t0, t1}
+    # absent store / absent orbit group -> empty (no crash)
+    assert store_times_ns(str(tmp_path / "missing.zarr"), "descending") == set()
+    assert store_times_ns(store, "ascending") == set()
+
+
+def test_new_acquisitions_filters_present_times() -> None:
+    a0 = {**_ACQ, "acq_stamp": "20230115t061234"}
+    a1 = {**_ACQ, "acq_stamp": "20230127t061230"}
+    present = {acq_time_ns("20230115t061234")}
+    assert new_acquisitions([a0, a1], present) == [a1]  # a0 already in cube -> dropped
+
+
+def test_ingest_all_skips_acquisition_already_in_cube(tmp_path) -> None:
+    """Re-ingesting an acquisition whose `time` is already present is a no-op (exit 0, no ingest)."""
+    store = str(tmp_path / "cube.zarr")
+    _store_with_times(store, [acq_time_ns(_ACQ["acq_stamp"])])  # _ACQ already present
+    with (
+        patch(f"{_MOD}.discover_s1tiling_acquisitions", return_value=[_ACQ]),
+        patch(f"{_MOD}.ingest_s1tiling_acquisition") as mock_ing,
+        patch(f"{_MOD}.discover_s1tiling_conditions", return_value=[]),
+        patch(f"{_MOD}.consolidate_s1_store") as mock_cons,
+        patch(f"{_MOD}._patch_cf_grid_mapping"),
+    ):
+        rc = ingest_all("/input", store, "descending")
+    assert rc == 0
+    mock_ing.assert_not_called()  # nothing to append
+    mock_cons.assert_not_called()  # no write, no consolidation
+
+
+def test_ingest_all_appends_only_new_acquisition(tmp_path) -> None:
+    """A 2nd, distinct acquisition appends (ingest called once for the new time only)."""
+    store = str(tmp_path / "cube.zarr")
+    _store_with_times(store, [acq_time_ns("20230115t061234")])  # one existing time
+    present_acq = {**_ACQ, "acq_stamp": "20230115t061234"}
+    new_acq = {**_ACQ, "acq_stamp": "20230127t061230"}
+    with (
+        patch(f"{_MOD}.discover_s1tiling_acquisitions", return_value=[present_acq, new_acq]),
+        patch(f"{_MOD}.ingest_s1tiling_acquisition", return_value=1) as mock_ing,
+        patch(f"{_MOD}.discover_s1tiling_conditions", return_value=[]),
+        patch(f"{_MOD}.consolidate_s1_store"),
+        patch(f"{_MOD}._patch_cf_grid_mapping"),
+    ):
+        rc = ingest_all("/input", store, "descending")
+    assert rc == 0
+    mock_ing.assert_called_once()  # only the new acquisition is appended
+    assert mock_ing.call_args.kwargs["vh_path"] == new_acq["vh"]
+
+
+def test_run_ingest_local_does_not_fetch(tmp_path) -> None:
+    """The cross-run fetch is an S3-only concern; a local destination never fetches."""
+    local_store = str(tmp_path / "cube.zarr")
+    with (
+        patch(f"{_MOD}._fetch_store_from_s3") as mock_fetch,
+        patch(f"{_MOD}.ingest_all", return_value=0),
+    ):
+        run_ingest("/input", local_store, "descending")
+    mock_fetch.assert_not_called()

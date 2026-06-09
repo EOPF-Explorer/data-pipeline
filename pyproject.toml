@@ -178,5 +178,5 @@ module = "notebooks.*"
 ignore_errors = true
 
 [[tool.mypy.overrides]]
-module = ["boto3.*", "botocore.*", "mgrs.*", "eopf_geozarr.*", "rioxarray.*", "eotile.*"]
+module = ["boto3.*", "botocore.*", "mgrs.*", "eopf_geozarr.*", "rioxarray.*", "eotile.*", "s3fs.*"]
 ignore_missing_imports = true
