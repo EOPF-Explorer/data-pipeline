@@ -22,7 +22,7 @@ per-tile cube writes; tests at each new-code boundary; **staging only** (prod = 
 |----------|--------|
 | `eopf-explorer-s1tiling` / `ingest-v1-s1rtc` WorkflowTemplates | ✅ merged (PR#207) |
 | s1tiling cfg render (tile/orbit/date) | ✅ exists; `platform_list` not parametrized (T2) |
-| `s1-dem` PVC (31TCH only, manual) + EGM2008 geoid | ✅ bound; no auto-fetch (T3) |
+| `s1-dem` PVC (31TCH only, manual) + EGM2008 geoid | ✅ bound; **`scripts/ensure_dem.py` auto-fetch shipped** (T3 branch); Argo `ensure-dem` step + cluster run pending |
 | Ingest = **fresh store per run** | ⚠️ → **append scene to per-tile cube** (T4); append validated by PoC |
 | `eopf_geozarr.build_s1_rtc_stac_item` = one item per store | ✅ reuse with **per-acquisition ids** + `sel=time` links (T5; no upstream change) |
 | `scripts/validate_s1_rtc.py` quality-gate CLI (T1) | ✅ shipped (#229); unit-tested + **verified tile-agnostic** on 31TDH; Argo step pending |
@@ -87,15 +87,24 @@ platform GeoTIFFs present in `data_out/{tile}`"** rather than "S1Processor exit 
 - [ ] s1tiling step succeeds (and syncs) when the requested platform produced output despite
       off-platform download failures
 
-### Task 3 — `ensure-dem` auto-fetch step  <status: blocked by OQ #4>
-**What**: `scripts/ensure_dem.py` — tile → swath bbox → fetch missing GLO-30 COGs from public
-`copernicus-dem-30m` (HTTPS, anon) → rename to `Product10` → rebuild `DEM_Union.gpkg`; idempotent.
-Argo `ensure-dem` step before s1tiling, writing the `s1-dem` PVC. Geoid pre-staged.
-**Verify**: `uv run pytest tests/unit/test_ensure_dem.py` (bbox/tile-name derivation; skip-existing; bad tile rejected); cluster: a NEW tile provisions + processes; re-run skips.
+### Task 3 — `ensure-dem` auto-fetch step  <status: script shipped (T3 branch); Argo step + cluster run pending>
+**What**: `scripts/ensure_dem.py` — tile → swath bbox (lon±4°/lat±1.5° margin) → integer GLO-30 cells
+→ keep the land cells the **static `eotile` `DEM_Union.gpkg`** knows (ocean cells don't exist in
+GLO-30) → skip cells already on disk → download the rest from public anon `copernicus-dem-30m`,
+renaming each COG to the `Product10` stem s1tiling matches. (`DEM_Union.gpkg` is *staged once* from
+`eotile`, not rebuilt per tile.) Argo `ensure-dem` step before s1tiling, writing the `s1-dem` PVC.
+Geoid pre-staged.
+**Verify**: `uv run pytest tests/unit/test_ensure_dem.py` (10 tests: derivation, naming, gpkg read, skip-existing, bad tile rejected); cluster: a NEW tile provisions + processes; re-run skips.
 **Acceptance**:
-- [ ] tile→swath-bbox→tile-name derivation unit-tested (malformed tile rejected)
-- [ ] previously-unprovisioned tile runs end-to-end, no manual DEM upload
-- [ ] idempotent re-run fetches nothing; OQ #4 resolved
+- [x] tile→swath-bbox→tile-name derivation unit-tested (malformed tile rejected) — `scripts/ensure_dem.py`;
+      convention ground-truthed vs the real `eotile` gpkg: 31TCH → **41 land cells incl N44W001/N44W002**
+      (the cells phase-5 saw the swath need), matching the ≥31-tile 31TCH PVC; anon HEAD on
+      `copernicus-dem-30m` confirmed key/region (42.6 MB tiff). 2026-06-09.
+- [ ] previously-unprovisioned tile runs end-to-end, no manual DEM upload *(cluster — pending)*
+- [x] idempotent re-run fetches nothing — `tiles_to_fetch` excludes on-disk stems (verified: full set present → `[]`)
+- [x] **OQ #4 resolved** (script-side): direct anon HTTPS from `copernicus-dem-30m`; static `eotile`
+      gpkg (no eodag); configurable margin (lon±4/lat±1.5); skip-existing for idempotency. PVC cache
+      *layout* is an Argo-manifest detail (platform-deploy).
 
 ### Task 4 — Datacube ingest: append scene to the per-tile cube  <status: ready (PoC-validated)>
 **What**: ingest **appends the scene as a new `time` slice into the per-tile cube**
@@ -133,6 +142,14 @@ the items now so they render later when option 2 lands, with **no data change**.
 > to the tile cube** (which opens as a datacube), and gets a **queryable per-acquisition STAC item**;
 > the `validate_s1_grd_rtc` notebook **PASSes** against the cube. Model proven on one product.
 > (Explorer rendering deferred — #228.)
+>
+> **"Run the whole chain on a *different* tile" lives here (CP-A).** It was gated solely on the DEM:
+> T1 (gate) is tile-agnostic (verified on 31TDH), T5 (register) is tile-parametrized, and **T3 now
+> auto-provisions the DEM for any tile** — so a new tile no longer needs a manual DEM upload. A
+> *single-acquisition* CP-A on a new tile needs only **T3** (fresh cube, no append); making it a true
+> *multi-time* datacube exercises **T4** on the 2nd acquisition. **CP-A-local** (run before the Argo
+> wiring): `ensure_dem.py` → `run_s1tiling.py` → ingest → `validate_s1_rtc.py` → `register_per_acquisition.py`
+> on a chosen tile (tile choice = OQ #1).
 
 ### Task 6 — Port the CDSE watcher to an Argo CronWorkflow (data-driven trigger)  <status: blocked by 1–5>
 **What**: trigger entrypoint (reuse `tile_bbox`/`query_cdse`) queries CDSE for a tile+window, filters
@@ -184,7 +201,7 @@ cube time-present prevent reprocessing; per-tile mutex (T4) serialises the burst
 | 1 | AOI tile set (+ 5 soak tiles) | T7, T9 | Loïc / science |
 | 2 | Backfill lookback window (days) | T8 | Loïc |
 | 3 | Alerting path (quality-gate FAIL + persistent failures) | T1, T9 | Loïc / infra |
-| 4 | `ensure-dem` discovery (eodag vs direct) + PVC cache layout | T3 | Loïc / me (during T3) |
+| 4 | ~~`ensure-dem` discovery (eodag vs direct) + PVC cache layout~~ **RESOLVED (script-side, 2026-06-09)**: direct anon HTTPS from `copernicus-dem-30m`; static `eotile` `DEM_Union.gpkg` (no eodag); margin lon±4/lat±1.5; skip-existing. PVC cache *layout* → Argo manifest (platform-deploy). | T3 ✅ | Loïc / me |
 | 5 | **Titiler rendering (I2/option 2) — DEFERRED**, tracked in its own follow-up issue (see below). Not a phase-6 blocker; per-acquisition items render later with no data change. | — (deferred) | Loïc / infra |
 
 *(Resolved: P8 = shared per-tile cube + per-acquisition items (queryable index), validated by the `validate_s1_grd_rtc` notebook; explorer/titiler rendering **deferred** off the critical path; DEM source = public `copernicus-dem-30m`; Spike 3 = titiler reconstructs the store + ignores href, so a titiler change (I2/option 2, `ecde99c`) is needed for rendering — tracked separately.)*
