@@ -20,6 +20,7 @@ from pathlib import Path
 
 import mgrs
 from pystac_client import Client
+from run_ingest_register import check_env_consistency
 
 log = logging.getLogger(__name__)
 
@@ -215,6 +216,9 @@ def process_product(args: argparse.Namespace, product: dict[str, str], tile: str
 
 def run_watch(args: argparse.Namespace) -> dict[str, int]:
     """Query each tile, run Script A -> B for unseen products, persist state, return run counts."""
+    # Fail fast on a cross-env bucket/collection pair, before the CDSE query or any s1tiling run --
+    # Script B (run_ingest_register) enforces the same invariant, but only after orthorectification.
+    check_env_consistency(args.collection, args.s3_zarr_bucket)
     tiles = [t.strip() for t in args.tiles.split(",") if t.strip()]
     state = load_processed(STATE_FILE)
     counts = {"found": 0, "new": 0, "processed": 0, "failed": 0}

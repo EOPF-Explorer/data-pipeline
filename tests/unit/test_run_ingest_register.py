@@ -11,7 +11,7 @@ import pytest
 scripts_dir = Path(__file__).parent.parent.parent / "scripts"
 sys.path.insert(0, str(scripts_dir))
 
-from run_ingest_register import run_pipeline  # noqa: E402
+from run_ingest_register import check_env_consistency, run_pipeline  # noqa: E402
 
 _MOD = "run_ingest_register"
 
@@ -163,6 +163,51 @@ def test_upload_failure_stops_pipeline() -> None:
         result = run_pipeline(**_KWARGS)
     assert result == 1
     assert mock_run.call_count == 2  # ingest + failed upload; no register
+
+
+def test_env_mismatch_rejected_before_any_subprocess() -> None:
+    """A staging collection paired with the tests bucket is the 32TLR footgun -> reject early.
+
+    The guard must fire before ingest, so no Zarr is written and no API is touched.
+    """
+    kwargs = {
+        **_KWARGS,
+        "collection": "sentinel-1-grd-rtc-staging",
+        "s3_output_bucket": "esa-zarr-sentinel-explorer-tests",
+    }
+    with patch(f"{_MOD}.subprocess.run") as mock_run, pytest.raises(ValueError, match="mismatch"):
+        run_pipeline(**kwargs)
+    mock_run.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("collection", "bucket"),
+    [
+        ("sentinel-1-grd-rtc-staging", "esa-zarr-sentinel-explorer-s1-l1grd-staging"),
+        ("sentinel-1-grd-rtc-tests", "esa-zarr-sentinel-explorer-tests"),
+        ("sentinel-1-grd-rtc-prod", "esa-zarr-sentinel-explorer-s1-l1grd-prod"),
+    ],
+)
+def test_matched_env_pairs_allowed(collection: str, bucket: str) -> None:
+    """Matching per-env bucket/collection pairs run the full pipeline (4 subprocesses)."""
+    kwargs = {**_KWARGS, "collection": collection, "s3_output_bucket": bucket}
+    with patch(f"{_MOD}.subprocess.run", side_effect=[_mock_proc(0)] * 4) as mock_run:
+        assert run_pipeline(**kwargs) == 0
+    assert mock_run.call_count == 4
+
+
+@pytest.mark.parametrize(
+    ("collection", "bucket"),
+    [
+        # Unrecognized bucket: env unknown -> can't judge -> allowed (existing _KWARGS case).
+        ("sentinel-1-grd-rtc-staging", "my-bucket"),
+        # Unrecognized collection (e.g. the cross-env -acquisitions collection) -> allowed.
+        ("sentinel-1-grd-rtc-acquisitions", "esa-zarr-sentinel-explorer-tests"),
+    ],
+)
+def test_unrecognized_names_pass_through(collection: str, bucket: str) -> None:
+    """When either name isn't a known per-env value, the guard can't infer env and stays out."""
+    check_env_consistency(collection, bucket)  # must not raise
 
 
 def test_local_zarr_cleaned_before_ingest() -> None:
