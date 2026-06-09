@@ -154,6 +154,15 @@ def main() -> None:
     except ValueError as exc:
         sys.exit(f"Error: {exc}")
 
+    # Fail fast on a multi-platform list: s1tiling 1.4.0's multi-platform post-filter discards
+    # everything (a 'S1A S1C' list yields 0 products), so a combined list silently produces nothing.
+    if len(args.platform_list.split()) != 1:
+        sys.exit(
+            f"Error: --platform-list must be a single platform (got {args.platform_list!r}); "
+            "s1tiling 1.4.0's multi-platform filter discards all products. Run one platform per "
+            "invocation (the data-driven trigger submits one product per run anyway)."
+        )
+
     for p, name in [
         (args.cfg, "--cfg"),
         (args.eodag_cfg, "--eodag-cfg"),

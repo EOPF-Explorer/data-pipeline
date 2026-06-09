@@ -587,3 +587,15 @@ def test_dry_run_s3_sync_uses_aws_profile_when_given(tmp_path):
     out = _dry_run(tmp_path, ["--aws-profile", "myprof"]).stdout
     assert "--profile" in out
     assert "myprof" in out
+
+
+def test_multi_platform_list_rejected(tmp_path):
+    """A combined platform list silently yields 0 products on s1tiling 1.4.0 -> fail fast."""
+    result = _dry_run(tmp_path, ["--platform-list", "S1A S1C"])
+    assert result.returncode != 0
+    assert "single platform" in (result.stderr + result.stdout)
+
+
+def test_single_platform_list_accepted(tmp_path):
+    """A single platform passes the guard (dry-run reaches normal exit 0)."""
+    assert _dry_run(tmp_path, ["--platform-list", "S1C"]).returncode == 0
