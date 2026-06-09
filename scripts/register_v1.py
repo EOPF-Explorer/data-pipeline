@@ -185,11 +185,12 @@ def _select_render(item: Item) -> dict | None:
     renders = item.properties.get("renders")
     if not isinstance(renders, dict) or not renders:
         return None
-    for name in _PREFERRED_RENDERS:
-        if isinstance(renders.get(name), dict):
-            return renders[name]
-    first = next(iter(renders.values()))
-    return first if isinstance(first, dict) else None
+    candidates = [renders.get(name) for name in _PREFERRED_RENDERS]
+    candidates.append(next(iter(renders.values())))
+    for candidate in candidates:
+        if isinstance(candidate, dict):
+            return candidate
+    return None
 
 
 def _render_to_query(render: dict, *, include_tilesize: bool) -> str:
@@ -214,7 +215,7 @@ def _render_to_query(render: dict, *, include_tilesize: bool) -> str:
             parts.append(f"bidx={b}")
     rescale = render.get("rescale")
     if rescale:
-        pairs = rescale if isinstance(rescale[0], (list, tuple)) else [rescale]
+        pairs = rescale if isinstance(rescale[0], list | tuple) else [rescale]
         if len({tuple(p) for p in pairs}) == 1:
             pairs = [pairs[0]]
         for mn, mx in pairs:
