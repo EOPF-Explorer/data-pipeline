@@ -23,7 +23,7 @@ per-tile cube writes; tests at each new-code boundary; **staging only** (prod = 
 | `eopf-explorer-s1tiling` / `ingest-v1-s1rtc` WorkflowTemplates | ✅ merged (PR#207) |
 | s1tiling cfg render (tile/orbit/date) | ✅ exists; `platform_list` not parametrized (T2) |
 | `s1-dem` PVC (31TCH only, manual) + EGM2008 geoid | ✅ bound; **`scripts/ensure_dem.py` auto-fetch shipped** (T3 branch); Argo `ensure-dem` step + cluster run pending |
-| Ingest = **fresh store per run** | ⚠️ → **append scene to per-tile cube** (T4); append validated by PoC |
+| Ingest = ~~fresh store per run~~ | ✅ **append+idempotency shipped** (T4 branch): `ingest_all` skips present times, `run_ingest` fetches+appends the S3 cube; Argo mutex + cluster run pending |
 | `eopf_geozarr.build_s1_rtc_stac_item` = one item per store | ✅ reuse with **per-acquisition ids** + `sel=time` links (T5; no upstream change) |
 | `scripts/validate_s1_rtc.py` quality-gate CLI (T1) | ✅ shipped (#229); unit-tested + **verified tile-agnostic** on 31TDH; Argo step pending |
 | `scripts/register_per_acquisition.py` per-acq register (T5) | ✅ shipped (#229); unit-tested + live (31TCH ×2 items); P-3 multi-time notebook pending |
@@ -106,18 +106,23 @@ Geoid pre-staged.
       gpkg (no eodag); configurable margin (lon±4/lat±1.5); skip-existing for idempotency. PVC cache
       *layout* is an Argo-manifest detail (platform-deploy).
 
-### Task 4 — Datacube ingest: append scene to the per-tile cube  <status: ready (PoC-validated)>
+### Task 4 — Datacube ingest: append scene to the per-tile cube  <status: append+idempotency shipped (T4 branch); Argo mutex + cluster run pending>
 **What**: ingest **appends the scene as a new `time` slice into the per-tile cube**
 (`s1-rtc-{tile}.zarr`, `sentinel-1-grd-rtc-staging`) via the existing `ingest_s1tiling_acquisition`
 (`mode=r+`, PoC-validated); **skip a `time` already present**; serialise per-tile writes with an **Argo
 `synchronization` mutex keyed on the tile**. Single shared cube (rendering deferred → no per-acquisition
-stores).
-**Verify**: `uv run pytest tests/unit/test_ingest_cube.py` (append into empty/existing cube; duplicate-time skip); cluster: 2 scenes same tile → a 2-time cube; concurrent submit → no corruption.
+stores). *(Impl in `scripts/ingest_v1_s1_rtc.py`: `ingest_all` drops already-present times; `run_ingest`
+fetches the existing cube into the temp store before ingest so an `s3://` cube **accumulates** instead
+of being replaced.)*
+**Verify**: `uv run pytest tests/unit/test_ingest_v1_s1_rtc.py` (idempotent skip; append-only-new; acq_stamp→ns matches cube; s3 fetch-before-ingest); cluster: 2 scenes same tile → a 2-time cube; concurrent submit → no corruption.
 **Acceptance**:
-- [ ] A 2nd acquisition appends a `time` slice (cube has N times), unit-tested
-- [ ] Re-ingesting an existing time is a no-op
-- [ ] Concurrent same-tile writes serialised (mutex) — no corruption
-- [ ] `xr.open_dataset(cube)` exposes all scenes on `time`
+- [x] A 2nd acquisition appends a `time` slice (cube has N times), unit-tested —
+      `test_ingest_all_appends_only_new_acquisition` (ingest called once, for the new time only)
+- [x] Re-ingesting an existing time is a no-op — `test_ingest_all_skips_acquisition_already_in_cube`
+      (no ingest, no consolidation); `acq_time_ns`/`store_times_ns`/`new_acquisitions` unit-tested
+- [ ] Concurrent same-tile writes serialised (mutex) — no corruption *(Argo `synchronization` — platform-deploy, cluster-pending)*
+- [ ] `xr.open_dataset(cube)` exposes all scenes on `time` *(cluster — real multi-time S3 cube; append
+      path = `_fetch_store_from_s3` → append → upload-superset)*
 
 ### Task 5 — Per-acquisition catalogue + notebook validation  <status: register CLI shipped (#229); P-3 multi-time notebook pending>
 **What**: emit **one queryable STAC item per acquisition** (`s1-rtc-{tile}-{datetime}`, single
