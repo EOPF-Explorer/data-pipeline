@@ -119,3 +119,26 @@ def test_tiles_to_fetch_rejects_malformed_tile():
 
     with pytest.raises(ValueError):
         m.tiles_to_fetch("not-a-tile", set(), set())
+
+
+# --- _anon_s3 endpoint pinning (F1) -----------------------------------------
+
+
+def test_anon_s3_pins_public_aws_endpoint_ignoring_ambient_env(monkeypatch):
+    """F1: the anonymous client must hit public AWS S3 for ``copernicus-dem-30m``, not an ambient
+    ``AWS_ENDPOINT_URL`` (e.g. the OVH endpoint set for the output bucket) — which would 400 the DEM
+    fetch (HeadObject Bad Request). The client must pin the regional AWS endpoint regardless of env."""
+    m = _mod()
+    monkeypatch.setenv("AWS_ENDPOINT_URL", "https://s3.de.io.cloud.ovh.net")
+    client = m._anon_s3("eu-central-1")
+    assert client.meta.endpoint_url == "https://s3.eu-central-1.amazonaws.com"
+
+
+def test_anon_s3_is_unsigned():
+    """The DEM bucket is public — the client must stay unsigned (no creds), so pinning the endpoint
+    must not reintroduce credential signing."""
+    from botocore import UNSIGNED
+
+    m = _mod()
+    client = m._anon_s3("eu-central-1")
+    assert client.meta.config.signature_version is UNSIGNED
