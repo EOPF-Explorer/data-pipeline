@@ -3,12 +3,16 @@
 Derives the Zarr store path from bucket/collection/tile-id, calls ingest_v1_s1_rtc.py,
 and — unless ingest reports no acquisitions (exit 2) — calls register_v1_s1_rtc.py.
 
-S3 endpoint/credentials are configured two ways and must agree: the ingest subprocess
-reads GeoTIFFs and writes the local store via s3fs/rasterio, which use the ambient
-``AWS_ENDPOINT_URL`` / ``AWS_PROFILE`` (or ``AWS_ACCESS_KEY_ID``/``AWS_SECRET_ACCESS_KEY``);
-the ``aws s3 sync`` upload and register step instead use the ``--s3-endpoint`` arg. Set
-``AWS_ENDPOINT_URL`` to the same endpoint passed as ``--s3-endpoint`` (with read+write creds
-for the output bucket) or the store will be read from one endpoint and written to another.
+Ingest writes the ``s3://`` cube directly via ``ingest_v1_s1_rtc.run_ingest``, which fetches any
+existing per-tile cube, **appends** the new scene as a ``time`` slice (T4), and uploads with s3fs —
+so the cube accumulates across runs instead of being overwritten.
+
+S3 endpoint/credentials are configured two ways and must agree: the ingest subprocess reads the
+GeoTIFFs and fetches/appends/uploads the ``s3://`` cube via s3fs/rasterio, which use the ambient
+``AWS_ENDPOINT_URL`` / ``AWS_PROFILE`` (or ``AWS_ACCESS_KEY_ID``/``AWS_SECRET_ACCESS_KEY``); the
+register step instead uses the ``--s3-endpoint`` arg. Set ``AWS_ENDPOINT_URL`` to the same endpoint
+passed as ``--s3-endpoint`` (with read+write creds for the output bucket) or the cube will be read
+from one endpoint and written to another.
 
 Exit codes:
     0 -- success, or ingest found no acquisitions (register skipped)
@@ -19,11 +23,8 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
-import shutil
 import subprocess
 import sys
-import tempfile
 
 log = logging.getLogger(__name__)
 
@@ -82,14 +83,11 @@ def run_pipeline(
         )
     check_env_consistency(collection, s3_output_bucket)
     s3_zarr = f"s3://{s3_output_bucket}/{collection}/s1-grd-rtc-{tile_id}.zarr"
-    # eopf_geozarr uses pathlib.Path internally, which collapses s3:// to s3:/ and
-    # writes the zarr to a local directory. Use a local temp path for ingest, then
-    # sync the result to S3 before registering.
-    local_zarr = os.path.join(tempfile.gettempdir(), f"s1-grd-rtc-{tile_id}.zarr")
-    if os.path.exists(local_zarr):
-        shutil.rmtree(local_zarr)
 
-    # Step 1 — ingest (writes to local temp dir)
+    # Step 1 — ingest directly into the s3:// cube. run_ingest fetches any existing cube, appends the
+    # new scene as a time slice (T4), and uploads via s3fs — so the per-tile cube accumulates across
+    # runs instead of being overwritten. Endpoint/creds come from the ambient AWS_ENDPOINT_URL/AWS_*
+    # (see the module docstring); no separate `aws s3 sync` step.
     ingest_cmd = [  # noqa: S607
         "uv",
         "run",
@@ -98,7 +96,7 @@ def run_pipeline(
         "--s3-geotiff-prefix",
         s3_geotiff_prefix,
         "--s3-zarr-store",
-        local_zarr,
+        s3_zarr,
         "--tile-id",
         tile_id,
         "--orbit-direction",
@@ -111,22 +109,7 @@ def run_pipeline(
     if result.returncode != 0:
         return result.returncode
 
-    # Step 2 — upload local zarr to S3
-    upload_cmd = [  # noqa: S607
-        "aws",
-        "s3",
-        "sync",
-        local_zarr,
-        s3_zarr,
-        "--endpoint-url",
-        s3_endpoint,
-    ]
-    result = subprocess.run(upload_cmd)  # noqa: S603
-    if result.returncode != 0:
-        log.error("zarr upload to %s failed (exit %d)", s3_zarr, result.returncode)
-        return result.returncode
-
-    # Step 3 — register (only reached when upload exited 0)
+    # Step 2 — register (only reached when ingest exited 0)
     register_cmd = [  # noqa: S607
         "uv",
         "run",
@@ -147,8 +130,8 @@ def run_pipeline(
     if result.returncode != 0:
         return result.returncode
 
-    # Step 4 — register the per-acquisition items (the -acquisitions collection). The data model
-    # has TWO registrations — the per-tile cube item (Step 3, -staging) AND one item per acquisition
+    # Step 3 — register the per-acquisition items (the -acquisitions collection). The data model
+    # has TWO registrations — the per-tile cube item (Step 2, -staging) AND one item per acquisition
     # (here). Running both from this single stage keeps the collections in sync; skipping either is
     # the kind of gap that leaves a tile invisible in one collection.
     peracq_cmd = [  # noqa: S607
