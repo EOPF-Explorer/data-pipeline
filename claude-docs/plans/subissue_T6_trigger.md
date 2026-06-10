@@ -155,7 +155,7 @@ JSON.
 ## Open questions
 | OQ | Question | Blocks | Owner |
 |----|----------|--------|-------|
-| T6-1 | Does CDSE product `datetime` equal the cube `ACQUISITION_DATETIME` to the second? If not, switch `item_exists` to a bounded datetime-window search. | cluster idempotency | me (cluster verify) |
+| T6-1 | ~~Does CDSE product `datetime` equal the cube `ACQUISITION_DATETIME` to the second?~~ **RESOLVED 2026-06-10 (CP-A on 31TCJ)**: CDSE product start `2026-06-05T06:08:42.283Z` → `expected_item_id = s1-rtc-31TCJ-20260605t060842` == the registered cube per-acq id, **exact match to the second**. Exact-id dedup ships; no datetime-window fallback needed. Evidence: `claude-docs/runs/cp_a_local_31TCJ.md`. | ~~cluster idempotency~~ | resolved |
 
 ## Risks & mitigations
 | Risk | Impact | Mitigation |
