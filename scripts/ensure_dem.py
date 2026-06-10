@@ -124,7 +124,16 @@ def _anon_s3(region: str) -> Any:
     from botocore import UNSIGNED
     from botocore.config import Config
 
-    return boto3.client("s3", region_name=region, config=Config(signature_version=UNSIGNED))
+    # Pin the public AWS S3 endpoint explicitly: `copernicus-dem-30m` lives on AWS, but boto3 would
+    # otherwise inherit an ambient `AWS_ENDPOINT_URL` (e.g. the OVH endpoint used for the output
+    # bucket) and 400 the anonymous DEM fetch (HeadObject Bad Request). Pinning it makes the fetch
+    # independent of whatever endpoint the surrounding pipeline set.
+    return boto3.client(
+        "s3",
+        region_name=region,
+        endpoint_url=f"https://s3.{region}.amazonaws.com",
+        config=Config(signature_version=UNSIGNED),
+    )
 
 
 def _download(s3: Any, bucket: str, key: str, dest: Path) -> None:
