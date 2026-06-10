@@ -200,6 +200,32 @@ def test_select_all_registered_returns_empty_idempotent() -> None:
         assert select_new_products(_args()) == []
 
 
+def test_select_emits_s1tiling_window_date_minus_plus_one() -> None:
+    """Each emitted product carries the s1tiling window date_start=date-1 / date_end=date+1, so the
+    CronWorkflow fans out child pipelines with no per-product date-math step (C0)."""
+    products = [_product("S1A_new", "S1A", "2026-06-05T06:08:42+00:00")]
+    with (
+        patch(f"{_MOD}.query_products", return_value=products),
+        patch(f"{_MOD}.item_exists", return_value=False),
+    ):
+        new = select_new_products(_args())
+    assert new[0]["date"] == "2026-06-05"
+    assert new[0]["date_start"] == "2026-06-04"
+    assert new[0]["date_end"] == "2026-06-06"
+
+
+def test_select_window_crosses_month_boundary() -> None:
+    """Adversarial: date-1/date+1 use real date arithmetic, not string slicing (month rollover)."""
+    products = [_product("S1A_eom", "S1A", "2026-05-31T06:00:32+00:00")]
+    with (
+        patch(f"{_MOD}.query_products", return_value=products),
+        patch(f"{_MOD}.item_exists", return_value=False),
+    ):
+        new = select_new_products(_args())
+    assert new[0]["date_start"] == "2026-05-30"
+    assert new[0]["date_end"] == "2026-06-01"
+
+
 def test_select_skips_s1d_at_query_time_no_dedup_call() -> None:
     """S1D is dropped before the dedup check -> never emitted, never a child Workflow."""
     products = [
