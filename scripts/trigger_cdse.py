@@ -7,6 +7,10 @@ logged), drops acquisitions whose **per-acquisition STAC item already exists** i
 product (decision B); the **cube-time-present** dedup arm runs downstream in ingest (T4). This is a
 pure query -> filter -> dedup -> emit step: no subprocess, no S3, no submission.
 
+Each emitted record is ``{tile, orbit, date_start, date_end, date, product_id, platform}``; the
+CronWorkflow's ``withParam`` consumes the controlled ``tile/orbit/date_start/date_end`` (the s1tiling
+window = acquisition day ∓1), never the raw ``product_id``.
+
 Usage:
     uv run python scripts/trigger_cdse.py --tiles 31TCH --orbit-direction descending \
       --lookback-days 7 --stac-api-url <eopf-stac> [--output new_products.json]
@@ -130,6 +134,9 @@ def select_new_products(args: argparse.Namespace) -> list[dict[str, str]]:
             if item_exists(args.stac_api_url, args.acq_collection, item_id):
                 log.info("skip %s: item %s already registered", product["product_id"], item_id)
                 continue
+            # s1tiling window brackets the acquisition day (date∓1, matching the local watcher), so
+            # the CronWorkflow fans out child pipelines with no per-product date-math step.
+            acq_date = dt.date.fromisoformat(product["date"])
             new_products.append(
                 {
                     "tile": tile,
@@ -137,6 +144,8 @@ def select_new_products(args: argparse.Namespace) -> list[dict[str, str]]:
                     "product_id": product["product_id"],
                     "datetime": product["datetime"],
                     "date": product["date"],
+                    "date_start": (acq_date - dt.timedelta(days=1)).isoformat(),
+                    "date_end": (acq_date + dt.timedelta(days=1)).isoformat(),
                     "platform": platform,
                 }
             )
