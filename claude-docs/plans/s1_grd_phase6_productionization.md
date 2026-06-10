@@ -28,8 +28,8 @@ per-tile cube writes; tests at each new-code boundary; **staging only** (prod = 
 | `scripts/validate_s1_rtc.py` quality-gate CLI (T1) | ✅ shipped (#229); unit-tested + **verified tile-agnostic** on 31TDH; Argo step pending |
 | `scripts/register_per_acquisition.py` per-acq register (T5) | ✅ shipped (#229); unit-tested + live (31TCH ×2 items); P-3 multi-time notebook pending |
 | titiler store resolution | ⚠️ reconstructs + ignores href (Spike 3); explorer rendering **deferred (#228)** — not a phase blocker (validation is via notebook) |
-| Local watcher query/bbox/dedup logic | ✅ port; dedup → per-acquisition STAC item-exists (T6) |
-| Blind daily cron + sensor (sub-issue 8) | ✅ shipped, suspended — replaced by the data-driven trigger (T6) |
+| Local watcher query/bbox/dedup logic | ✅ ported to `scripts/trigger_cdse.py` (T6): query→{S1A,S1C}→per-acq item-exists dedup→emit JSON; 24 tests. CronWorkflow + cluster pending |
+| Blind daily cron + sensor (sub-issue 8) | ✅ shipped, suspended — replaced by the data-driven trigger (T6 in-repo done; retire on cluster) |
 
 ---
 
@@ -160,17 +160,34 @@ the items now so they render later when option 2 lands, with **no data change**.
 > wiring): `ensure_dem.py` → `run_s1tiling.py` → ingest → `validate_s1_rtc.py` → `register_per_acquisition.py`
 > on a chosen tile (tile choice = OQ #1).
 
-### Task 6 — Port the CDSE watcher to an Argo CronWorkflow (data-driven trigger)  <status: blocked by 1–5>
+### Task 6 — Port the CDSE watcher to an Argo CronWorkflow (data-driven trigger)  <status: in-repo trigger shipped; CronWorkflow + cluster pending>
 **What**: trigger entrypoint (reuse `tile_bbox`/`query_cdse`) queries CDSE for a tile+window, filters
 platform to {S1A,S1C} (**skips S1D**, logged), and emits **new** products — dedup = **per-acquisition
 STAC item-exists** + cube time-present (P2). CronWorkflow (**6 h**) submits one child Workflow per new
 product (decision B), **replacing** the suspended blind cron.
-**Verify**: `uv run pytest tests/unit/test_trigger.py` (query→dedup, mocked STAC); cluster: data-bearing window submits only new products; no-data → nothing; re-run → 0.
+*(In-repo impl `scripts/trigger_cdse.py` — see plan `claude-docs/plans/subissue_T6_trigger.md`. The
+two P2 dedup arms are **split across components** per spec §5/P2: the *trigger* does the
+per-acquisition **STAC item-exists** check; the **cube-time-present** arm is already shipped in T4
+(`new_acquisitions`) and runs downstream in ingest — so the trigger stays off S3. The trigger is a
+pure query→filter→dedup→**emit JSON array**; the CronWorkflow's `withParam` does the child-Workflow
+fan-out, so "submits" = "emits a product record".)*
+**Verify**: `uv run pytest tests/unit/test_trigger_cdse.py` (query→dedup, mocked STAC); cluster: data-bearing window submits only new products; no-data → nothing; re-run → 0.
 **Acceptance**:
-- [ ] Submits only for acquisitions with no existing per-acquisition item (dedup), unit-tested
-- [ ] No-data window → 0 submissions; re-run → 0 (idempotent)
-- [ ] S1D filtered at query time (logged), no child Workflow
-- [ ] Suspended sub-issue-8 cron retired (one trigger of record)
+- [x] Submits only for acquisitions with no existing per-acquisition item (dedup), unit-tested —
+      `select_new_products` emits only products whose `expected_item_id` (= `acquisition_id`,
+      `s1-rtc-{tile}-{stamp}`) is absent from `sentinel-1-grd-rtc-acquisitions`
+      (`test_select_emits_only_unregistered_products`; 24 tests in `test_trigger_cdse.py`, all green;
+      full suite 500 passed). 2026-06-10.
+- [x] No-data window → 0 submissions; re-run → 0 (idempotent) — `test_select_empty_query_returns_empty`
+      + `test_select_all_registered_returns_empty_idempotent` (all-registered → `[]`) *(unit; cluster
+      re-run → 0 pending)*
+- [x] S1D filtered at query time (logged), no child Workflow — allowlist `ENABLED_PLATFORMS={S1A,S1C}`;
+      S1D dropped **before** the dedup call (`test_select_skips_s1d_at_query_time_no_dedup_call`:
+      asserts the S1D product is absent from the emit and `item_exists` is consulted only for the
+      enabled platform) *(cluster: no child Workflow — pending)*
+- [ ] Suspended sub-issue-8 cron retired (one trigger of record) *(platform-deploy / cluster — pending)*
+- [ ] CronWorkflow (6 h) runs `trigger_cdse.py` + `withParam` child-Workflow fan-out (decision B);
+      **CDSE↔cube `datetime` parity** ground-truthed (OQ-T6-1) *(platform-deploy / cluster — pending)*
 
 ### Task 7 — Multi-tile AOI iteration  <status: blocked by 3,6; OQ #1>
 **What**: CronWorkflow iterates the configured AOI; each tile self-provisions DEM (T3), accumulates its
