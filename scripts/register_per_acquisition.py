@@ -3,8 +3,8 @@
 The cube (`s1-rtc-{tile}.zarr`, collection `sentinel-1-grd-rtc-staging`) holds all acquisitions on a
 `time` axis. This emits **one queryable STAC item per `time` slice** (`s1-rtc-{tile}-{datetime}`,
 single `datetime`) into the `sentinel-1-grd-rtc-acquisitions` collection, each pointing at the cube
-via asset href with a `sel=time` tilejson link baked in. Explorer rendering is deferred (see #228);
-the links render once titiler resolves the store from the item href — no later data change.
+via asset href and carrying `sel=time` preview links (tilejson + xyz) and a thumbnail asset, so a
+per-acquisition item renders in the Explorer like the cube item — scoped to its own slice.
 
 Usage:
     uv run python scripts/register_per_acquisition.py --store <cube-uri> --tile-id 31TCH \
@@ -27,6 +27,17 @@ def acquisition_id(tile_id: str, when: dt.datetime) -> str:
     return f"s1-rtc-{tile_id}-{when.strftime('%Y%m%dt%H%M%S')}"
 
 
+def _sel_time_query(when: dt.datetime, orbit: str, var: str) -> str:
+    """Shared TiTiler query selecting this acquisition's slice (``sel=time``) + the VH render params."""
+    sel = urllib.parse.quote(f"time=nearest::{when.isoformat()}", safe="")
+    variables = urllib.parse.quote(f"/{orbit}:{var}", safe="")
+    return f"variables={variables}&bidx=1&rescale=0%2C219&assets={var}&sel={sel}"
+
+
+def _item_raster_base(raster_api: str, collection: str, item_id: str) -> str:
+    return f"{raster_api}/collections/{collection}/items/{item_id}"
+
+
 def sel_time_tilejson(
     raster_api: str,
     collection: str,
@@ -37,13 +48,38 @@ def sel_time_tilejson(
     var: str = "vh",
 ) -> str:
     """TiTiler tilejson URL that renders this acquisition's slice of the cube (``sel=time``)."""
-    sel = urllib.parse.quote(f"time=nearest::{when.isoformat()}", safe="")
-    variables = urllib.parse.quote(f"/{orbit}:{var}", safe="")
-    return (
-        f"{raster_api}/collections/{collection}/items/{item_id}"
-        f"/WebMercatorQuad/tilejson.json?variables={variables}&bidx=1&rescale=0%2C219"
-        f"&assets={var}&sel={sel}"
-    )
+    base = _item_raster_base(raster_api, collection, item_id)
+    return f"{base}/WebMercatorQuad/tilejson.json?{_sel_time_query(when, orbit, var)}"
+
+
+def sel_time_xyz(
+    raster_api: str,
+    collection: str,
+    item_id: str,
+    when: dt.datetime,
+    orbit: str,
+    *,
+    var: str = "vh",
+) -> str:
+    """TiTiler XYZ tile template (``{z}/{x}/{y}.png``) for this acquisition's slice — the map preview,
+    mirroring the cube item's ``xyz`` link (register_v0.add_visualization_links)."""
+    base = _item_raster_base(raster_api, collection, item_id)
+    return f"{base}/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png?{_sel_time_query(when, orbit, var)}"
+
+
+def sel_time_thumbnail(
+    raster_api: str,
+    collection: str,
+    item_id: str,
+    when: dt.datetime,
+    orbit: str,
+    *,
+    var: str = "vh",
+) -> str:
+    """TiTiler ``preview`` PNG for this acquisition's slice — the static thumbnail, mirroring the cube
+    item's thumbnail asset (register_v0.add_thumbnail_asset)."""
+    base = _item_raster_base(raster_api, collection, item_id)
+    return f"{base}/preview?format=png&{_sel_time_query(when, orbit, var)}"
 
 
 def per_acquisition_items(
@@ -58,8 +94,8 @@ def per_acquisition_items(
     """Clone the per-tile ``base_item`` into one item per `time` slice.
 
     Each clone keeps the base geometry/assets/SAR+proj properties, sets a single ``datetime`` (drops
-    the start/end range), targets ``collection``, and carries a ``sel=time`` tilejson link. The input
-    ``base_item`` is not mutated.
+    the start/end range), targets ``collection``, and carries ``sel=time`` preview links + a thumbnail
+    asset (tilejson + xyz + thumbnail) so it renders like the cube item. ``base_item`` is not mutated.
     """
     items: list[dict] = []
     for t_ns in times_ns:
@@ -81,8 +117,20 @@ def per_acquisition_items(
                 "type": "application/json",
                 "href": sel_time_tilejson(raster_api, collection, item_id, when, orbit),
                 "title": "tilejson (sel=time)",
-            }
+            },
+            {
+                "rel": "xyz",
+                "type": "image/png",
+                "href": sel_time_xyz(raster_api, collection, item_id, when, orbit),
+                "title": "Sentinel-1 GRD VH (sel=time)",
+            },
         ]
+        item.setdefault("assets", {})["thumbnail"] = {
+            "href": sel_time_thumbnail(raster_api, collection, item_id, when, orbit),
+            "type": "image/png",
+            "roles": ["thumbnail"],
+            "title": "Sentinel-1 GRD VH Preview (sel=time)",
+        }
         items.append(item)
     return items
 
