@@ -316,8 +316,9 @@ def test_select_queries_cdse_catalogue_not_target_stac() -> None:
     assert q.call_args.args[0] == CDSE_STAC_URL
 
 
-def test_parser_acq_collection_defaults_to_acquisitions() -> None:
-    assert _args().acq_collection == "sentinel-1-grd-rtc-acquisitions"
+def test_parser_acq_collection_defaults_to_tests() -> None:
+    # env-split: code default is the test env; the cron passes --acq-collection …-staging
+    assert _args().acq_collection == "sentinel-1-grd-rtc-acquisitions-tests"
 
 
 def test_main_writes_json_array_to_output(tmp_path: Path) -> None:

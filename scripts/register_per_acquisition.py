@@ -2,7 +2,8 @@
 
 The cube (`s1-rtc-{tile}.zarr`, collection `sentinel-1-grd-rtc-staging`) holds all acquisitions on a
 `time` axis. This emits **one queryable STAC item per `time` slice** (`s1-rtc-{tile}-{datetime}`,
-single `datetime`) into the `sentinel-1-grd-rtc-acquisitions` collection, each pointing at the cube
+single `datetime`) into the env-split per-acquisition collection (`--collection`, default `…-tests`,
+the cron passes `…-staging`), each pointing at the cube
 via asset href and carrying `sel=time` preview links (tilejson + xyz) and a thumbnail asset, so a
 per-acquisition item renders in the Explorer like the cube item — scoped to its own slice.
 
@@ -19,7 +20,9 @@ import datetime as dt
 import urllib.parse
 from typing import Any
 
-DEFAULT_ACQ_COLLECTION = "sentinel-1-grd-rtc-acquisitions"
+# Per-acquisition collections are env-split like the cube collections (…-tests/-staging/-prod). The
+# code default targets the test env (local/CP-A runs); the Argo cron passes --collection …-staging.
+DEFAULT_ACQ_COLLECTION = "sentinel-1-grd-rtc-acquisitions-tests"
 
 
 def acquisition_id(tile_id: str, when: dt.datetime) -> str:
