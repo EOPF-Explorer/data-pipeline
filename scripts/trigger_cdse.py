@@ -1,8 +1,9 @@
 """Data-driven CDSE trigger for the S1 GRD RTC pipeline (Phase-6 Task 6).
 
 Queries CDSE for new S1 GRD products over a tile+window, keeps only ``{S1A, S1C}`` (S1D skipped,
-logged), drops acquisitions whose **per-acquisition STAC item already exists** in
-``sentinel-1-grd-rtc-acquisitions``, and emits the remaining NEW products as a JSON array (to
+logged), drops acquisitions whose **per-acquisition STAC item already exists** in the env-split
+per-acquisition collection (``--acq-collection``; cron passes ``…-staging``), and emits the remaining
+NEW products as a JSON array (to
 ``--output`` or stdout). The Argo CronWorkflow consumes that array to fan out one child Workflow per
 product (decision B); the **cube-time-present** dedup arm runs downstream in ingest (T4). This is a
 pure query -> filter -> dedup -> emit step: no subprocess, no S3, no submission.
