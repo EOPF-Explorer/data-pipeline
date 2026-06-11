@@ -35,6 +35,40 @@ from run_ingest_register import check_env_consistency
 log = logging.getLogger(__name__)
 
 
+# --- TEMPORARY (data-pipeline#246; revert when titiler-eopf#108 lands) ----------------------
+def _titiler_render_copy(store: str, collection: str, item_id: str, s3_endpoint: str) -> None:
+    """Copy the store to titiler's reconstructed render path so new tiles preview.
+
+    titiler-eopf ignores the STAC asset href and opens
+    ``s3://{bucket}/tests-output/{collection}/{item_id}.zarr``. Until titiler-eopf#108 (resolve
+    the store from the href) lands and deploys, place a server-side copy there. Same-bucket so the
+    copy is a server-side S3 operation, not a download/upload. Best-effort: a failure logs a
+    warning but does NOT fail registration (mirrors ``warm_thumbnail_cache``). Revert = delete this
+    function and its call.
+    """
+    parsed = urlparse(store)
+    if parsed.scheme != "s3":
+        return
+    bucket = parsed.netloc
+    src = f"{bucket}{parsed.path}"  # s3fs addresses bucket/key (no scheme)
+    dst = f"{bucket}/tests-output/{collection}/{item_id}.zarr"
+    try:
+        import s3fs
+
+        fs = s3fs.S3FileSystem(client_kwargs={"endpoint_url": s3_endpoint} if s3_endpoint else None)
+        if fs.exists(dst):
+            fs.rm(dst, recursive=True)  # idempotent overwrite
+        fs.copy(src, dst, recursive=True)
+        log.info("titiler render-copy: s3://%s -> s3://%s", src, dst)
+    except Exception:
+        log.warning(
+            "titiler render-copy failed (item still registered): s3://%s", dst, exc_info=True
+        )
+
+
+# --- end TEMPORARY --------------------------------------------------------------------------
+
+
 def register(
     store: str,
     collection: str,
@@ -77,6 +111,7 @@ def register(
         log.exception("Failed to upsert item %s to %s", item.id, stac_api_url)
         return 1
 
+    _titiler_render_copy(store, collection, item.id, s3_endpoint)  # TEMPORARY #246
     return 0
 
 
