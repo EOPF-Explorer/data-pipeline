@@ -1,7 +1,7 @@
 """Unit tests for scripts/register_per_acquisition.py — per-acquisition STAC items (plan T5).
 
-One STAC item per cube `time` slice, id `s1-rtc-{tile}-{datetime}`, with `sel=time` viz links
-baked (explorer rendering deferred to #228). Pure builders tested here; store I/O + upsert in main().
+One STAC item per cube `time` slice, id `s1-rtc-{tile}-{datetime}`, with `sel=time` preview links
+(tilejson + xyz) and a thumbnail asset. Pure builders tested here; store I/O + upsert in main().
 """
 
 import datetime as dt
@@ -72,6 +72,28 @@ def test_sel_time_tilejson_carries_sel_and_item():
     assert "tilejson.json" in url
 
 
+# --- sel_time_xyz / sel_time_thumbnail (preview parity with the cube item) ----
+
+
+def test_sel_time_xyz_is_png_tile_template_with_sel():
+    m = _mod()
+    when = dt.datetime(2026, 6, 5, 6, 9, 7, tzinfo=dt.UTC)
+    url = m.sel_time_xyz(RASTER, ACQ, "s1-rtc-31TCH-20260605t060907", when, "descending")
+    # XYZ tile template (titiler {z}/{x}/{y}.png), scoped to this acquisition's slice
+    assert "/tiles/WebMercatorQuad/{z}/{x}/{y}.png" in url
+    assert "s1-rtc-31TCH-20260605t060907" in url
+    assert "sel=" in url and "time%3Dnearest" in url
+    assert "rescale=0%2C219" in url and "assets=vh" in url
+
+
+def test_sel_time_thumbnail_is_png_preview_with_sel():
+    m = _mod()
+    when = dt.datetime(2026, 6, 5, 6, 9, 7, tzinfo=dt.UTC)
+    url = m.sel_time_thumbnail(RASTER, ACQ, "s1-rtc-31TCH-20260605t060907", when, "descending")
+    assert "/preview" in url and "format=png" in url
+    assert "sel=" in url and "time%3Dnearest" in url
+
+
 # --- per_acquisition_items ---------------------------------------------------
 
 
@@ -112,6 +134,32 @@ def test_per_acquisition_items_collection_and_sel_link():
     tilejson = [link for link in item["links"] if link["rel"] == "tilejson"]
     assert len(tilejson) == 1
     assert "sel=" in tilejson[0]["href"] and item["id"] in tilejson[0]["href"]
+
+
+def test_per_acquisition_items_has_xyz_link_and_thumbnail_asset():
+    """Preview parity with the cube item: each per-acq item carries an xyz link + a thumbnail
+    asset, both scoped to the acquisition's slice (sel=time)."""
+    m = _mod()
+    items = m.per_acquisition_items(
+        _base_item(), [_T0], tile_id="31TCH", orbit="descending", collection=ACQ, raster_api=RASTER
+    )
+    item = items[0]
+    rels = {link["rel"] for link in item["links"]}
+    assert {"tilejson", "xyz"} <= rels
+    xyz = next(link for link in item["links"] if link["rel"] == "xyz")
+    assert "{z}/{x}/{y}.png" in xyz["href"] and "sel=" in xyz["href"]
+    thumb = item["assets"]["thumbnail"]
+    assert thumb["type"] == "image/png" and thumb["roles"] == ["thumbnail"]
+    assert "sel=" in thumb["href"] and item["id"] in thumb["href"]
+
+
+def test_per_acquisition_items_does_not_add_thumbnail_to_base():
+    m = _mod()
+    base = _base_item()
+    m.per_acquisition_items(
+        base, [_T0], tile_id="31TCH", orbit="descending", collection=ACQ, raster_api=RASTER
+    )
+    assert "thumbnail" not in base["assets"]  # base assets untouched
 
 
 def test_per_acquisition_items_does_not_mutate_base():
