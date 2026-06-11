@@ -1,6 +1,7 @@
 """Simple tests for query_stac.py script."""
 
 import json
+import tempfile
 from datetime import datetime
 from io import StringIO
 from pathlib import Path
@@ -114,9 +115,12 @@ class FakeStacClient:
 
 
 def run_script(
-    source_items: list[Item], target_items: list[Item], raise_error_on_target: bool = False
+    source_items: list[Item],
+    target_items: list[Item],
+    raise_error_on_target: bool = False,
+    batch_size: int = 200,
 ) -> dict:
-    """Helper to run the script with test data."""
+    """Helper to run `discover` mode with test data and read back the manifest files."""
     source_client = FakeStacClient(
         items=source_items,
         collection=SOURCE_COLLECTION,
@@ -135,12 +139,14 @@ def run_script(
             return source_client
         return target_client
 
+    out_dir = tempfile.mkdtemp()
     with (
         patch("scripts.query_stac.Client.open", side_effect=mock_client_open),
         patch(
             "sys.argv",
             [
                 "query_stac.py",
+                "discover",
                 "https://source-stac.example.com/",
                 SOURCE_COLLECTION,
                 "https://target-stac.example.com/",
@@ -148,6 +154,10 @@ def run_script(
                 "2024-01-01T12:00:00Z",  # ISO timestamp instead of "0"
                 "3",
                 "[-5.14, 41.33, 9.56, 51.09]",
+                "--out-dir",
+                out_dir,
+                "--batch-size",
+                str(batch_size),
             ],
         ),
         patch("sys.stdout", StringIO()) as stdout,
@@ -157,12 +167,43 @@ def run_script(
 
         main()
 
-        return {
-            "output": json.loads(stdout.getvalue()),
-            "stderr": stderr.getvalue(),
-            "source_client": source_client,
-            "target_client": target_client,
-        }
+    return {
+        "output": json.loads((Path(out_dir) / "items.json").read_text()),
+        "count": int((Path(out_dir) / "count").read_text()),
+        "num_batches": int((Path(out_dir) / "num_batches").read_text()),
+        "stdout": stdout.getvalue(),
+        "stderr": stderr.getvalue(),
+        "out_dir": out_dir,
+        "source_client": source_client,
+        "target_client": target_client,
+    }
+
+
+def run_read_batch(items: list[dict], index: int, batch_size: int = 200) -> list[dict]:
+    """Run `read-batch` mode against a temp items file; return the emitted slice."""
+    out_dir = tempfile.mkdtemp()
+    items_file = Path(out_dir) / "items.json"
+    items_file.write_text(json.dumps(items))
+
+    with (
+        patch(
+            "sys.argv",
+            [
+                "query_stac.py",
+                "read-batch",
+                str(items_file),
+                str(index),
+                "--batch-size",
+                str(batch_size),
+            ],
+        ),
+        patch("sys.stdout", StringIO()) as stdout,
+    ):
+        from scripts.query_stac import main
+
+        main()
+
+    return json.loads(stdout.getvalue())
 
 
 class TestQueryStac:
@@ -315,3 +356,83 @@ class TestQueryStac:
 
         # Should use CQL2 filter language
         assert result["source_client"].searches[0]["filter_lang"] == "cql2-json"
+
+
+class TestBatchedOutput:
+    """`discover` writes a manifest + items file; `read-batch` emits bounded slices."""
+
+    def test_discover_writes_manifest_files(self):
+        """discover writes items.json, count, and num_batches = ceil(count/batch_size)."""
+        source = [create_stac_item(f"item-{i:03d}", SOURCE_COLLECTION) for i in range(5)]
+
+        result = run_script(source, [], batch_size=2)
+
+        assert result["count"] == 5
+        assert len(result["output"]) == 5
+        assert result["num_batches"] == 3  # ceil(5/2)
+
+    def test_discover_does_not_emit_list_to_stdout(self):
+        """The full list must NOT go to stdout — that was the 256 KB withParam gate."""
+        source = [create_stac_item(f"item-{i:04d}", SOURCE_COLLECTION) for i in range(300)]
+
+        result = run_script(source, [], batch_size=200)
+
+        assert "source_url" not in result["stdout"]
+
+    def test_num_batches_boundaries(self):
+        """Exactly-full and one-over batch counts compute the right num_batches."""
+        s4 = [create_stac_item(f"i{n:02d}", SOURCE_COLLECTION) for n in range(4)]
+        s5 = [create_stac_item(f"i{n:02d}", SOURCE_COLLECTION) for n in range(5)]
+
+        assert run_script(s4, [], batch_size=2)["num_batches"] == 2
+        assert run_script(s5, [], batch_size=2)["num_batches"] == 3
+
+    def test_empty_discovery_zero_batches(self):
+        """No items → count 0, num_batches 0, empty items file."""
+        result = run_script([], [], batch_size=200)
+
+        assert result["count"] == 0
+        assert result["num_batches"] == 0
+        assert result["output"] == []
+
+    def test_read_batch_slices_within_bounds(self):
+        """read-batch returns exactly items [index*size : (index+1)*size]."""
+        items = [
+            {"source_url": f"u{i}", "collection": "c", "item_id": f"item-{i:03d}"} for i in range(5)
+        ]
+
+        assert [i["item_id"] for i in run_read_batch(items, 0, 2)] == ["item-000", "item-001"]
+        assert [i["item_id"] for i in run_read_batch(items, 1, 2)] == ["item-002", "item-003"]
+        assert [i["item_id"] for i in run_read_batch(items, 2, 2)] == ["item-004"]
+
+    def test_read_batch_is_lossless_across_all_batches(self):
+        """The union of every batch equals the full list — nothing dropped or duplicated."""
+        items = [
+            {"source_url": f"u{i}", "collection": "c", "item_id": f"item-{i:04d}"}
+            for i in range(450)
+        ]
+        batch_size = 200
+        num_batches = (len(items) + batch_size - 1) // batch_size
+
+        union: list[dict] = []
+        for idx in range(num_batches):
+            batch = run_read_batch(items, idx, batch_size)
+            assert len(batch) <= batch_size
+            union += batch
+
+        assert union == items
+
+    def test_read_batch_out_of_range_is_empty(self):
+        """An index past the end yields an empty list (clean short-circuit)."""
+        items = [{"source_url": "u", "collection": "c", "item_id": "x"}]
+
+        assert run_read_batch(items, 5, 2) == []
+
+    def test_read_batch_bound_is_count_based_not_byte_based(self):
+        """Large/unicode payloads don't change the per-batch item count bound."""
+        items = [
+            {"source_url": "u" * 500, "collection": "c", "item_id": "💧" * 50 + str(i)}
+            for i in range(10)
+        ]
+
+        assert len(run_read_batch(items, 0, 4)) == 4

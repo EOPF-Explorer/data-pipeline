@@ -5,17 +5,31 @@ Query STAC API for new items to process.
 This script searches for items in a source collection that were updated within
 a specified time window and checks if they already exist in the target collection
 to avoid reprocessing. Uses the 'updated' property for harvesting use cases.
+
+Two modes (subcommands):
+
+- ``discover``: run the STAC query and write the full item list to ``items.json``
+  in ``--out-dir`` (Argo ships it as an output artifact), plus ``count`` and
+  ``num_batches`` files for the workflow to fan out over. The list is NOT written
+  to stdout: Argo caps a step's stdout/result at ~256 KB, and a large window would
+  truncate it and break the downstream ``withParam`` loop.
+- ``read-batch``: print one bounded slice ``[index*size : (index+1)*size]`` of a
+  previously written items file as a JSON list — small enough for ``withParam``.
 """
 
 import argparse
 import json
 import logging
+import math
 import os
 import sys
 from datetime import datetime, timedelta
+from pathlib import Path
 from urllib.parse import urlparse
 
 from pystac_client import Client
+
+DEFAULT_BATCH_SIZE = 200
 
 # Configure logging
 logging.basicConfig(
@@ -40,18 +54,8 @@ def _validate_bbox(bbox: object) -> None:
             sys.exit(f"Error: AOI_BBOX[{i}] must be a number, got: {v!r}")
 
 
-def main() -> None:
-    """Main entry point for STAC query script."""
-    parser = argparse.ArgumentParser(description="Query STAC API for new items to process.")
-    parser.add_argument("source_stac_api_url", metavar="SOURCE_STAC_API_URL")
-    parser.add_argument("source_collection", metavar="SOURCE_COLLECTION")
-    parser.add_argument("target_stac_api_url", metavar="TARGET_STAC_API_URL")
-    parser.add_argument("target_collection", metavar="TARGET_COLLECTION")
-    parser.add_argument("scheduled_end_time", metavar="SCHEDULED_END_TIME")
-    parser.add_argument("window_hours", metavar="WINDOW_HOURS", type=int)
-    parser.add_argument("aoi_bbox", metavar="AOI_BBOX", type=json.loads)
-    args = parser.parse_args()
-
+def discover(args: argparse.Namespace) -> None:
+    """Query STAC and write the item manifest files for the workflow to fan out over."""
     SOURCE_STAC_API_URL = args.source_stac_api_url
     SOURCE_COLLECTION = args.source_collection
     TARGET_STAC_API_URL = args.target_stac_api_url
@@ -159,9 +163,57 @@ def main() -> None:
         f"📊 Summary: Processed {page_count} pages, checked {checked_count} items, {len(items_to_process)} to process"
     )
 
-    # Output ONLY JSON to stdout (for Argo withParam)
-    sys.stdout.write(json.dumps(items_to_process))
+    # Write the full list as files: items.json becomes an Argo output artifact; count
+    # and num_batches drive the workflow's batch fan-out. Nothing large goes to stdout,
+    # so we never hit Argo's ~256 KB result cap regardless of how many items match.
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "items.json").write_text(json.dumps(items_to_process))
+    (out_dir / "count").write_text(str(len(items_to_process)))
+    num_batches = math.ceil(len(items_to_process) / args.batch_size)
+    (out_dir / "num_batches").write_text(str(num_batches))
+    logger.info(
+        f"Wrote {len(items_to_process)} items to {out_dir / 'items.json'} "
+        f"(batch_size={args.batch_size}, num_batches={num_batches})"
+    )
+
+
+def read_batch(args: argparse.Namespace) -> None:
+    """Print one bounded slice ``[index*size : (index+1)*size]`` of an items file."""
+    items = json.loads(Path(args.items_file).read_text())
+    start = args.index * args.batch_size
+    batch = items[start : start + args.batch_size]
+    sys.stdout.write(json.dumps(batch))
     sys.stdout.flush()
+
+
+def main() -> None:
+    """Dispatch to the ``discover`` or ``read-batch`` subcommand."""
+    parser = argparse.ArgumentParser(description="Query STAC API for new items to process.")
+    sub = parser.add_subparsers(dest="mode", required=True)
+
+    d = sub.add_parser("discover", help="Run the STAC query and write the item manifest.")
+    d.add_argument("source_stac_api_url", metavar="SOURCE_STAC_API_URL")
+    d.add_argument("source_collection", metavar="SOURCE_COLLECTION")
+    d.add_argument("target_stac_api_url", metavar="TARGET_STAC_API_URL")
+    d.add_argument("target_collection", metavar="TARGET_COLLECTION")
+    d.add_argument("scheduled_end_time", metavar="SCHEDULED_END_TIME")
+    d.add_argument("window_hours", metavar="WINDOW_HOURS", type=int)
+    d.add_argument("aoi_bbox", metavar="AOI_BBOX", type=json.loads)
+    d.add_argument(
+        "--out-dir", required=True, help="Directory to write items.json/count/num_batches."
+    )
+    d.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    d.set_defaults(func=discover)
+
+    r = sub.add_parser("read-batch", help="Print one bounded slice of an items file.")
+    r.add_argument("items_file", metavar="ITEMS_FILE")
+    r.add_argument("index", metavar="INDEX", type=int)
+    r.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    r.set_defaults(func=read_batch)
+
+    args = parser.parse_args()
+    args.func(args)
 
 
 if __name__ == "__main__":
