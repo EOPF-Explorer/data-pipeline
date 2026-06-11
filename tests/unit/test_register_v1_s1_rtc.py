@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pystac
 import pytest
@@ -87,6 +87,7 @@ def test_upserts_item_with_correct_id() -> None:
         patch(f"{_MOD}.warm_thumbnail_cache"),
         patch(f"{_MOD}.upsert_item") as mock_upsert,
         patch(f"{_MOD}.Client"),
+        patch(f"{_MOD}._titiler_render_copy"),  # TEMPORARY #246
     ):
         result = register(
             _STORE,
@@ -106,6 +107,95 @@ def test_upserts_item_with_correct_id() -> None:
     assert called_item.id == "s1-rtc-31TCH"
 
 
+# --- TEMPORARY #246: titiler render-copy (revert when titiler-eopf#108 lands) ---------------
+# titiler-eopf reconstructs the store path as {bucket}/tests-output/{collection}/{item_id}.zarr
+# and ignores the asset href, so register() copies the store there. These tests pin that contract.
+
+
+def test_render_copy_targets_reconstructed_path() -> None:
+    """Copy lands the store at {bucket}/tests-output/{collection}/{item_id}.zarr (item-id name)."""
+    import register_v1_s1_rtc as m
+
+    fs = MagicMock()
+    fs.exists.return_value = False
+    with patch("s3fs.S3FileSystem", return_value=fs):
+        m._titiler_render_copy(
+            "s3://esa-zarr-sentinel-explorer-fra/sentinel-1-grd-rtc-tests/s1-grd-rtc-32TLR.zarr",
+            "sentinel-1-grd-rtc-tests",
+            "s1-rtc-32TLR",
+            "https://s3.example.com",
+        )
+    fs.copy.assert_called_once_with(
+        "esa-zarr-sentinel-explorer-fra/sentinel-1-grd-rtc-tests/s1-grd-rtc-32TLR.zarr",
+        "esa-zarr-sentinel-explorer-fra/tests-output/sentinel-1-grd-rtc-tests/s1-rtc-32TLR.zarr",
+        recursive=True,
+    )
+    fs.rm.assert_not_called()
+
+
+def test_render_copy_overwrites_existing() -> None:
+    """Idempotent: an existing dst is removed before the copy."""
+    import register_v1_s1_rtc as m
+
+    fs = MagicMock()
+    fs.exists.return_value = True
+    with patch("s3fs.S3FileSystem", return_value=fs):
+        m._titiler_render_copy(
+            "s3://b/sentinel-1-grd-rtc-tests/s1-grd-rtc-32TLR.zarr",
+            "sentinel-1-grd-rtc-tests",
+            "s1-rtc-32TLR",
+            "https://s3.example.com",
+        )
+    fs.rm.assert_called_once_with(
+        "b/tests-output/sentinel-1-grd-rtc-tests/s1-rtc-32TLR.zarr", recursive=True
+    )
+    fs.copy.assert_called_once()
+
+
+def test_render_copy_best_effort_on_failure() -> None:
+    """A copy failure must NOT raise -- the item is already registered."""
+    import register_v1_s1_rtc as m
+
+    fs = MagicMock()
+    fs.exists.return_value = False
+    fs.copy.side_effect = OSError("boom")
+    with patch("s3fs.S3FileSystem", return_value=fs):
+        m._titiler_render_copy(
+            "s3://b/c/s1-grd-rtc-32TLR.zarr", "c", "s1-rtc-32TLR", "https://s3.example.com"
+        )  # must not raise
+
+
+def test_render_copy_skips_non_s3_store() -> None:
+    """A local (non-s3) store is a no-op -- s3fs is never constructed."""
+    import register_v1_s1_rtc as m
+
+    with patch("s3fs.S3FileSystem") as mock_fs:
+        m._titiler_render_copy("local-store/s1-grd-rtc-32TLR.zarr", "c", "s1-rtc-32TLR", "")
+    mock_fs.assert_not_called()
+
+
+def test_register_invokes_render_copy_after_upsert() -> None:
+    """register() calls the render-copy once with (store, collection, item.id, endpoint)."""
+    with (
+        patch(f"{_MOD}.build_s1_rtc_stac_item", return_value=_make_item()),
+        patch(f"{_MOD}.warm_thumbnail_cache"),
+        patch(f"{_MOD}.upsert_item"),
+        patch(f"{_MOD}.Client"),
+        patch(f"{_MOD}._titiler_render_copy") as mock_copy,
+    ):
+        register(
+            _STORE,
+            _COLLECTION,
+            "https://stac.example.com",
+            "https://raster.example.com",
+            "https://s3.example.com",
+        )
+    mock_copy.assert_called_once_with(_STORE, _COLLECTION, "s1-rtc-31TCH", "https://s3.example.com")
+
+
+# --- end TEMPORARY #246 --------------------------------------------------------------------
+
+
 def test_visualization_links_called() -> None:
     """add_visualization_links must be called once with correct raster URL and collection."""
     with (
@@ -113,6 +203,7 @@ def test_visualization_links_called() -> None:
         patch(f"{_MOD}.warm_thumbnail_cache"),
         patch(f"{_MOD}.upsert_item"),
         patch(f"{_MOD}.Client"),
+        patch(f"{_MOD}._titiler_render_copy"),  # TEMPORARY #246
         patch(f"{_MOD}.add_visualization_links") as mock_viz,
     ):
         register(
@@ -193,6 +284,7 @@ def test_matched_env_store_allowed() -> None:
         patch(f"{_MOD}.warm_thumbnail_cache"),
         patch(f"{_MOD}.upsert_item") as mock_upsert,
         patch(f"{_MOD}.Client"),
+        patch(f"{_MOD}._titiler_render_copy"),  # TEMPORARY #246
     ):
         result = register(
             good_store,
