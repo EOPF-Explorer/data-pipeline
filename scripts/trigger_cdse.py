@@ -142,43 +142,53 @@ def select_new_products(args: argparse.Namespace) -> list[dict[str, str]]:
     acquisitions (logged), and return the new products as ``{tile, orbit, product_id, datetime, date,
     platform, date_start, date_end}``."""
     tiles = [t.strip() for t in args.tiles.split(",") if t.strip()]
+    # `both` discovers ascending + descending passes (asc+desc AOI); each is queried separately so
+    # same-pass collapse never merges across directions, and each product carries its own orbit.
+    orbits = (
+        ["ascending", "descending"] if args.orbit_direction == "both" else [args.orbit_direction]
+    )
     new_products: list[dict[str, str]] = []
     for tile in tiles:
-        products = collapse_same_pass(
-            query_products(CDSE_STAC_URL, tile_bbox(tile), args.orbit_direction, args.lookback_days)
-        )
-        for product in products:
-            platform = product["platform"]
-            if not is_enabled_platform(platform):
-                log.info("skip %s: platform %s not enabled", product["product_id"], platform)
-                continue
-            when = dt.datetime.fromisoformat(product["datetime"])
-            item_id = expected_item_id(tile, when)
-            if item_exists(args.stac_api_url, args.acq_collection, item_id):
-                log.info("skip %s: item %s already registered", product["product_id"], item_id)
-                continue
-            # s1tiling window brackets the acquisition day (date∓1, matching the local watcher), so
-            # the CronWorkflow fans out child pipelines with no per-product date-math step.
-            acq_date = dt.date.fromisoformat(product["date"])
-            new_products.append(
-                {
-                    "tile": tile,
-                    "orbit": args.orbit_direction,
-                    "product_id": product["product_id"],
-                    "datetime": product["datetime"],
-                    "date": product["date"],
-                    "date_start": (acq_date - dt.timedelta(days=1)).isoformat(),
-                    "date_end": (acq_date + dt.timedelta(days=1)).isoformat(),
-                    "platform": platform,
-                }
+        bbox = tile_bbox(tile)
+        for orbit in orbits:
+            products = collapse_same_pass(
+                query_products(CDSE_STAC_URL, bbox, orbit, args.lookback_days)
             )
+            for product in products:
+                platform = product["platform"]
+                if not is_enabled_platform(platform):
+                    log.info("skip %s: platform %s not enabled", product["product_id"], platform)
+                    continue
+                when = dt.datetime.fromisoformat(product["datetime"])
+                item_id = expected_item_id(tile, when)
+                if item_exists(args.stac_api_url, args.acq_collection, item_id):
+                    log.info("skip %s: item %s already registered", product["product_id"], item_id)
+                    continue
+                # s1tiling window brackets the acquisition day (date∓1, matching the local watcher),
+                # so the CronWorkflow fans out child pipelines with no per-product date-math step.
+                acq_date = dt.date.fromisoformat(product["date"])
+                new_products.append(
+                    {
+                        "tile": tile,
+                        "orbit": orbit,
+                        "product_id": product["product_id"],
+                        "datetime": product["datetime"],
+                        "date": product["date"],
+                        "date_start": (acq_date - dt.timedelta(days=1)).isoformat(),
+                        "date_end": (acq_date + dt.timedelta(days=1)).isoformat(),
+                        "platform": platform,
+                    }
+                )
     return new_products
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tiles", required=True, help="Comma-separated MGRS tile IDs (e.g. 31TCH)")
-    parser.add_argument("--orbit-direction", required=True, choices=["ascending", "descending"])
+    parser.add_argument(
+        "--orbit-direction", required=True, choices=["ascending", "descending", "both"],
+        help="single direction, or 'both' to discover ascending + descending passes (asc+desc AOI)",
+    )  # fmt: skip
     parser.add_argument("--lookback-days", required=True, type=int, help="CDSE query window (days)")
     parser.add_argument(
         "--stac-api-url", required=True, help="EOPF target STAC API (per-acquisition dedup)"

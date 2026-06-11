@@ -304,6 +304,50 @@ def test_select_iterates_multiple_tiles() -> None:
     assert {p["tile"] for p in new} == {"31TCH", "30TXM"}
 
 
+# --- asc+desc coverage (T7) -----------------------------------------------------------------
+
+
+def test_parser_orbit_direction_accepts_both() -> None:
+    """`--orbit-direction both` is a valid choice (asc+desc AOI coverage, T7)."""
+    ns = build_parser().parse_args(
+        ["--tiles", "31TCH", "--orbit-direction", "both",
+         "--lookback-days", "7", "--stac-api-url", "https://eopf/stac"]
+    )  # fmt: skip
+    assert ns.orbit_direction == "both"
+
+
+def test_select_orbit_both_queries_both_directions_and_tags_each() -> None:
+    """`both` runs discover for ascending AND descending, tagging each product with its own orbit."""
+
+    def _q(_stac: str, _bbox: list, orbit: str, _lookback: int) -> list[dict]:
+        # asc/desc passes image a tile at different times -> distinct datetimes
+        when = "2026-06-07T05:52:48+00:00" if orbit == "descending" else "2026-06-07T17:10:00+00:00"
+        return [_product(f"S1A_{orbit}", "S1A", when)]
+
+    with (
+        patch(f"{_MOD}.query_products", side_effect=_q) as q,
+        patch(f"{_MOD}.item_exists", return_value=False),
+    ):
+        new = select_new_products(_args(orbit_direction="both"))
+    assert {call.args[2] for call in q.call_args_list} == {"ascending", "descending"}
+    assert {p["orbit"] for p in new} == {"ascending", "descending"}
+    assert len(new) == 2
+
+
+def test_select_single_orbit_unchanged() -> None:
+    """A single direction still queries once and tags that direction (no behaviour change)."""
+    with (
+        patch(
+            f"{_MOD}.query_products",
+            return_value=[_product("S1A", "S1A", "2026-06-07T05:52:48+00:00")],
+        ) as q,
+        patch(f"{_MOD}.item_exists", return_value=False),
+    ):
+        new = select_new_products(_args(orbit_direction="ascending"))
+    assert q.call_count == 1 and q.call_args.args[2] == "ascending"
+    assert [p["orbit"] for p in new] == ["ascending"]
+
+
 def test_select_queries_cdse_catalogue_not_target_stac() -> None:
     """The acquisition query hits the CDSE source catalogue, not the EOPF target STAC."""
     from trigger_cdse import CDSE_STAC_URL
