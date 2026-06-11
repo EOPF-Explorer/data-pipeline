@@ -115,14 +115,36 @@ def item_exists(stac_api_url: str, acq_collection: str, item_id: str) -> bool:
     return next(iter(search.items()), None) is not None
 
 
+def collapse_same_pass(products: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Collapse adjacent frames of one satellite pass to a single representative product.
+
+    CDSE returns one product per *frame*; a tile is typically covered by 2+ adjacent frames of the same
+    pass (same relative orbit + datatake), which s1tiling mosaics into ONE tile ``time``. Emitting per
+    frame would spawn redundant pipelines and register only one of the N per-acquisition ids — a re-run
+    then re-emits the rest (the dedup loop never closes). A pass images a tile once per date+platform for
+    a fixed orbit direction, so group by ``(date, platform)`` and keep the earliest-datetime frame.
+    """
+    # Keep one product per (date, platform); the dict preserves first-seen pass order, and within a
+    # pass the earliest-datetime frame wins (the representative). No global re-sort — that would reorder
+    # distinct acquisitions relative to the CDSE query order.
+    by_pass: dict[tuple[str, str], dict[str, str]] = {}
+    for product in products:
+        key = (product["date"], product["platform"])
+        current = by_pass.get(key)
+        if current is None or product["datetime"] < current["datetime"]:
+            by_pass[key] = product
+    return list(by_pass.values())
+
+
 def select_new_products(args: argparse.Namespace) -> list[dict[str, str]]:
-    """Per tile: query CDSE, drop non-{S1A,S1C} (logged) and already-registered acquisitions (logged),
-    and return the new products to submit as ``{tile, orbit, product_id, datetime, date, platform}``."""
+    """Per tile: query CDSE, collapse same-pass frames, drop non-{S1A,S1C} (logged) and already-registered
+    acquisitions (logged), and return the new products as ``{tile, orbit, product_id, datetime, date,
+    platform, date_start, date_end}``."""
     tiles = [t.strip() for t in args.tiles.split(",") if t.strip()]
     new_products: list[dict[str, str]] = []
     for tile in tiles:
-        products = query_products(
-            CDSE_STAC_URL, tile_bbox(tile), args.orbit_direction, args.lookback_days
+        products = collapse_same_pass(
+            query_products(CDSE_STAC_URL, tile_bbox(tile), args.orbit_direction, args.lookback_days)
         )
         for product in products:
             platform = product["platform"]

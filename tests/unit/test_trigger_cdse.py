@@ -15,6 +15,7 @@ sys.path.insert(0, str(scripts_dir))
 
 from trigger_cdse import (  # noqa: E402
     build_parser,
+    collapse_same_pass,
     expected_item_id,
     is_enabled_platform,
     item_exists,
@@ -169,6 +170,44 @@ def _product(product_id: str, platform: str, when: str) -> dict[str, str]:
         "datetime": when,
         "date": when[:10],
     }
+
+
+# --- collapse_same_pass (A3 — adjacent frames of one pass -> one product) --------------------
+
+
+def test_collapse_same_pass_keeps_earliest_frame_per_date_platform() -> None:
+    """Two adjacent frames of one pass (same date+platform) collapse to the earliest-datetime frame."""
+    frames = [
+        _product("S1C_f2", "S1C", "2026-06-06T06:00:12+00:00"),
+        _product("S1C_f1", "S1C", "2026-06-06T05:59:47+00:00"),
+    ]
+    assert [p["product_id"] for p in collapse_same_pass(frames)] == ["S1C_f1"]
+
+
+def test_collapse_same_pass_keeps_distinct_dates_and_platforms() -> None:
+    """Distinct acquisitions (different date OR platform) are NOT collapsed."""
+    products = [
+        _product("S1C_a", "S1C", "2026-06-06T06:00:12+00:00"),
+        _product("S1A_a", "S1A", "2026-06-06T06:00:12+00:00"),  # same date, different platform
+        _product("S1C_b", "S1C", "2026-06-07T06:00:00+00:00"),  # different date
+    ]
+    assert len(collapse_same_pass(products)) == 3
+
+
+def test_select_collapses_same_pass_frames_to_one() -> None:
+    """End-to-end: 2 same-pass S1C frames -> the trigger emits ONE product (the earliest frame)."""
+    products = [
+        _product("S1C_f2", "S1C", "2026-06-06T06:00:12+00:00"),
+        _product("S1C_f1", "S1C", "2026-06-06T05:59:47+00:00"),
+    ]
+    with (
+        patch(f"{_MOD}.query_products", return_value=products),
+        patch(f"{_MOD}.item_exists", return_value=False),
+    ):
+        new = select_new_products(_args())
+    assert len(new) == 1
+    assert new[0]["product_id"] == "S1C_f1"
+    assert new[0]["date"] == "2026-06-06"
 
 
 def test_select_emits_only_unregistered_products() -> None:
