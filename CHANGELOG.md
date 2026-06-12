@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.10.0 (2026-06-12)
+
+## What's Changed
+* build(deps): bump the all group across 1 directory with 2 updates by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/248
+* feat(query-stac): batched fan-out + newest-first ordering + acquisition-age filter by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/257
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.9.0...v1.10.0
+
 ## 1.9.0 (2026-06-09)
 
 ## What's Changed
