@@ -11,9 +11,14 @@ EODAG 4.0.0 introduced several breaking changes for S1Tiling:
 4. cop_dataspace requires UPPERCASE orbit direction ("DESCENDING" not "descending").
 5. `relativeOrbitNumber` search param silently returns 0 results on cop_dataspace.
 
+It also raises eodag's hardcoded 60 s stream read timeout to 300 s so a throttled
+CDSE download survives a transient stall instead of failing the product pass
+(exit 68) — T7 Task 0.
+
 This script patches:
 - S1FileManager.py: fixes the search() call (issues 1, 3, 4, 5)
 - s1/product.py: adds legacy→STAC property name fallback (issue 2)
+- eodag/utils/__init__.py: raises the stream read timeout 60 s → 300 s
 
 Usage (inside the Docker container):
     python3 /patch/s1tiling_eodag4_patch.py
@@ -23,6 +28,18 @@ import pathlib
 import re
 
 S1T_PKG = pathlib.Path("/opt/S1TilingEnv/lib/python3.10/site-packages/s1tiling/libs")
+EODAG_PKG = pathlib.Path("/opt/S1TilingEnv/lib/python3.10/site-packages/eodag")
+
+# eodag streams downloads with a hardcoded per-read socket timeout
+# (DEFAULT_STREAM_REQUESTS_TIMEOUT, defined in eodag/utils/__init__.py and reused
+# at every stream call-site in http.py / api/product/_product.py). Under CDSE
+# throttle the server stalls past 60 s, requests raises "Read timed out", eodag
+# does not catch/retry it, and s1tiling fails the whole product pass (exit 68).
+# The value is a constant (not config), so it can only be raised on disk. We
+# rewrite the single definition so all call-sites pick up the new value at once.
+# Verified in-image against s1tiling:1.4.0 / eodag 4.0.0 (T7 Task 0).
+_STREAM_TIMEOUT_OLD = "DEFAULT_STREAM_REQUESTS_TIMEOUT = 60"
+_STREAM_TIMEOUT_NEW = "DEFAULT_STREAM_REQUESTS_TIMEOUT = 300"
 
 
 def patch_s1filemanager() -> None:
@@ -126,8 +143,40 @@ def patch_product_property() -> None:
     print(f"  Patched {fpath.name}")
 
 
+def _rewrite_stream_timeout(src: str) -> str:
+    """Raise eodag's hardcoded stream read timeout 60 s -> 300 s.
+
+    Pure transform (no file IO) so it can be unit-tested on a fixture. Three
+    states, checked in order:
+      1. already patched -> return unchanged (idempotent no-op; re-running the
+         patch in a fresh container must not error).
+      2. anchor present  -> replace and return.
+      3. neither present -> raise (eodag version/layout drift). This deliberately
+         diverges from the silent-skip style of patch_product_property() above:
+         a silent no-op here would ship a stale fix in-cluster, which is the
+         exact failure mode this guard exists to prevent.
+    """
+    if _STREAM_TIMEOUT_NEW in src:
+        return src
+    if _STREAM_TIMEOUT_OLD not in src:
+        raise RuntimeError(
+            f"eodag stream-timeout anchor {_STREAM_TIMEOUT_OLD!r} not found; "
+            "eodag layout may have changed -- refusing to silently skip."
+        )
+    return src.replace(_STREAM_TIMEOUT_OLD, _STREAM_TIMEOUT_NEW, 1)
+
+
+def patch_eodag_stream_timeout() -> None:
+    """Raise eodag's stream read timeout so a throttled CDSE download rides out a
+    transient stall instead of failing the product pass (exit 68) — T7 Task 0."""
+    fpath = EODAG_PKG / "utils" / "__init__.py"
+    fpath.write_text(_rewrite_stream_timeout(fpath.read_text()))
+    print(f"  Patched eodag stream timeout -> 300s in {fpath.name}")
+
+
 if __name__ == "__main__":
     print("Applying S1Tiling EODAG 4.0.0 compatibility patches...")
     patch_s1filemanager()
     patch_product_property()
+    patch_eodag_stream_timeout()
     print("Done.")
