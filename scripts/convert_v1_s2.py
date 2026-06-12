@@ -82,8 +82,9 @@ def open_source_datatree(zarr_url: str, storage_options: dict[str, Any] | None) 
         return xr.open_datatree(zarr_url, **open_kwargs)
     except Exception as exc:
         logger.warning(
+            " ",
             "   ⚠️  Default source open failed (%s: %s); retrying pinned to Zarr v2 "
-            "metadata (empty upstream zarr.json? see #263)",
+            "metadata",
             type(exc).__name__,
             exc,
         )
