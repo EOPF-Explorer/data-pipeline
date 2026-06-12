@@ -54,21 +54,26 @@ def _validate_bbox(bbox: object) -> None:
             sys.exit(f"Error: AOI_BBOX[{i}] must be a number, got: {v!r}")
 
 
+def _to_utc(dt: datetime) -> datetime:
+    """Normalize a datetime to UTC-aware so comparisons/sorts never mix naive and aware.
+
+    Naive datetimes are assumed UTC (pystac preserves naive inputs); aware ones are
+    converted to UTC. Centralizing this keeps the sort key and the acquisition filter
+    using identical semantics.
+    """
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
+
+
 def _acquisition_sort_key(item: dict) -> datetime:
     """Sort key for ordering processing items by acquisition datetime (newest first).
 
     Parses the stored ISO timestamp so the comparison is chronological (not lexicographic,
-    which would break across mixed UTC offsets). Naive timestamps are treated as UTC and
-    items with no datetime sort oldest, so the key is always tz-aware and never raises on
-    mixed naive/aware comparisons.
+    which would break across mixed UTC offsets). Items with no datetime sort oldest.
     """
     raw = item.get("datetime")
     if not raw:
         return datetime.min.replace(tzinfo=UTC)
-    parsed = datetime.fromisoformat(raw)
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed
+    return _to_utc(datetime.fromisoformat(raw))
 
 
 def discover(args: argparse.Namespace) -> None:
@@ -80,10 +85,13 @@ def discover(args: argparse.Namespace) -> None:
     SCHEDULED_END_TIME = args.scheduled_end_time
     WINDOW_HOURS = args.window_hours
     AOI_BBOX = args.aoi_bbox
+    MAX_ACQUISITION_AGE_DAYS = args.max_acquisition_age_days
 
     _require_https(SOURCE_STAC_API_URL, "SOURCE_STAC_API_URL")
     _require_https(TARGET_STAC_API_URL, "TARGET_STAC_API_URL")
     _validate_bbox(AOI_BBOX)
+    if MAX_ACQUISITION_AGE_DAYS is not None and MAX_ACQUISITION_AGE_DAYS <= 0:
+        sys.exit(f"Error: --max-acquisition-age-days must be > 0, got: {MAX_ACQUISITION_AGE_DAYS}")
 
     # Parse scheduled end time and calculate start time
     end_time = datetime.fromisoformat(SCHEDULED_END_TIME.replace("Z", "+00:00"))
@@ -93,6 +101,16 @@ def discover(args: argparse.Namespace) -> None:
     start_time_str = start_time.isoformat().replace("+00:00", "Z")
     end_time_str = end_time.isoformat().replace("+00:00", "Z")
 
+    # Acquisition-date floor for real-time processing: keep only items observed within the
+    # last N days of the window end, so a reingestion that re-stamps `updated` on old
+    # acquisitions doesn't flood the queue. Floor only (open upper bound) — never drop the
+    # freshest data. Unset → no acquisition filter (original behaviour).
+    min_acquisition_dt = (
+        end_time - timedelta(days=MAX_ACQUISITION_AGE_DAYS)
+        if MAX_ACQUISITION_AGE_DAYS is not None
+        else None
+    )
+
     logger.info(f"Querying source STAC API: {SOURCE_STAC_API_URL}")
     logger.info(f"Source collection: {SOURCE_COLLECTION}")
     logger.info(f"Target STAC API: {TARGET_STAC_API_URL}")
@@ -101,6 +119,11 @@ def discover(args: argparse.Namespace) -> None:
     logger.info(f"Time window: {WINDOW_HOURS} hours")
     logger.info(f"Query time range: {start_time_str} to {end_time_str}")
     logger.info(f"Area of Interest (bbox): {AOI_BBOX}")
+    if min_acquisition_dt is not None:
+        logger.info(
+            f"Acquisition floor: {min_acquisition_dt.isoformat().replace('+00:00', 'Z')} "
+            f"(max age {MAX_ACQUISITION_AGE_DAYS} days)"
+        )
 
     # Connect to source STAC catalog
     source_catalog = Client.open(SOURCE_STAC_API_URL)
@@ -110,20 +133,26 @@ def discover(args: argparse.Namespace) -> None:
 
     # Search for items by updated time (for harvesting use case)
     # Query items that were updated within the time window, not by acquisition date
-    search = source_catalog.search(
-        collections=[SOURCE_COLLECTION],
-        filter={
+    search_kwargs: dict[str, object] = {
+        "collections": [SOURCE_COLLECTION],
+        "filter": {
             "op": "between",
             "args": [{"property": "updated"}, start_time_str, end_time_str],
         },
-        filter_lang="cql2-json",
-        bbox=AOI_BBOX,
-        limit=100,  # Items per page for efficient pagination
-    )
+        "filter_lang": "cql2-json",
+        "bbox": AOI_BBOX,
+        "limit": 100,  # Items per page for efficient pagination
+    }
+    # Narrow by acquisition datetime server-side too (open upper bound), so the flood is
+    # trimmed before pagination. The client-side guard below remains authoritative.
+    if min_acquisition_dt is not None:
+        search_kwargs["datetime"] = f"{min_acquisition_dt.isoformat().replace('+00:00', 'Z')}/.."
+    search = source_catalog.search(**search_kwargs)
 
     # Collect items to process
     items_to_process = []
     checked_count = 0
+    skipped_old_count = 0
     page_count = 0
 
     logger.info("Starting pagination through search results...")
@@ -141,6 +170,15 @@ def discover(args: argparse.Namespace) -> None:
 
         for item in page_items:
             checked_count += 1
+
+            # Acquisition-date filter (real-time): drop items observed before the floor, or
+            # with no datetime (can't be proven recent). Done before the per-item dedup
+            # search below so filtered items cost no target-API call.
+            if min_acquisition_dt is not None and (
+                item.datetime is None or _to_utc(item.datetime) < min_acquisition_dt
+            ):
+                skipped_old_count += 1
+                continue
 
             # Get item URL
             item_url = next(
@@ -178,7 +216,9 @@ def discover(args: argparse.Namespace) -> None:
             )
 
     logger.info(
-        f"📊 Summary: Processed {page_count} pages, checked {checked_count} items, {len(items_to_process)} to process"
+        f"📊 Summary: Processed {page_count} pages, checked {checked_count} items, "
+        f"{skipped_old_count} skipped (out of acquisition window), "
+        f"{len(items_to_process)} to process"
     )
 
     # Process most-recent-first: during a large reingestion backlog, order the queue by
@@ -228,6 +268,13 @@ def main() -> None:
         "--out-dir", required=True, help="Directory to write items.json/count/num_batches."
     )
     d.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    d.add_argument(
+        "--max-acquisition-age-days",
+        type=int,
+        default=None,
+        help="Real-time filter: keep only items whose acquisition datetime is within the last "
+        "N days of the scheduled window end. Omit for no acquisition filter (default).",
+    )
     d.set_defaults(func=discover)
 
     r = sub.add_parser("read-batch", help="Print one bounded slice of an items file.")

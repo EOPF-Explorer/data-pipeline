@@ -2,11 +2,12 @@
 
 import json
 import tempfile
-from datetime import datetime
+from datetime import UTC, datetime
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from pystac import Item, Link
 
 # Test collection names
@@ -130,8 +131,13 @@ def run_script(
     target_items: list[Item],
     raise_error_on_target: bool = False,
     batch_size: int = 200,
+    max_acquisition_age_days: int | None = None,
 ) -> dict:
-    """Helper to run `discover` mode with test data and read back the manifest files."""
+    """Helper to run `discover` mode with test data and read back the manifest files.
+
+    The hardcoded scheduled end time is 2024-01-01T12:00:00Z, so an acquisition floor of
+    N days lands at 2024-01-01 − N days — pick item datetimes relative to that.
+    """
     source_client = FakeStacClient(
         items=source_items,
         collection=SOURCE_COLLECTION,
@@ -151,26 +157,26 @@ def run_script(
         return target_client
 
     out_dir = tempfile.mkdtemp()
+    argv = [
+        "query_stac.py",
+        "discover",
+        "https://source-stac.example.com/",
+        SOURCE_COLLECTION,
+        "https://target-stac.example.com/",
+        TARGET_COLLECTION,
+        "2024-01-01T12:00:00Z",  # ISO timestamp instead of "0"
+        "3",
+        "[-5.14, 41.33, 9.56, 51.09]",
+        "--out-dir",
+        out_dir,
+        "--batch-size",
+        str(batch_size),
+    ]
+    if max_acquisition_age_days is not None:
+        argv += ["--max-acquisition-age-days", str(max_acquisition_age_days)]
     with (
         patch("scripts.query_stac.Client.open", side_effect=mock_client_open),
-        patch(
-            "sys.argv",
-            [
-                "query_stac.py",
-                "discover",
-                "https://source-stac.example.com/",
-                SOURCE_COLLECTION,
-                "https://target-stac.example.com/",
-                TARGET_COLLECTION,
-                "2024-01-01T12:00:00Z",  # ISO timestamp instead of "0"
-                "3",
-                "[-5.14, 41.33, 9.56, 51.09]",
-                "--out-dir",
-                out_dir,
-                "--batch-size",
-                str(batch_size),
-            ],
-        ),
+        patch("sys.argv", argv),
         patch("sys.stdout", StringIO()) as stdout,
         patch("sys.stderr", StringIO()) as stderr,
     ):
@@ -236,7 +242,10 @@ class TestQueryStac:
             "item-002",
             "item-003",
         }
-        assert "Processed 1 pages, checked 3 items, 3 to process" in caplog.text
+        assert (
+            "Processed 1 pages, checked 3 items, 0 skipped (out of acquisition window), "
+            "3 to process" in caplog.text
+        )
 
     def test_excludes_items_already_in_target(self, caplog):
         """Items already in target collection should be excluded."""
@@ -250,7 +259,10 @@ class TestQueryStac:
         assert len(result["output"]) == 2
         assert {item["item_id"] for item in result["output"]} == {"item-001", "item-003"}
         assert "Already converted" in caplog.text
-        assert "Processed 1 pages, checked 3 items, 2 to process" in caplog.text
+        assert (
+            "Processed 1 pages, checked 3 items, 0 skipped (out of acquisition window), "
+            "2 to process" in caplog.text
+        )
 
     def test_skips_items_without_self_link(self, caplog):
         """Items without a self link should be skipped."""
@@ -280,8 +292,12 @@ class TestQueryStac:
         assert result["output"] == []
         # Allow for either 0 or 1 pages depending on STAC client behavior
         assert (
-            "Processed 0 pages, checked 0 items, 0 to process" in caplog.text
-            or "Processed 1 pages, checked 0 items, 0 to process" in caplog.text
+            "Processed 0 pages, checked 0 items, 0 skipped (out of acquisition window), "
+            "0 to process"
+            in caplog.text
+            or "Processed 1 pages, checked 0 items, 0 skipped (out of acquisition window), "
+            "0 to process"
+            in caplog.text
         )
 
     def test_handles_error_checking_target(self, caplog):
@@ -501,3 +517,107 @@ class TestProcessingOrder:
         result = run_script(source, [])
 
         assert result["output"][0]["datetime"] == "2024-01-01T00:00:00"
+
+
+class TestAcquisitionFilter:
+    """`--max-acquisition-age-days` keeps only recently-acquired items (scheduled end 2024-01-01)."""
+
+    def test_drops_items_older_than_floor(self):
+        """With a 7-day floor, an item acquired 31 days earlier is excluded; a recent one kept."""
+        source = [
+            create_stac_item("recent", SOURCE_COLLECTION, dt=datetime(2023, 12, 28, 12, 0, 0)),
+            create_stac_item("stale", SOURCE_COLLECTION, dt=datetime(2023, 12, 1, 12, 0, 0)),
+        ]
+
+        result = run_script(source, [], max_acquisition_age_days=7)
+
+        assert [it["item_id"] for it in result["output"]] == ["recent"]
+
+    def test_boundary_item_at_floor_is_kept(self):
+        """An item acquired exactly at the floor (end − N days) is kept (>= boundary)."""
+        # floor = 2024-01-01T12:00:00Z − 7d = 2023-12-25T12:00:00Z
+        source = [create_stac_item("edge", SOURCE_COLLECTION, dt=datetime(2023, 12, 25, 12, 0, 0))]
+
+        result = run_script(source, [], max_acquisition_age_days=7)
+
+        assert [it["item_id"] for it in result["output"]] == ["edge"]
+
+    def test_naive_and_aware_datetimes_filter_without_raising(self):
+        """Mixed naive (default factory) and tz-aware item datetimes compare safely."""
+        source = [
+            create_stac_item(
+                "naive-recent", SOURCE_COLLECTION, dt=datetime(2023, 12, 28, 12, 0, 0)
+            ),
+            create_stac_item(
+                "aware-recent",
+                SOURCE_COLLECTION,
+                dt=datetime(2023, 12, 27, 12, 0, 0, tzinfo=UTC),
+            ),
+            create_stac_item("aware-stale", SOURCE_COLLECTION, dt=datetime(2023, 11, 1, 12, 0, 0)),
+        ]
+
+        result = run_script(source, [], max_acquisition_age_days=7)
+
+        assert {it["item_id"] for it in result["output"]} == {"naive-recent", "aware-recent"}
+
+    def test_undated_item_excluded_when_filter_active(self):
+        """An item with no acquisition datetime can't be proven recent → dropped when active."""
+        source = [
+            create_stac_item("dated", SOURCE_COLLECTION, dt=datetime(2023, 12, 28, 12, 0, 0)),
+            create_stac_item("no-date", SOURCE_COLLECTION, dt=None),
+        ]
+
+        result = run_script(source, [], max_acquisition_age_days=7)
+
+        assert [it["item_id"] for it in result["output"]] == ["dated"]
+
+    def test_inactive_filter_passes_no_datetime_kwarg(self):
+        """Without the flag, the search carries no `datetime` param (only the updated filter)."""
+        source = [create_stac_item("a", SOURCE_COLLECTION, dt=datetime(2020, 1, 1, 0, 0, 0))]
+
+        result = run_script(source, [])
+
+        assert "datetime" not in result["source_client"].searches[0]["kwargs"]
+        assert [it["item_id"] for it in result["output"]] == ["a"]  # old item still kept
+
+    def test_active_filter_passes_datetime_floor_to_search(self):
+        """When active, the source search is narrowed server-side with an open-ended floor."""
+        source = [create_stac_item("a", SOURCE_COLLECTION, dt=datetime(2023, 12, 28, 12, 0, 0))]
+
+        result = run_script(source, [], max_acquisition_age_days=7)
+
+        assert (
+            result["source_client"].searches[0]["kwargs"]["datetime"] == "2023-12-25T12:00:00Z/.."
+        )
+
+    def test_filtered_items_do_not_trigger_dedup_search(self):
+        """Items dropped by the filter cost no target/dedup API call (filter runs before dedup)."""
+        source = [
+            create_stac_item("recent", SOURCE_COLLECTION, dt=datetime(2023, 12, 28, 12, 0, 0)),
+            create_stac_item("stale", SOURCE_COLLECTION, dt=datetime(2023, 1, 1, 12, 0, 0)),
+        ]
+
+        result = run_script(source, [], max_acquisition_age_days=7)
+
+        # Only the surviving item is checked against the target collection.
+        assert len(result["target_client"].searches) == 1
+
+    def test_survivors_remain_newest_first(self):
+        """Filter then sort: kept items are still ordered most-recent acquisition first."""
+        source = [
+            create_stac_item("mid", SOURCE_COLLECTION, dt=datetime(2023, 12, 27, 12, 0, 0)),
+            create_stac_item("stale", SOURCE_COLLECTION, dt=datetime(2023, 10, 1, 12, 0, 0)),
+            create_stac_item("newest", SOURCE_COLLECTION, dt=datetime(2023, 12, 30, 12, 0, 0)),
+        ]
+
+        result = run_script(source, [], max_acquisition_age_days=14)
+
+        assert [it["item_id"] for it in result["output"]] == ["newest", "mid"]
+
+    def test_non_positive_age_is_rejected(self):
+        """N must be > 0; a non-positive value exits rather than silently dropping everything."""
+        source = [create_stac_item("a", SOURCE_COLLECTION)]
+
+        for bad in (0, -5):
+            with pytest.raises(SystemExit):
+                run_script(source, [], max_acquisition_age_days=bad)
