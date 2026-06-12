@@ -63,6 +63,33 @@ def get_zarr_url(stac_item_url: str) -> str:
     raise RuntimeError("No Zarr asset found in STAC item")
 
 
+def open_source_datatree(zarr_url: str, storage_options: dict[str, Any] | None) -> xr.DataTree:
+    """Open the source Zarr store, falling back to v2 metadata if the default open fails.
+
+    Upstream EOPF products on data.eodc.eu now ship an empty (0-byte) Zarr v3 ``zarr.json``
+    next to the valid v2 ``.zgroup``. Readers that prefer v3 read the empty stub and crash on
+    ``json.loads(b"")`` (``JSONDecodeError``). We try the normal, format-autodetecting open
+    first — so a genuine v3 store keeps working — and only on failure retry pinned to
+    ``zarr_format=2``, which reads the valid ``.zgroup`` and ignores the broken stub.
+    See EOPF-Explorer/coordination#263.
+    """
+    open_kwargs: dict[str, Any] = {
+        "engine": "zarr",
+        "chunks": "auto",
+        "storage_options": storage_options,
+    }
+    try:
+        return xr.open_datatree(zarr_url, **open_kwargs)
+    except Exception as exc:
+        logger.warning(
+            "   ⚠️  Default source open failed (%s: %s); retrying pinned to Zarr v2 "
+            "metadata (empty upstream zarr.json? see #263)",
+            type(exc).__name__,
+            exc,
+        )
+        return xr.open_datatree(zarr_url, zarr_format=2, **open_kwargs)
+
+
 # === Conversion Workflow ===
 
 
@@ -179,12 +206,7 @@ def run_conversion(
             "asynchronous": True,
             "target_options": merged_target,
         }
-    dt_input = xr.open_datatree(
-        str(zarr_url),
-        engine="zarr",
-        chunks="auto",
-        storage_options=storage_options,
-    )
+    dt_input = open_source_datatree(str(zarr_url), storage_options)
 
     try:
         convert_s2_optimized(
