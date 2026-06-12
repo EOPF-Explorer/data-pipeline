@@ -23,7 +23,7 @@ import logging
 import math
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -52,6 +52,23 @@ def _validate_bbox(bbox: object) -> None:
     for i, v in enumerate(bbox):
         if not isinstance(v, int | float):
             sys.exit(f"Error: AOI_BBOX[{i}] must be a number, got: {v!r}")
+
+
+def _acquisition_sort_key(item: dict) -> datetime:
+    """Sort key for ordering processing items by acquisition datetime (newest first).
+
+    Parses the stored ISO timestamp so the comparison is chronological (not lexicographic,
+    which would break across mixed UTC offsets). Naive timestamps are treated as UTC and
+    items with no datetime sort oldest, so the key is always tz-aware and never raises on
+    mixed naive/aware comparisons.
+    """
+    raw = item.get("datetime")
+    if not raw:
+        return datetime.min.replace(tzinfo=UTC)
+    parsed = datetime.fromisoformat(raw)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed
 
 
 def discover(args: argparse.Namespace) -> None:
@@ -156,12 +173,19 @@ def discover(args: argparse.Namespace) -> None:
                     "source_url": item_url,
                     "collection": TARGET_COLLECTION,
                     "item_id": item.id,
+                    "datetime": item.datetime.isoformat() if item.datetime else None,
                 }
             )
 
     logger.info(
         f"📊 Summary: Processed {page_count} pages, checked {checked_count} items, {len(items_to_process)} to process"
     )
+
+    # Process most-recent-first: during a large reingestion backlog, order the queue by
+    # acquisition datetime descending so the freshest observations are converted before the
+    # long tail drains. The stable sort preserves pagination order within equal datetimes;
+    # items lacking a datetime sort last.
+    items_to_process.sort(key=_acquisition_sort_key, reverse=True)
 
     # Write the full list as files: items.json becomes an Argo output artifact; count
     # and num_batches drive the workflow's batch fan-out. Nothing large goes to stdout,

@@ -14,14 +14,25 @@ SOURCE_COLLECTION = "test"
 TARGET_COLLECTION = "test-staging"
 
 
-def create_stac_item(item_id: str, collection_id: str, has_self_link: bool = True) -> Item:
+def create_stac_item(
+    item_id: str,
+    collection_id: str,
+    has_self_link: bool = True,
+    dt: datetime | None = datetime(2023, 12, 8, 10, 0, 0),
+) -> Item:
     """Create a minimal STAC item for testing."""
+    # pystac requires start/end when datetime is None; item.datetime still resolves to None.
+    properties = (
+        {}
+        if dt is not None
+        else {"start_datetime": "2024-01-01T00:00:00Z", "end_datetime": "2024-01-02T00:00:00Z"}
+    )
     item = Item(
         id=item_id,
         geometry={"type": "Polygon", "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 1], [0, 0]]]},
         bbox=[0, 0, 1, 1],
-        datetime=datetime(2023, 12, 8, 10, 0, 0),
-        properties={},
+        datetime=dt,
+        properties=properties,
     )
 
     if has_self_link:
@@ -436,3 +447,57 @@ class TestBatchedOutput:
         ]
 
         assert len(run_read_batch(items, 0, 4)) == 4
+
+
+class TestProcessingOrder:
+    """`discover` orders the queue most-recent-first (acquisition datetime, descending)."""
+
+    def test_items_sorted_most_recent_first(self):
+        """Items are emitted newest acquisition datetime first, regardless of arrival order."""
+        source = [
+            create_stac_item("old", SOURCE_COLLECTION, dt=datetime(2024, 1, 1, 0, 0, 0)),
+            create_stac_item("newest", SOURCE_COLLECTION, dt=datetime(2024, 6, 1, 0, 0, 0)),
+            create_stac_item("middle", SOURCE_COLLECTION, dt=datetime(2024, 3, 1, 0, 0, 0)),
+        ]
+
+        result = run_script(source, [])
+
+        assert [it["item_id"] for it in result["output"]] == ["newest", "middle", "old"]
+
+    def test_sort_is_chronological_across_utc_offsets(self):
+        """Sorting parses timestamps, so a later instant wins even with a larger offset.
+
+        09:00+02:00 (07:00Z) is earlier than 08:00+00:00 (08:00Z); a lexicographic
+        string sort would get this wrong, a chronological one ranks 08:00Z first.
+        """
+        source = [
+            create_stac_item(
+                "plus2", SOURCE_COLLECTION, dt=datetime.fromisoformat("2024-05-01T09:00:00+02:00")
+            ),
+            create_stac_item(
+                "utc", SOURCE_COLLECTION, dt=datetime.fromisoformat("2024-05-01T08:00:00+00:00")
+            ),
+        ]
+
+        result = run_script(source, [])
+
+        assert [it["item_id"] for it in result["output"]] == ["utc", "plus2"]
+
+    def test_items_without_datetime_sort_last(self):
+        """An item with no acquisition datetime drains after dated items."""
+        source = [
+            create_stac_item("no-date", SOURCE_COLLECTION, dt=None),
+            create_stac_item("dated", SOURCE_COLLECTION, dt=datetime(2024, 1, 1, 0, 0, 0)),
+        ]
+
+        result = run_script(source, [])
+
+        assert [it["item_id"] for it in result["output"]] == ["dated", "no-date"]
+
+    def test_output_carries_datetime_field(self):
+        """Each record exposes the acquisition datetime used for ordering."""
+        source = [create_stac_item("item-001", SOURCE_COLLECTION, dt=datetime(2024, 1, 1, 0, 0, 0))]
+
+        result = run_script(source, [])
+
+        assert result["output"][0]["datetime"] == "2024-01-01T00:00:00"
