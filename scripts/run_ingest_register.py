@@ -75,14 +75,17 @@ def run_pipeline(
     raster_api_url: str,
     acquisitions_collection: str = "sentinel-1-grd-rtc-acquisitions",
 ) -> int:
-    # Store key prefix is the STAC collection, so per-mission/per-env buckets stay
-    # self-describing: s3://{bucket}/{collection}/s1-grd-rtc-{tile}.zarr
     if not collection or "/" in collection:
         raise ValueError(
             f"collection must be a non-empty single path segment (no '/'), got: {collection!r}"
         )
     check_env_consistency(collection, s3_output_bucket)
-    s3_zarr = f"s3://{s3_output_bucket}/{collection}/s1-grd-rtc-{tile_id}.zarr"
+    # TEMPORARY (#246): write the cube directly at titiler-eopf's reconstructed render path
+    # — s3://{bucket}/tests-output/{collection}/{item_id}.zarr where item_id == s1-rtc-{tile} —
+    # so new tiles preview without a copy (titiler ignores the asset href). Replaces the #250
+    # auto-copy. Revert to s3://{bucket}/{collection}/s1-grd-rtc-{tile}.zarr when titiler-eopf#108
+    # (resolve store from href) lands.
+    s3_zarr = f"s3://{s3_output_bucket}/tests-output/{collection}/s1-rtc-{tile_id}.zarr"
 
     # Step 1 — ingest directly into the s3:// cube. run_ingest fetches any existing cube, appends the
     # new scene as a time slice (T4), and uploads via s3fs — so the per-tile cube accumulates across
