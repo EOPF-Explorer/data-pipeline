@@ -33,8 +33,9 @@ _KWARGS = {
     "raster_api_url": "https://raster.example.com",
 }
 
-# The derived per-tile cube URI: s3://{bucket}/{collection}/s1-grd-rtc-{tile}.zarr
-_S3_CUBE = "s3://my-bucket/sentinel-1-grd-rtc-staging/s1-grd-rtc-31TCH.zarr"
+# TEMPORARY (#246): the cube is written at titiler's reconstructed render path
+# s3://{bucket}/tests-output/{collection}/s1-rtc-{tile}.zarr (revert when titiler-eopf#108 lands).
+_S3_CUBE = "s3://my-bucket/tests-output/sentinel-1-grd-rtc-staging/s1-rtc-31TCH.zarr"
 
 
 def _mock_proc(returncode: int) -> MagicMock:
@@ -149,7 +150,8 @@ def test_store_prefix_tracks_collection() -> None:
     and the cube register --store).
     """
     kwargs = {**_KWARGS, "collection": "sentinel-1-grd-rtc-tests"}
-    expected_store = "s3://my-bucket/sentinel-1-grd-rtc-tests/s1-grd-rtc-31TCH.zarr"
+    # TEMPORARY (#246): tests-output render path + s1-rtc- filename (revert with titiler-eopf#108).
+    expected_store = "s3://my-bucket/tests-output/sentinel-1-grd-rtc-tests/s1-rtc-31TCH.zarr"
     with patch(f"{_MOD}.subprocess.run", side_effect=[_mock_proc(0)] * 3) as mock_run:
         run_pipeline(**kwargs)
     ingest_cmd: list[str] = mock_run.call_args_list[0][0][0]
