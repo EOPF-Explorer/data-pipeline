@@ -25,7 +25,10 @@ from typing import Any
 DEM_BUCKET = "copernicus-dem-30m"  # AWS Open Data, anonymous
 DEM_REGION = "eu-central-1"
 MARGIN_LON = 4.0  # SAR (IW) swath reaches ~3° E/W of the tile at mid-latitudes
-MARGIN_LAT = 1.5  # ~1.5° N/S (phase-5: 31TCH swath needed N44, tile tops out ~43.3)
+# The swath spans further N/S than the tile: a descending pass over 31TCG (tile top ~42.45°N) still
+# reaches N44 (~1.5° above the tile), so lat±1.5 fell short and AgglomerateDEM aborted (2026-06-15).
+# 3.0° covers the full swath for tiles at the southern edge of a pass, with an N45 row of headroom.
+MARGIN_LAT = 3.0
 
 
 def product10_stem(lat: int, lon: int) -> str:
