@@ -1,0 +1,114 @@
+"""Unit tests for scripts/gen_aoi_tiles.py — region bbox → land/DEM MGRS tile list (T7 Phase 2).
+
+Covers the pure selection core: a region bbox is sampled on a grid into MGRS 100 km tile ids, then
+filtered to tiles that actually overlap DEM/land cells (a tile with no `Product10` cell in the
+`eotile` `DEM_Union.gpkg` is ocean / out-of-coverage and is dropped). The gpkg read + anon staging
+live in ensure_dem (integration); here the gpkg land set is injected so the tests are hermetic and
+need neither eotile nor network.
+"""
+
+import sys
+from pathlib import Path
+
+SCRIPT = Path(__file__).parent.parent.parent / "scripts" / "gen_aoi_tiles.py"
+
+
+def _mod():
+    sys.path.insert(0, str(SCRIPT.parent))
+    import gen_aoi_tiles
+
+    return gen_aoi_tiles
+
+
+def _stem():
+    import ensure_dem
+
+    return ensure_dem.product10_stem
+
+
+# --- mgrs_tiles_in_bbox (bbox → MGRS 100 km tile ids) ------------------------
+
+
+def test_mgrs_tiles_in_bbox_small_bbox_single_tile():
+    """A bbox well inside one 100 km square resolves to just that tile."""
+    m = _mod()
+    tiles = m.mgrs_tiles_in_bbox([0.95, 42.45, 1.05, 42.55])  # near 31TCH centre
+    assert tiles == {"31TCH"}
+
+
+def test_mgrs_tiles_in_bbox_spans_multiple_tiles():
+    m = _mod()
+    tiles = m.mgrs_tiles_in_bbox([0.3, 42.4, 1.6, 43.2])  # straddles the C column / G-H rows
+    assert {"31TCH", "31TBH"} <= tiles
+    assert all(len(t) == 5 for t in tiles)
+
+
+def test_mgrs_tiles_in_bbox_is_a_set_no_duplicates():
+    m = _mod()
+    tiles = m.mgrs_tiles_in_bbox([0.0, 42.0, 2.0, 43.0], step=0.05)
+    assert isinstance(tiles, set)
+
+
+# --- tile_is_land (gpkg land filter) ----------------------------------------
+
+
+def test_tile_is_land_true_when_a_covered_cell_is_in_gpkg():
+    m = _mod()
+    s = _stem()
+    # 31TCH covers integer cells (42,0),(42,1),(43,0),(43,1); the gpkg knowing any one ⇒ land.
+    assert m.tile_is_land("31TCH", {s(43, 1)}) is True
+
+
+def test_tile_is_land_false_when_no_covered_cell_in_gpkg():
+    m = _mod()
+    s = _stem()
+    # only an unrelated cell present ⇒ the tile has no DEM coverage (treat as ocean / out-of-area).
+    assert m.tile_is_land("31TCH", {s(10, 10)}) is False
+
+
+def test_tile_is_land_uses_tile_footprint_not_swath_margin():
+    """Selection must test the tile's own footprint (margin 0), not the wide DEM swath margin —
+    otherwise a coastal/ocean tile would be kept just because its swath reaches distant land."""
+    m = _mod()
+    s = _stem()
+    # a cell ~3° away (inside the swath margin, outside the tile footprint) must NOT count as land.
+    assert m.tile_is_land("31TCH", {s(45, 4)}) is False
+
+
+# --- tiles_for_region (sorted, deduped, land-only) --------------------------
+
+
+def test_tiles_for_region_is_sorted_deduped_and_land_only():
+    m = _mod()
+    s = _stem()
+    gpkg = {s(42, 0), s(42, 1), s(43, 0), s(43, 1)}  # land around 31T B/C H
+    tiles = m.tiles_for_region([0.3, 42.4, 1.6, 43.2], gpkg)
+    assert tiles == sorted(tiles)
+    assert len(tiles) == len(set(tiles))
+    assert "31TCH" in tiles
+    assert all(m.tile_is_land(t, gpkg) for t in tiles)
+
+
+def test_tiles_for_region_empty_when_gpkg_has_no_land():
+    """An all-ocean region (no covered cell in the gpkg) yields an empty list, not a crash."""
+    m = _mod()
+    assert m.tiles_for_region([0.3, 42.4, 1.6, 43.2], set()) == []
+
+
+def test_tiles_for_region_is_deterministic():
+    m = _mod()
+    s = _stem()
+    gpkg = {s(42, 1), s(43, 1)}
+    bbox = [0.3, 42.4, 1.6, 43.2]
+    assert m.tiles_for_region(bbox, gpkg) == m.tiles_for_region(bbox, gpkg)
+
+
+# --- REGIONS (committed bboxes) ---------------------------------------------
+
+
+def test_regions_defines_pyrenees_and_alps_with_valid_bboxes():
+    m = _mod()
+    assert {"pyrenees", "alps"} <= set(m.REGIONS)
+    for name, bbox in m.REGIONS.items():
+        lon0, lat0, lon1, lat1 = bbox
+        assert lon0 < lon1 and lat0 < lat1, name
