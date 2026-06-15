@@ -5,8 +5,9 @@ public-bucket COG keys, plus the idempotent + ocean-skip fetch list (candidates 
 The anon-S3 download + COG→Product10 rename + eotile gpkg copy live in main() (integration; cluster).
 
 Naming + the 31TCH expectations below are ground-truthed against the real `eotile` `DEM_Union.gpkg`:
-a lon±4°/lat±1.5° swath margin around 31TCH yields 50 integer cells, of which 41 are real land
-tiles (incl. N44W001/N44W002, observed needed in phase-5) and 9 are absent ocean cells.
+a lon±4°/lat±3° swath margin around 31TCH yields 80 integer cells (the gpkg keeps the land subset,
+incl. N44W001/N44W002). The lat margin is 3° (was 1.5°) so the swath is covered for tiles at the
+southern edge of a descending pass too — see test_tiles_for_bbox_covers_31tcg_n44_swath.
 """
 
 import sqlite3
@@ -57,10 +58,10 @@ def test_cog_key_matches_public_bucket_layout():
 def test_tiles_for_bbox_covers_margin_and_observed_needed_cells():
     m = _mod()
     bbox = [0.533, 42.427, 1.784, 43.346]  # 31TCH
-    cells = m.tiles_for_bbox(bbox)  # default margin lon±4, lat±1.5
-    assert len(cells) == 50  # lon -4..5 (10) × lat 40..44 (5)
+    cells = m.tiles_for_bbox(bbox)  # default margin lon±4, lat±3
+    assert len(cells) == 80  # lon -4..5 (10) × lat 39..46 (8)
     assert (44, -1) in cells and (44, -2) in cells  # phase-5: swath needed these
-    assert (40, -4) in cells and (44, 5) in cells  # corners
+    assert (39, -4) in cells and (46, 5) in cells  # corners
     assert cells == sorted(cells)  # deterministic order
 
 
@@ -68,6 +69,19 @@ def test_tiles_for_bbox_margin_is_configurable():
     m = _mod()
     cells = m.tiles_for_bbox([0.5, 42.4, 0.6, 42.6], margin_lon=0.0, margin_lat=0.0)
     assert cells == [(42, 0)]  # single cell, no margin
+
+
+def test_tiles_for_bbox_covers_31tcg_n44_swath():
+    """31TCG (a row south of 31TCH) shares the same descending swath, which still reaches N44.
+
+    Regression for the 2026-06-15 failure: with the old lat±1.5° margin, 31TCG (tile top ~42.45°N)
+    only reached N43, so s1tiling's AgglomerateDEM aborted on the missing N44_W001/N44_W002 cells.
+    The default margin must cover the whole swath, not just the tile.
+    """
+    m = _mod()
+    bbox = [0.569, 41.527, 1.801, 42.446]  # 31TCG
+    cells = m.tiles_for_bbox(bbox)  # default margin
+    assert (44, -1) in cells and (44, -2) in cells  # the cells s1tiling needed but didn't get
 
 
 # --- read_gpkg_product10 (sqlite, no GDAL) -----------------------------------
