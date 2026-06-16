@@ -55,6 +55,7 @@ def test_exits_0_on_success() -> None:
     """Happy path: 2 acquisitions + 1 condition group -> all 5 steps called -> exit 0."""
     with (
         patch(f"{_MOD}.discover_s1tiling_acquisitions", return_value=[_ACQ, _ACQ]) as mock_disc,
+        patch(f"{_MOD}._acquisition_has_data", return_value=True),
         patch(f"{_MOD}.ingest_s1tiling_acquisition", return_value=0) as mock_ing,
         patch(f"{_MOD}.discover_s1tiling_conditions", return_value=[_COND]) as mock_disc_cond,
         patch(f"{_MOD}.ingest_s1tiling_conditions") as mock_ing_cond,
@@ -105,6 +106,7 @@ def test_exits_1_on_ingest_error() -> None:
     """First ingest failure -> exit 1; consolidate_s1_store must not be called."""
     with (
         patch(f"{_MOD}.discover_s1tiling_acquisitions", return_value=[_ACQ]),
+        patch(f"{_MOD}._acquisition_has_data", return_value=True),
         patch(f"{_MOD}.ingest_s1tiling_acquisition", side_effect=OSError("disk full")),
         patch(f"{_MOD}.consolidate_s1_store") as mock_cons,
     ):
@@ -118,6 +120,7 @@ def test_conditions_non_fatal_if_empty() -> None:
     """Empty conditions -> consolidate_s1_store still called (non-fatal)."""
     with (
         patch(f"{_MOD}.discover_s1tiling_acquisitions", return_value=[_ACQ]),
+        patch(f"{_MOD}._acquisition_has_data", return_value=True),
         patch(f"{_MOD}.ingest_s1tiling_acquisition", return_value=0),
         patch(f"{_MOD}.discover_s1tiling_conditions", return_value=[]),
         patch(f"{_MOD}.ingest_s1tiling_conditions") as mock_ing_cond,
@@ -129,6 +132,86 @@ def test_conditions_non_fatal_if_empty() -> None:
     assert result == 0
     mock_ing_cond.assert_not_called()
     assert mock_cons.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# empty-slice skip -- the produced data, not the trigger footprint, decides
+# ---------------------------------------------------------------------------
+
+
+def _write_tif(path: Path, data) -> Path:
+    """Write a tiny single-band float32 GeoTIFF (for the has-data probe)."""
+    import rasterio
+    from rasterio.transform import from_origin
+
+    h, w = data.shape
+    with rasterio.open(
+        str(path), "w", driver="GTiff", height=h, width=w, count=1,
+        dtype="float32", crs="EPSG:32631", transform=from_origin(0, 0, 10, 10),
+    ) as dst:  # fmt: skip
+        dst.write(data.astype("float32"), 1)
+    return path
+
+
+def test_band_has_data_false_for_all_nodata(tmp_path) -> None:
+    import numpy as np
+    from ingest_v1_s1_rtc import _band_has_data
+
+    assert _band_has_data(_write_tif(tmp_path / "z.tif", np.zeros((80, 80)))) is False
+
+
+def test_band_has_data_true_for_sparse_data(tmp_path) -> None:
+    """A small real-data patch (well above the 0.01% floor) is detected through the decimated probe."""
+    import numpy as np
+    from ingest_v1_s1_rtc import _band_has_data
+
+    arr = np.zeros((80, 80))
+    arr[16:32, 16:32] = 0.42  # 4% of the tile -> reliably sampled by the 8x probe
+    assert _band_has_data(_write_tif(tmp_path / "d.tif", arr)) is True
+
+
+def test_acquisition_has_data_falls_back_to_vh(tmp_path) -> None:
+    import numpy as np
+    from ingest_v1_s1_rtc import _acquisition_has_data
+
+    empty = _write_tif(tmp_path / "vv.tif", np.zeros((64, 64)))
+    data = np.zeros((64, 64))
+    data[8:40, 8:40] = 1.0
+    vh = _write_tif(tmp_path / "vh.tif", data)
+    assert _acquisition_has_data({"vv": empty, "vh": vh}) is True
+    assert _acquisition_has_data({"vv": empty, "vh": empty}) is False
+
+
+def test_ingest_all_skips_empty_acquisition() -> None:
+    """An all-nodata acquisition is dropped; a data-bearing one on another date is still ingested."""
+    acq_empty = {**_ACQ, "acq_stamp": "20230116t061234"}
+    acq_data = {**_ACQ, "acq_stamp": "20230117t061234"}
+    with (
+        patch(f"{_MOD}.discover_s1tiling_acquisitions", return_value=[acq_empty, acq_data]),
+        patch(f"{_MOD}._acquisition_has_data", side_effect=[False, True]),
+        patch(f"{_MOD}.ingest_s1tiling_acquisition", return_value=0) as mock_ing,
+        patch(f"{_MOD}.discover_s1tiling_conditions", return_value=[]),
+        patch(f"{_MOD}.consolidate_s1_store"),
+        patch(f"{_MOD}._patch_cf_grid_mapping"),
+    ):
+        result = ingest_all("/input", "/store.zarr", "ascending")
+    assert result == 0
+    assert mock_ing.call_count == 1
+    assert mock_ing.call_args.kwargs["vv_path"] == acq_data["vv"]
+
+
+def test_ingest_all_all_empty_creates_no_store() -> None:
+    """If every new acquisition is empty, nothing is ingested and no store is built (exit 0)."""
+    with (
+        patch(f"{_MOD}.discover_s1tiling_acquisitions", return_value=[_ACQ]),
+        patch(f"{_MOD}._acquisition_has_data", return_value=False),
+        patch(f"{_MOD}.ingest_s1tiling_acquisition") as mock_ing,
+        patch(f"{_MOD}.consolidate_s1_store") as mock_cons,
+    ):
+        result = ingest_all("/input", "/store.zarr", "ascending")
+    assert result == 0
+    mock_ing.assert_not_called()
+    mock_cons.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -328,6 +411,7 @@ def test_ingest_all_appends_only_new_acquisition(tmp_path) -> None:
     new_acq = {**_ACQ, "acq_stamp": "20230127t061230"}
     with (
         patch(f"{_MOD}.discover_s1tiling_acquisitions", return_value=[present_acq, new_acq]),
+        patch(f"{_MOD}._acquisition_has_data", return_value=True),
         patch(f"{_MOD}.ingest_s1tiling_acquisition", return_value=1) as mock_ing,
         patch(f"{_MOD}.discover_s1tiling_conditions", return_value=[]),
         patch(f"{_MOD}.consolidate_s1_store"),
