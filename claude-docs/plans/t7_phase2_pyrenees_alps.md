@@ -76,13 +76,18 @@ expected tiles; ocean→empty; every emitted tile resolvable in `DEM_Union.gpkg`
 - [x] generator tests green (10 passed); lists committed (Pyrenees 14, Alps 72) + map-reviewed.
       **⏸ Awaiting human sign-off before Task 3 starts any live processing.**
 
-### Task 3 — Pyrenees starter soak (CP-B-lite)  *(live, staging)* — M
-**Description:** Drive the Pyrenees list (~15 tiles) through the pipeline at N=3, **both orbits**, a recent
+### Task 3 — Pyrenees starter soak (CP-B-lite)  *(live, staging)* — M  ⏳ IN PROGRESS
+**Description:** Drive the Pyrenees list (14 tiles) through the pipeline at N=3, **both orbits**, a recent
 window — via controlled manual batches against the deployed templates (not the cron yet). Watch render
 success, per-tile DEM, throughput, CDSE throttle, dedup (re-run → 0 new).
+**Run (2026-06-16):** submitted `argo submit --from cronwf/eopf-explorer-s1rtc` as
+**`s1rtc-soak-pyrenees-vpmmr`** (`-n devseed-staging`) — `tiles`=14-tile Pyrenees list, `orbit_direction=both`,
+`lookback_days=14`, `trigger_image_version=sha-0ecdafc` (overridden: the pinned `v0.3.0-s1rtc` predates the
+`both` support #254; `sha-0ecdafc` carries both #254 + the #262 margin fix `MARGIN_LAT=3.0`, both verified by
+`docker run`). s1tiling template already pins `sha-0ecdafc`. Lands in `sentinel-1-grd-rtc-staging` (OQ-2).
 **Acceptance criteria:**
 - [ ] all land tiles render (or cleanly skip empty-data days); per-tile DEM self-provisions; `aggDEMfail=0`.
-- [ ] cubes + per-acq items appear for the tiles in `sentinel-1-grd-rtc-tests`; previews 200.
+- [ ] cubes + per-acq items appear for the tiles in `sentinel-1-grd-rtc-staging` (see OQ-2); previews 200.
 - [ ] a re-run processes **only new** products (no dup slices).
 **Verification:** monitor batches to terminal; STAC + titiler spot-check a few tiles; re-run shows 0 new.
 **Dependencies:** Task 2, deployed pipeline. **Files:** none (live). **Scope:** M (soak)
@@ -126,5 +131,9 @@ Stage in batches; monitor cost/throughput; confirm the margin fix holds across t
    (~15 tiles); review at Checkpoint B before committing to the ~80-tile Alps soak.
 3. **OQ-4 — window:** ✅ **recent 14-day window** (`--lookback-days 14`) — matches the real-time cron
    use case; exercises dedup vs fresh products.
-4. **OQ-2 — collection/env:** ✅ keep landing in **`sentinel-1-grd-rtc-tests`** for the soak; **move to a
-   staging collection/env afterwards** (once the region flow is proven).
+4. **OQ-2 — collection/env:** ✅ **`sentinel-1-grd-rtc-staging`** for the soak. *(Revised 2026-06-16: the
+   deployed cron's `submit-ingest` only threads `s3_geotiff_prefix`/`tile_id`/`orbit_direction` — the cube
+   `collection` is hardwired to the ingest template default `sentinel-1-grd-rtc-staging` and is NOT
+   overridable at `argo submit --from cronwf` time. Running the soak via the real cron is the faithful
+   production rehearsal, so the soak lands in `-staging`. Honoring `-tests` would mean bypassing the cron
+   or a deployment change — not worth it for a soak. Earlier `-tests` choice retired.)*
