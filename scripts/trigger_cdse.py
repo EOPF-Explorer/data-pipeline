@@ -25,12 +25,9 @@ import json
 import logging
 import sys
 from pathlib import Path
-from typing import TypedDict
 
-import mgrs
 from pystac_client import Client
 from register_per_acquisition import DEFAULT_ACQ_COLLECTION, acquisition_id
-from shapely.geometry import Polygon, shape
 
 # Reuse the watcher's tile geometry + CDSE query constants (single source of truth); query_cdse
 # itself is *not* reused -- it drops the datetime/platform this trigger needs (see query_products).
@@ -46,26 +43,6 @@ log = logging.getLogger(__name__)
 # Phase-6 platform allowlist (spec §2): S1A + S1C only. Allowlist (not an S1D denylist) so a future
 # S1B/S1E can't leak through until s1tiling support is confirmed.
 ENABLED_PLATFORMS = {"S1A", "S1C"}
-
-# Minimum fraction of the MGRS tile a product footprint must cover to be worth processing. The CDSE
-# query is a *bbox* intersection, so a slanted S1 swath that only grazes a tile corner still matches
-# (S1A orbit 30 covered 1.5% of 30TWN on 2026-06-06) and s1tiling then emits an all-nodata tile. A
-# tile an orbit genuinely images is ~fully covered (after same-pass frame mosaic); low partial
-# coverage means a *different* orbit covers it properly, so requiring 20% drops the empty-tile slivers
-# without dropping legitimate swath-edge tiles. Overridable via --min-coverage.
-MIN_TILE_COVERAGE = 0.20
-
-
-class Product(TypedDict):
-    """A CDSE product as the trigger carries it internally: query metadata + tile coverage. The
-    emitted record (``select_new_products``) is a *different*, all-string shape — ``coverage`` is an
-    internal gate signal, not part of the JSON the CronWorkflow consumes."""
-
-    product_id: str
-    platform: str
-    datetime: str
-    date: str
-    coverage: float
 
 
 def platform_of(product_id: str) -> str:
@@ -88,48 +65,15 @@ def _item_datetime(item: object) -> dt.datetime | None:
     return None
 
 
-def tile_polygon(tile_id: str) -> Polygon:
-    """The MGRS 100 km tile as a WGS84 polygon (true square corners, not the axis-aligned bbox).
-
-    Coverage must be measured against the real square: ``tile_bbox`` over-states the footprint (it is
-    the min/max over the four non-axis-aligned corners), which would mask the corner-graze it exists to
-    catch. Raises ``ValueError`` for a malformed/unknown tile id (mirrors ``tile_bbox``).
-    """
-    m = mgrs.MGRS()
-    corners = [
-        "0000000000",
-        "9999900000",
-        "9999999999",
-        "0000099999",
-    ]  # SW, SE, NE, NW (ring order)
-    try:
-        latlon = [m.toLatLon(f"{tile_id}{c}") for c in corners]
-    except mgrs.core.MGRSError as exc:
-        raise ValueError(f"invalid MGRS tile id: {tile_id!r}") from exc
-    return Polygon([(lon, lat) for lat, lon in latlon])
-
-
-def tile_coverage(geometry: dict | None, tile_poly: Polygon) -> float:
-    """Fraction (0..1) of ``tile_poly`` covered by a product footprint ``geometry`` (GeoJSON).
-
-    A swath grazing a tile corner scores near 0; a pass imaging the whole tile ~1. Missing geometry
-    can't be verified to cover anything, so it scores 0 (dropped by the gate).
-    """
-    if not geometry or tile_poly.area == 0:
-        return 0.0
-    return float(shape(geometry).intersection(tile_poly).area / tile_poly.area)
-
-
 def query_products(
-    stac_url: str, bbox: list[float], orbit_direction: str, lookback_days: int, tile_poly: Polygon
-) -> list[Product]:
+    stac_url: str, bbox: list[float], orbit_direction: str, lookback_days: int
+) -> list[dict[str, str]]:
     """Query CDSE for S1 GRD products over `bbox` in the last `lookback_days`.
 
-    Returns ``[{"product_id", "platform", "datetime"(ISO, to seconds), "date", "coverage"}, ...]``.
-    Mirrors ``watch_cdse_and_process.query_cdse``'s filter but keeps the per-second ``datetime``
-    (needed for the per-acquisition item-id dedup), the parsed ``platform``, and the ``coverage``
-    fraction of ``tile_poly`` (for the empty-tile gate — the CDSE bbox match alone admits corner
-    grazes). Items without a datetime are skipped (logged).
+    Returns ``[{"product_id", "platform", "datetime"(ISO, to seconds), "date"}, ...]``. Mirrors
+    ``watch_cdse_and_process.query_cdse``'s filter but keeps the per-second ``datetime`` (needed for
+    the per-acquisition item-id dedup) and the parsed ``platform``. Items without a datetime are
+    skipped (logged).
     """
     now = dt.datetime.now(dt.UTC)
     start = now - dt.timedelta(days=lookback_days)
@@ -139,7 +83,7 @@ def query_products(
         datetime=f"{start.isoformat()}/{now.isoformat()}",
         query={ORBIT_STATE_PROPERTY: {"eq": orbit_direction}},
     )
-    products: list[Product] = []
+    products: list[dict[str, str]] = []
     for item in search.items():
         when = _item_datetime(item)
         if when is None:
@@ -151,7 +95,6 @@ def query_products(
                 "platform": platform_of(item.id),
                 "datetime": when.isoformat(),
                 "date": when.date().isoformat(),
-                "coverage": tile_coverage(item.geometry, tile_poly),
             }
         )
     return products
@@ -173,7 +116,7 @@ def item_exists(stac_api_url: str, acq_collection: str, item_id: str) -> bool:
     return next(iter(search.items()), None) is not None
 
 
-def collapse_same_pass(products: list[Product]) -> list[Product]:
+def collapse_same_pass(products: list[dict[str, str]]) -> list[dict[str, str]]:
     """Collapse adjacent frames of one satellite pass to a single representative product.
 
     CDSE returns one product per *frame*; a tile is typically covered by 2+ adjacent frames of the same
@@ -185,7 +128,7 @@ def collapse_same_pass(products: list[Product]) -> list[Product]:
     # Keep one product per (date, platform); the dict preserves first-seen pass order, and within a
     # pass the earliest-datetime frame wins (the representative). No global re-sort — that would reorder
     # distinct acquisitions relative to the CDSE query order.
-    by_pass: dict[tuple[str, str], Product] = {}
+    by_pass: dict[tuple[str, str], dict[str, str]] = {}
     for product in products:
         key = (product["date"], product["platform"])
         current = by_pass.get(key)
@@ -194,31 +137,10 @@ def collapse_same_pass(products: list[Product]) -> list[Product]:
     return list(by_pass.values())
 
 
-def drop_low_coverage(products: list[Product], min_coverage: float) -> list[Product]:
-    """Drop products whose footprint covers less than ``min_coverage`` of the tile (logged).
-
-    Runs **before** ``collapse_same_pass`` so a corner-grazing frame can't become a pass's
-    representative; a pass whose every frame is sub-threshold is dropped entirely (no s1tiling run).
-    """
-    kept: list[Product] = []
-    for product in products:
-        coverage = product["coverage"]
-        if coverage >= min_coverage:
-            kept.append(product)
-        else:
-            log.info(
-                "skip %s: covers %.1f%% of tile (< %.0f%% min)",
-                product["product_id"],
-                coverage * 100,
-                min_coverage * 100,
-            )
-    return kept
-
-
 def select_new_products(args: argparse.Namespace) -> list[dict[str, str]]:
-    """Per tile: query CDSE, drop low-coverage grazes (logged), collapse same-pass frames, drop
-    non-{S1A,S1C} (logged) and already-registered acquisitions (logged), and return the new products
-    as ``{tile, orbit, product_id, datetime, date, platform, date_start, date_end}``."""
+    """Per tile: query CDSE, collapse same-pass frames, drop non-{S1A,S1C} (logged) and already-registered
+    acquisitions (logged), and return the new products as ``{tile, orbit, product_id, datetime, date,
+    platform, date_start, date_end}``."""
     tiles = [t.strip() for t in args.tiles.split(",") if t.strip()]
     # `both` discovers ascending + descending passes (asc+desc AOI); each is queried separately so
     # same-pass collapse never merges across directions, and each product carries its own orbit.
@@ -228,13 +150,9 @@ def select_new_products(args: argparse.Namespace) -> list[dict[str, str]]:
     new_products: list[dict[str, str]] = []
     for tile in tiles:
         bbox = tile_bbox(tile)
-        poly = tile_polygon(tile)
         for orbit in orbits:
             products = collapse_same_pass(
-                drop_low_coverage(
-                    query_products(CDSE_STAC_URL, bbox, orbit, args.lookback_days, poly),
-                    args.min_coverage,
-                )
+                query_products(CDSE_STAC_URL, bbox, orbit, args.lookback_days)
             )
             for product in products:
                 platform = product["platform"]
@@ -272,12 +190,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="single direction, or 'both' to discover ascending + descending passes (asc+desc AOI)",
     )  # fmt: skip
     parser.add_argument("--lookback-days", required=True, type=int, help="CDSE query window (days)")
-    parser.add_argument(
-        "--min-coverage",
-        type=float,
-        default=MIN_TILE_COVERAGE,
-        help=f"min fraction of the tile a footprint must cover (default: {MIN_TILE_COVERAGE})",
-    )
     parser.add_argument(
         "--stac-api-url", required=True, help="EOPF target STAC API (per-acquisition dedup)"
     )

@@ -800,7 +800,6 @@ dependencies = [
     { name = "pystac-client" },
     { name = "requests" },
     { name = "s3fs" },
-    { name = "shapely" },
     { name = "tenacity" },
     { name = "xarray" },
     { name = "zarr" },
@@ -821,6 +820,7 @@ notebooks = [
     { name = "notebook" },
     { name = "pandas" },
     { name = "python-dotenv" },
+    { name = "shapely" },
 ]
 test = [
     { name = "pytest" },
@@ -841,7 +841,6 @@ requires-dist = [
     { name = "pystac-client", specifier = "==0.9.0" },
     { name = "requests", specifier = "==2.34.1" },
     { name = "s3fs", specifier = "==2026.4.0" },
-    { name = "shapely", specifier = "==2.1.2" },
     { name = "tenacity", specifier = "==9.1.4" },
     { name = "xarray", specifier = "==2026.4.0" },
     { name = "zarr", specifier = "==3.2.1" },
@@ -862,6 +861,7 @@ notebooks = [
     { name = "notebook", specifier = "==7.5.6" },
     { name = "pandas", specifier = "==3.0.3" },
     { name = "python-dotenv", specifier = "==1.2.2" },
+    { name = "shapely", specifier = "==2.1.2" },
 ]
 test = [
     { name = "pytest", specifier = "==9.0.3" },

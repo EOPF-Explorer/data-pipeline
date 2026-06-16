@@ -9,24 +9,19 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from shapely.geometry import box, mapping
 
 scripts_dir = Path(__file__).parent.parent.parent / "scripts"
 sys.path.insert(0, str(scripts_dir))
 
 from trigger_cdse import (  # noqa: E402
-    MIN_TILE_COVERAGE,
     build_parser,
     collapse_same_pass,
-    drop_low_coverage,
     expected_item_id,
     is_enabled_platform,
     item_exists,
     platform_of,
     query_products,
     select_new_products,
-    tile_coverage,
-    tile_polygon,
 )
 
 _MOD = "trigger_cdse"
@@ -66,17 +61,11 @@ def test_is_enabled_platform_rejects_others(platform: str) -> None:
 # --- query_products (T6.2) ------------------------------------------------------------------
 
 
-def _item(
-    item_id: str,
-    when: dt.datetime | None,
-    properties: dict | None = None,
-    geometry: dict | None = None,
-) -> MagicMock:
+def _item(item_id: str, when: dt.datetime | None, properties: dict | None = None) -> MagicMock:
     item = MagicMock()
     item.id = item_id
     item.datetime = when
     item.properties = properties or {}
-    item.geometry = geometry  # explicit: an unset MagicMock attr would break shape()
     return item
 
 
@@ -86,37 +75,35 @@ def _patched_client(items: list[MagicMock]) -> MagicMock:
     return client
 
 
-def _covering_geometry(tile_id: str) -> dict:
-    """A GeoJSON polygon that fully covers ``tile_id`` (the tile bbox grown 1° each way)."""
-    minx, miny, maxx, maxy = tile_polygon(tile_id).bounds
-    return mapping(box(minx - 1, miny - 1, maxx + 1, maxy + 1))
-
-
-def test_query_products_keeps_full_datetime_platform_and_coverage() -> None:
-    """Unlike query_cdse (date-only), the trigger keeps the per-second datetime, platform + coverage."""
-    full = _covering_geometry("31TCH")
+def test_query_products_keeps_full_datetime_and_platform() -> None:
+    """Unlike query_cdse (date-only), the trigger keeps the per-second datetime + parsed platform."""
     items = [
-        _item("S1A_IW_GRDH_A", dt.datetime(2026, 6, 7, 5, 52, 48, tzinfo=dt.UTC), geometry=full),
-        _item("S1D_IW_GRDH_B", dt.datetime(2026, 6, 7, 5, 53, 0, tzinfo=dt.UTC), geometry=full),
+        _item("S1A_IW_GRDH_A", dt.datetime(2026, 6, 7, 5, 52, 48, tzinfo=dt.UTC)),
+        _item("S1D_IW_GRDH_B", dt.datetime(2026, 6, 7, 5, 53, 0, tzinfo=dt.UTC)),
     ]
     with patch(f"{_MOD}.Client.open", return_value=_patched_client(items)):
-        products = query_products(
-            "https://cdse/stac", [0.5, 42.4, 1.8, 43.3], "descending", 7, tile_polygon("31TCH")
-        )
-    assert [(p["product_id"], p["platform"], p["datetime"], p["date"]) for p in products] == [
-        ("S1A_IW_GRDH_A", "S1A", "2026-06-07T05:52:48+00:00", "2026-06-07"),
-        ("S1D_IW_GRDH_B", "S1D", "2026-06-07T05:53:00+00:00", "2026-06-07"),
+        products = query_products("https://cdse/stac", [0.5, 42.4, 1.8, 43.3], "descending", 7)
+    assert products == [
+        {
+            "product_id": "S1A_IW_GRDH_A",
+            "platform": "S1A",
+            "datetime": "2026-06-07T05:52:48+00:00",
+            "date": "2026-06-07",
+        },
+        {
+            "product_id": "S1D_IW_GRDH_B",
+            "platform": "S1D",
+            "datetime": "2026-06-07T05:53:00+00:00",
+            "date": "2026-06-07",
+        },
     ]
-    assert all(p["coverage"] > 0.99 for p in products)
 
 
 def test_query_products_applies_orbit_and_collection_filter() -> None:
     """The CDSE search is scoped to sentinel-1-grd, the bbox, and the orbit-state filter."""
     client = _patched_client([])
     with patch(f"{_MOD}.Client.open", return_value=client):
-        query_products(
-            "https://cdse/stac", [0.5, 42.4, 1.8, 43.3], "descending", 7, tile_polygon("31TCH")
-        )
+        query_products("https://cdse/stac", [0.5, 42.4, 1.8, 43.3], "descending", 7)
     kwargs = client.search.call_args.kwargs
     assert kwargs["collections"] == ["sentinel-1-grd"]
     assert kwargs["bbox"] == [0.5, 42.4, 1.8, 43.3]
@@ -130,50 +117,8 @@ def test_query_products_skips_item_without_datetime() -> None:
         _item("S1A_bad", None, properties={}),
     ]
     with patch(f"{_MOD}.Client.open", return_value=_patched_client(items)):
-        products = query_products(
-            "https://cdse/stac", [0.5, 42.4, 1.8, 43.3], "descending", 7, tile_polygon("31TCH")
-        )
+        products = query_products("https://cdse/stac", [0.5, 42.4, 1.8, 43.3], "descending", 7)
     assert [p["product_id"] for p in products] == ["S1A_good"]
-
-
-# --- coverage gate (empty-tile fix) ---------------------------------------------------------
-
-
-def test_tile_coverage_full_when_footprint_covers_tile() -> None:
-    poly = tile_polygon("31TCH")
-    assert tile_coverage(_covering_geometry("31TCH"), poly) > 0.99
-
-
-def test_tile_coverage_near_zero_for_corner_graze() -> None:
-    """The 30TWN case: a swath clipping a tile corner scores far below the 20% gate."""
-    poly = tile_polygon("31TCH")
-    minx, miny, _maxx, _maxy = poly.bounds
-    sliver = mapping(box(minx - 1, miny - 1, minx + 0.02, miny + 0.02))
-    assert tile_coverage(sliver, poly) < 0.05
-
-
-def test_tile_coverage_zero_when_disjoint() -> None:
-    poly = tile_polygon("31TCH")
-    assert tile_coverage(mapping(box(100, 0, 101, 1)), poly) == 0.0
-
-
-def test_tile_coverage_zero_when_geometry_missing() -> None:
-    assert tile_coverage(None, tile_polygon("31TCH")) == 0.0
-
-
-def test_tile_polygon_rejects_bad_tile_id() -> None:
-    with pytest.raises(ValueError, match="invalid MGRS tile id"):
-        tile_polygon("NOPE")
-
-
-def test_drop_low_coverage_filters_below_threshold() -> None:
-    products = [
-        {"product_id": "keep", "coverage": 0.8},
-        {"product_id": "graze", "coverage": 0.015},
-        {"product_id": "edge", "coverage": 0.20},  # exactly at the gate is kept
-    ]
-    kept = drop_low_coverage(products, 0.20)
-    assert [p["product_id"] for p in kept] == ["keep", "edge"]
 
 
 # --- item-exists dedup (T6.3) ---------------------------------------------------------------
@@ -218,13 +163,12 @@ def _args(**overrides: object) -> object:
     return ns
 
 
-def _product(product_id: str, platform: str, when: str, coverage: float = 1.0) -> dict[str, str]:
+def _product(product_id: str, platform: str, when: str) -> dict[str, str]:
     return {
         "product_id": product_id,
         "platform": platform,
         "datetime": when,
         "date": when[:10],
-        "coverage": coverage,
     }
 
 
@@ -349,32 +293,6 @@ def test_select_carries_tile_and_orbit_per_record() -> None:
     assert new[0]["platform"] == "S1A"
 
 
-def test_select_drops_low_coverage_product() -> None:
-    """Regression (30TWN): a product that only grazes the tile (1.5% coverage) is NOT emitted, while a
-    full-coverage product on another date is. Fails on pre-gate code (both would be emitted)."""
-    products = [
-        _product("S1A_full", "S1A", "2026-06-07T05:52:48+00:00", coverage=1.0),
-        _product("S1A_graze", "S1A", "2026-06-06T17:55:31+00:00", coverage=0.015),
-    ]
-    with (
-        patch(f"{_MOD}.query_products", return_value=products),
-        patch(f"{_MOD}.item_exists", return_value=False),
-    ):
-        new = select_new_products(_args())
-    assert [p["product_id"] for p in new] == ["S1A_full"]
-
-
-def test_select_min_coverage_override_changes_gate() -> None:
-    """A higher --min-coverage drops a partially-covered product the default would keep."""
-    products = [_product("S1A_partial", "S1A", "2026-06-07T05:52:48+00:00", coverage=0.30)]
-    with (
-        patch(f"{_MOD}.query_products", return_value=products),
-        patch(f"{_MOD}.item_exists", return_value=False),
-    ):
-        assert select_new_products(_args(min_coverage=0.5)) == []  # 0.30 < 0.5 -> dropped
-        assert len(select_new_products(_args(min_coverage=0.2))) == 1  # 0.30 >= 0.2 -> kept
-
-
 def test_select_iterates_multiple_tiles() -> None:
     products = [_product("S1A_new", "S1A", "2026-06-07T05:52:48+00:00")]
     with (
@@ -401,7 +319,7 @@ def test_parser_orbit_direction_accepts_both() -> None:
 def test_select_orbit_both_queries_both_directions_and_tags_each() -> None:
     """`both` runs discover for ascending AND descending, tagging each product with its own orbit."""
 
-    def _q(_stac: str, _bbox: list, orbit: str, _lookback: int, _poly: object) -> list[dict]:
+    def _q(_stac: str, _bbox: list, orbit: str, _lookback: int) -> list[dict]:
         # asc/desc passes image a tile at different times -> distinct datetimes
         when = "2026-06-07T05:52:48+00:00" if orbit == "descending" else "2026-06-07T17:10:00+00:00"
         return [_product(f"S1A_{orbit}", "S1A", when)]
@@ -445,15 +363,6 @@ def test_select_queries_cdse_catalogue_not_target_stac() -> None:
 def test_parser_acq_collection_defaults_to_tests() -> None:
     # env-split: code default is the test env; the cron passes --acq-collection …-staging
     assert _args().acq_collection == "sentinel-1-grd-rtc-acquisitions-tests"
-
-
-def test_parser_min_coverage_defaults_and_overrides() -> None:
-    assert _args().min_coverage == MIN_TILE_COVERAGE
-    ns = build_parser().parse_args(
-        ["--tiles", "31TCH", "--orbit-direction", "ascending",
-         "--lookback-days", "7", "--stac-api-url", "https://eopf/stac", "--min-coverage", "0.5"]
-    )  # fmt: skip
-    assert ns.min_coverage == 0.5
 
 
 def test_main_writes_json_array_to_output(tmp_path: Path) -> None:
