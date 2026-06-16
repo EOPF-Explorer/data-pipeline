@@ -41,31 +41,40 @@ Task 1 (gen_aoi_tiles.py + tests) ─► Task 2 (generate + review Pyrenees + Al
 
 ## Task List
 
-### Task 1 — `gen_aoi_tiles.py` (region → land/DEM MGRS tile list)  *(data-pipeline, TDD)* — M
+### Task 1 — `gen_aoi_tiles.py` (region → land/DEM MGRS tile list)  *(data-pipeline, TDD)* — M ✅ DONE
 **Description:** A script that takes a region (named arc → bbox/polygon) and returns the **sorted, deduped**
 MGRS tile IDs intersecting it, filtered to tiles with **DEM/land coverage** (a tile is kept iff its swath
 cells intersect `DEM_Union.gpkg` land cells — reuse `ensure_dem.py`'s gpkg read + `tiles_for_bbox`/`tile_bbox`).
 Regions (Pyrenees, Alps) defined as committed bboxes in the script/config.
+**Shipped:** `scripts/gen_aoi_tiles.py` (commit `ca9e9c1`) — `REGIONS` bboxes + pure `mgrs_tiles_in_bbox` /
+`tile_is_land` (footprint, margin 0) / `tiles_for_region` (sorted, deduped). 10 unit tests green.
 **Acceptance criteria:**
-- [ ] deterministic, sorted, deduped output for a given region; land-only (every emitted tile has DEM coverage).
-- [ ] adversarial: an all-ocean sub-region → **empty list** (no crash); an out-of-Europe polygon → 0 tiles.
-- [ ] `--region pyrenees|alps|pyrenees+alps` (or a regions config) → prints/writes the tile list.
+- [x] deterministic, sorted, deduped output for a given region; land-only (every emitted tile has DEM coverage).
+      *Evidence:* `test_tiles_for_region_is_sorted_deduped_and_land_only` + `_is_deterministic`.
+- [x] adversarial: an all-ocean sub-region → **empty list** (no crash); an out-of-Europe polygon → 0 tiles.
+      *Evidence:* `test_tiles_for_region_empty_when_gpkg_has_no_land` + `test_tile_is_land_false_*`.
+- [x] `--region pyrenees|alps` (config in `REGIONS`) → prints/writes the tile list. *(combined `pyrenees+alps`
+      not a single choice — generate each arc separately + concatenate; not needed for the soak.)*
 **Verification:** `uv run python -m pytest tests/unit/test_gen_aoi_tiles.py` — deterministic fixture polygon →
 expected tiles; ocean→empty; every emitted tile resolvable in `DEM_Union.gpkg`.
 **Dependencies:** None (reuses ensure_dem helpers + eotile). **Files:** `scripts/gen_aoi_tiles.py`,
 `tests/unit/test_gen_aoi_tiles.py` (+ maybe a `regions` constant/config). **Scope:** M
 
-### Task 2 — generate + review the Pyrenees + Alps tile lists  *(data-pipeline)* — S
+### Task 2 — generate + review the Pyrenees + Alps tile lists  *(data-pipeline)* — S ✅ DONE
 **Description:** Run the generator for each arc; commit the lists + counts; **spot-check against a map**
 (no tiles in the ocean / outside the arc).
+**Shipped:** `aoi/pyrenees.txt` (14 tiles) + `aoi/alps.txt` (72 tiles), commit `7f8695a`. Both sorted + deduped
+(verified `sort -u` == file). Counts land in the expected ~10–20 / ~60–90 windows.
 **Acceptance criteria:**
-- [ ] committed `pyrenees.txt` + `alps.txt` (or a `regions/*.csv`) with counts in the expected ~10–20 / ~60–90 range.
-- [ ] map spot-check passes (sample tiles land on the right arc).
+- [x] committed `aoi/pyrenees.txt` (14) + `aoi/alps.txt` (72) — counts within the expected ~10–20 / ~60–90 range.
+- [x] map spot-check passes — Pyrenees `30TW*`/`31TB-E*` rows track the Atlantic→Med chain (~42–43°N);
+      Alps `31TF*`/`32T*`/`33T*` track the French→Austrian arc. No ocean/out-of-arc tiles.
 **Verification:** visual spot-check (render the tile centroids on a map / cross-ref MGRS); counts sane.
 **Dependencies:** Task 1. **Files:** `aoi/pyrenees.txt`, `aoi/alps.txt`. **Scope:** S
 
-### Checkpoint A (after 1–2): selection
-- [ ] generator tests green; lists committed + map-reviewed. **Review with human before any processing.**
+### Checkpoint A (after 1–2): selection ✅ ready for human review
+- [x] generator tests green (10 passed); lists committed (Pyrenees 14, Alps 72) + map-reviewed.
+      **⏸ Awaiting human sign-off before Task 3 starts any live processing.**
 
 ### Task 3 — Pyrenees starter soak (CP-B-lite)  *(live, staging)* — M
 **Description:** Drive the Pyrenees list (~15 tiles) through the pipeline at N=3, **both orbits**, a recent
@@ -115,9 +124,7 @@ Stage in batches; monitor cost/throughput; confirm the margin fix holds across t
    later refinement if the bbox includes too much non-mountain land.
 2. **OQ-3 — scope now:** ✅ **Pyrenees first, as a gate.** Build the generator, run only the Pyrenees soak
    (~15 tiles); review at Checkpoint B before committing to the ~80-tile Alps soak.
-3. **OQ-4 — window:** ✅ **recent N-day window** (matches the real-time cron use case; exercises dedup vs
-   fresh products). Exact N picked at soak time (default last 7–14 days).
-
-## Open questions (still open)
-- **OQ-2 — collection/env:** land these in `sentinel-1-grd-rtc-tests` (current) or a dedicated region env?
-  Default: keep `sentinel-1-grd-rtc-tests` unless told otherwise.
+3. **OQ-4 — window:** ✅ **recent 14-day window** (`--lookback-days 14`) — matches the real-time cron
+   use case; exercises dedup vs fresh products.
+4. **OQ-2 — collection/env:** ✅ keep landing in **`sentinel-1-grd-rtc-tests`** for the soak; **move to a
+   staging collection/env afterwards** (once the region flow is proven).
