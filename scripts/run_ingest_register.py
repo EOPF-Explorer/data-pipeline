@@ -150,6 +150,8 @@ def run_pipeline(
         orbit_direction,
         "--collection",
         acquisitions_collection,
+        "--cube-collection",
+        collection,
         "--stac-api-url",
         stac_api_url,
         "--raster-api-url",

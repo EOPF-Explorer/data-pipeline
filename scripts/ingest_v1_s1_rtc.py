@@ -19,8 +19,10 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import rasterio
 import zarr
 from eopf_geozarr.conversion.s1_ingest import (
+    _rasterio_env,  # reused: identical S3 GDAL-env handling as the acquisition reads
     consolidate_s1_store,
     discover_s1tiling_acquisitions,
     discover_s1tiling_conditions,
@@ -30,6 +32,10 @@ from eopf_geozarr.conversion.s1_ingest import (
 from pyproj import CRS
 
 log = logging.getLogger(__name__)
+
+# Subsample factor for the has-data probe (see _band_has_data). 8x keeps the probe read cheap
+# (~1/64 of a band) while reliably catching any data blob down to ~0.01% of the tile.
+_DATA_PROBE_DECIMATION = 8
 
 
 def _patch_cf_grid_mapping(store_path: str, orbit_direction: str) -> list[str]:
@@ -113,6 +119,27 @@ def new_acquisitions(acquisitions: list[dict], present_ns: set[int]) -> list[dic
     return [a for a in acquisitions if acq_time_ns(a["acq_stamp"]) not in present_ns]
 
 
+def _band_has_data(path: str | Path) -> bool:
+    """True if a GeoTIFF band holds any valid (finite, non-zero) pixel.
+
+    RTC gamma-naught backscatter is positive power; its nodata reads as 0 / NaN, so a slice with no
+    real data over the tile is entirely zero/NaN. Probed on a decimated read (factor
+    ``_DATA_PROBE_DECIMATION``) — a full re-read here would double the (large) per-band I/O that
+    ``ingest_s1tiling_acquisition`` already does, and decimation still catches any blob down to
+    ~0.01% of the tile (the floor we care about). ``_rasterio_env`` supplies the S3 GDAL env.
+    """
+    with _rasterio_env(path), rasterio.open(str(path)) as src:
+        h = max(1, src.height // _DATA_PROBE_DECIMATION)
+        w = max(1, src.width // _DATA_PROBE_DECIMATION)
+        data = src.read(1, out_shape=(h, w))
+    return bool(np.any(np.isfinite(data) & (data != 0)))
+
+
+def _acquisition_has_data(acq: dict) -> bool:
+    """True if either polarisation of an acquisition carries real data (vv probed first, then vh)."""
+    return _band_has_data(acq["vv"]) or _band_has_data(acq["vh"])
+
+
 def ingest_all(s3_geotiff_prefix: str, store_path: str, orbit_direction: str) -> int:
     """Run the 5-step S1 ingest pipeline, appending new acquisitions to the per-tile cube.
 
@@ -140,6 +167,20 @@ def ingest_all(s3_geotiff_prefix: str, store_path: str, orbit_direction: str) ->
             "All %d discovered acquisition(s) already in the cube; nothing to ingest",
             len(acquisitions),
         )
+        return 0
+
+    # Step 1c -- skip new acquisitions whose produced GeoTIFFs hold no valid data (all-nodata).
+    # Footprint coverage at the trigger is an unreliable proxy (swath nodata edges over-state it,
+    # multi-frame mosaic under-states it); the produced pixels are the truth. This keeps any slice
+    # with real data — even a tiny sliver — and drops only 0%-data slices, so they never become an
+    # empty cube time step (and a dark preview). A tile whose only new scenes are empty creates no store.
+    with_data = [acq for acq in acquisitions_to_ingest if _acquisition_has_data(acq)]
+    empty = len(acquisitions_to_ingest) - len(with_data)
+    if empty:
+        log.info("Skipping %d new acquisition(s) with no valid data (all-nodata)", empty)
+    acquisitions_to_ingest = with_data
+    if not acquisitions_to_ingest:
+        log.info("No new acquisition(s) with valid data; nothing to ingest")
         return 0
 
     # Step 2 -- ingest each new acquisition (abort on first error)

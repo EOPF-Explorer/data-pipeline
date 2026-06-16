@@ -3,13 +3,17 @@
 The cube (`s1-rtc-{tile}.zarr`, collection `sentinel-1-grd-rtc-staging`) holds all acquisitions on a
 `time` axis. This emits **one queryable STAC item per `time` slice** (`s1-rtc-{tile}-{datetime}`,
 single `datetime`) into the env-split per-acquisition collection (`--collection`, default `…-tests`,
-the cron passes `…-staging`), each pointing at the cube
-via asset href and carrying `sel=time` preview links (tilejson + xyz) and a thumbnail asset, so a
-per-acquisition item renders in the Explorer like the cube item — scoped to its own slice.
+the cron passes `…-staging`). **No data duplication**: the item's render links point at the **cube's**
+TiTiler endpoint (`--cube-collection`/items/`s1-rtc-{tile}`) with `sel=time={physical index}` — TiTiler
+reconstructs the shared cube store and `isel`s this acquisition's slice. (The deployed titiler-eopf
+supports `sel` by integer index, not the `nearest::{datetime}` syntax; switch to the datetime form when
+it does — more reorder-proof.) The index is the slice's **physical** position in the cube's `time`
+axis; it's re-derived every run, so it stays correct as the cube appends.
 
 Usage:
     uv run python scripts/register_per_acquisition.py --store <cube-uri> --tile-id 31TCH \
-      --orbit-direction descending --stac-api-url <url> --raster-api-url <url>
+      --orbit-direction descending --collection <acq-coll> --cube-collection <cube-coll> \
+      --stac-api-url <url> --raster-api-url <url>
 """
 
 from __future__ import annotations
@@ -17,8 +21,9 @@ from __future__ import annotations
 import argparse
 import copy
 import datetime as dt
-import urllib.parse
 from typing import Any
+
+from register_v1 import _render_to_query
 
 # Per-acquisition collections are env-split like the cube collections (…-tests/-staging/-prod). The
 # code default targets the test env (local/CP-A runs); the Argo cron passes --collection …-staging.
@@ -30,59 +35,61 @@ def acquisition_id(tile_id: str, when: dt.datetime) -> str:
     return f"s1-rtc-{tile_id}-{when.strftime('%Y%m%dt%H%M%S')}"
 
 
-def _sel_time_query(when: dt.datetime, orbit: str, var: str) -> str:
-    """Shared TiTiler query selecting this acquisition's slice (``sel=time``) + the VH render params."""
-    sel = urllib.parse.quote(f"time=nearest::{when.isoformat()}", safe="")
-    variables = urllib.parse.quote(f"/{orbit}:{var}", safe="")
-    return f"variables={variables}&bidx=1&rescale=0%2C219&assets={var}&sel={sel}"
+def _cube_item_base(raster_api: str, cube_collection: str, tile_id: str) -> str:
+    """TiTiler endpoint of the shared **cube** item (``s1-rtc-{tile}`` in the cube collection).
+
+    The per-acquisition item's render links point here — not at the acquisition item's own endpoint —
+    because TiTiler reconstructs the store path from ``{collection}/{item_id}`` and only the cube path
+    exists. ``sel=time={index}`` then selects this acquisition's slice.
+    """
+    return f"{raster_api}/collections/{cube_collection}/items/s1-rtc-{tile_id}"
 
 
-def _item_raster_base(raster_api: str, collection: str, item_id: str) -> str:
-    return f"{raster_api}/collections/{collection}/items/{item_id}"
-
-
-def sel_time_tilejson(
-    raster_api: str,
-    collection: str,
-    item_id: str,
-    when: dt.datetime,
-    orbit: str,
-    *,
-    var: str = "vh",
+def render_tilejson(
+    raster_api: str, cube_collection: str, tile_id: str, render: dict, index: int
 ) -> str:
-    """TiTiler tilejson URL that renders this acquisition's slice of the cube (``sel=time``)."""
-    base = _item_raster_base(raster_api, collection, item_id)
-    return f"{base}/WebMercatorQuad/tilejson.json?{_sel_time_query(when, orbit, var)}"
+    """tilejson URL for the cube's slice ``index`` (composite render from ``renders.rgb`` + ``sel``)."""
+    base = _cube_item_base(raster_api, cube_collection, tile_id)
+    return f"{base}/WebMercatorQuad/tilejson.json?{_render_to_query(render, include_tilesize=True)}&sel=time={index}"
 
 
-def sel_time_xyz(
-    raster_api: str,
-    collection: str,
-    item_id: str,
-    when: dt.datetime,
-    orbit: str,
-    *,
-    var: str = "vh",
+def render_xyz(
+    raster_api: str, cube_collection: str, tile_id: str, render: dict, index: int
 ) -> str:
-    """TiTiler XYZ tile template (``{z}/{x}/{y}.png``) for this acquisition's slice — the map preview,
-    mirroring the cube item's ``xyz`` link (register_v0.add_visualization_links)."""
-    base = _item_raster_base(raster_api, collection, item_id)
-    return f"{base}/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png?{_sel_time_query(when, orbit, var)}"
+    """XYZ tile template (``{z}/{x}/{y}.png``) for the cube's slice ``index`` — the map preview."""
+    base = _cube_item_base(raster_api, cube_collection, tile_id)
+    q = _render_to_query(render, include_tilesize=True)
+    return f"{base}/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png?{q}&sel=time={index}"
 
 
-def sel_time_thumbnail(
-    raster_api: str,
-    collection: str,
-    item_id: str,
-    when: dt.datetime,
-    orbit: str,
-    *,
-    var: str = "vh",
+def render_thumbnail(
+    raster_api: str, cube_collection: str, tile_id: str, render: dict, index: int
 ) -> str:
-    """TiTiler ``preview`` PNG for this acquisition's slice — the static thumbnail, mirroring the cube
-    item's thumbnail asset (register_v0.add_thumbnail_asset)."""
-    base = _item_raster_base(raster_api, collection, item_id)
-    return f"{base}/preview?format=png&{_sel_time_query(when, orbit, var)}"
+    """``preview`` PNG for the cube's slice ``index`` — the static thumbnail."""
+    base = _cube_item_base(raster_api, cube_collection, tile_id)
+    return f"{base}/preview?format=png&{_render_to_query(render, include_tilesize=False)}&sel=time={index}"
+
+
+def _reorient_item_to_orbit(item: dict, orbit: str) -> None:
+    """Fix the base item's orbit-dependent **STAC metadata** to this acquisition's run ``orbit``.
+
+    ``eopf_geozarr.build_s1_rtc_stac_item`` derives ``sat:orbit_state``, the ``renders.rgb`` orbit, and
+    the ``vv``/``vh`` asset groups from the cube's *preferred* orbit (it prefers ascending), so a
+    both-orbits cube mislabels a descending acquisition as ascending. Correct them so the queryable
+    metadata matches the run orbit. The ``vv``/``vh`` hrefs stay on the **cube** store — only the orbit
+    group changes. (Render-param tuning beyond the orbit is deferred to titiler-eopf#108.)
+    """
+    props = item["properties"]
+    props["sat:orbit_state"] = orbit
+    rgb = props.get("renders", {}).get("rgb")
+    if rgb is not None:
+        vv, vh = f"/{orbit}:vv", f"/{orbit}:vh"
+        rgb["expression"] = f"{vv};{vh};({vv})/({vh})"
+    cube_href = item.get("assets", {}).get("zarr-store", {}).get("href")
+    if cube_href:
+        for pol in ("vv", "vh"):
+            if pol in item["assets"]:
+                item["assets"][pol]["href"] = f"{cube_href}/{orbit}"
 
 
 def per_acquisition_items(
@@ -92,16 +99,20 @@ def per_acquisition_items(
     tile_id: str,
     orbit: str,
     collection: str,
+    cube_collection: str,
     raster_api: str,
 ) -> list[dict]:
     """Clone the per-tile ``base_item`` into one item per `time` slice.
 
-    Each clone keeps the base geometry/assets/SAR+proj properties, sets a single ``datetime`` (drops
-    the start/end range), targets ``collection``, and carries ``sel=time`` preview links + a thumbnail
-    asset (tilejson + xyz + thumbnail) so it renders like the cube item. ``base_item`` is not mutated.
+    ``times_ns`` must be in the cube's **physical** order — each item's ``sel=time={index}`` uses its
+    position here. Each clone keeps the base geometry/assets/SAR+proj properties, sets a single
+    ``datetime`` (drops the start/end range), targets the acquisition ``collection``, reorients the
+    orbit-dependent metadata to the run ``orbit``, and gets tilejson/xyz/thumbnail links pointing at the
+    **cube** endpoint (``cube_collection``/``s1-rtc-{tile}``) with the composite render + ``sel=time``.
+    ``base_item`` is not mutated.
     """
     items: list[dict] = []
-    for t_ns in times_ns:
+    for index, t_ns in enumerate(times_ns):
         when = dt.datetime.fromtimestamp(t_ns / 1e9, tz=dt.UTC)
         item_id = acquisition_id(tile_id, when)
         item = copy.deepcopy(base_item)
@@ -114,25 +125,29 @@ def per_acquisition_items(
         }
         props["datetime"] = when.isoformat()
         item["properties"] = props
+        _reorient_item_to_orbit(item, orbit)
+        render = item["properties"]["renders"][
+            "rgb"
+        ]  # reoriented composite (build always emits it)
         item["links"] = [
             {
                 "rel": "tilejson",
                 "type": "application/json",
-                "href": sel_time_tilejson(raster_api, collection, item_id, when, orbit),
-                "title": "tilejson (sel=time)",
+                "href": render_tilejson(raster_api, cube_collection, tile_id, render, index),
+                "title": "tilejson",
             },
             {
                 "rel": "xyz",
                 "type": "image/png",
-                "href": sel_time_xyz(raster_api, collection, item_id, when, orbit),
-                "title": "Sentinel-1 GRD VH (sel=time)",
+                "href": render_xyz(raster_api, cube_collection, tile_id, render, index),
+                "title": "Sentinel-1 GRD RGB composite",
             },
         ]
         item.setdefault("assets", {})["thumbnail"] = {
-            "href": sel_time_thumbnail(raster_api, collection, item_id, when, orbit),
+            "href": render_thumbnail(raster_api, cube_collection, tile_id, render, index),
             "type": "image/png",
             "roles": ["thumbnail"],
-            "title": "Sentinel-1 GRD VH Preview (sel=time)",
+            "title": "Sentinel-1 GRD RGB composite preview",
         }
         items.append(item)
     return items
@@ -152,12 +167,14 @@ def _open_root(store: str) -> Any:
 
 
 def read_times_ns(store: str, orbit: str) -> list[int]:
-    """Sorted `time` values (ns since epoch) from the cube's native (r10m) level."""
+    """`time` values (ns since epoch) from the cube's native (r10m) level, in **physical** (stored)
+    order — NOT sorted. The list position is the slice's index, which the render links bake as
+    ``sel=time={index}``; it must match TiTiler's `isel` over the same stored array."""
     import numpy as np
 
     root = _open_root(store)
     times = np.asarray(root[orbit]["r10m"]["time"]).astype("datetime64[ns]").astype("int64")
-    return sorted(int(t) for t in times)
+    return [int(t) for t in times]
 
 
 def _upsert_items(stac_api_url: str, collection: str, items: list[dict]) -> None:
@@ -181,7 +198,14 @@ def main() -> None:
     ap.add_argument("--store", required=True, help="per-tile cube URI (https/s3)")
     ap.add_argument("--tile-id", required=True)
     ap.add_argument("--orbit-direction", required=True, choices=["descending", "ascending"])
-    ap.add_argument("--collection", default=DEFAULT_ACQ_COLLECTION)
+    ap.add_argument(
+        "--collection", default=DEFAULT_ACQ_COLLECTION, help="per-acquisition collection"
+    )
+    ap.add_argument(
+        "--cube-collection",
+        required=True,
+        help="cube collection (its TiTiler endpoint serves the shared store the render links point at)",
+    )
     ap.add_argument("--stac-api-url", required=True)
     ap.add_argument("--raster-api-url", required=True)
     args = ap.parse_args()
@@ -203,6 +227,7 @@ def main() -> None:
         tile_id=args.tile_id,
         orbit=args.orbit_direction,
         collection=args.collection,
+        cube_collection=args.cube_collection,
         raster_api=args.raster_api_url,
     )
     _upsert_items(args.stac_api_url, args.collection, items)
