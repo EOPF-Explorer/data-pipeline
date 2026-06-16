@@ -76,7 +76,7 @@ expected tiles; ocean→empty; every emitted tile resolvable in `DEM_Union.gpkg`
 - [x] generator tests green (10 passed); lists committed (Pyrenees 14, Alps 72) + map-reviewed.
       **⏸ Awaiting human sign-off before Task 3 starts any live processing.**
 
-### Task 3 — Pyrenees starter soak (CP-B-lite)  *(live, staging)* — M  ⏳ IN PROGRESS
+### Task 3 — Pyrenees starter soak (CP-B-lite)  *(live, staging)* — M  ⏸ STOPPED EARLY (partial)
 **Description:** Drive the Pyrenees list (14 tiles) through the pipeline at N=3, **both orbits**, a recent
 window — via controlled manual batches against the deployed templates (not the cron yet). Watch render
 success, per-tile DEM, throughput, CDSE throttle, dedup (re-run → 0 new).
@@ -85,15 +85,27 @@ success, per-tile DEM, throughput, CDSE throttle, dedup (re-run → 0 new).
 `lookback_days=14`, `trigger_image_version=sha-0ecdafc` (overridden: the pinned `v0.3.0-s1rtc` predates the
 `both` support #254; `sha-0ecdafc` carries both #254 + the #262 margin fix `MARGIN_LAT=3.0`, both verified by
 `docker run`). s1tiling template already pins `sha-0ecdafc`. Lands in `sentinel-1-grd-rtc-staging` (OQ-2).
-**Acceptance criteria:**
-- [ ] all land tiles render (or cleanly skip empty-data days); per-tile DEM self-provisions; `aggDEMfail=0`.
-- [ ] cubes + per-acq items appear for the tiles in `sentinel-1-grd-rtc-staging` (see OQ-2); previews 200.
-- [ ] a re-run processes **only new** products (no dup slices).
-**Verification:** monitor batches to terminal; STAC + titiler spot-check a few tiles; re-run shows 0 new.
-**Dependencies:** Task 2, deployed pipeline. **Files:** none (live). **Scope:** M (soak)
+**Outcome — STOPPED EARLY by user (2026-06-16):** discover found **66 products** (14 tiles × both orbits ×
+14 d); at N=3 (~2.3 products/h) the full soak ETA was ~23 h, so the user chose to stop after the in-flight
+batch ingested. Suspended → drained the running ingests → terminated. **13 products fully ingested, 0
+failures**, landing in **5 distinct tile cubes** in `sentinel-1-grd-rtc-staging`: `30TWM`, `30TWN`, `30TXM`,
+`31TCH`, `31TEH` (multiple per-acquisition products append per tile cube). All 5 cubes' titiler thumbnails →
+**HTTP 200** (real PNGs, 17 KB–1.16 MB). The remaining ~52 products + the rest of the 14 tiles (incl.
+**`31TCG`, the #262 margin-fix tile — NOT reached**) were not processed. Dedup re-run **not** exercised.
+**Acceptance criteria (partial — proven only on the 5 completed cubes):**
+- [x] completed tiles render; per-tile DEM self-provisioned; `aggDEMfail=0` on the 13 ingested products.
+      *(Not all 14 land tiles — 31TCG/31TDG/31TBG/31TBH/31TDH/31TEG/31TCG-row not reached.)*
+- [x] cubes + per-acq items in `sentinel-1-grd-rtc-staging` for 5 tiles (see OQ-2); previews **200** (5/5).
+- [ ] a re-run processes **only new** products (no dup slices). — **not run** (stopped early).
+**Verification:** STAC list = 5 cubes; titiler `/preview` 200 for all 5; `argo terminate` clean (13 ingests
+Succeeded). **Dependencies:** Task 2, deployed pipeline. **Files:** none (live). **Scope:** M (soak)
+**To finish the gate:** re-run the soak to completion (all 14 tiles incl. 31TCG) and do the dedup re-run,
+or accept the partial proof and move to Task 4/5 with the cron driving full coverage over time.
 
-### Checkpoint B (after 3): starter region proven
-- [ ] Pyrenees soak clean (renders, dedup, cost within budget). **Review before scaling to the Alps.**
+### Checkpoint B (after 3): starter region proven  ⚠ PARTIAL
+- [~] Pyrenees soak **partially** proven: 13 products / 5 tile cubes rendered + ingested + previews 200, 0
+      failures — the region flow works end-to-end via the real cron. **Not** clean-complete: full 14-tile
+      coverage (incl. 31TCG), cost-over-full-run, and the dedup re-run are still owed. **Review before Alps.**
 
 ### Task 4 — Alps expansion soak  *(live, staging)* — L
 **Description:** Same as Task 3 for the Alps list (~60–90 tiles) — the larger soak (~1–2 days at N=3).
