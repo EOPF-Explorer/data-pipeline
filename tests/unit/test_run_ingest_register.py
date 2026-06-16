@@ -90,10 +90,12 @@ def test_registers_both_cube_item_and_per_acquisition_items() -> None:
     assert any(
         s.endswith("register_per_acquisition.py") for s in scripts_called
     ), "per-acquisition items not registered"
-    # per-acq register (3rd call) targets the acquisitions collection with the same s3 store
+    # per-acq register (3rd call) targets the acquisitions collection with the same s3 store, and
+    # passes the cube collection so the render links point at the cube's TiTiler endpoint (sel=index)
     peracq_cmd = mock_run.call_args_list[2][0][0]
     assert "sentinel-1-grd-rtc-acquisitions" in peracq_cmd
     assert _S3_CUBE in peracq_cmd
+    assert peracq_cmd[peracq_cmd.index("--cube-collection") + 1] == _KWARGS["collection"]
 
 
 def test_per_acquisition_skipped_when_cube_register_fails() -> None:
