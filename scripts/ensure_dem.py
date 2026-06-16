@@ -72,7 +72,11 @@ def read_gpkg_product10(gpkg_path: Path) -> set[str]:
         )
         if table is None:
             raise ValueError(f"no table with a Product10 column in {gpkg_path}")
-        return {r[0] for r in con.execute(f"SELECT Product10 FROM {table}") if r[0]}  # noqa: S608
+        # `table` is an identifier discovered from the gpkg's own `sqlite_master` schema (it is one of
+        # `tables` above, the one carrying a Product10 column) — never user input. SQLite cannot
+        # parameterise an identifier, so interpolation is required and safe for this trusted static
+        # gpkg; flagged as a false positive by ruff S608 / bandit B608.
+        return {r[0] for r in con.execute(f"SELECT Product10 FROM {table}") if r[0]}  # noqa: S608  # nosec B608
     finally:
         con.close()
 
