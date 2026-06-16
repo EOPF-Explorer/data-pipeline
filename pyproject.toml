@@ -37,6 +37,7 @@ dependencies = [
     "eopf-geozarr @ git+https://github.com/EOPF-Explorer/data-model.git@f43d567623eca71aa933147428bdca176db98557",
     "requests==2.34.1",
     "mgrs==1.5.4",
+    "shapely==2.1.2",  # trigger_cdse footprint↔tile coverage gate (runtime, not just notebooks)
 ]
 
 [tool.uv]
@@ -65,7 +66,6 @@ notebooks = [
     "ipykernel==7.2.0",
     "pandas==3.0.3",
     "matplotlib==3.10.9",
-    "shapely==2.1.2",
     "python-dotenv==1.2.2",
 ]
 
@@ -179,5 +179,5 @@ module = "notebooks.*"
 ignore_errors = true
 
 [[tool.mypy.overrides]]
-module = ["boto3.*", "botocore.*", "mgrs.*", "eopf_geozarr.*", "rioxarray.*", "eotile.*", "s3fs.*"]
+module = ["boto3.*", "botocore.*", "mgrs.*", "eopf_geozarr.*", "rioxarray.*", "eotile.*", "s3fs.*", "shapely.*"]
 ignore_missing_imports = true
