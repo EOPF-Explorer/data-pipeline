@@ -4,11 +4,14 @@ The cube (`s1-rtc-{tile}.zarr`, collection `sentinel-1-grd-rtc-staging`) holds a
 `time` axis. This emits **one queryable STAC item per `time` slice** (`s1-rtc-{tile}-{datetime}`,
 single `datetime`) into the env-split per-acquisition collection (`--collection`, default `…-tests`,
 the cron passes `…-staging`). **No data duplication**: the item's render links point at the **cube's**
-TiTiler endpoint (`--cube-collection`/items/`s1-rtc-{tile}`) with `sel=time={physical index}` — TiTiler
-reconstructs the shared cube store and `isel`s this acquisition's slice. (The deployed titiler-eopf
-supports `sel` by integer index, not the `nearest::{datetime}` syntax; switch to the datetime form when
-it does — more reorder-proof.) The index is the slice's **physical** position in the cube's `time`
-axis; it's re-derived every run, so it stays correct as the cube appends.
+TiTiler endpoint (`--cube-collection`/items/`s1-rtc-{tile}`) with `sel=time={datetime}` — TiTiler
+reconstructs the shared cube store and selects this acquisition's slice by its **datetime** (exact
+label `.sel`, since the cube's `time` is CF-encoded; see data-model #192). Selecting by datetime instead
+of a positional index makes each item self-contained: it renders the correct slice regardless of the
+cube's physical slice order (which can go non-monotonic on out-of-order appends), so no slice ever needs
+re-registering when the cube grows. Registration is therefore **incremental** — only acquisitions not
+already in the collection are written (use `--reregister-all` for the one-time migration of items that
+still carry the old index-based `sel`).
 
 Usage:
     uv run python scripts/register_per_acquisition.py --store <cube-uri> --tile-id 31TCH \
@@ -21,6 +24,7 @@ from __future__ import annotations
 import argparse
 import copy
 import datetime as dt
+import urllib.parse
 from typing import Any
 
 from register_v1 import _render_to_query
@@ -40,34 +44,43 @@ def _cube_item_base(raster_api: str, cube_collection: str, tile_id: str) -> str:
 
     The per-acquisition item's render links point here — not at the acquisition item's own endpoint —
     because TiTiler reconstructs the store path from ``{collection}/{item_id}`` and only the cube path
-    exists. ``sel=time={index}`` then selects this acquisition's slice.
+    exists. ``sel=time={datetime}`` then selects this acquisition's slice.
     """
     return f"{raster_api}/collections/{cube_collection}/items/s1-rtc-{tile_id}"
 
 
+def _sel_time(sel_time: str) -> str:
+    """The ``sel`` query fragment selecting a slice by datetime (exact label ``.sel`` in TiTiler).
+
+    The ``:`` in the timestamp is percent-encoded so the href is unambiguous; TiTiler decodes it before
+    parsing ``time=<value>``.
+    """
+    return f"sel=time={urllib.parse.quote(sel_time, safe='')}"
+
+
 def render_tilejson(
-    raster_api: str, cube_collection: str, tile_id: str, render: dict, index: int
+    raster_api: str, cube_collection: str, tile_id: str, render: dict, sel_time: str
 ) -> str:
-    """tilejson URL for the cube's slice ``index`` (composite render from ``renders.rgb`` + ``sel``)."""
+    """tilejson URL for the cube slice at ``sel_time`` (composite render from ``renders.rgb`` + ``sel``)."""
     base = _cube_item_base(raster_api, cube_collection, tile_id)
-    return f"{base}/WebMercatorQuad/tilejson.json?{_render_to_query(render, include_tilesize=True)}&sel=time={index}"
+    return f"{base}/WebMercatorQuad/tilejson.json?{_render_to_query(render, include_tilesize=True)}&{_sel_time(sel_time)}"
 
 
 def render_xyz(
-    raster_api: str, cube_collection: str, tile_id: str, render: dict, index: int
+    raster_api: str, cube_collection: str, tile_id: str, render: dict, sel_time: str
 ) -> str:
-    """XYZ tile template (``{z}/{x}/{y}.png``) for the cube's slice ``index`` — the map preview."""
+    """XYZ tile template (``{z}/{x}/{y}.png``) for the cube slice at ``sel_time`` — the map preview."""
     base = _cube_item_base(raster_api, cube_collection, tile_id)
     q = _render_to_query(render, include_tilesize=True)
-    return f"{base}/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png?{q}&sel=time={index}"
+    return f"{base}/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png?{q}&{_sel_time(sel_time)}"
 
 
 def render_thumbnail(
-    raster_api: str, cube_collection: str, tile_id: str, render: dict, index: int
+    raster_api: str, cube_collection: str, tile_id: str, render: dict, sel_time: str
 ) -> str:
-    """``preview`` PNG for the cube's slice ``index`` — the static thumbnail."""
+    """``preview`` PNG for the cube slice at ``sel_time`` — the static thumbnail."""
     base = _cube_item_base(raster_api, cube_collection, tile_id)
-    return f"{base}/preview?format=png&{_render_to_query(render, include_tilesize=False)}&sel=time={index}"
+    return f"{base}/preview?format=png&{_render_to_query(render, include_tilesize=False)}&{_sel_time(sel_time)}"
 
 
 def _reorient_item_to_orbit(item: dict, orbit: str) -> None:
@@ -104,17 +117,20 @@ def per_acquisition_items(
 ) -> list[dict]:
     """Clone the per-tile ``base_item`` into one item per `time` slice.
 
-    ``times_ns`` must be in the cube's **physical** order — each item's ``sel=time={index}`` uses its
-    position here. Each clone keeps the base geometry/assets/SAR+proj properties, sets a single
-    ``datetime`` (drops the start/end range), targets the acquisition ``collection``, reorients the
-    orbit-dependent metadata to the run ``orbit``, and gets tilejson/xyz/thumbnail links pointing at the
-    **cube** endpoint (``cube_collection``/``s1-rtc-{tile}``) with the composite render + ``sel=time``.
-    ``base_item`` is not mutated.
+    Each clone keeps the base geometry/assets/SAR+proj properties, sets a single ``datetime`` (drops the
+    start/end range), targets the acquisition ``collection``, reorients the orbit-dependent metadata to
+    the run ``orbit``, and gets tilejson/xyz/thumbnail links pointing at the **cube** endpoint
+    (``cube_collection``/``s1-rtc-{tile}``) with the composite render + ``sel=time={datetime}``. The
+    render selects the slice by its **datetime**, so the order of ``times_ns`` is irrelevant — each item
+    is correct on its own regardless of the cube's physical slice order. ``base_item`` is not mutated.
     """
     items: list[dict] = []
-    for index, t_ns in enumerate(times_ns):
+    for t_ns in times_ns:
         when = dt.datetime.fromtimestamp(t_ns / 1e9, tz=dt.UTC)
         item_id = acquisition_id(tile_id, when)
+        # Exact value TiTiler matches against the CF-decoded datetime64 `time` index (second precision,
+        # the resolution S1 acquisition stamps carry); same instant as `when` / the item id.
+        sel_time = when.strftime("%Y-%m-%dT%H:%M:%S")
         item = copy.deepcopy(base_item)
         item["id"] = item_id
         item["collection"] = collection
@@ -133,18 +149,18 @@ def per_acquisition_items(
             {
                 "rel": "tilejson",
                 "type": "application/json",
-                "href": render_tilejson(raster_api, cube_collection, tile_id, render, index),
+                "href": render_tilejson(raster_api, cube_collection, tile_id, render, sel_time),
                 "title": "tilejson",
             },
             {
                 "rel": "xyz",
                 "type": "image/png",
-                "href": render_xyz(raster_api, cube_collection, tile_id, render, index),
+                "href": render_xyz(raster_api, cube_collection, tile_id, render, sel_time),
                 "title": "Sentinel-1 GRD RGB composite",
             },
         ]
         item.setdefault("assets", {})["thumbnail"] = {
-            "href": render_thumbnail(raster_api, cube_collection, tile_id, render, index),
+            "href": render_thumbnail(raster_api, cube_collection, tile_id, render, sel_time),
             "type": "image/png",
             "roles": ["thumbnail"],
             "title": "Sentinel-1 GRD RGB composite preview",
@@ -167,14 +183,26 @@ def _open_root(store: str) -> Any:
 
 
 def read_times_ns(store: str, orbit: str) -> list[int]:
-    """`time` values (ns since epoch) from the cube's native (r10m) level, in **physical** (stored)
-    order — NOT sorted. The list position is the slice's index, which the render links bake as
-    ``sel=time={index}``; it must match TiTiler's `isel` over the same stored array."""
+    """`time` values (ns since epoch) from the cube's native (r10m) level. Each value becomes one
+    per-acquisition item whose render selects by that datetime, so the order is irrelevant (no longer a
+    positional index). ``r10m/time`` stays a raw int64 array even after the CF attrs are added, so this
+    read is unchanged."""
     import numpy as np
 
     root = _open_root(store)
     times = np.asarray(root[orbit]["r10m"]["time"]).astype("datetime64[ns]").astype("int64")
     return [int(t) for t in times]
+
+
+def existing_item_ids(stac_api_url: str, collection: str, candidate_ids: list[str]) -> set[str]:
+    """Of ``candidate_ids``, those already present in ``collection`` (one STAC search, not N lookups)."""
+    from pystac_client import Client
+
+    if not candidate_ids:
+        return set()
+    client = Client.open(stac_api_url)
+    search = client.search(collections=[collection], ids=candidate_ids, limit=len(candidate_ids))
+    return {it["id"] for it in search.items_as_dicts()}
 
 
 def _upsert_items(stac_api_url: str, collection: str, items: list[dict]) -> None:
@@ -208,6 +236,12 @@ def main() -> None:
     )
     ap.add_argument("--stac-api-url", required=True)
     ap.add_argument("--raster-api-url", required=True)
+    ap.add_argument(
+        "--reregister-all",
+        action="store_true",
+        help="re-upsert every slice's item (one-time migration of items still on the old index sel); "
+        "default registers only acquisitions not already in the collection",
+    )
     args = ap.parse_args()
 
     from eopf_geozarr.stac.s1_rtc import build_s1_rtc_stac_item
@@ -230,6 +264,14 @@ def main() -> None:
         cube_collection=args.cube_collection,
         raster_api=args.raster_api_url,
     )
+    # Incremental by default: each item's datetime `sel` is correct for the life of the cube, so only
+    # acquisitions not yet in the collection need writing (scales as the cube grows). --reregister-all
+    # forces all (migrating items that still carry the old index-based sel).
+    if not args.reregister_all:
+        existing = existing_item_ids(args.stac_api_url, args.collection, [i["id"] for i in items])
+        skipped = len(items)
+        items = [i for i in items if i["id"] not in existing]
+        print(f"{skipped - len(items)} already registered, {len(items)} new")
     _upsert_items(args.stac_api_url, args.collection, items)
     print(f"registered {len(items)} per-acquisition item(s) in {args.collection}")
 

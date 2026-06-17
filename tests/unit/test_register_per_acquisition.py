@@ -1,8 +1,9 @@
 """Unit tests for scripts/register_per_acquisition.py — per-acquisition STAC items (plan T5).
 
 One STAC item per cube `time` slice, id `s1-rtc-{tile}-{datetime}`. Render links point at the **cube**
-TiTiler endpoint with the composite render + `sel=time={physical index}` (no data duplication; the
-acquisition item is a reference into the shared cube). Pure builders tested here; store I/O + upsert in
+TiTiler endpoint with the composite render + `sel=time={datetime}` (no data duplication; the acquisition
+item is a reference into the shared cube). Selecting by datetime (not a positional index) makes each item
+correct regardless of the cube's physical slice order. Pure builders tested here; store I/O + upsert in
 main().
 """
 
@@ -103,13 +104,17 @@ def test_single_datetime_no_range_and_targets_acq_collection():
     assert props["sar:product_type"] == "GRD"
 
 
-# --- render links point at the CUBE endpoint + sel=index (no duplication) -----
+# --- render links point at the CUBE endpoint + sel=datetime (no duplication) --
+
+# _T_EARLY = 2026-06-05T06:09:07 → the encoded sel fragment TiTiler matches by datetime
+_SEL_EARLY = "sel=time=2026-06-05T06%3A09%3A07"
+_SEL_LATER = "sel=time=2026-06-07T05%3A52%3A48"
 
 
-def test_render_links_point_at_cube_endpoint_with_sel_index():
+def test_render_links_point_at_cube_endpoint_with_sel_datetime():
     """tilejson + xyz target the CUBE item's endpoint (not the acquisition item's), carry the
-    composite render (reoriented to the run orbit) + rescale 0,0.1 + sel=time={index}; no store path,
-    no hardcoded 0,219, no nearest:: syntax."""
+    composite render (reoriented to the run orbit) + rescale 0,0.1 + sel=time={datetime} (colons
+    percent-encoded); no store path, no hardcoded 0,219, no integer index, no nearest:: syntax."""
     links = _links(_items()[0])
     for rel in ("tilejson", "xyz"):
         href = links[rel]
@@ -117,27 +122,28 @@ def test_render_links_point_at_cube_endpoint_with_sel_index():
         assert ACQ not in href  # the render link never points at the acquisitions collection
         assert "expression=" in href
         assert "rescale=0.0%2C0.1" in href and "rescale=0%2C219" not in href
-        assert "sel=time=0" in href and "nearest" not in href
+        assert _SEL_EARLY in href and "nearest" not in href
+        assert "sel=time=0" not in href  # not a positional index
         assert "/descending:vv" in urllib.parse.unquote(href)  # reoriented to the run orbit
     assert "tilejson.json" in links["tilejson"] and "{z}/{x}/{y}.png" in links["xyz"]
 
 
-def test_thumbnail_asset_points_at_cube_endpoint_with_sel_index():
+def test_thumbnail_asset_points_at_cube_endpoint_with_sel_datetime():
     thumb = _items()[0]["assets"]["thumbnail"]
     assert thumb["type"] == "image/png" and thumb["roles"] == ["thumbnail"]
     href = thumb["href"]
     assert f"/collections/{CUBE}/items/s1-rtc-31TCH/preview" in href
-    assert "expression=" in href and "rescale=0.0%2C0.1" in href and "sel=time=0" in href
+    assert "expression=" in href and "rescale=0.0%2C0.1" in href and _SEL_EARLY in href
 
 
-def test_sel_index_follows_physical_order_not_chronology():
-    """sel=time={index} uses the slice's PHYSICAL position in the passed list (cube append order),
-    NOT chronological order — index 0 maps to the first-appended slice even if it's later in time."""
+def test_sel_follows_datetime_not_physical_position():
+    """Each item's sel is ITS OWN datetime, independent of position in the passed (physical) list —
+    so a non-monotonic cube still renders every slice correctly without reordering or re-registering."""
     items = _items(times=[_T_LATER, _T_EARLY])  # physical/append order (later appended first)
     assert items[0]["properties"]["datetime"] == "2026-06-07T05:52:48+00:00"
-    assert "sel=time=0" in _links(items[0])["tilejson"]
+    assert _SEL_LATER in _links(items[0])["tilejson"]  # index 0 but its OWN (later) datetime
     assert items[1]["properties"]["datetime"] == "2026-06-05T06:09:07+00:00"
-    assert "sel=time=1" in _links(items[1])["tilejson"]
+    assert _SEL_EARLY in _links(items[1])["tilejson"]  # index 1 but its OWN (earlier) datetime
 
 
 # --- orbit metadata reconciliation -------------------------------------------
