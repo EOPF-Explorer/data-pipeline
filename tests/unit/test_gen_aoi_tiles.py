@@ -1,10 +1,11 @@
 """Unit tests for scripts/gen_aoi_tiles.py — region bbox → land/DEM MGRS tile list (T7 Phase 2).
 
 Covers the pure selection core: a region bbox is sampled on a grid into MGRS 100 km tile ids, then
-filtered to tiles that actually overlap DEM/land cells (a tile with no `Product10` cell in the
-`eotile` `DEM_Union.gpkg` is ocean / out-of-coverage and is dropped). The gpkg read + anon staging
-live in ensure_dem (integration); here the gpkg land set is injected so the tests are hermetic and
-need neither eotile nor network.
+filtered to tiles that are both a real S2 granule (in the `eotile` S2 tiling grid) and actually
+overlap DEM/land cells (a tile with no `Product10` cell in the `eotile` `DEM_Union.gpkg` is ocean /
+out-of-coverage and is dropped). The gpkg reads + anon staging live in ensure_dem / read_s2_tile_ids
+(integration); here the land set and the valid-S2 set are injected so the tests are hermetic and need
+neither eotile nor network.
 """
 
 import sys
@@ -81,8 +82,10 @@ def test_tile_is_land_uses_tile_footprint_not_swath_margin():
 def test_tiles_for_region_is_sorted_deduped_and_land_only():
     m = _mod()
     s = _stem()
+    bbox = [0.3, 42.4, 1.6, 43.2]
     gpkg = {s(42, 0), s(42, 1), s(43, 0), s(43, 1)}  # land around 31T B/C H
-    tiles = m.tiles_for_region([0.3, 42.4, 1.6, 43.2], gpkg)
+    valid = m.mgrs_tiles_in_bbox(bbox)  # S2 filter a no-op here: isolate the land assertion
+    tiles = m.tiles_for_region(bbox, gpkg, valid)
     assert tiles == sorted(tiles)
     assert len(tiles) == len(set(tiles))
     assert "31TCH" in tiles
@@ -92,7 +95,27 @@ def test_tiles_for_region_is_sorted_deduped_and_land_only():
 def test_tiles_for_region_empty_when_gpkg_has_no_land():
     """An all-ocean region (no covered cell in the gpkg) yields an empty list, not a crash."""
     m = _mod()
-    assert m.tiles_for_region([0.3, 42.4, 1.6, 43.2], set()) == []
+    bbox = [0.3, 42.4, 1.6, 43.2]
+    assert m.tiles_for_region(bbox, set(), m.mgrs_tiles_in_bbox(bbox)) == []
+
+
+def test_tiles_for_region_drops_tile_absent_from_s2_grid():
+    """A math-valid square that is land but NOT a defined S2 granule must be dropped (the 31TBH bug).
+
+    31TBH straddles the UTM zone-30/31 boundary; its ground is served by 30TYN, so the S2 grid omits
+    it. It IS land (the DEM filter keeps it), so only the S2-grid gate can remove it — otherwise
+    s1tiling exits 73 on the non-existent tile and fails the whole run.
+    """
+    m = _mod()
+    s = _stem()
+    bbox = [0.3, 42.4, 1.6, 43.2]
+    gpkg = {s(42, 0), s(42, 1), s(43, 0), s(43, 1)}  # land under both 31TBH and 31TCH
+    assert "31TBH" in m.mgrs_tiles_in_bbox(bbox)  # the sampler still produces it
+    assert m.tile_is_land("31TBH", gpkg)  # ... and it passes the land filter
+    valid = m.mgrs_tiles_in_bbox(bbox) - {"31TBH"}  # but the S2 grid omits it
+    tiles = m.tiles_for_region(bbox, gpkg, valid)
+    assert "31TBH" not in tiles
+    assert "31TCH" in tiles
 
 
 def test_tiles_for_region_is_deterministic():
@@ -100,7 +123,8 @@ def test_tiles_for_region_is_deterministic():
     s = _stem()
     gpkg = {s(42, 1), s(43, 1)}
     bbox = [0.3, 42.4, 1.6, 43.2]
-    assert m.tiles_for_region(bbox, gpkg) == m.tiles_for_region(bbox, gpkg)
+    valid = m.mgrs_tiles_in_bbox(bbox)
+    assert m.tiles_for_region(bbox, gpkg, valid) == m.tiles_for_region(bbox, gpkg, valid)
 
 
 # --- REGIONS (committed bboxes) ---------------------------------------------
