@@ -85,6 +85,7 @@ def test_upserts_item_with_correct_id() -> None:
     with (
         patch(f"{_MOD}.build_s1_rtc_stac_item", return_value=_make_item()),
         patch(f"{_MOD}.warm_thumbnail_cache"),
+        patch(f"{_MOD}.slice_coverages", return_value=[]),  # no store read in these unit tests
         patch(f"{_MOD}.upsert_item") as mock_upsert,
         patch(f"{_MOD}.Client"),
     ):
@@ -111,6 +112,7 @@ def test_visualization_links_called() -> None:
     with (
         patch(f"{_MOD}.build_s1_rtc_stac_item", return_value=_make_item()),
         patch(f"{_MOD}.warm_thumbnail_cache"),
+        patch(f"{_MOD}.slice_coverages", return_value=[]),  # no store read in these unit tests
         patch(f"{_MOD}.upsert_item"),
         patch(f"{_MOD}.Client"),
         patch(f"{_MOD}.add_visualization_links") as mock_viz,
@@ -191,6 +193,7 @@ def test_matched_env_store_allowed() -> None:
     with (
         patch(f"{_MOD}.build_s1_rtc_stac_item", return_value=_make_item()),
         patch(f"{_MOD}.warm_thumbnail_cache"),
+        patch(f"{_MOD}.slice_coverages", return_value=[]),  # no store read in these unit tests
         patch(f"{_MOD}.upsert_item") as mock_upsert,
         patch(f"{_MOD}.Client"),
     ):
@@ -204,3 +207,76 @@ def test_matched_env_store_allowed() -> None:
 
     assert result == 0
     mock_upsert.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Best-recent preview slice: _pin_preview_to_best_recent (reorient + sel_time)
+# ---------------------------------------------------------------------------
+
+import datetime as _dt  # noqa: E402
+
+import numpy as _np  # noqa: E402
+import zarr as _zarr  # noqa: E402
+from register_v1_s1_rtc import _pin_preview_to_best_recent  # noqa: E402
+
+
+def _ns(day: int) -> int:
+    return int(_dt.datetime(2026, 6, day, 6, 0, tzinfo=_dt.UTC).timestamp() * 1e9)
+
+
+def _write_orbit(root, orbit, masks, days):
+    lvl = root.create_group(orbit).create_group("r720m")
+    n, (y, x) = len(masks), masks[0].shape
+    lvl.create_array("border_mask", shape=(n, y, x), dtype="uint8", fill_value=0)[:] = _np.stack(
+        masks
+    )
+    lvl.create_array("time", shape=(n,), dtype="int64")[:] = _np.array(
+        [_ns(d) for d in days], "int64"
+    )
+
+
+def _cube_item(store_href: str) -> pystac.Item:
+    """A cube item as build_s1_rtc_stac_item emits: renders.rgb on the preferred (ascending) orbit."""
+    expr = "/ascending:vv;/ascending:vh;(/ascending:vv)/(/ascending:vh)"
+    item = pystac.Item(
+        id="s1-rtc-31TCH",
+        geometry=None,
+        bbox=None,
+        datetime=_dt.datetime(2026, 6, 7, tzinfo=_dt.UTC),
+        properties={
+            "sat:orbit_state": "ascending",
+            "renders": {"rgb": {"expression": expr, "rescale": [[0.0, 0.1]], "bidx": [1]}},
+        },
+    )
+    item.add_asset("zarr-store", pystac.Asset(href=store_href, roles=["data"]))
+    for pol in ("vv", "vh"):
+        item.add_asset(pol, pystac.Asset(href=f"{store_href}/ascending", roles=["data"]))
+    return item
+
+
+def test_pin_reorients_to_descending_best_recent(tmp_path) -> None:
+    """Best-recent = most recent >80%: descending day-7 (0.81) beats ascending day-4 (1.0)."""
+    store = str(tmp_path / "cube.zarr")
+    root = _zarr.open_group(store, mode="w", zarr_format=3)
+    full = _np.ones((4, 4))  # 1.0
+    over80 = _np.zeros((4, 4))
+    over80.flat[:13] = 1  # 13/16 = 0.8125 (> 0.80)
+    _write_orbit(root, "ascending", [full], [4])
+    _write_orbit(root, "descending", [over80], [7])
+
+    new_item, sel_time = _pin_preview_to_best_recent(_cube_item(store), store)
+
+    assert sel_time == "2026-06-07T06:00:00"
+    assert new_item.properties["sat:orbit_state"] == "descending"
+    assert "/descending:vv" in new_item.properties["renders"]["rgb"]["expression"]
+    assert "/ascending" not in new_item.properties["renders"]["rgb"]["expression"]
+
+
+def test_pin_noop_on_empty_cube(tmp_path) -> None:
+    """No slices -> item unchanged, sel_time None (preview falls back to default)."""
+    store = str(tmp_path / "empty.zarr")
+    _zarr.open_group(store, mode="w", zarr_format=3)  # no orbit groups
+    item = _cube_item(store)
+    new_item, sel_time = _pin_preview_to_best_recent(item, store)
+    assert sel_time is None
+    assert new_item.properties["sat:orbit_state"] == "ascending"  # untouched
