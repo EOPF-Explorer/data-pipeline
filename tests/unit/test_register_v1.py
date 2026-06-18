@@ -250,3 +250,31 @@ class TestVisualizationFromRenders:
         add_thumbnail_asset(item, RASTER_BASE, "sentinel-1-grd-rtc-staging")
         # legacy VH grayscale path still applies when no render config present
         assert "thumbnail" in item.assets
+
+
+_SEL = "2026-06-07T05:52:48"
+_SEL_Q = "sel=time=2026-06-07T05%3A52%3A48"  # colons percent-encoded
+
+
+class TestSelTimePinsSlice:
+    """The cube preview pins the best-recent slice via ``sel=time={datetime}`` on its links + thumbnail."""
+
+    def test_thumbnail_asset_carries_sel_time(self):
+        item = _real_item(_s1_rgb_renders())
+        add_thumbnail_asset(item, RASTER_BASE, "sentinel-1-grd-rtc-staging", sel_time=_SEL)
+        assert _SEL_Q in item.assets["thumbnail"].href
+
+    def test_xyz_and_tilejson_carry_sel_time(self):
+        item = _real_item(_s1_rgb_renders())
+        add_visualization_links(item, RASTER_BASE, "sentinel-1-grd-rtc-staging", sel_time=_SEL)
+        for rel in ("xyz", "tilejson"):
+            link = next(link for link in item.links if link.rel == rel)
+            assert _SEL_Q in link.href
+
+    def test_no_sel_time_by_default_backcompat(self):
+        # sel_time omitted (S2 + any other caller) => links/thumbnail unchanged, no sel.
+        item = _real_item(_s1_rgb_renders())
+        add_visualization_links(item, RASTER_BASE, "sentinel-1-grd-rtc-staging")
+        add_thumbnail_asset(item, RASTER_BASE, "sentinel-1-grd-rtc-staging")
+        hrefs = [link.href for link in item.links] + [item.assets["thumbnail"].href]
+        assert all("sel=time" not in h for h in hrefs)

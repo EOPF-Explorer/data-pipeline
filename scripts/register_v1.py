@@ -212,15 +212,33 @@ def _render_to_query(render: dict, *, include_tilesize: bool) -> str:
     return "&".join(parts)
 
 
-def add_visualization_links(item: Item, raster_base: str, collection_id: str) -> None:
-    """Add viewer/xyz/tilejson links for TiTiler visualization."""
+def _with_sel_time(query: str, sel_time: str | None) -> str:
+    """Append the ``sel=time={datetime}`` selector to a titiler query when a slice is pinned.
+
+    Used for the S1 RTC cube item so its preview defaults to a chosen acquisition; ``None`` leaves the
+    query unchanged (other callers/missions render the default slice). Colons are percent-encoded so the
+    href is unambiguous (TiTiler decodes before parsing ``time=<value>``).
+    """
+    if not sel_time:
+        return query
+    return f"{query}&sel=time={urllib.parse.quote(sel_time, safe='')}"
+
+
+def add_visualization_links(
+    item: Item, raster_base: str, collection_id: str, sel_time: str | None = None
+) -> None:
+    """Add viewer/xyz/tilejson links for TiTiler visualization.
+
+    ``sel_time`` (when set) pins the render to one cube slice by datetime — the cube item passes the
+    best-recent acquisition so its preview isn't the default (oldest) slice.
+    """
     base_url = f"{raster_base}/collections/{collection_id}/items/{item.id}"
     item.add_link(Link("viewer", f"{base_url}/viewer", "text/html", f"Viewer for {item.id}"))
 
     # Prefer a producer-declared render config (STAC render extension) over the
     # hardcoded mission defaults below.
     if render := _select_render(item):
-        query = _render_to_query(render, include_tilesize=True)
+        query = _with_sel_time(_render_to_query(render, include_tilesize=True), sel_time)
         title = render.get("title") or f"Visualization for {item.id}"
         item.add_link(
             Link(
@@ -302,8 +320,14 @@ def _add_explorer_link(item: Item, collection_id: str) -> None:
     )
 
 
-def add_thumbnail_asset(item: Item, raster_base: str, collection_id: str) -> None:
-    """Add thumbnail preview asset for STAC browsers."""
+def add_thumbnail_asset(
+    item: Item, raster_base: str, collection_id: str, sel_time: str | None = None
+) -> None:
+    """Add thumbnail preview asset for STAC browsers.
+
+    ``sel_time`` (when set) pins the preview image to one cube slice by datetime — the actual image the
+    STAC browser shows, so the cube item passes the best-recent acquisition.
+    """
     if "thumbnail" in item.assets:
         return
 
@@ -312,7 +336,9 @@ def add_thumbnail_asset(item: Item, raster_base: str, collection_id: str) -> Non
 
     # Prefer a producer-declared render config (STAC render extension).
     if render := _select_render(item):
-        params = "format=png&" + _render_to_query(render, include_tilesize=False)
+        params = _with_sel_time(
+            "format=png&" + _render_to_query(render, include_tilesize=False), sel_time
+        )
         title = render.get("title") or f"{item.id} preview"
         item.add_asset(
             "thumbnail",
