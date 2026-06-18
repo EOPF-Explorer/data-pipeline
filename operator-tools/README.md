@@ -185,6 +185,13 @@ uv run operator-tools/manage_collections.py create stac/sentinel-2-l2a.json --up
 
 # Batch create collections
 uv run operator-tools/manage_collections.py batch-create stac/
+
+# Align the S1 RTC collections with the new asset model + live items, then apply.
+# build_s1_rtc_collections.py derives item_assets from eopf_geozarr.stac.s1_rtc (drift-proof) and the
+# extent from the live items (re-run after new ingests to keep it aligned); writes the stac/{id}.json templates.
+uv run operator-tools/build_s1_rtc_collections.py
+uv run operator-tools/manage_collections.py create --update stac/sentinel-1-grd-rtc-staging.json
+uv run operator-tools/manage_collections.py create --update stac/sentinel-1-grd-rtc-acquisitions-staging.json
 ```
 
 **Key Features:**

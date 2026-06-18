@@ -1,16 +1,8 @@
 {
-  "id": "sentinel-1-grd-rtc-staging",
+  "id": "sentinel-1-grd-rtc-acquisitions-staging",
   "type": "Collection",
-  "links": [
-    {
-      "rel": "license",
-      "href": "https://sentinel.esa.int/documents/247904/690755/Sentinel_Data_Legal_Notice",
-      "type": "application/pdf",
-      "title": "Legal notice on the use of Copernicus Sentinel Data and Service Information"
-    }
-  ],
-  "title": "Sentinel-1 GRD RTC [V1 staging]",
-  "assets": {},
+  "links": [],
+  "title": "Sentinel-1 GRD RTC — per-acquisition slices [V1 staging]",
   "extent": {
     "spatial": {
       "bbox": [
@@ -32,6 +24,26 @@
     }
   },
   "license": "proprietary",
+  "renders": {
+    "rgb": {
+      "title": "VV, VH, VV/VH composite",
+      "assets": [
+        "gamma0-rtc-backscatter-asc",
+        "gamma0-rtc-backscatter-desc"
+      ],
+      "expression": "/ascending:vv;/ascending:vh;(/ascending:vv)/(/ascending:vh)",
+      "rescale": [
+        [
+          0.0,
+          0.2
+        ]
+      ],
+      "bidx": [
+        1
+      ],
+      "tilesize": 256
+    }
+  },
   "keywords": [
     "Copernicus",
     "Sentinel",
@@ -72,20 +84,22 @@
     "gsd": [
       10
     ],
+    "platform": [
+      "sentinel-1a",
+      "sentinel-1c"
+    ],
     "instruments": [
       "c-sar"
     ],
     "constellation": [
       "sentinel-1"
     ],
-    "sar:instrument_mode": [
-      "IW"
+    "sat:orbit_state": [
+      "ascending",
+      "descending"
     ],
-    "sar:frequency_band": [
-      "C"
-    ],
-    "sar:center_frequency": [
-      5.405
+    "sar:product_type": [
+      "GRD"
     ],
     "sar:polarizations": [
       [
@@ -93,15 +107,17 @@
         "VH"
       ]
     ],
-    "sar:product_type": [
-      "GRD"
+    "sar:frequency_band": [
+      "C"
     ],
-    "sat:orbit_state": [
-      "ascending",
-      "descending"
+    "sar:instrument_mode": [
+      "IW"
+    ],
+    "sar:center_frequency": [
+      5.405
     ]
   },
-  "description": "Sentinel-1 Ground Range Detected (GRD) data processed to Radiometric Terrain Correction (RTC), stored as analysis-ready Zarr V3 tiles. Each tile aggregates all acquisitions for a given MGRS tile and orbit direction into a time-stacked Zarr store.",
+  "description": "Per-acquisition STAC items for S1 GRD RTC. Each item is one time slice of the per-tile datacube in 'sentinel-1-grd-rtc-staging', rendered via titiler sel=time.",
   "item_assets": {
     "zarr-store": {
       "type": "application/vnd.zarr; version=3",
@@ -209,25 +225,5 @@
     "https://stac-extensions.github.io/sar/v1.0.0/schema.json",
     "https://stac-extensions.github.io/sat/v1.0.0/schema.json",
     "https://stac-extensions.github.io/render/v1.0.0/schema.json"
-  ],
-  "renders": {
-    "rgb": {
-      "title": "VV, VH, VV/VH composite",
-      "assets": [
-        "gamma0-rtc-backscatter-asc",
-        "gamma0-rtc-backscatter-desc"
-      ],
-      "expression": "/ascending:vv;/ascending:vh;(/ascending:vv)/(/ascending:vh)",
-      "rescale": [
-        [
-          0.0,
-          0.2
-        ]
-      ],
-      "bidx": [
-        1
-      ],
-      "tilesize": 256
-    }
-  }
+  ]
 }
