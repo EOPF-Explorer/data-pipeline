@@ -39,10 +39,11 @@ import mgrs
 # Region AOIs as committed WGS84 bboxes [lon_min, lat_min, lon_max, lat_max]. Bbox per arc (v1):
 # simplest + deterministic, over-includes some basin/foothill land (accepted — valid land tiles).
 REGIONS: dict[str, list[float]] = {
-    # Atlantic (~-1.8°W) to Mediterranean (~3.2°E), the Pyrenean chain + foothills. lat_max 44.3 spans
-    # one MGRS row north of the chain (to ~44.25°N: the …P/…J row, e.g. 31TDJ above 31TDH) — the K/Q
-    # row (~45°N, Garonne/Aquitaine plain) starts above this, so it's intentionally excluded.
-    "pyrenees": [-1.8, 42.3, 3.2, 44.3],
+    # Atlantic (~-1.8°W) Pyrenees, extended one MGRS row north (lat_max 45.0 → the …Q/…K row above the
+    # chain) and east to the French Mediterranean coast / Côte d'Azur (~7.7°E: 31TF*/31TG*/32TKM/32TL*).
+    # First step toward whole-France coverage. 37 tiles (was 19). lon_max 7.7 over-includes a little
+    # Ligurian land east of Menton — DEM-/S2-filtered, harmless.
+    "pyrenees": [-1.8, 42.3, 7.7, 45.0],
     # The Alpine arc from the French Alps (~5°E) to the eastern Austrian Alps (~16°E).
     "alps": [5.0, 43.5, 16.0, 48.0],
 }
