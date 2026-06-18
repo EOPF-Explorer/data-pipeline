@@ -210,3 +210,52 @@ def test_apply_s1_rtc_rescale_noop_without_render():
     )  # fmt: skip
     m.apply_s1_rtc_rescale(item)
     assert "renders" not in item.properties
+
+
+# --- alignment with cube item: alternate/storage + store/via links -----------
+
+
+def _base_item_with_alternate() -> dict:
+    """base_item as main() hands it to per_acquisition_items: the build item + the cube augmentation
+    (alternate-assets/storage blocks on the data assets + a `store` link)."""
+    d = _base_item()
+    d["stac_extensions"] = [
+        "https://stac-extensions.github.io/alternate-assets/v1.2.0/schema.json",
+        "https://stac-extensions.github.io/storage/v2.0.0/schema.json",
+    ]
+    for key in ("vv", "vh", "zarr-store"):
+        suffix = "" if key == "zarr-store" else "/ascending"  # preferred orbit, as build emits
+        d["assets"][key]["alternate"] = {
+            "s3": {
+                "href": f"s3://bkt/x/s1-rtc-31TCH.zarr{suffix}",
+                "storage:scheme": {"tier": "STANDARD", "region": "de", "platform": "OVHcloud"},
+            }
+        }
+    d["links"] = [
+        {
+            "rel": "store",
+            "type": "application/vnd.zarr+zarr",
+            "href": "https://gw/x/s1-rtc-31TCH.zarr",
+        }
+    ]
+    return d
+
+
+def test_aligned_items_carry_alternate_storage_and_store_via_links():
+    """Per-acq items inherit the cube's alternate-assets/storage blocks + `store` link and gain a `via`
+    link. For a descending run, the s3 alternate href is reoriented to the run orbit (zarr-store stays
+    at the store root)."""
+    items = _mod().per_acquisition_items(
+        _base_item_with_alternate(), [_T_EARLY], tile_id="31TCH", orbit="descending",
+        collection=ACQ, cube_collection=CUBE, raster_api=RASTER,
+    )  # fmt: skip
+    item = items[0]
+    rels = {link["rel"] for link in item["links"]}
+    assert {"store", "tilejson", "xyz", "via"} <= rels
+    via = next(link for link in item["links"] if link["rel"] == "via")
+    assert via["href"].endswith(f"/collections/{ACQ}/items/{item['id']}")
+    for pol in ("vv", "vh"):
+        assert item["assets"][pol]["alternate"]["s3"]["href"].endswith(".zarr/descending")
+        assert item["assets"][pol]["alternate"]["s3"]["storage:scheme"]["platform"] == "OVHcloud"
+    assert item["assets"]["zarr-store"]["alternate"]["s3"]["href"].endswith(".zarr")
+    assert "ascending" not in json.dumps(item)  # fully reoriented (primary + alternate)
