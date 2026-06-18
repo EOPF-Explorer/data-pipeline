@@ -102,7 +102,10 @@ def query_products(
 
 def expected_item_id(tile_id: str, when: dt.datetime) -> str:
     """Per-acquisition STAC item id this acquisition would register as (the dedup key)."""
-    return acquisition_id(tile_id, when)
+    item_id: str = acquisition_id(
+        tile_id, when
+    )  # annotate: acquisition_id is untyped (no-any-return)
+    return item_id
 
 
 def item_exists(stac_api_url: str, acq_collection: str, item_id: str) -> bool:
