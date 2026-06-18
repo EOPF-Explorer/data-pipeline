@@ -55,7 +55,14 @@ def list_cube_items(stac_api_url: str, cube_collection: str) -> list[tuple[str, 
 
 
 def store_orbits(store: str) -> list[str]:
-    """Orbit groups present in a cube store (read-only; prefers consolidated metadata)."""
+    """Orbit groups present in a cube store **with a usable (non-all-zero) r10m time axis**.
+
+    An orbit whose r10m time is empty or all-zero is a corrupt store (its time data was lost) — building
+    per-acquisition items from it would emit bogus ``1970-01-01`` epoch ids (all slices collapse to one).
+    Such orbits are skipped with an error; the store needs re-ingestion. Read-only; prefers consolidated
+    metadata, falling back to a direct read when the root consolidated metadata is absent.
+    """
+    import numpy as np
     import zarr
 
     try:
@@ -64,7 +71,26 @@ def store_orbits(store: str) -> list[str]:
         if "consolidated metadata" not in str(exc).lower():
             raise
         root = zarr.open_group(store, mode="r", zarr_format=3)
-    return [o for o in _ORBITS if o in root]
+
+    out: list[str] = []
+    for o in _ORBITS:
+        if o not in root:
+            continue
+        try:
+            times = np.asarray(root[o]["r10m"]["time"])
+            usable = times.size > 0 and bool(np.any(times))
+        except Exception:  # noqa: BLE001 -- an unreadable time axis is treated as unusable
+            usable = False
+        if not usable:
+            log.error(
+                "%s orbit %s: r10m time is empty/all-zero — skipping per-acquisition registration "
+                "(corrupt store; needs re-ingestion)",
+                store,
+                o,
+            )
+            continue
+        out.append(o)
+    return out
 
 
 def _cube_cmd(store: str, args: argparse.Namespace) -> list[str]:

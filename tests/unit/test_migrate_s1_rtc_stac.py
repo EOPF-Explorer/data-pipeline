@@ -118,3 +118,21 @@ def test_main_refuses_non_staging_without_flag() -> None:
     ]  # fmt: skip
     with patch.object(sys, "argv", argv), pytest.raises(SystemExit, match="non-…-staging"):
         m.main()
+
+
+def test_store_orbits_skips_all_zero_time(tmp_path: Path) -> None:
+    """A corrupt orbit (all-zero r10m time) is skipped so the migration never emits 1970-epoch items."""
+    import numpy as np
+    import zarr
+
+    store = str(tmp_path / "s1-rtc-30TYN.zarr")
+    root = zarr.open_group(store, mode="w", zarr_format=3)
+    for orbit, times in (
+        ("ascending", [0, 0, 0]),  # corrupt: time axis lost
+        ("descending", [1781244056000000000, 1780639747000000000]),  # valid
+    ):
+        r10m = root.create_group(orbit).create_group("r10m")
+        r10m.create_array("time", shape=(len(times),), dtype="int64")[:] = np.array(times, "int64")
+    zarr.consolidate_metadata(store, zarr_format=3)
+
+    assert m.store_orbits(store) == ["descending"]
