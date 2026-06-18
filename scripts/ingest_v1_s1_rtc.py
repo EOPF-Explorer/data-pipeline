@@ -3,7 +3,8 @@
 Exit codes:
     0 -- success (all acquisitions ingested)
     1 -- error during ingest (first failure aborts)
-    2 -- no acquisitions found (empty prefix)
+    2 -- nothing to register: empty prefix, OR a fresh tile whose only new scenes are all-nodata
+         (no store built) — the workflow skips register on 2 (so an uncovered edge tile is a clean skip)
 """
 
 from __future__ import annotations
@@ -180,8 +181,17 @@ def ingest_all(s3_geotiff_prefix: str, store_path: str, orbit_direction: str) ->
         log.info("Skipping %d new acquisition(s) with no valid data (all-nodata)", empty)
     acquisitions_to_ingest = with_data
     if not acquisitions_to_ingest:
-        log.info("No new acquisition(s) with valid data; nothing to ingest")
-        return 0
+        # A fresh tile (no existing cube) whose only new scenes are all-nodata builds no store, so there
+        # is nothing to register: return 2 (same as the empty-prefix case) so the workflow skips register
+        # instead of failing it ("No acquisitions found" — the 30TWQ edge-tile failure). If the cube
+        # already has slices, return 0 so register re-registers the existing cube (idempotent).
+        if present:
+            log.info(
+                "No new acquisition(s) with valid data; cube already has %d slice(s)", len(present)
+            )
+            return 0
+        log.info("No new acquisition(s) with valid data and no existing cube; nothing to register")
+        return 2
 
     # Step 2 -- ingest each new acquisition (abort on first error)
     for acq in acquisitions_to_ingest:
