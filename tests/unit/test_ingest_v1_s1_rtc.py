@@ -200,18 +200,39 @@ def test_ingest_all_skips_empty_acquisition() -> None:
     assert mock_ing.call_args.kwargs["vv_path"] == acq_data["vv"]
 
 
-def test_ingest_all_all_empty_creates_no_store() -> None:
-    """If every new acquisition is empty, nothing is ingested and no store is built (exit 0)."""
+def test_ingest_all_all_empty_fresh_tile_returns_2_skips_register() -> None:
+    """A fresh tile (no existing cube) whose only new scenes are all-nodata builds no store and must
+    return 2 (no acquisitions) so the workflow skips register — returning 0 would run register against
+    a never-built store (the 30TWQ edge-tile failure: 'No acquisitions found' / 'Orbit group not found')."""
     with (
         patch(f"{_MOD}.discover_s1tiling_acquisitions", return_value=[_ACQ]),
         patch(f"{_MOD}._acquisition_has_data", return_value=False),
         patch(f"{_MOD}.ingest_s1tiling_acquisition") as mock_ing,
         patch(f"{_MOD}.consolidate_s1_store") as mock_cons,
     ):
+        result = ingest_all(
+            "/input", "/store.zarr", "ascending"
+        )  # no existing store -> present empty
+    assert result == 2
+    mock_ing.assert_not_called()
+    mock_cons.assert_not_called()
+
+
+def test_ingest_all_all_empty_with_existing_cube_returns_0() -> None:
+    """All-nodata new scenes but the cube already has slices -> return 0 (re-register the existing cube,
+    idempotent). Only a *fresh* tile with nothing to register returns 2."""
+    with (
+        patch(f"{_MOD}.discover_s1tiling_acquisitions", return_value=[_ACQ]),
+        patch(
+            f"{_MOD}.store_times_ns", return_value={123}
+        ),  # existing cube already has a time slice
+        patch(f"{_MOD}._acquisition_has_data", return_value=False),
+        patch(f"{_MOD}.ingest_s1tiling_acquisition") as mock_ing,
+        patch(f"{_MOD}.consolidate_s1_store"),
+    ):
         result = ingest_all("/input", "/store.zarr", "ascending")
     assert result == 0
     mock_ing.assert_not_called()
-    mock_cons.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
