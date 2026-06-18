@@ -12,22 +12,16 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
-import datetime as dt
 import logging
 import sys
 from pathlib import Path
-from typing import NamedTuple
 from urllib.parse import urlparse
-
-import numpy as np
-import zarr
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from eopf_geozarr.stac.s1_rtc import build_s1_rtc_stac_item
+from eopf_geozarr.stac.s1_rtc import build_s1_rtc_stac_item, pick_slice, slice_coverages
 from pystac import Item
 from pystac_client import Client
-from register_per_acquisition import _reorient_item_to_orbit, apply_s1_rtc_rescale
 from register_v1 import (
     add_alternate_s3_assets,
     add_store_link,
@@ -41,69 +35,29 @@ from run_ingest_register import check_env_consistency
 
 log = logging.getLogger(__name__)
 
-# The cube preview defaults to the most recent acquisition that covers most of the tile, so the browser
-# shows fresh, near-full data rather than the (default-rendered) oldest slice.
-COVERAGE_THRESHOLD = 0.80
+SAT_EXT = "https://stac-extensions.github.io/sat/v1.0.0/schema.json"
+
+# Coverage-based preview-slice selection (Slice / pick_slice / slice_coverages) now lives in the
+# eopf_geozarr.stac.s1_rtc library — imported above and used by _pin_preview_to_best_recent below.
 
 
-class Slice(NamedTuple):
-    """One cube time slice: which orbit group it lives in, its acquisition instant, and the fraction of
-    the tile it covers (0..1)."""
+def _reorient_item_to_orbit(item: dict, orbit: str) -> None:
+    """Point the cube item's orbit-dependent *metadata* at the preview slice's orbit.
 
-    orbit: str
-    dt: dt.datetime
-    coverage: float
-
-
-def pick_slice(slices: list[Slice]) -> Slice | None:
-    """Choose the slice the cube preview should default to.
-
-    The most recent acquisition with coverage strictly above ``COVERAGE_THRESHOLD``; if none clears it,
-    the highest-coverage slice (ties broken by most recent). Spans both orbit groups. Returns ``None``
-    for an empty cube.
+    The new asset model exposes both orbit groups as first-class assets, so only the orbit-scoped
+    metadata needs adjusting for the default preview: ``sat:orbit_state`` and the ``renders.rgb``
+    expression. The builder omits ``sat:orbit_state`` on a dual-orbit cube, so set it (and declare the
+    SAT extension) for the chosen preview slice. No asset-href rewrite is needed any more.
     """
-    if not slices:
-        return None
-    good = [s for s in slices if s.coverage > COVERAGE_THRESHOLD]
-    if good:
-        return max(good, key=lambda s: s.dt)
-    return max(slices, key=lambda s: (s.coverage, s.dt))
-
-
-_ORBITS = ("ascending", "descending")
-
-
-def _open_cube_root(store: str) -> zarr.Group:
-    """Open the cube root, mirroring build_s1_rtc_stac_item: prefer consolidated metadata, fall back to a
-    plain group open (an appended same-orbit cube can lack root consolidated metadata)."""
-    try:
-        return zarr.open_consolidated(store, zarr_format=3)
-    except Exception as exc:  # noqa: BLE001 — only the consolidated-metadata absence is expected
-        if "consolidated metadata" not in str(exc).lower():
-            raise
-        return zarr.open_group(store, mode="r", zarr_format=3)
-
-
-def slice_coverages(store: str) -> list[Slice]:
-    """Per-slice tile coverage from the cube, both orbit groups.
-
-    Reads the ``border_mask`` at the cheap ``r720m`` level only (~150x150). Coverage is the fraction of
-    **valid** pixels; the S1Tiling ``_BorderMask`` is stored with ``fill_value=0`` for the border, so
-    valid = non-zero. ``time`` is raw int64 ns (as build_s1_rtc_stac_item reads it) -> UTC datetime.
-    """
-    root = _open_cube_root(store)
-    out: list[Slice] = []
-    for orbit in _ORBITS:
-        if orbit not in root:
-            continue
-        level = root[orbit]["r720m"]
-        mask = np.asarray(level["border_mask"])  # (time, y, x), uint8
-        times_ns = np.asarray(level["time"]).tolist()  # int64 ns since epoch
-        for i, t_ns in enumerate(times_ns):
-            sl = mask[i]
-            coverage = float(np.count_nonzero(sl) / sl.size)
-            out.append(Slice(orbit, dt.datetime.fromtimestamp(t_ns / 1e9, tz=dt.UTC), coverage))
-    return out
+    props = item["properties"]
+    props["sat:orbit_state"] = orbit
+    rgb = props.get("renders", {}).get("rgb")
+    if rgb is not None:
+        vv, vh = f"/{orbit}:vv", f"/{orbit}:vh"
+        rgb["expression"] = f"{vv};{vh};({vv})/({vh})"
+    exts = item.setdefault("stac_extensions", [])
+    if SAT_EXT not in exts:
+        exts.append(SAT_EXT)
 
 
 def _pin_preview_to_best_recent(item: Item, store: str) -> tuple[Item, str | None]:
@@ -157,9 +111,6 @@ def register(
     # Default the cube preview to the best-recent acquisition (most recent >80% coverage, else max
     # coverage) and reorient the item to that slice's orbit so the render targets the right group.
     item, sel_time = _pin_preview_to_best_recent(item, store)
-
-    # Override the upstream render rescale (0.0,0.1) before the viz links/thumbnail are derived from it.
-    apply_s1_rtc_rescale(item)
 
     # build_s1_rtc_stac_item returns s3:// hrefs; TiTiler needs https:// via the gateway
     for asset in item.assets.values():

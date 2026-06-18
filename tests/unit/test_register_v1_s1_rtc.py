@@ -107,14 +107,14 @@ def test_upserts_item_with_correct_id() -> None:
     assert called_item.id == "s1-rtc-31TCH"
 
 
-def test_register_overrides_rescale_to_0_2() -> None:
-    """register() applies apply_s1_rtc_rescale: the upserted cube item renders at 0.0,0.2 (not build's
-    0.0,0.1), and the derived xyz/tilejson links inherit it."""
+def test_render_rescale_propagates_to_links() -> None:
+    """The cube renders at 0.0,0.2 (now emitted by the data-model builder; the old in-pipeline
+    apply_s1_rtc_rescale override is gone), and the derived xyz/tilejson links inherit it."""
     item = _make_item()
     item.properties["renders"] = {
         "rgb": {
             "expression": "/ascending:vv;/ascending:vh;(/ascending:vv)/(/ascending:vh)",
-            "rescale": [[0.0, 0.1]],
+            "rescale": [[0.0, 0.2]],
             "bidx": [1],
         }
     }
