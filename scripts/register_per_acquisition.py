@@ -22,11 +22,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import copy
-import datetime as dt
 import urllib.parse
-from typing import Any
 
+from eopf_geozarr.stac.s1_rtc import acquisition_id as acquisition_id  # re-export for trigger_cdse
+from eopf_geozarr.stac.s1_rtc import build_s1_rtc_per_acquisition_items
 from pystac import Item
 from register_v1 import EXPLORER_BASE, _render_to_query
 
@@ -34,28 +33,11 @@ from register_v1 import EXPLORER_BASE, _render_to_query
 # code default targets the test env (local/CP-A runs); the Argo cron passes --collection …-staging.
 DEFAULT_ACQ_COLLECTION = "sentinel-1-grd-rtc-acquisitions-tests"
 
-# S1 RTC RGB composite rescale (linear gamma0 units), applied to every band. Overrides the upstream
-# build_s1_rtc_stac_item default (0.0,0.1, too bright) at item-build time so the cube item and every
-# per-acquisition item — and the tilejson/xyz/thumbnail queries derived from the render — inherit it.
-# In-pipeline because the data-model pin (16c5f14) can't be bumped to fix it upstream: data-model main
-# was refactored to a src/ layout and the build module moved. Revisit when the pin is migrated.
-S1_RTC_RESCALE = [[0.0, 0.2]]
-
-
-def apply_s1_rtc_rescale(item: Item) -> None:
-    """Set the S1 RTC RGB render rescale on a freshly built item.
-
-    Call right after ``build_s1_rtc_stac_item`` (before any render links are derived) so the
-    tilejson/xyz/thumbnail queries all inherit ``S1_RTC_RESCALE``.
-    """
-    render = item.properties.get("renders", {}).get("rgb")
-    if render is not None:
-        render["rescale"] = [list(pair) for pair in S1_RTC_RESCALE]
-
-
-def acquisition_id(tile_id: str, when: dt.datetime) -> str:
-    """Per-acquisition item id, e.g. ``s1-rtc-31TCH-20260607t055248``."""
-    return f"s1-rtc-{tile_id}-{when.strftime('%Y%m%dt%H%M%S')}"
+# Item *construction* — one item per cube `time` slice, oriented to its orbit, carrying the orbit's γ⁰
+# asset + a `renders.rgb` whose rescale (0.0,0.2) the builder now emits — lives in
+# eopf_geozarr.stac.s1_rtc.build_s1_rtc_per_acquisition_items. This script adds only the deployment
+# decoration (render/`via` links + thumbnail at the cube endpoint, `store` link, S3 alternates) and
+# upserts. The old in-pipeline apply_s1_rtc_rescale override is gone (the builder emits 0.0,0.2).
 
 
 def _cube_item_base(raster_api: str, cube_collection: str, tile_id: str) -> str:
@@ -102,139 +84,56 @@ def render_thumbnail(
     return f"{base}/preview?format=png&{_render_to_query(render, include_tilesize=False)}&{_sel_time(sel_time)}"
 
 
-def _reorient_item_to_orbit(item: dict, orbit: str) -> None:
-    """Fix the base item's orbit-dependent **STAC metadata** to this acquisition's run ``orbit``.
+def decorate_acquisition_item(
+    item: Item, *, tile_id: str, cube_collection: str, raster_api: str
+) -> dict:
+    """Add the render/``via`` links + thumbnail to a per-acquisition item and return its dict.
 
-    ``eopf_geozarr.build_s1_rtc_stac_item`` derives ``sat:orbit_state``, the ``renders.rgb`` orbit, and
-    the ``vv``/``vh`` asset groups from the cube's *preferred* orbit (it prefers ascending), so a
-    both-orbits cube mislabels a descending acquisition as ascending. Correct them so the queryable
-    metadata matches the run orbit. The ``vv``/``vh`` hrefs stay on the **cube** store — only the orbit
-    group changes. (Render-param tuning beyond the orbit is deferred to titiler-eopf#108.)
+    Construction (single ``datetime``, run-orbit metadata, the orbit's γ⁰ asset, ``renders.rgb``) is
+    already done by ``build_s1_rtc_per_acquisition_items``; this adds only the deployment links. They
+    point at the shared **cube** TiTiler endpoint (``cube_collection``/``s1-rtc-{tile}``) with
+    ``sel=time={datetime}`` — no data duplication; the acquisition item is a reference into the cube,
+    and the render stays slice-correct regardless of the cube's physical slice order. No ``viewer`` link
+    (TiTiler can't deep-link to a single cube slice). Any ``store`` link / S3 ``alternate`` blocks the
+    caller already added are preserved.
     """
-    props = item["properties"]
-    props["sat:orbit_state"] = orbit
-    rgb = props.get("renders", {}).get("rgb")
-    if rgb is not None:
-        vv, vh = f"/{orbit}:vv", f"/{orbit}:vh"
-        rgb["expression"] = f"{vv};{vh};({vv})/({vh})"
-    cube_href = item.get("assets", {}).get("zarr-store", {}).get("href")
-    if cube_href:
-        for pol in ("vv", "vh"):
-            if pol in item["assets"]:
-                item["assets"][pol]["href"] = f"{cube_href}/{orbit}"
-    # When alternate S3 assets are present (per-acquisition path adds them before reorienting), keep the
-    # s3 alternate href on the same orbit group as the primary href. The cube path reorients before
-    # alternates exist, so this is a no-op there.
-    s3_root = (
-        item.get("assets", {}).get("zarr-store", {}).get("alternate", {}).get("s3", {}).get("href")
-    )
-    if s3_root:
-        for pol in ("vv", "vh"):
-            alt = item.get("assets", {}).get(pol, {}).get("alternate", {}).get("s3")
-            if isinstance(alt, dict) and "href" in alt:
-                alt["href"] = f"{s3_root}/{orbit}"
-
-
-def per_acquisition_items(
-    base_item: dict,
-    times_ns: list[int],
-    *,
-    tile_id: str,
-    orbit: str,
-    collection: str,
-    cube_collection: str,
-    raster_api: str,
-) -> list[dict]:
-    """Clone the per-tile ``base_item`` into one item per `time` slice.
-
-    Each clone keeps the base geometry/assets (incl. the alternate-assets/storage blocks and `store`
-    link added to ``base_item`` upstream)/SAR+proj properties, sets a single ``datetime`` (drops the
-    start/end range), targets the acquisition ``collection``, reorients the orbit-dependent metadata to
-    the run ``orbit``, and gets tilejson/xyz/thumbnail + `via` links pointing at the **cube** endpoint
-    (``cube_collection``/``s1-rtc-{tile}``) with the composite render + ``sel=time={datetime}``. The
-    render selects the slice by its **datetime**, so the order of ``times_ns`` is irrelevant — each item
-    is correct on its own regardless of the cube's physical slice order. ``base_item`` is not mutated.
-    """
-    items: list[dict] = []
-    for t_ns in times_ns:
-        when = dt.datetime.fromtimestamp(t_ns / 1e9, tz=dt.UTC)
-        item_id = acquisition_id(tile_id, when)
-        # Exact value TiTiler matches against the CF-decoded datetime64 `time` index (second precision,
-        # the resolution S1 acquisition stamps carry); same instant as `when` / the item id.
-        sel_time = when.strftime("%Y-%m-%dT%H:%M:%S")
-        item = copy.deepcopy(base_item)
-        item["id"] = item_id
-        item["collection"] = collection
-        props = {
-            k: v
-            for k, v in item.get("properties", {}).items()
-            if k not in ("start_datetime", "end_datetime")
-        }
-        props["datetime"] = when.isoformat()
-        item["properties"] = props
-        _reorient_item_to_orbit(item, orbit)
-        render = item["properties"]["renders"][
-            "rgb"
-        ]  # reoriented composite (build always emits it)
-        # Keep the cube `store` link (added to base_item before cloning) and add the render links +
-        # the Explorer `via` link (this acquisition's own page). No `viewer` link: the TiTiler viewer
-        # can't deep-link to a single cube slice (it ignores URL query params and has no time selector),
-        # and the per-acq id has no reconstructable store. Render links stay slice-correct via sel=time.
-        store_links = [lk for lk in item.get("links", []) if lk.get("rel") == "store"]
-        item["links"] = [
-            *store_links,
-            {
-                "rel": "tilejson",
-                "type": "application/json",
-                "href": render_tilejson(raster_api, cube_collection, tile_id, render, sel_time),
-                "title": "tilejson",
-            },
-            {
-                "rel": "xyz",
-                "type": "image/png",
-                "href": render_xyz(raster_api, cube_collection, tile_id, render, sel_time),
-                "title": "Sentinel-1 GRD RGB composite",
-            },
-            {
-                "rel": "via",
-                "type": "text/html",
-                "href": f"{EXPLORER_BASE}/collections/{collection.lower().replace('_', '-')}/items/{item_id}",
-                "title": "EOPF Explorer",
-            },
-        ]
-        item.setdefault("assets", {})["thumbnail"] = {
-            "href": render_thumbnail(raster_api, cube_collection, tile_id, render, sel_time),
+    when = item.datetime
+    assert when is not None  # noqa: S101 -- per-acquisition items always carry a single datetime
+    # Exact value TiTiler matches against the CF-decoded datetime64 `time` index (second precision).
+    sel_time = when.strftime("%Y-%m-%dT%H:%M:%S")
+    d = item.to_dict(include_self_link=False)
+    item_id = d["id"]
+    collection = d.get("collection", "")
+    render = d["properties"]["renders"]["rgb"]
+    store_links = [lk for lk in d.get("links", []) if lk.get("rel") == "store"]
+    d["links"] = [
+        *store_links,
+        {
+            "rel": "tilejson",
+            "type": "application/json",
+            "href": render_tilejson(raster_api, cube_collection, tile_id, render, sel_time),
+            "title": "tilejson",
+        },
+        {
+            "rel": "xyz",
             "type": "image/png",
-            "roles": ["thumbnail"],
-            "title": "Sentinel-1 GRD RGB composite preview",
-        }
-        items.append(item)
-    return items
-
-
-# --- store I/O + registration (integration; exercised in main) --------------
-
-
-def _open_root(store: str) -> Any:
-    import zarr
-
-    if "://" in store:
-        from zarr.storage import FsspecStore
-
-        return zarr.open_group(FsspecStore.from_url(store), mode="r")
-    return zarr.open_group(store, mode="r", zarr_format=3)
-
-
-def read_times_ns(store: str, orbit: str) -> list[int]:
-    """`time` values (ns since epoch) from the cube's native (r10m) level. Each value becomes one
-    per-acquisition item whose render selects by that datetime, so the order is irrelevant (no longer a
-    positional index). ``r10m/time`` stays a raw int64 array even after the CF attrs are added, so this
-    read is unchanged."""
-    import numpy as np
-
-    root = _open_root(store)
-    times = np.asarray(root[orbit]["r10m"]["time"]).astype("datetime64[ns]").astype("int64")
-    return [int(t) for t in times]
+            "href": render_xyz(raster_api, cube_collection, tile_id, render, sel_time),
+            "title": "Sentinel-1 GRD RGB composite",
+        },
+        {
+            "rel": "via",
+            "type": "text/html",
+            "href": f"{EXPLORER_BASE}/collections/{collection.lower().replace('_', '-')}/items/{item_id}",
+            "title": "EOPF Explorer",
+        },
+    ]
+    d.setdefault("assets", {})["thumbnail"] = {
+        "href": render_thumbnail(raster_api, cube_collection, tile_id, render, sel_time),
+        "type": "image/png",
+        "roles": ["thumbnail"],
+        "title": "Sentinel-1 GRD RGB composite preview",
+    }
+    return d
 
 
 def existing_item_ids(stac_api_url: str, collection: str, candidate_ids: list[str]) -> set[str]:
@@ -292,42 +191,41 @@ def main() -> None:
     )
     args = ap.parse_args()
 
-    from eopf_geozarr.stac.s1_rtc import build_s1_rtc_stac_item
     from register_v1 import add_alternate_s3_assets, add_store_link, s3_to_https
 
-    base_item = build_s1_rtc_stac_item(args.store, args.collection)
-    apply_s1_rtc_rescale(base_item)
-    # Mirror register_v1_s1_rtc's cube augmentation so per-acq items carry the same assets/metadata:
-    # rewrite s3://→https first (the alternate-assets block is derived from the https href), then add the
-    # cube `store` link + the alternate-assets/storage blocks. These flow into every clone via deepcopy
-    # in per_acquisition_items. Reading times below still uses the s3 store (authoritative; avoids the
-    # gateway's read-cache lag).
-    for asset in base_item.assets.values():
-        if asset.href and asset.href.startswith("s3://"):
-            asset.href = s3_to_https(asset.href)
-    add_store_link(base_item, args.store)
-    add_alternate_s3_assets(base_item, args.s3_endpoint)
-    base = base_item.to_dict()
-    times = read_times_ns(args.store, args.orbit_direction)
-    items = per_acquisition_items(
-        base,
-        times,
-        tile_id=args.tile_id,
-        orbit=args.orbit_direction,
-        collection=args.collection,
-        cube_collection=args.cube_collection,
-        raster_api=args.raster_api_url,
+    # Construction (one item per slice, oriented to its orbit, with the orbit's γ⁰ asset + renders.rgb)
+    # is done by the library; this script adds the deployment decoration per item: s3://→https for the
+    # TiTiler gateway, the cube `store` link + S3 alternate-assets/storage blocks, then the render/`via`
+    # links + thumbnail (cube endpoint, sel=time). Reading from args.store (authoritative s3 in the cron).
+    items = build_s1_rtc_per_acquisition_items(
+        args.store, orbit=args.orbit_direction, collection_id=args.collection
     )
+    records: list[dict] = []
+    for item in items:
+        for asset in item.assets.values():
+            if asset.href and asset.href.startswith("s3://"):
+                asset.href = s3_to_https(asset.href)
+        add_store_link(item, args.store)
+        add_alternate_s3_assets(item, args.s3_endpoint)
+        records.append(
+            decorate_acquisition_item(
+                item,
+                tile_id=args.tile_id,
+                cube_collection=args.cube_collection,
+                raster_api=args.raster_api_url,
+            )
+        )
+
     # Incremental by default: each item's datetime `sel` is correct for the life of the cube, so only
     # acquisitions not yet in the collection need writing (scales as the cube grows). --reregister-all
-    # forces all (migrating items that still carry the old index-based sel).
+    # forces all (e.g. the migration to the new asset model).
     if not args.reregister_all:
-        existing = existing_item_ids(args.stac_api_url, args.collection, [i["id"] for i in items])
-        skipped = len(items)
-        items = [i for i in items if i["id"] not in existing]
-        print(f"{skipped - len(items)} already registered, {len(items)} new")
-    _upsert_items(args.stac_api_url, args.collection, items)
-    print(f"registered {len(items)} per-acquisition item(s) in {args.collection}")
+        existing = existing_item_ids(args.stac_api_url, args.collection, [r["id"] for r in records])
+        skipped = len(records)
+        records = [r for r in records if r["id"] not in existing]
+        print(f"{skipped - len(records)} already registered, {len(records)} new")
+    _upsert_items(args.stac_api_url, args.collection, records)
+    print(f"registered {len(records)} per-acquisition item(s) in {args.collection}")
 
 
 if __name__ == "__main__":
