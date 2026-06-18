@@ -176,3 +176,37 @@ def test_does_not_mutate_base():
     assert "start_datetime" in base["properties"]
     assert base["properties"]["sat:orbit_state"] == "ascending"  # not reoriented in place
     assert "thumbnail" not in base["assets"]
+
+
+# --- rescale override (S1_RTC_RESCALE) ---------------------------------------
+
+
+def test_apply_s1_rtc_rescale_overrides_build_default():
+    """apply_s1_rtc_rescale replaces build's 0.0,0.1 with S1_RTC_RESCALE (0.0,0.2) on the rgb render."""
+    from pystac import Item
+
+    m = _mod()
+    render = _base_item()["properties"]["renders"][
+        "rgb"
+    ]  # the build-default render (rescale 0.0,0.1)
+    item = Item(
+        id="s1-rtc-31TCH", geometry=None, bbox=None,
+        datetime=dt.datetime(2026, 6, 7, tzinfo=dt.UTC), properties={"renders": {"rgb": render}},
+    )  # fmt: skip
+    assert item.properties["renders"]["rgb"]["rescale"] == [[0.0, 0.1]]
+    m.apply_s1_rtc_rescale(item)
+    assert item.properties["renders"]["rgb"]["rescale"] == [[0.0, 0.2]]
+    assert m.S1_RTC_RESCALE == [[0.0, 0.2]]
+
+
+def test_apply_s1_rtc_rescale_noop_without_render():
+    """No rgb render (e.g. a non-S1 item) → apply is a safe no-op, not an error."""
+    from pystac import Item
+
+    m = _mod()
+    item = Item(
+        id="x", geometry=None, bbox=None,
+        datetime=dt.datetime(2026, 6, 7, tzinfo=dt.UTC), properties={},
+    )  # fmt: skip
+    m.apply_s1_rtc_rescale(item)
+    assert "renders" not in item.properties

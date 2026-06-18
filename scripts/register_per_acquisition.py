@@ -27,11 +27,30 @@ import datetime as dt
 import urllib.parse
 from typing import Any
 
+from pystac import Item
 from register_v1 import _render_to_query
 
 # Per-acquisition collections are env-split like the cube collections (…-tests/-staging/-prod). The
 # code default targets the test env (local/CP-A runs); the Argo cron passes --collection …-staging.
 DEFAULT_ACQ_COLLECTION = "sentinel-1-grd-rtc-acquisitions-tests"
+
+# S1 RTC RGB composite rescale (linear gamma0 units), applied to every band. Overrides the upstream
+# build_s1_rtc_stac_item default (0.0,0.1, too bright) at item-build time so the cube item and every
+# per-acquisition item — and the tilejson/xyz/thumbnail queries derived from the render — inherit it.
+# In-pipeline because the data-model pin (16c5f14) can't be bumped to fix it upstream: data-model main
+# was refactored to a src/ layout and the build module moved. Revisit when the pin is migrated.
+S1_RTC_RESCALE = [[0.0, 0.2]]
+
+
+def apply_s1_rtc_rescale(item: Item) -> None:
+    """Set the S1 RTC RGB render rescale on a freshly built item.
+
+    Call right after ``build_s1_rtc_stac_item`` (before any render links are derived) so the
+    tilejson/xyz/thumbnail queries all inherit ``S1_RTC_RESCALE``.
+    """
+    render = item.properties.get("renders", {}).get("rgb")
+    if render is not None:
+        render["rescale"] = [list(pair) for pair in S1_RTC_RESCALE]
 
 
 def acquisition_id(tile_id: str, when: dt.datetime) -> str:
@@ -247,7 +266,9 @@ def main() -> None:
     from eopf_geozarr.stac.s1_rtc import build_s1_rtc_stac_item
     from register_v1 import s3_to_https
 
-    base = build_s1_rtc_stac_item(args.store, args.collection).to_dict()
+    base_item = build_s1_rtc_stac_item(args.store, args.collection)
+    apply_s1_rtc_rescale(base_item)
+    base = base_item.to_dict()
     # build_s1_rtc_stac_item emits s3:// hrefs for an s3 store; rewrite to the https gateway so the
     # per-acquisition items match the cube item (register_v1 does the same). Reading times below
     # still uses the s3 store, which is authoritative and avoids the gateway's read-cache lag.
