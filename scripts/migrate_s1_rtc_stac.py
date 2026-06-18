@@ -22,7 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import subprocess
+import subprocess  # nosec B404 -- composes the trusted register scripts with fixed argv (no shell)
 import sys
 import urllib.request
 from pathlib import Path
@@ -44,7 +44,7 @@ def list_cube_items(stac_api_url: str, cube_collection: str) -> list[tuple[str, 
     out: list[tuple[str, str]] = []
     url: str | None = f"{stac_api_url.rstrip('/')}/collections/{cube_collection}/items?limit=100"
     while url:
-        with urllib.request.urlopen(url, timeout=60) as resp:  # noqa: S310 -- trusted STAC API
+        with urllib.request.urlopen(url, timeout=60) as resp:  # noqa: S310  # nosec B310 -- https STAC API
             page = json.load(resp)
         for feat in page.get("features", []):
             href = feat.get("assets", {}).get("zarr-store", {}).get("href")
@@ -99,7 +99,7 @@ def _run(cmd: list[str], dry_run: bool) -> int:
     if dry_run:
         print("DRY-RUN:", " ".join(cmd))
         return 0
-    return subprocess.run(cmd).returncode  # noqa: S603 -- fixed argv, no shell
+    return subprocess.run(cmd).returncode  # noqa: S603  # nosec B603 -- fixed argv, no shell
 
 
 def migrate(args: argparse.Namespace) -> int:

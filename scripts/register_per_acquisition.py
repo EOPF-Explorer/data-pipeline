@@ -98,7 +98,8 @@ def decorate_acquisition_item(
     caller already added are preserved.
     """
     when = item.datetime
-    assert when is not None  # noqa: S101 -- per-acquisition items always carry a single datetime
+    if when is None:  # per-acquisition items always carry a single datetime
+        raise ValueError(f"per-acquisition item {item.id!r} has no datetime")
     # Exact value TiTiler matches against the CF-decoded datetime64 `time` index (second precision).
     sel_time = when.strftime("%Y-%m-%dT%H:%M:%S")
     d = item.to_dict(include_self_link=False)
@@ -153,7 +154,7 @@ def _upsert_items(stac_api_url: str, collection: str, items: list[dict]) -> None
 
     client = Client.open(stac_api_url)
     io = client._stac_io
-    assert io is not None  # noqa: S101 -- pystac-client always sets this after open()
+    assert io is not None  # noqa: S101  # nosec B101 -- pystac-client always sets this after open()
     base = str(client.self_href).rstrip("/")
     for item in items:
         item_id = item["id"]
