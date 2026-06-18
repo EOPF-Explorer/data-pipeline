@@ -113,8 +113,9 @@ uv run python scripts/register_per_acquisition.py --store <cube> --tile-id 30TWN
   --orbit-direction descending --collection sentinel-1-grd-rtc-acquisitions-staging \
   --cube-collection sentinel-1-grd-rtc-staging --stac-api-url <url> --raster-api-url <url> --reregister-all
 
-# full migration (after smoke passes)
-uv run python scripts/<migrate_s1_rtc>.py --stac-api-url <url> --raster-api-url <url> --s3-endpoint <url>
+# migration: --dry-run first (read-only enumeration), then drop --dry-run for the bulk run (S3 creds)
+uv run python scripts/migrate_s1_rtc_stac.py --stac-api-url <url> --raster-api-url <url> \
+  --s3-endpoint <url> [--dry-run] [--tile 30TWN]   # idempotent, staging-only, resumable
 ```
 
 ## 5. Tests
