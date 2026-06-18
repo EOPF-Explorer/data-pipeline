@@ -63,9 +63,12 @@ re-registration.
   `add_thumbnail_asset`, `warm_thumbnail_cache`, `upsert_item`.
 
 ### `scripts/register_v1.py`
-- `add_visualization_links` / `add_thumbnail_asset`: both are render-first and already work for S1 RTC.
-  **Delete the dead S1 fallback** that reads `item.assets.get("vh")` (~lines 269, 361) — there is no
-  `vh` asset key anymore.
+- `add_visualization_links` / `add_thumbnail_asset`: both are **render-first**, so the new S1 RTC items
+  (which always carry `renders.rgb`) never reach the `item.assets.get("vh")` fallback (~lines 269, 361)
+  — confirmed by `TestVisualizationFromRenders`. **Leave the fallback in place**: it is the
+  mission-default for *render-less* / legacy S1 (e.g. `register_v0`) and is covered by
+  `test_falls_back_to_mission_default_without_renders`; deleting it would break that test and drop the
+  legacy path. (Earlier draft said to delete it — corrected: it is render-superseded for RTC, not dead.)
 - `add_alternate_s3_assets`: generic over assets → automatically covers the new keys
   (`gamma0-rtc-backscatter-{asc,desc}`, `border-mask-{asc,desc}`). Verify alternates land on all data
   assets; confirm the `thumbnail` skip still holds.
