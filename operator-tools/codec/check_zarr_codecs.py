@@ -12,11 +12,11 @@ Usage
 
 # S3 path:
     uv run python operator-tools/codec/check_zarr_codecs.py \
-        s3://esa-zarr-sentinel-explorer-s2-l2a-staging/converted/sentinel-2-l2a-staging-codecs/S2B_MSIL2A_20260427T105619_N0512_R094_T31UCU_20260427T133501.zarr/measurements/reflectance/r10m/b02 \
+        s3://esa-zarr-sentinel-explorer-s2-l2a-staging/converted/sentinel-2-l2a-staging/S2B_MSIL2A_20260427T105619_N0512_R094_T31UCU_20260427T133501.zarr/measurements/reflectance/r10m/b02 \
         --endpoint-url https://s3.de.io.cloud.ovh.net
 
     uv run python operator-tools/codec/check_zarr_codecs.py \
-        s3://esa-zarr-sentinel-explorer-s2-l2a-staging/converted/sentinel-2-l2a-staging-codecs/S2A_MSIL2A_20260426T100051_N0512_R122_T33TUL_20260426T170004.zarr/measurements/reflectance/r10m/b02 \
+        s3://esa-zarr-sentinel-explorer-s2-l2a-staging/converted/sentinel-2-l2a-staging/S2A_MSIL2A_20260426T100051_N0512_R122_T33TUL_20260426T170004.zarr/measurements/reflectance/r10m/b02 \
         --endpoint-url https://s3.de.io.cloud.ovh.net --profile eopfexplorer
 """
 

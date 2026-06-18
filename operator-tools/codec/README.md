@@ -66,6 +66,6 @@ uv run operator-tools/codec/check_zarr_codecs.py \
 
 # S3:
 uv run operator-tools/codec/check_zarr_codecs.py \
-    s3://esa-zarr-sentinel-explorer-s2-l2a-staging/converted/sentinel-2-l2a-staging-codecs/<scene>.zarr/measurements/reflectance/r10m/b02 \
+    s3://esa-zarr-sentinel-explorer-s2-l2a-staging/converted/sentinel-2-l2a-staging/<scene>.zarr/measurements/reflectance/r10m/b02 \
     --endpoint-url https://s3.de.io.cloud.ovh.net --profile eopfexplorer
 ```
