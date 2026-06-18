@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from eopf_geozarr.stac.s1_rtc import build_s1_rtc_stac_item
 from pystac import Item
 from pystac_client import Client
-from register_per_acquisition import _reorient_item_to_orbit
+from register_per_acquisition import _reorient_item_to_orbit, apply_s1_rtc_rescale
 from register_v1 import (
     add_alternate_s3_assets,
     add_store_link,
@@ -157,6 +157,9 @@ def register(
     # Default the cube preview to the best-recent acquisition (most recent >80% coverage, else max
     # coverage) and reorient the item to that slice's orbit so the render targets the right group.
     item, sel_time = _pin_preview_to_best_recent(item, store)
+
+    # Override the upstream render rescale (0.0,0.1) before the viz links/thumbnail are derived from it.
+    apply_s1_rtc_rescale(item)
 
     # build_s1_rtc_stac_item returns s3:// hrefs; TiTiler needs https:// via the gateway
     for asset in item.assets.values():

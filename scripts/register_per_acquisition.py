@@ -27,11 +27,30 @@ import datetime as dt
 import urllib.parse
 from typing import Any
 
-from register_v1 import _render_to_query
+from pystac import Item
+from register_v1 import EXPLORER_BASE, _render_to_query
 
 # Per-acquisition collections are env-split like the cube collections (…-tests/-staging/-prod). The
 # code default targets the test env (local/CP-A runs); the Argo cron passes --collection …-staging.
 DEFAULT_ACQ_COLLECTION = "sentinel-1-grd-rtc-acquisitions-tests"
+
+# S1 RTC RGB composite rescale (linear gamma0 units), applied to every band. Overrides the upstream
+# build_s1_rtc_stac_item default (0.0,0.1, too bright) at item-build time so the cube item and every
+# per-acquisition item — and the tilejson/xyz/thumbnail queries derived from the render — inherit it.
+# In-pipeline because the data-model pin (16c5f14) can't be bumped to fix it upstream: data-model main
+# was refactored to a src/ layout and the build module moved. Revisit when the pin is migrated.
+S1_RTC_RESCALE = [[0.0, 0.2]]
+
+
+def apply_s1_rtc_rescale(item: Item) -> None:
+    """Set the S1 RTC RGB render rescale on a freshly built item.
+
+    Call right after ``build_s1_rtc_stac_item`` (before any render links are derived) so the
+    tilejson/xyz/thumbnail queries all inherit ``S1_RTC_RESCALE``.
+    """
+    render = item.properties.get("renders", {}).get("rgb")
+    if render is not None:
+        render["rescale"] = [list(pair) for pair in S1_RTC_RESCALE]
 
 
 def acquisition_id(tile_id: str, when: dt.datetime) -> str:
@@ -103,6 +122,17 @@ def _reorient_item_to_orbit(item: dict, orbit: str) -> None:
         for pol in ("vv", "vh"):
             if pol in item["assets"]:
                 item["assets"][pol]["href"] = f"{cube_href}/{orbit}"
+    # When alternate S3 assets are present (per-acquisition path adds them before reorienting), keep the
+    # s3 alternate href on the same orbit group as the primary href. The cube path reorients before
+    # alternates exist, so this is a no-op there.
+    s3_root = (
+        item.get("assets", {}).get("zarr-store", {}).get("alternate", {}).get("s3", {}).get("href")
+    )
+    if s3_root:
+        for pol in ("vv", "vh"):
+            alt = item.get("assets", {}).get(pol, {}).get("alternate", {}).get("s3")
+            if isinstance(alt, dict) and "href" in alt:
+                alt["href"] = f"{s3_root}/{orbit}"
 
 
 def per_acquisition_items(
@@ -117,9 +147,10 @@ def per_acquisition_items(
 ) -> list[dict]:
     """Clone the per-tile ``base_item`` into one item per `time` slice.
 
-    Each clone keeps the base geometry/assets/SAR+proj properties, sets a single ``datetime`` (drops the
+    Each clone keeps the base geometry/assets (incl. the alternate-assets/storage blocks and `store`
+    link added to ``base_item`` upstream)/SAR+proj properties, sets a single ``datetime`` (drops the
     start/end range), targets the acquisition ``collection``, reorients the orbit-dependent metadata to
-    the run ``orbit``, and gets tilejson/xyz/thumbnail links pointing at the **cube** endpoint
+    the run ``orbit``, and gets tilejson/xyz/thumbnail + `via` links pointing at the **cube** endpoint
     (``cube_collection``/``s1-rtc-{tile}``) with the composite render + ``sel=time={datetime}``. The
     render selects the slice by its **datetime**, so the order of ``times_ns`` is irrelevant — each item
     is correct on its own regardless of the cube's physical slice order. ``base_item`` is not mutated.
@@ -145,7 +176,13 @@ def per_acquisition_items(
         render = item["properties"]["renders"][
             "rgb"
         ]  # reoriented composite (build always emits it)
+        # Keep the cube `store` link (added to base_item before cloning) and add the render links +
+        # the Explorer `via` link (this acquisition's own page). No `viewer` link: the TiTiler viewer
+        # can't deep-link to a single cube slice (it ignores URL query params and has no time selector),
+        # and the per-acq id has no reconstructable store. Render links stay slice-correct via sel=time.
+        store_links = [lk for lk in item.get("links", []) if lk.get("rel") == "store"]
         item["links"] = [
+            *store_links,
             {
                 "rel": "tilejson",
                 "type": "application/json",
@@ -157,6 +194,12 @@ def per_acquisition_items(
                 "type": "image/png",
                 "href": render_xyz(raster_api, cube_collection, tile_id, render, sel_time),
                 "title": "Sentinel-1 GRD RGB composite",
+            },
+            {
+                "rel": "via",
+                "type": "text/html",
+                "href": f"{EXPLORER_BASE}/collections/{collection.lower().replace('_', '-')}/items/{item_id}",
+                "title": "EOPF Explorer",
             },
         ]
         item.setdefault("assets", {})["thumbnail"] = {
@@ -237,6 +280,11 @@ def main() -> None:
     ap.add_argument("--stac-api-url", required=True)
     ap.add_argument("--raster-api-url", required=True)
     ap.add_argument(
+        "--s3-endpoint",
+        default="https://s3.de.io.cloud.ovh.net",
+        help="S3 endpoint for the alternate-assets/storage metadata (region + tier). Default: OVH de.",
+    )
+    ap.add_argument(
         "--reregister-all",
         action="store_true",
         help="re-upsert every slice's item (one-time migration of items still on the old index sel); "
@@ -245,15 +293,21 @@ def main() -> None:
     args = ap.parse_args()
 
     from eopf_geozarr.stac.s1_rtc import build_s1_rtc_stac_item
-    from register_v1 import s3_to_https
+    from register_v1 import add_alternate_s3_assets, add_store_link, s3_to_https
 
-    base = build_s1_rtc_stac_item(args.store, args.collection).to_dict()
-    # build_s1_rtc_stac_item emits s3:// hrefs for an s3 store; rewrite to the https gateway so the
-    # per-acquisition items match the cube item (register_v1 does the same). Reading times below
-    # still uses the s3 store, which is authoritative and avoids the gateway's read-cache lag.
-    for asset in base.get("assets", {}).values():
-        if isinstance(asset.get("href"), str) and asset["href"].startswith("s3://"):
-            asset["href"] = s3_to_https(asset["href"])
+    base_item = build_s1_rtc_stac_item(args.store, args.collection)
+    apply_s1_rtc_rescale(base_item)
+    # Mirror register_v1_s1_rtc's cube augmentation so per-acq items carry the same assets/metadata:
+    # rewrite s3://→https first (the alternate-assets block is derived from the https href), then add the
+    # cube `store` link + the alternate-assets/storage blocks. These flow into every clone via deepcopy
+    # in per_acquisition_items. Reading times below still uses the s3 store (authoritative; avoids the
+    # gateway's read-cache lag).
+    for asset in base_item.assets.values():
+        if asset.href and asset.href.startswith("s3://"):
+            asset.href = s3_to_https(asset.href)
+    add_store_link(base_item, args.store)
+    add_alternate_s3_assets(base_item, args.s3_endpoint)
+    base = base_item.to_dict()
     times = read_times_ns(args.store, args.orbit_direction)
     items = per_acquisition_items(
         base,

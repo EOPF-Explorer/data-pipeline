@@ -107,6 +107,40 @@ def test_upserts_item_with_correct_id() -> None:
     assert called_item.id == "s1-rtc-31TCH"
 
 
+def test_register_overrides_rescale_to_0_2() -> None:
+    """register() applies apply_s1_rtc_rescale: the upserted cube item renders at 0.0,0.2 (not build's
+    0.0,0.1), and the derived xyz/tilejson links inherit it."""
+    item = _make_item()
+    item.properties["renders"] = {
+        "rgb": {
+            "expression": "/ascending:vv;/ascending:vh;(/ascending:vv)/(/ascending:vh)",
+            "rescale": [[0.0, 0.1]],
+            "bidx": [1],
+        }
+    }
+    item.stac_extensions.append("https://stac-extensions.github.io/render/v1.0.0/schema.json")
+    with (
+        patch(f"{_MOD}.build_s1_rtc_stac_item", return_value=item),
+        patch(f"{_MOD}.warm_thumbnail_cache"),
+        patch(f"{_MOD}.slice_coverages", return_value=[]),
+        patch(f"{_MOD}.upsert_item") as mock_upsert,
+        patch(f"{_MOD}.Client"),
+    ):
+        result = register(
+            _STORE,
+            _COLLECTION,
+            "https://stac.example.com",
+            "https://raster.example.com",
+            "https://s3.example.com",
+        )
+
+    assert result == 0
+    called_item = mock_upsert.call_args[0][2]
+    assert called_item.properties["renders"]["rgb"]["rescale"] == [[0.0, 0.2]]
+    hrefs = " ".join(link.href for link in called_item.links if link.rel in ("xyz", "tilejson"))
+    assert "rescale=0.0%2C0.2" in hrefs and "rescale=0.0%2C0.1" not in hrefs
+
+
 def test_visualization_links_called() -> None:
     """add_visualization_links must be called once with correct raster URL and collection."""
     with (
