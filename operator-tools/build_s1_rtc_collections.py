@@ -39,6 +39,12 @@ CUBE_COLLECTION = "sentinel-1-grd-rtc-staging"
 ACQ_COLLECTION = "sentinel-1-grd-rtc-acquisitions-staging"
 _ORBITS = (("asc", "ascending"), ("desc", "descending"))
 
+# Fixed spatial extent (the STAC Browser collection-map "frame"). Pinned to the *planned* target
+# coverage — France (Pyrenees → north tip ≈ 51.1°N) + the Alpine arc — rather than the live-item
+# bbox, so the frame stays stable instead of drifting as new tiles ingest. [lon_min, lat_min,
+# lon_max, lat_max]; widen here if the AOI grows.
+AOI_BBOX = [-1.8, 42.3, 16.0, 51.2]
+
 
 def _gamma0_bands() -> list[dict[str, Any]]:
     return [
@@ -118,7 +124,8 @@ def align_collection(
     """Return a copy of ``coll`` with the stale fields patched to the new model (pure, no I/O)."""
     c = copy.deepcopy(coll)
     c["item_assets"] = item_assets()
-    c["extent"] = extent
+    # Pin the spatial bbox to the fixed target AOI (stable browser frame); keep the live temporal.
+    c["extent"] = {"spatial": {"bbox": [list(AOI_BBOX)]}, "temporal": extent["temporal"]}
     c["renders"] = _collection_render()
 
     summaries = dict(c.get("summaries", {}))
