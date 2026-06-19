@@ -87,7 +87,7 @@ def test_align_pins_spatial_extent_to_fixed_target_aoi() -> None:
     # The live-derived spatial bbox is discarded in favor of a fixed AOI so the STAC Browser
     # collection-map frame stays stable as ingestion scales out (the temporal start stays live).
     c = b.align_collection(_live(False), is_cube=False, extent=EXTENT)
-    assert b.AOI_BBOX == [-1.8, 42.3, 16.0, 51.2]  # France (Pyrenees → north tip) + Alpine arc
+    assert b.AOI_BBOX == [-5.2, 42.0, 9.2, 49.0]  # France + N Spain (Brittany → Stuttgart, N ~49°)
     assert c["extent"]["spatial"]["bbox"] == [b.AOI_BBOX]
     assert c["extent"]["temporal"] == EXTENT["temporal"]
 
