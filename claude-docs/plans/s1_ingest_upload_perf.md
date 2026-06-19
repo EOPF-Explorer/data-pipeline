@@ -35,6 +35,15 @@ Measured directly against the live store via consolidated metadata + S3 listing 
 | concurrent `fs.get` batch=32 | **134** | **2.2×** |
 This 2.2× is a **conservative floor**: laptop home-bandwidth + 178 KB objects (partly bandwidth-bound). The production pain was tiny <4 KB PUTs (pure latency-bound), where concurrency scales closer to N. **In-cluster PUT numbers must still be measured (Task 0)** before claiming a production speedup.
 
+**Real-S3 PUT/GET/incremental benchmark (2026-06-19, laptop→DE, bucket `esa-zarr-sentinel-explorer-tests`, exercising the actual `_put_files`/`_sync_tree`/`_get_tree`):** synthetic 372-object store (300 tiny <4 KB + 60×50 KB + 8×178 KB) — modelling the real cube's latency-bound tiny-object profile.
+| Path | Serial (old) | Concurrent / incremental (new) | Speedup |
+|---|---|---|---|
+| PUT full store | 298.9 s | 11.4 s @batch16 · 12.8 s @batch32 · 13.3 s @batch64 | **~23–26×** |
+| GET append-fetch | 49.8 s | 4.6 s @batch32 | **10.8×** |
+| T3 incremental append (1 new shard + 4 `zarr.json`) | 15.1 s (cold/full) | **1.2 s** (warm) | **13×** |
+
+The PUT win (>20×) far exceeds the 2.2× GET floor because tiny PUTs are pure-latency-bound (concurrency scales near N), confirming the plan's prediction. **The knee is batch≈16**; 32/64 plateau (within noise) — default 32 sits on the plateau, env-overridable for the in-cluster ceiling. **I2 (key-format) validated on real OVH S3**: `fs.find(dest, detail=True)` keys are exactly `f"{dest}/{rel}"` (372/372; `local rels == remote rels`), so T3's size-based incremental match works rather than silently degrading to a full re-upload.
+
 **Takeaways that reorder the plan:**
 - Sharding is **already done** for the display pyramid — the win is sharding the *one* family left out (`gamma_area`), collapsing **3604 → ~8 objects** (T5). This is the largest absolute reduction available.
 - Because `gamma_area` is static per relative-orbit, T3 (incremental upload) **skips re-PUTting ~3600 unchanged objects every append** — the biggest data-pipeline win, independent of T5.
@@ -79,8 +88,9 @@ T0 read-only benchmark gates Track B's concurrency choice (largely DONE — see 
 **Acceptance**:
 - [x] Object-count census captured (real store `31TEG`): 3807 objects, 94.7% unsharded `gamma_area` → motivates T5. *(done — ground-truth table)*
 - [x] Serial vs concurrent GET measured on real objects: 296→134 ms/obj = **2.2× @ batch=32** (laptop→DE floor). *(done — ground-truth table)*
-- [ ] **In-cluster** GET benchmark re-run from a pod (same region as S3, no home-bandwidth cap) to get the production-representative N and speedup ceiling — the 2.2× is a cross-region floor.
-- [ ] Decision recorded: chosen `_S3_CONCURRENCY` default (start 32, confirm in-cluster). (T3 + T5 are **required regardless** of this number — concurrency is a multiplier, not the primary lever.)
+- [x] Real-S3 **PUT** path measured (laptop→DE) on the actual functions: serial 298.9 s → batched 11.4 s = **~23–26×**; GET 10.8×; T3 incremental append 13× (see real-S3 table above). I2 key-format validated.
+- [ ] **In-cluster** benchmark re-run from a pod (same region, no home-bandwidth cap) to get the production ceiling — the laptop numbers are still a cross-region floor.
+- [x] Decision recorded: `_S3_CONCURRENCY` default = **32** (on the measured plateau; knee≈16), env-overridable via `S1_INGEST_S3_CONCURRENCY` for the in-cluster ceiling. (T3 is **required regardless** — concurrency is a multiplier, not the primary lever.)
 **PUT-vs-GET caveat**: GET is a *proxy* for PUT round-trip cost (read-only, hence safe), but object stores often throttle/rate-limit PUT differently and PUT RTT can be slower. **The N chosen here is provisional**: the post-T1 real single-tile ingest (Checkpoints) re-validates concurrency on the *write* path, and `_S3_CONCURRENCY` may need retuning for PUT.
 **Note**: the laptop benchmark already proves the mechanism works; the remaining open item is the in-cluster ceiling, which only affects how much T1/T2 add *on top of* T3/T5.
 
@@ -91,7 +101,7 @@ T0 read-only benchmark gates Track B's concurrency choice (largely DONE — see 
 **Acceptance**:
 - [x] All files land at exactly `dest/<relpath>` (`test_put_tree_lands_at_dest_without_nesting` green on the batched path).
 - [x] Transfers issued concurrently (≤ `_S3_CONCURRENCY` in flight), not one-by-one (`test_put_tree_issues_single_concurrent_batch`: one `fs.put`, `put_file` never called, `batch_size==_S3_CONCURRENCY`).
-- [ ] Measured: upload of a representative cube drops from tens-of-min to a few min — **deferred: needs in-cluster ingest** (laptop creds are cross-owner-denied on existing cubes; plan §Checkpoints).
+- [x] Measured on real S3 (laptop→DE, `esa-zarr-sentinel-explorer-tests`): full-store PUT 298.9 s → 11.4 s = **~26×**; GET 10.8× (real-S3 table). In-cluster wall-time on a live cube still deferred (laptop creds cross-owner-denied on existing prod cubes; plan §Checkpoints).
 
 ### Task 2 — Parallelize the append-fetch (`_get_tree`)  <✅ DONE>
 **What**: Same treatment for the download side: `fs.get(keys, lpaths, batch_size=_S3_CONCURRENCY)` (build the key→lpath list as today), so fetching the existing cube to append is concurrent too.
@@ -111,7 +121,7 @@ T0 read-only benchmark gates Track B's concurrency choice (largely DONE — see 
 **Acceptance**:
 - [x] Append uploads only new + size-changed objects (count ≪ total cube objects); no `rm(recursive)` of the live cube (`test_sync_tree_uploads_only_new_changed_and_metadata` asserts the exact sent-set + asserts no `recursive=True` rm; `test_sync_tree_local_roundtrip_converges` end-to-end on a real fs).
 - [x] Every `zarr.json` re-uploaded each append; no ETag/MD5 dependency anywhere (size-only compare; both `zarr.json` always in the sent-set).
-- [x] Resulting cube opens with `zarr` after an incremental sync (`test_sync_tree_result_opens_as_zarr`). titiler render unaffected — **in-cluster confirmation deferred** (same creds blocker as T1).
+- [x] Resulting cube opens with `zarr` after an incremental sync (`test_sync_tree_result_opens_as_zarr`); validated on **real OVH S3** too — a warm append re-PUT only the 5 changed objects (1 new shard + 4 `zarr.json`) in 1.2 s vs 15.1 s cold = **13×**, and the I2 key-match is exact (372/372). titiler render unaffected — **in-cluster confirmation deferred** (same creds blocker as T1).
 **Partial-failure note**: dropping the `rm`+full-reupload means a mid-append failure can leave a cube that is neither the old nor the fully-new state. This is acceptable because the per-tile Argo mutex serialises writers and a re-run re-attempts the same append idempotently (already-present `time` slices are skipped, T4); the next successful run converges the cube. Surface this in the run log so a partial upload is visible.
 
 ### Task 4 — Tests  <✅ DONE>

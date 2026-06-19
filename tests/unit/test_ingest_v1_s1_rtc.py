@@ -15,7 +15,6 @@ from ingest_v1_s1_rtc import (  # noqa: E402
     _S3_CONCURRENCY,
     _get_tree,
     _patch_cf_grid_mapping,
-    _put_tree,
     _sync_tree,
     acq_time_ns,
     ingest_all,
@@ -348,9 +347,9 @@ def test_run_ingest_s3_skips_upload_on_failure() -> None:
         mock_upload.assert_not_called()
 
 
-def test_put_tree_lands_at_dest_without_nesting(tmp_path) -> None:
-    """_put_tree maps each file to dest/<relpath> — the store lands AT dest, not
-    nested under dest/<store-basename>/ (the fsspec put recursive footgun)."""
+def test_sync_tree_lands_at_dest_without_nesting(tmp_path) -> None:
+    """_sync_tree (the sole upload path) maps each file to dest/<relpath> — the store lands AT
+    dest, not nested under dest/<store-basename>/ (the fsspec put recursive footgun)."""
     import fsspec
 
     store = tmp_path / "src" / "s1-grd-rtc-31TCH.zarr"
@@ -360,7 +359,7 @@ def test_put_tree_lands_at_dest_without_nesting(tmp_path) -> None:
     (store / "descending" / "r10m" / "c" / "0.0").write_text("chunk")
 
     dest_root = tmp_path / "dst" / "s1-grd-rtc-31TCH.zarr"
-    _put_tree(fsspec.filesystem("file"), str(store), str(dest_root))
+    _sync_tree(fsspec.filesystem("file"), str(store), str(dest_root))
 
     assert (dest_root / "zarr.json").is_file()
     assert (dest_root / "descending" / "r10m" / "c" / "0.0").is_file()
@@ -550,29 +549,10 @@ def test_discover_resolves_masked_multiframe_stamp(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# T1/T2 -- concurrent transfer: _put_tree / _get_tree issue ONE batched call,
-# not a per-file put_file/get_file loop (capped at _S3_CONCURRENCY).
+# T1/T2 -- concurrent transfer: the upload (via _put_files) and _get_tree issue
+# ONE batched call, not a per-file put_file/get_file loop (capped at _S3_CONCURRENCY).
+# (the upload side is asserted on _sync_tree below, the sole upload path.)
 # ---------------------------------------------------------------------------
-
-
-def test_put_tree_issues_single_concurrent_batch(tmp_path) -> None:
-    """_put_tree collects every file into one fs.put(lpaths, rpaths, batch_size=N) — concurrent,
-    not a serial put_file loop — while keeping the per-file dest mapping (no nesting)."""
-    from unittest.mock import MagicMock
-
-    store = tmp_path / "src" / "cube.zarr"
-    (store / "g" / "r10m").mkdir(parents=True)
-    (store / "zarr.json").write_text("{}")
-    (store / "g" / "r10m" / "0.0").write_text("chunk")
-
-    fs = MagicMock()
-    _put_tree(fs, str(store), "bucket/dest")
-
-    fs.put_file.assert_not_called()  # no serial loop
-    assert fs.put.call_count == 1
-    args, kwargs = fs.put.call_args
-    assert kwargs["batch_size"] == _S3_CONCURRENCY  # capped concurrency
-    assert set(args[1]) == {"bucket/dest/zarr.json", "bucket/dest/g/r10m/0.0"}
 
 
 def test_get_tree_issues_single_concurrent_batch(tmp_path) -> None:
@@ -634,6 +614,10 @@ def test_sync_tree_uploads_only_new_changed_and_metadata(tmp_path) -> None:
 
     _sync_tree(fs, str(store), "bucket/c")
 
+    # one batched, capped fs.put — not a serial put_file loop (T1 concurrency on the upload path)
+    fs.put_file.assert_not_called()
+    assert fs.put.call_count == 1
+    assert fs.put.call_args.kwargs["batch_size"] == _S3_CONCURRENCY
     sent = set(fs.put.call_args[0][1])
     assert sent == {
         "bucket/c/zarr.json",

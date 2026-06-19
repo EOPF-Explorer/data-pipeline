@@ -273,29 +273,12 @@ def _put_files(fs: Any, pairs: list[tuple[str, str]]) -> None:
     fs.put(lpaths, rpaths, batch_size=_S3_CONCURRENCY)
 
 
-def _put_tree(fs: Any, local_store: str, dest: str) -> None:
-    """Upload every file under ``local_store`` to ``dest/<relpath>`` (concurrently).
-
-    Maps each file explicitly rather than calling ``fs.put(..., recursive=True)``, whose
-    directory-nesting behaviour depends on trailing slashes and the fsspec version (it can
-    land the tree at ``dest/<basename>/...`` instead of ``dest/...``). Mapping per file makes
-    the store land at exactly ``dest`` on any version.
-    """
-    pairs = []
-    for root, _dirs, files in os.walk(local_store):
-        for name in files:
-            lpath = os.path.join(root, name)
-            rel = os.path.relpath(lpath, local_store).replace(os.sep, "/")
-            pairs.append((lpath, f"{dest}/{rel}"))
-    _put_files(fs, pairs)
-
-
 def _get_tree(fs: Any, src: str, local_store: str) -> None:
     """Download every object under ``src`` to ``local_store/<relpath>`` concurrently.
 
-    Mirror of ``_put_tree``: builds the key→lpath mapping as before, pre-creates the local
-    parent dirs (the list form does not), then issues a single batched ``fs.get`` so the
-    existing cube is fetched concurrently up to ``_S3_CONCURRENCY``.
+    Builds the key→lpath mapping, pre-creates the local parent dirs (the batched list form
+    does not), then issues a single ``fs.get`` so the existing cube is fetched concurrently
+    up to ``_S3_CONCURRENCY``. The download mirror of the ``_put_files`` upload primitive.
     """
     keys = fs.find(src)
     if not keys:
