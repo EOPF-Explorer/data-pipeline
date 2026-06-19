@@ -883,7 +883,7 @@ requires-dist = [
     { name = "s3fs", specifier = "==2026.4.0" },
     { name = "tenacity", specifier = "==9.1.4" },
     { name = "xarray", specifier = "==2026.4.0" },
-    { name = "zarr", extras = ["cast-value-rs"], specifier = ">=3.2.0" },
+    { name = "zarr", extras = ["cast-value-rs"], specifier = ">=3.2.1" },
 ]
 
 [package.metadata.requires-dev]
