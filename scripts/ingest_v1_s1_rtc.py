@@ -38,6 +38,13 @@ log = logging.getLogger(__name__)
 # (~1/64 of a band) while reliably catching any data blob down to ~0.01% of the tile.
 _DATA_PROBE_DECIMATION = 8
 
+# Max concurrent S3 transfers (PUT/GET). s3fs is async-backed, so fsspec runs the batched
+# list form (fs.put/fs.get) concurrently up to this many in flight. 32 is the cross-region
+# GET-benchmark optimum (plan T0); overridable without a rebuild while the in-cluster PUT
+# ceiling is tuned. The per-tile Argo mutex makes this process the only writer, and each
+# transfer targets independent object keys, so there is no write-write hazard.
+_S3_CONCURRENCY = int(os.environ.get("S1_INGEST_S3_CONCURRENCY", "32"))
+
 
 def _patch_cf_grid_mapping(store_path: str, orbit_direction: str) -> list[str]:
     """Inject a CF ``spatial_ref`` coordinate + ``grid_mapping`` attrs into every
@@ -248,35 +255,57 @@ def ingest_all(s3_geotiff_prefix: str, store_path: str, orbit_direction: str) ->
     return 0
 
 
-def _put_tree(fs: Any, local_store: str, dest: str) -> None:
-    """Upload every file under ``local_store`` to ``dest/<relpath>``.
+def _put_files(fs: Any, pairs: list[tuple[str, str]]) -> None:
+    """Upload ``(lpath, rpath)`` pairs concurrently, creating each remote parent first.
 
-    Maps each file explicitly rather than calling ``fs.put(..., recursive=True)``,
-    whose directory-nesting behaviour depends on trailing slashes and the fsspec
-    version (it can land the tree at ``dest/<basename>/...`` instead of ``dest/...``).
-    Mapping per file makes the store land at exactly ``dest`` on any version.
+    Uses fsspec's explicit list form ``fs.put([lpaths], [rpaths], batch_size=N)``: it maps
+    each pair one-to-one — preserving the no-nesting guarantee the per-file mapping gives —
+    and runs the transfers concurrently on async backends (s3fs) up to ``_S3_CONCURRENCY``.
+    The list form does NOT create parent dirs, so we ``makedirs`` each parent first (a no-op
+    on s3fs where the bucket exists; a real mkdir on a local fs).
     """
-    made: set[str] = set()
+    if not pairs:
+        return
+    lpaths = [lp for lp, _ in pairs]
+    rpaths = [rp for _, rp in pairs]
+    for parent in {rp.rsplit("/", 1)[0] for rp in rpaths}:
+        fs.makedirs(parent, exist_ok=True)
+    fs.put(lpaths, rpaths, batch_size=_S3_CONCURRENCY)
+
+
+def _put_tree(fs: Any, local_store: str, dest: str) -> None:
+    """Upload every file under ``local_store`` to ``dest/<relpath>`` (concurrently).
+
+    Maps each file explicitly rather than calling ``fs.put(..., recursive=True)``, whose
+    directory-nesting behaviour depends on trailing slashes and the fsspec version (it can
+    land the tree at ``dest/<basename>/...`` instead of ``dest/...``). Mapping per file makes
+    the store land at exactly ``dest`` on any version.
+    """
+    pairs = []
     for root, _dirs, files in os.walk(local_store):
         for name in files:
             lpath = os.path.join(root, name)
             rel = os.path.relpath(lpath, local_store).replace(os.sep, "/")
-            rpath = f"{dest}/{rel}"
-            parent = rpath.rsplit("/", 1)[0]
-            if parent not in made:
-                # No-op on s3fs (bucket exists); creates parents on a local fs.
-                fs.makedirs(parent, exist_ok=True)
-                made.add(parent)
-            fs.put_file(lpath, rpath)
+            pairs.append((lpath, f"{dest}/{rel}"))
+    _put_files(fs, pairs)
 
 
 def _get_tree(fs: Any, src: str, local_store: str) -> None:
-    """Download every object under ``src`` to ``local_store/<relpath>`` (mirror of ``_put_tree``)."""
-    for key in fs.find(src):
-        rel = key[len(src) :].lstrip("/")
-        lpath = os.path.join(local_store, rel.replace("/", os.sep))
-        os.makedirs(os.path.dirname(lpath), exist_ok=True)
-        fs.get_file(key, lpath)
+    """Download every object under ``src`` to ``local_store/<relpath>`` concurrently.
+
+    Mirror of ``_put_tree``: builds the key→lpath mapping as before, pre-creates the local
+    parent dirs (the list form does not), then issues a single batched ``fs.get`` so the
+    existing cube is fetched concurrently up to ``_S3_CONCURRENCY``.
+    """
+    keys = fs.find(src)
+    if not keys:
+        return
+    lpaths = [
+        os.path.join(local_store, key[len(src) :].lstrip("/").replace("/", os.sep)) for key in keys
+    ]
+    for parent in {os.path.dirname(p) for p in lpaths}:
+        os.makedirs(parent, exist_ok=True)
+    fs.get(keys, lpaths, batch_size=_S3_CONCURRENCY)
 
 
 def _fetch_store_from_s3(s3_uri: str, local_store: str) -> None:
@@ -320,23 +349,71 @@ def _drop_consolidated_metadata(local_store: str) -> None:
         )
 
 
+def _sync_tree(fs: Any, local_store: str, dest: str) -> None:
+    """Upload only new/changed objects under ``local_store`` to ``dest``; delete vanished keys.
+
+    Zarr append is additive: a new acquisition writes **new** shard keys at the new time index
+    and rewrites only the tiny metadata in place. Exploit that instead of an ``rm`` + full
+    re-upload of the whole accumulated cube every append (which re-PUT ~3600 static objects):
+
+    - ``zarr.json`` metadata: always re-upload — it is the one thing rewritten *in place*
+      (shape/attr edits) and is tiny.
+    - chunk/shard objects: upload only if **absent** from the S3 listing (new) or its local
+      **size differs** (changed). A content-changed blosc-compressed shard almost always
+      changes compressed size. NOT ETag/MD5 — s3fs uploads shards multipart, whose ETag is
+      ``<md5>-<nparts>``, not the object MD5, so an MD5 compare is both wrong and pointless.
+    - deletions: drop S3 keys no longer present locally (rare — e.g. a re-chunk).
+
+    Both the presence and size checks come from the single ``fs.find`` listing — no extra
+    round-trips. Keeps per-append upload flat as the cube grows.
+    """
+    remote_size = (
+        {k: v.get("size") for k, v in fs.find(dest, detail=True).items()} if fs.exists(dest) else {}
+    )
+    pairs: list[tuple[str, str]] = []
+    local_keys: set[str] = set()
+    for root, _dirs, files in os.walk(local_store):
+        for name in files:
+            lpath = os.path.join(root, name)
+            rel = os.path.relpath(lpath, local_store).replace(os.sep, "/")
+            rpath = f"{dest}/{rel}"
+            local_keys.add(rpath)
+            if (
+                name == "zarr.json"
+                or rpath not in remote_size
+                or os.path.getsize(lpath) != remote_size[rpath]
+            ):
+                pairs.append((lpath, rpath))
+    _put_files(fs, pairs)
+    stale = sorted(set(remote_size) - local_keys)
+    if stale:
+        fs.rm(stale)
+    # A mid-append failure can leave the cube between states; the per-tile Argo mutex serialises
+    # writers and a re-run re-appends idempotently, so the next success converges. Surface counts.
+    log.info(
+        "Incremental upload to %s: %d/%d object(s) sent, %d deleted",
+        dest,
+        len(pairs),
+        len(local_keys),
+        len(stale),
+    )
+
+
 def _upload_store_to_s3(local_store: str, s3_uri: str) -> None:
-    """Upload a local Zarr store directory to an ``s3://`` URI via s3fs.
+    """Upload a local Zarr store directory to an ``s3://`` URI via s3fs (incrementally).
 
     The endpoint is taken from ``AWS_ENDPOINT_URL`` (OVH S3 is not AWS-default);
     credentials come from the ambient ``AWS_ACCESS_KEY_ID`` / ``AWS_SECRET_ACCESS_KEY``.
-    The destination is removed first, then re-uploaded; for an appended cube the local store is the
-    full superset (existing slices fetched by ``_fetch_store_from_s3`` + the new one), so this writes
-    the accumulated cube, not a fresh single-acquisition store.
+    For an appended cube the local store is the full superset (existing slices fetched by
+    ``_fetch_store_from_s3`` + the new one); ``_sync_tree`` uploads only the objects that are
+    new or changed vs the current S3 listing, so append cost stays flat as the cube grows.
     """
     import s3fs
 
     endpoint = os.environ.get("AWS_ENDPOINT_URL")
     fs = s3fs.S3FileSystem(client_kwargs={"endpoint_url": endpoint} if endpoint else None)
     dest = s3_uri[len("s3://") :].rstrip("/")
-    if fs.exists(dest):
-        fs.rm(dest, recursive=True)
-    _put_tree(fs, local_store, dest)
+    _sync_tree(fs, local_store, dest)
 
 
 def run_ingest(s3_geotiff_prefix: str, store: str, orbit_direction: str) -> int:
