@@ -40,10 +40,10 @@ ACQ_COLLECTION = "sentinel-1-grd-rtc-acquisitions-staging"
 _ORBITS = (("asc", "ascending"), ("desc", "descending"))
 
 # Fixed spatial extent (the STAC Browser collection-map "frame"). Pinned to the *planned* target
-# coverage — France (Pyrenees → north tip ≈ 51.1°N) + the Alpine arc — rather than the live-item
-# bbox, so the frame stays stable instead of drifting as new tiles ingest. [lon_min, lat_min,
-# lon_max, lat_max]; widen here if the AOI grows.
-AOI_BBOX = [-1.8, 42.3, 16.0, 51.2]
+# coverage — France + northern Spain (west Brittany → the longitude of Stuttgart ~9.2°E; northern
+# Spain ~42°N → ~49°N) — rather than the live-item bbox, so the frame stays stable instead of
+# drifting as new tiles ingest. [lon_min, lat_min, lon_max, lat_max]; widen here if the AOI grows.
+AOI_BBOX = [-5.2, 42.0, 9.2, 49.0]
 
 
 def _gamma0_bands() -> list[dict[str, Any]]:
