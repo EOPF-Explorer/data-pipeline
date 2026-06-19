@@ -66,7 +66,9 @@ def test_align_cube_drops_platform_and_processing_level() -> None:
     assert "processing:level" not in c["summaries"]
     assert "vv" not in c["item_assets"]
     assert "gamma0-rtc-backscatter-asc" in c["item_assets"]
-    assert c["extent"] == EXTENT
+    # spatial extent is pinned to the fixed target AOI (stable browser frame); temporal stays live
+    assert c["extent"]["spatial"]["bbox"] == [b.AOI_BBOX]
+    assert c["extent"]["temporal"] == EXTENT["temporal"]
     assert "rgb" in c["renders"]
     assert c["title"] == "keep me"  # good fields preserved
     assert c["providers"] == [{"name": "ESA"}]
@@ -79,6 +81,15 @@ def test_align_acq_sets_normalized_platform() -> None:
     c = b.align_collection(_live(False), is_cube=False, extent=EXTENT)
     assert c["summaries"]["platform"] == ["sentinel-1a", "sentinel-1c"]
     assert "processing:level" not in c["summaries"]
+
+
+def test_align_pins_spatial_extent_to_fixed_target_aoi() -> None:
+    # The live-derived spatial bbox is discarded in favor of a fixed AOI so the STAC Browser
+    # collection-map frame stays stable as ingestion scales out (the temporal start stays live).
+    c = b.align_collection(_live(False), is_cube=False, extent=EXTENT)
+    assert b.AOI_BBOX == [-1.8, 42.3, 16.0, 51.2]  # France (Pyrenees → north tip) + Alpine arc
+    assert c["extent"]["spatial"]["bbox"] == [b.AOI_BBOX]
+    assert c["extent"]["temporal"] == EXTENT["temporal"]
 
 
 def test_align_does_not_mutate_input() -> None:
