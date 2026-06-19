@@ -118,6 +118,24 @@ def test_tiles_for_region_drops_tile_absent_from_s2_grid():
     assert "31TCH" in tiles
 
 
+def test_tiles_for_region_drops_excluded_tiles():
+    """The ocean denylist removes a tile that otherwise passes both the S2 and land filters — the
+    case the coarse 1° DEM filter can't catch (an all-sea footprint inside a part-land 1° cell)."""
+    m = _mod()
+    s = _stem()
+    bbox = [0.3, 42.4, 1.6, 43.2]
+    gpkg = {s(42, 0), s(42, 1), s(43, 0), s(43, 1)}
+    valid = m.mgrs_tiles_in_bbox(bbox)
+    assert "31TCH" in m.tiles_for_region(bbox, gpkg, valid)
+    assert "31TCH" not in m.tiles_for_region(bbox, gpkg, valid, exclude=frozenset({"31TCH"}))
+
+
+def test_exclude_keys_are_known_regions():
+    """Every denylist key must be a defined region, else its tiles silently never apply."""
+    m = _mod()
+    assert set(m.EXCLUDE) <= set(m.REGIONS)
+
+
 def test_tiles_for_region_is_deterministic():
     m = _mod()
     s = _stem()

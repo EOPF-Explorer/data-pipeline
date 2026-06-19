@@ -48,6 +48,25 @@ REGIONS: dict[str, list[float]] = {
     "france": [-5.2, 42.0, 9.2, 49.0],
 }
 
+# Ocean denylist: real S2 granules inside a region bbox that the 1° DEM land filter keeps, but whose
+# own footprint is essentially open sea. The filter keeps them because a neighbouring part of the same
+# coarse 1° cell is land; it can't see that the tile itself has ~no land. Drop them so the pipeline
+# doesn't download + process all-ocean scenes. Each tile is annotated with its land fraction
+# (share of the footprint over land, ~1 km global-land-mask); threshold for this list is < 2%.
+EXCLUDE: dict[str, set[str]] = {
+    "france": {
+        "30TWQ",  # 0.0%  Bay of Biscay
+        "30TWR",  # 0.0%  Bay of Biscay
+        "30UUV",  # 0.0%  Channel approaches, N of Brittany
+        "31TGG",  # 0.0%  Gulf of Lion
+        "32TKM",  # 0.0%  Gulf of Lion
+        "32TLM",  # 0.0%  Ligurian Sea
+        "30TUT",  # 0.1%  offshore SW Brittany
+        "31TFH",  # 1.1%  Gulf of Lion
+        "32TLN",  # 1.7%  Ligurian Sea
+    },
+}
+
 
 def mgrs_tiles_in_bbox(bbox: list[float], *, step: float = 0.1) -> set[str]:
     """The MGRS 100 km tile ids (5-char, e.g. ``31TCH``) overlapping ``bbox``.
@@ -130,18 +149,20 @@ def tiles_for_region(
     gpkg_products: set[str],
     valid_s2_tiles: set[str],
     *,
+    exclude: frozenset[str] = frozenset(),
     step: float = 0.1,
 ) -> list[str]:
     """Sorted, deduped tile ids overlapping ``bbox`` that are real S2 granules AND have DEM/land cover.
 
     The S2-grid membership test (``valid_s2_tiles``) drops math-valid-but-non-existent squares that the
     land filter alone would keep (e.g. UTM-zone-boundary duplicates); the land filter drops ocean /
-    out-of-DEM-coverage tiles. A tile must pass both.
+    out-of-DEM-coverage tiles. A tile must pass both. Tiles in ``exclude`` (a curated ocean denylist
+    for footprints the coarse 1° land filter can't tell are ~all-sea) are then removed.
     """
     return sorted(
         t
         for t in mgrs_tiles_in_bbox(bbox, step=step)
-        if t in valid_s2_tiles and tile_is_land(t, gpkg_products)
+        if t in valid_s2_tiles and t not in exclude and tile_is_land(t, gpkg_products)
     )
 
 
@@ -163,7 +184,13 @@ def main() -> None:
     ensure_gpkg(args.gpkg)
     products = read_gpkg_product10(args.gpkg)
     valid_s2 = read_s2_tile_ids(resolve_s2_gpkg(args.s2_gpkg))
-    tiles = tiles_for_region(REGIONS[args.region], products, valid_s2, step=args.step)
+    tiles = tiles_for_region(
+        REGIONS[args.region],
+        products,
+        valid_s2,
+        exclude=frozenset(EXCLUDE.get(args.region, set())),
+        step=args.step,
+    )
 
     text = "\n".join(tiles) + "\n" if tiles else ""
     if args.out:
