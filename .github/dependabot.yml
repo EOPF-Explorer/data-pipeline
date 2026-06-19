@@ -17,6 +17,10 @@ updates:
           - "major"
           - "minor"
           - "patch"
+      security:
+        applies-to: security-updates
+        patterns:
+          - "*"
   - package-ecosystem: "uv"
     directory: "/"
     cooldown:
@@ -32,6 +36,10 @@ updates:
         update-types:
           - "minor"
           - "patch"
+      security:
+        applies-to: security-updates
+        patterns:
+          - "*"
   - package-ecosystem: "pip"
     directory: "/docker"
     cooldown:
@@ -47,6 +55,10 @@ updates:
           - "major"
           - "minor"
           - "patch"
+      security:
+        applies-to: security-updates
+        patterns:
+          - "*"
   - package-ecosystem: "docker"
     directory: "/docker"
     cooldown:
@@ -61,3 +73,7 @@ updates:
         update-types:
           - "minor"
           - "patch"
+      security:
+        applies-to: security-updates
+        patterns:
+          - "*"
