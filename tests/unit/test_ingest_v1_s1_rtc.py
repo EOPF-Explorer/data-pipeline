@@ -12,8 +12,10 @@ scripts_dir = Path(__file__).parent.parent.parent / "scripts"
 sys.path.insert(0, str(scripts_dir))
 
 from ingest_v1_s1_rtc import (  # noqa: E402
+    _S3_CONCURRENCY,
+    _get_tree,
     _patch_cf_grid_mapping,
-    _put_tree,
+    _sync_tree,
     acq_time_ns,
     ingest_all,
     new_acquisitions,
@@ -345,9 +347,9 @@ def test_run_ingest_s3_skips_upload_on_failure() -> None:
         mock_upload.assert_not_called()
 
 
-def test_put_tree_lands_at_dest_without_nesting(tmp_path) -> None:
-    """_put_tree maps each file to dest/<relpath> — the store lands AT dest, not
-    nested under dest/<store-basename>/ (the fsspec put recursive footgun)."""
+def test_sync_tree_lands_at_dest_without_nesting(tmp_path) -> None:
+    """_sync_tree (the sole upload path) maps each file to dest/<relpath> — the store lands AT
+    dest, not nested under dest/<store-basename>/ (the fsspec put recursive footgun)."""
     import fsspec
 
     store = tmp_path / "src" / "s1-grd-rtc-31TCH.zarr"
@@ -357,7 +359,7 @@ def test_put_tree_lands_at_dest_without_nesting(tmp_path) -> None:
     (store / "descending" / "r10m" / "c" / "0.0").write_text("chunk")
 
     dest_root = tmp_path / "dst" / "s1-grd-rtc-31TCH.zarr"
-    _put_tree(fsspec.filesystem("file"), str(store), str(dest_root))
+    _sync_tree(fsspec.filesystem("file"), str(store), str(dest_root))
 
     assert (dest_root / "zarr.json").is_file()
     assert (dest_root / "descending" / "r10m" / "c" / "0.0").is_file()
@@ -544,3 +546,152 @@ def test_discover_resolves_masked_multiframe_stamp(tmp_path: Path) -> None:
     assert acqs[0]["acq_stamp"] == "20260602t054323"
     for k in ("vv", "vh", "vv_mask", "vh_mask"):
         assert k in acqs[0]
+
+
+# ---------------------------------------------------------------------------
+# T1/T2 -- concurrent transfer: the upload (via _put_files) and _get_tree issue
+# ONE batched call, not a per-file put_file/get_file loop (capped at _S3_CONCURRENCY).
+# (the upload side is asserted on _sync_tree below, the sole upload path.)
+# ---------------------------------------------------------------------------
+
+
+def test_get_tree_issues_single_concurrent_batch(tmp_path) -> None:
+    """_get_tree fetches the existing cube via one batched fs.get, pre-creating local parents."""
+    from unittest.mock import MagicMock
+
+    fs = MagicMock()
+    fs.find.return_value = ["bucket/src/zarr.json", "bucket/src/g/0.0"]
+    local = tmp_path / "local"
+
+    _get_tree(fs, "bucket/src", str(local))
+
+    fs.get_file.assert_not_called()
+    assert fs.get.call_count == 1
+    args, kwargs = fs.get.call_args
+    assert args[0] == ["bucket/src/zarr.json", "bucket/src/g/0.0"]
+    assert kwargs["batch_size"] == _S3_CONCURRENCY
+    assert (local / "g").is_dir()  # local parent created before the batched get
+
+
+def test_get_tree_empty_src_is_noop(tmp_path) -> None:
+    """An empty source (no keys) issues no transfer."""
+    from unittest.mock import MagicMock
+
+    fs = MagicMock()
+    fs.find.return_value = []
+    _get_tree(fs, "bucket/empty", str(tmp_path / "local"))
+    fs.get.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# T3 -- incremental upload: _sync_tree sends only new/changed objects, always
+# re-pushes zarr.json, deletes vanished keys, and never rm's the whole cube.
+# ---------------------------------------------------------------------------
+
+
+def test_sync_tree_uploads_only_new_changed_and_metadata(tmp_path) -> None:
+    """Append uploads only new + size-changed chunks, every zarr.json, and deletes vanished keys —
+    no rm(recursive) of the live cube."""
+    from unittest.mock import MagicMock
+
+    store = tmp_path / "cube.zarr"
+    (store / "g").mkdir(parents=True)
+    (store / "zarr.json").write_text('{"meta":1}')  # metadata -> always re-upload
+    (store / "g" / "zarr.json").write_text('{"m":2}')  # metadata -> always re-upload
+    (store / "g" / "new.0").write_text("brand new shard")  # absent remotely -> upload
+    (store / "g" / "same.0").write_text("unchanged")  # same size remote -> skip
+    (store / "g" / "changed.0").write_text("now much bigger")  # size differs -> upload
+
+    fs = MagicMock()
+    fs.exists.return_value = True
+    fs.find.return_value = {
+        "bucket/c/zarr.json": {"size": 99},
+        "bucket/c/g/zarr.json": {"size": 99},
+        "bucket/c/g/same.0": {"size": len("unchanged")},
+        "bucket/c/g/changed.0": {"size": 3},  # local is larger -> changed
+        "bucket/c/g/gone.0": {"size": 5},  # not local -> delete
+    }
+
+    _sync_tree(fs, str(store), "bucket/c")
+
+    # one batched, capped fs.put — not a serial put_file loop (T1 concurrency on the upload path)
+    fs.put_file.assert_not_called()
+    assert fs.put.call_count == 1
+    assert fs.put.call_args.kwargs["batch_size"] == _S3_CONCURRENCY
+    sent = set(fs.put.call_args[0][1])
+    assert sent == {
+        "bucket/c/zarr.json",
+        "bucket/c/g/zarr.json",  # metadata always
+        "bucket/c/g/new.0",
+        "bucket/c/g/changed.0",  # new + size-changed
+    }
+    assert "bucket/c/g/same.0" not in sent  # unchanged chunk skipped
+    fs.rm.assert_called_once_with(["bucket/c/g/gone.0"])  # vanished key deleted
+    # never an rm(recursive) of the whole cube
+    for c in fs.rm.call_args_list:
+        assert c.kwargs.get("recursive") is not True
+
+
+def test_sync_tree_fresh_cube_uploads_everything(tmp_path) -> None:
+    """A first-ingest cube (dest absent) uploads all objects, lists nothing, deletes nothing."""
+    from unittest.mock import MagicMock
+
+    store = tmp_path / "cube.zarr"
+    (store / "g").mkdir(parents=True)
+    (store / "zarr.json").write_text("{}")
+    (store / "g" / "0.0").write_text("x")
+
+    fs = MagicMock()
+    fs.exists.return_value = False
+
+    _sync_tree(fs, str(store), "bucket/c")
+
+    assert set(fs.put.call_args[0][1]) == {"bucket/c/zarr.json", "bucket/c/g/0.0"}
+    fs.find.assert_not_called()
+    fs.rm.assert_not_called()
+
+
+def test_sync_tree_local_roundtrip_converges(tmp_path) -> None:
+    """End-to-end on a real local fs: an incremental re-sync converges the 'remote' to the local
+    store — metadata refreshed, grown chunk replaced, new chunk added, removed chunk deleted."""
+    import fsspec
+
+    fs = fsspec.filesystem("file")
+    store = tmp_path / "local.zarr"
+    remote = tmp_path / "remote.zarr"
+    (store / "g").mkdir(parents=True)
+    (store / "zarr.json").write_text('{"v":1}')
+    (store / "g" / "0.0").write_text("aaa")
+    (store / "g" / "1.0").write_text("bbb")
+
+    _sync_tree(fs, str(store), str(remote))
+    assert (remote / "zarr.json").read_text() == '{"v":1}'
+    assert (remote / "g" / "0.0").read_text() == "aaa"
+    assert (remote / "g" / "1.0").read_text() == "bbb"
+
+    # mutate locally: metadata edit, chunk grows, new chunk, one chunk removed
+    (store / "zarr.json").write_text('{"v":2}')
+    (store / "g" / "0.0").write_text("aaaaaa")  # size change
+    (store / "g" / "2.0").write_text("ccc")  # new
+    (store / "g" / "1.0").unlink()  # removed
+
+    _sync_tree(fs, str(store), str(remote))
+    assert (remote / "zarr.json").read_text() == '{"v":2}'  # metadata refreshed
+    assert (remote / "g" / "0.0").read_text() == "aaaaaa"  # grown chunk replaced
+    assert (remote / "g" / "2.0").read_text() == "ccc"  # new chunk added
+    assert not (remote / "g" / "1.0").exists()  # removed chunk deleted
+
+
+def test_sync_tree_result_opens_as_zarr(tmp_path) -> None:
+    """The incrementally-synced 'remote' is a valid zarr store the reader can open."""
+    import fsspec
+
+    fs = fsspec.filesystem("file")
+    store = str(tmp_path / "s.zarr")
+    _store_with_times(store, [0, 1])  # builds descending/r10m/time
+    remote = str(tmp_path / "r.zarr")
+
+    _sync_tree(fs, store, remote)
+
+    g = zarr.open_group(remote, mode="r", zarr_format=3)["descending"]["r10m"]
+    assert list(g["time"][...]) == [0, 1]
