@@ -1,5 +1,14 @@
 # Implementation Plan: T7 Phase 2 — Pyrenees + Alps region rollout
 
+> **2026-06-19 — AOI superseded.** The two-region (`pyrenees` + `alps`) AOI below has been
+> consolidated into a **single `france` region** covering France + northern Spain
+> (bbox `[-5.2, 42.0, 9.2, 49.0]`: west to Brittany, east stopping at the longitude of
+> Stuttgart ~9.2°E, north ~49°N). `aoi/pyrenees.txt` + `aoi/alps.txt` were deleted and
+> replaced by `aoi/france.txt` (112 tiles); `gen_aoi_tiles.py` `REGIONS` now has only
+> `france`. The pipeline mechanism is unchanged — only the AOI bbox/list changed. The
+> deployed `s1rtc` cron (platform-deploy) still needs repointing to `aoi/france.txt`.
+> Sections below are retained for historical context.
+
 ## Overview
 Scale the validated single-/few-tile S1 RTC pipeline (CP-A 3/3) to a **region AOI** over the Pyrenees and
 Alps: generate a deterministic MGRS tile list for the region (land/DEM-covered), drive it through the

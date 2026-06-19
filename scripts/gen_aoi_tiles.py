@@ -1,6 +1,6 @@
 """Generate the land/DEM MGRS tile list for a region AOI (T7 Phase 2).
 
-Scaling the S1 RTC pipeline to a mountain arc (Pyrenees, Alps) needs a deterministic, reviewable
+Scaling the S1 RTC pipeline to a region (France + northern Spain) needs a deterministic, reviewable
 list of the MGRS 100 km tiles to process. This takes a region bbox, samples it on a grid into the
 MGRS tiles it overlaps, then keeps a tile only if it is BOTH (a) a real Sentinel-2 granule in the
 authoritative `eotile` S2 tiling grid AND (b) actually has DEM/land coverage. A tile whose footprint
@@ -16,12 +16,13 @@ s1tiling has no granule for it and exits 73, failing the whole cron run. Validat
 
 The selection is intentionally pure: the gpkg land set + the S2 tile-id set are read once (stdlib
 sqlite) and injected, so the core is testable without eotile or network. A region bbox over-includes
-some non-mountain land (e.g. the Ebro/Po basins); that's accepted for v1 — those are valid land tiles.
-A precise mountain polygon is a later refinement.
+some neighbouring land within the box (e.g. S England, Belgium/Luxembourg, W Germany/Switzerland,
+NW Italy); that's accepted for v1 — those are valid land tiles. A precise France polygon is a later
+refinement.
 
 Usage:
-    uv run python scripts/gen_aoi_tiles.py --region pyrenees \
-      --gpkg $WORKDIR/DEM/dem_db/DEM_Union.gpkg --out aoi/pyrenees.txt
+    uv run python scripts/gen_aoi_tiles.py --region france \
+      --gpkg $WORKDIR/DEM/dem_db/DEM_Union.gpkg --out aoi/france.txt
 """
 
 from __future__ import annotations
@@ -36,16 +37,15 @@ import mgrs
 # functions that need them — as ensure_dem itself does — so this module imports cleanly regardless
 # of whether scripts/ is on sys.path at import time (pytest's full-suite collection isn't).
 
-# Region AOIs as committed WGS84 bboxes [lon_min, lat_min, lon_max, lat_max]. Bbox per arc (v1):
-# simplest + deterministic, over-includes some basin/foothill land (accepted — valid land tiles).
+# Region AOI as a committed WGS84 bbox [lon_min, lat_min, lon_max, lat_max] (v1): simplest +
+# deterministic, over-includes some neighbouring land within the box (accepted — valid land tiles).
 REGIONS: dict[str, list[float]] = {
-    # Atlantic (~-1.8°W) Pyrenees, extended one MGRS row north (lat_max 45.0 → the …Q/…K row above the
-    # chain) and east to the French Mediterranean coast / Côte d'Azur (~7.7°E: 31TF*/31TG*/32TKM/32TL*).
-    # First step toward whole-France coverage. 37 tiles (was 19). lon_max 7.7 over-includes a little
-    # Ligurian land east of Menton — DEM-/S2-filtered, harmless.
-    "pyrenees": [-1.8, 42.3, 7.7, 45.0],
-    # The Alpine arc from the French Alps (~5°E) to the eastern Austrian Alps (~16°E).
-    "alps": [5.0, 43.5, 16.0, 48.0],
+    # France + northern Spain. W -5.2° (Ushant / west Brittany) → E 9.2° (longitude of Stuttgart);
+    # S 42.0° (northern Spain) → N 49.0° (clips Brittany's far-north tip and excludes Hauts-de-France).
+    # The bbox over-includes some neighbouring land within it (S England, Belgium/Luxembourg,
+    # W Germany/Switzerland, NW Italy) — all valid land tiles, S2-/DEM-filtered; a precise France
+    # polygon is a later refinement.
+    "france": [-5.2, 42.0, 9.2, 49.0],
 }
 
 
