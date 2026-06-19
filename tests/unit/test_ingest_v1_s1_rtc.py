@@ -498,6 +498,130 @@ def test_drop_consolidated_metadata_enables_resize(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# T2 -- self-heal: backfill a per-level `time` missing on r20m/r60m before append
+# (an inconsistent/legacy cube where r10m has `time` but a coarser level does not -> the eopf_geozarr
+# per-level resize raises KeyError 'time'; the guard makes the append convergent).
+# ---------------------------------------------------------------------------
+
+_TIME_CF_ATTRS = {
+    "units": "nanoseconds since 1970-01-01",
+    "calendar": "proleptic_gregorian",
+    "standard_name": "time",
+    "_ARRAY_DIMENSIONS": ["time"],
+}
+
+
+def _build_multilevel_cube(
+    store_path: str,
+    times_ns: list[int],
+    *,
+    levels_with_time: tuple[str, ...] = ("r10m",),
+    orbit: str = "ascending",
+    level_lens: dict[str, int] | None = None,
+) -> None:
+    """A cube with r10m/r20m/r60m, each level carrying a (time, y, x) `vv` of length ``level_lens``
+    (default = len(times_ns)), but a CF `time` coordinate only on ``levels_with_time``."""
+    import numpy as np
+
+    root = zarr.open_group(store_path, mode="w-", zarr_format=3)
+    og = root.create_group(orbit)
+    n = len(times_ns)
+    for lvl in ("r10m", "r20m", "r60m"):
+        g = og.create_group(lvl)
+        ln = (level_lens or {}).get(lvl, n)
+        vv = g.create_array(
+            "vv", shape=(ln, 4, 4), dtype="float32", dimension_names=("time", "y", "x")
+        )
+        vv[...] = np.zeros((ln, 4, 4), dtype="float32")
+        if lvl in levels_with_time:
+            t = g.create_array(
+                "time", shape=(n,), dtype="int64", chunks=(512,), dimension_names=("time",)
+            )
+            t[...] = np.asarray(times_ns, dtype="int64")
+            t.attrs.update(_TIME_CF_ATTRS)
+
+
+def test_ensure_level_time_coords_backfills_missing_levels(tmp_path) -> None:
+    """r10m has `time`, r20m/r60m do not -> the guard backfills both with values + dtype + CF attrs
+    identical to r10m/time, and the per-level resize the append does then succeeds."""
+    from ingest_v1_s1_rtc import _ensure_level_time_coords
+
+    t0, t1 = acq_time_ns("20230115t061234"), acq_time_ns("20230127t061230")
+    store = str(tmp_path / "cube.zarr")
+    _build_multilevel_cube(store, [t0, t1], levels_with_time=("r10m",))
+
+    _ensure_level_time_coords(store, "ascending")
+
+    og = zarr.open_group(store, mode="r", zarr_format=3)["ascending"]
+    src = og["r10m"]["time"]
+    for lvl in ("r10m", "r20m", "r60m"):
+        t = og[lvl]["time"]
+        assert list(t[...]) == [t0, t1]
+        assert t.dtype == src.dtype
+        assert list(t.metadata.dimension_names) == ["time"]
+        assert dict(t.attrs) == dict(src.attrs)
+    # the resize that crashed before (KeyError 'time' on r20m) now succeeds
+    r20 = zarr.open_group(store, mode="r+", zarr_format=3)["ascending"]["r20m"]
+    r20["time"].resize((3,))
+    assert r20["time"].shape == (3,)
+
+
+def test_ensure_level_time_coords_noop_when_all_present(tmp_path) -> None:
+    """Every level already has `time` -> idempotent no-op (no raise, values untouched)."""
+    from ingest_v1_s1_rtc import _ensure_level_time_coords
+
+    store = str(tmp_path / "cube.zarr")
+    _build_multilevel_cube(store, [1, 2, 3], levels_with_time=("r10m", "r20m", "r60m"))
+    _ensure_level_time_coords(store, "ascending")
+    og = zarr.open_group(store, mode="r", zarr_format=3)["ascending"]
+    for lvl in ("r10m", "r20m", "r60m"):
+        assert list(og[lvl]["time"][...]) == [1, 2, 3]
+
+
+def test_ensure_level_time_coords_raises_on_length_mismatch(tmp_path) -> None:
+    """A half-built cube (r20m/vv shorter than r10m/time) must fail loudly, not mis-heal with a
+    wrong-length coordinate."""
+    import pytest
+    from ingest_v1_s1_rtc import _ensure_level_time_coords
+
+    store = str(tmp_path / "cube.zarr")
+    _build_multilevel_cube(store, [1, 2], levels_with_time=("r10m",), level_lens={"r20m": 1})
+    with pytest.raises(ValueError, match="half-built"):
+        _ensure_level_time_coords(store, "ascending")
+
+
+def test_ensure_level_time_coords_raises_when_r10m_time_missing(tmp_path) -> None:
+    """r10m holds slices but no `time` -> no backfill source -> raise (wipe required), not a silent
+    invention of a coordinate."""
+    import pytest
+    from ingest_v1_s1_rtc import _ensure_level_time_coords
+
+    store = str(tmp_path / "cube.zarr")
+    _build_multilevel_cube(store, [1, 2], levels_with_time=())  # no level has `time`, incl. r10m
+    with pytest.raises(ValueError, match="backfill source"):
+        _ensure_level_time_coords(store, "ascending")
+
+
+def test_ensure_level_time_coords_skips_conditions_group(tmp_path) -> None:
+    """The `conditions` group (arrays are (y, x) only) is not a multiscale level and must never gain
+    a `time` coordinate."""
+    import numpy as np
+    from ingest_v1_s1_rtc import _ensure_level_time_coords
+
+    store = str(tmp_path / "cube.zarr")
+    _build_multilevel_cube(store, [1, 2], levels_with_time=("r10m", "r20m", "r60m"))
+    cond = zarr.open_group(store, mode="r+", zarr_format=3)["ascending"].create_group("conditions")
+    cond.create_array("gamma_area_008", shape=(4, 4), dtype="float32", dimension_names=("y", "x"))[
+        ...
+    ] = np.ones((4, 4), dtype="float32")
+
+    _ensure_level_time_coords(store, "ascending")
+
+    cond_r = zarr.open_group(store, mode="r", zarr_format=3)["ascending"]["conditions"]
+    assert "time" not in list(cond_r.array_keys())
+
+
+# ---------------------------------------------------------------------------
 # F1 -- multi-frame "daily" products whose time is masked (…txxxxxx…) are resolved upstream
 # (data-model #184); the local _normalize_masked_stamps workaround (#237) has been removed.
 # ---------------------------------------------------------------------------

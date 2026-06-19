@@ -332,6 +332,80 @@ def _drop_consolidated_metadata(local_store: str) -> None:
         )
 
 
+def _level_time_axis_len(level: Any) -> int | None:
+    """Length of a multiscale level's time axis, read from its first ``time``-dimensioned data array
+    (``vv``/``vh``/``border_mask``); ``None`` if the group has no such array (e.g. the ``conditions``
+    group, whose arrays are ``(y, x)`` only)."""
+    for _name, arr in level.arrays():
+        dims = arr.metadata.dimension_names or ()
+        if dims and dims[0] == "time":
+            return int(arr.shape[0])
+    return None
+
+
+def _ensure_level_time_coords(local_store: str, orbit_direction: str) -> None:
+    """Backfill a missing per-level ``time`` coordinate before append (self-heal -> convergence).
+
+    eopf_geozarr's append resizes ``level["time"]`` on **every** multiscale level, assuming a fresh
+    build created ``time`` at each level (data-model #192). A cube built before #192 -- or left
+    half-built by an interrupted append -- can carry ``r10m/time`` yet lack it at ``r20m``/``r60m``;
+    the resize then raises ``KeyError: 'time'``. Because the dedup only reads ``r10m/time``
+    (``store_times_ns``), the crash recurs on every re-run (non-convergent). For each multiscale level
+    missing ``time``, recreate it from ``r10m/time`` -- copying its values, dtype, ``dimension_names``
+    and attrs (already the CF time attrs) -- so the backfilled coordinate is byte-identical to a fresh
+    build without hardcoding the attr dict. No-op when every level already has ``time``.
+
+    Refuses to mask a deeper corruption rather than write a wrong-length coordinate: raises if
+    ``r10m`` holds slices but no ``time`` (no backfill source) or a level's time-axis length disagrees
+    with ``r10m/time`` (a half-built cube a wipe must repair, plan T4).
+    """
+    if not Path(local_store).exists():
+        return
+    root = zarr.open_group(local_store, mode="r+", zarr_format=3)
+    if orbit_direction not in root:
+        return
+    orbit: Any = root[orbit_direction]
+    levels = dict(orbit.groups())
+    r10m = levels.get("r10m")
+    if r10m is None:
+        return
+    if "time" not in list(r10m.array_keys()):
+        r10m_len = _level_time_axis_len(r10m)
+        if r10m_len:
+            raise ValueError(
+                f"Cannot self-heal {orbit_direction}: r10m has {r10m_len} slice(s) but no `time` "
+                "coordinate (no backfill source -- wipe + reingest)"
+            )
+        return  # nothing ingested yet -> the writer creates r10m/time on the first append
+    src = r10m["time"]
+    values = np.asarray(src[...])
+    healed: list[str] = []
+    for name, level in levels.items():
+        if name == "r10m" or "time" in list(level.array_keys()):
+            continue
+        data_len = _level_time_axis_len(level)
+        if data_len is None:
+            continue  # not a multiscale level (e.g. the `conditions` group) -- no `time` belongs here
+        if data_len != int(values.shape[0]):
+            raise ValueError(
+                f"Cannot self-heal {orbit_direction}/{name}/time: data length {data_len} != "
+                f"r10m/time length {int(values.shape[0])} (half-built cube -- wipe + reingest)"
+            )
+        arr = level.create_array(
+            "time",
+            shape=values.shape,
+            dtype=src.dtype,
+            chunks=src.chunks,
+            fill_value=0,
+            dimension_names=list(src.metadata.dimension_names or ["time"]),
+        )
+        arr[...] = values
+        arr.attrs.update(dict(src.attrs))
+        healed.append(f"{orbit_direction}/{name}")
+    if healed:
+        log.info("Backfilled missing per-level `time` from r10m/time: %s", healed)
+
+
 def _sync_tree(fs: Any, local_store: str, dest: str) -> None:
     """Upload only new/changed objects under ``local_store`` to ``dest``; delete vanished keys.
 
@@ -415,6 +489,7 @@ def run_ingest(s3_geotiff_prefix: str, store: str, orbit_direction: str) -> int:
     try:
         _fetch_store_from_s3(store, local_store)  # append to the existing per-tile cube (T4)
         _drop_consolidated_metadata(local_store)  # so eopf_geozarr can resize `time` on append
+        _ensure_level_time_coords(local_store, orbit_direction)  # heal a level missing `time` (T2)
         rc = ingest_all(s3_geotiff_prefix, local_store, orbit_direction)
         if rc != 0:
             return rc
