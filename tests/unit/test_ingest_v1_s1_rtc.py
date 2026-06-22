@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from unittest.mock import call, patch
@@ -13,7 +14,9 @@ sys.path.insert(0, str(scripts_dir))
 
 from ingest_v1_s1_rtc import (  # noqa: E402
     _S3_CONCURRENCY,
-    _get_tree,
+    _coordinate_array_dirs,
+    _fetch_for_append,
+    _get_keys,
     _patch_cf_grid_mapping,
     _sync_tree,
     acq_time_ns,
@@ -498,6 +501,130 @@ def test_drop_consolidated_metadata_enables_resize(tmp_path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# T2 -- self-heal: backfill a per-level `time` missing on r20m/r60m before append
+# (an inconsistent/legacy cube where r10m has `time` but a coarser level does not -> the eopf_geozarr
+# per-level resize raises KeyError 'time'; the guard makes the append convergent).
+# ---------------------------------------------------------------------------
+
+_TIME_CF_ATTRS = {
+    "units": "nanoseconds since 1970-01-01",
+    "calendar": "proleptic_gregorian",
+    "standard_name": "time",
+    "_ARRAY_DIMENSIONS": ["time"],
+}
+
+
+def _build_multilevel_cube(
+    store_path: str,
+    times_ns: list[int],
+    *,
+    levels_with_time: tuple[str, ...] = ("r10m",),
+    orbit: str = "ascending",
+    level_lens: dict[str, int] | None = None,
+) -> None:
+    """A cube with r10m/r20m/r60m, each level carrying a (time, y, x) `vv` of length ``level_lens``
+    (default = len(times_ns)), but a CF `time` coordinate only on ``levels_with_time``."""
+    import numpy as np
+
+    root = zarr.open_group(store_path, mode="w-", zarr_format=3)
+    og = root.create_group(orbit)
+    n = len(times_ns)
+    for lvl in ("r10m", "r20m", "r60m"):
+        g = og.create_group(lvl)
+        ln = (level_lens or {}).get(lvl, n)
+        vv = g.create_array(
+            "vv", shape=(ln, 4, 4), dtype="float32", dimension_names=("time", "y", "x")
+        )
+        vv[...] = np.zeros((ln, 4, 4), dtype="float32")
+        if lvl in levels_with_time:
+            t = g.create_array(
+                "time", shape=(n,), dtype="int64", chunks=(512,), dimension_names=("time",)
+            )
+            t[...] = np.asarray(times_ns, dtype="int64")
+            t.attrs.update(_TIME_CF_ATTRS)
+
+
+def test_ensure_level_time_coords_backfills_missing_levels(tmp_path) -> None:
+    """r10m has `time`, r20m/r60m do not -> the guard backfills both with values + dtype + CF attrs
+    identical to r10m/time, and the per-level resize the append does then succeeds."""
+    from ingest_v1_s1_rtc import _ensure_level_time_coords
+
+    t0, t1 = acq_time_ns("20230115t061234"), acq_time_ns("20230127t061230")
+    store = str(tmp_path / "cube.zarr")
+    _build_multilevel_cube(store, [t0, t1], levels_with_time=("r10m",))
+
+    _ensure_level_time_coords(store, "ascending")
+
+    og = zarr.open_group(store, mode="r", zarr_format=3)["ascending"]
+    src = og["r10m"]["time"]
+    for lvl in ("r10m", "r20m", "r60m"):
+        t = og[lvl]["time"]
+        assert list(t[...]) == [t0, t1]
+        assert t.dtype == src.dtype
+        assert list(t.metadata.dimension_names) == ["time"]
+        assert dict(t.attrs) == dict(src.attrs)
+    # the resize that crashed before (KeyError 'time' on r20m) now succeeds
+    r20 = zarr.open_group(store, mode="r+", zarr_format=3)["ascending"]["r20m"]
+    r20["time"].resize((3,))
+    assert r20["time"].shape == (3,)
+
+
+def test_ensure_level_time_coords_noop_when_all_present(tmp_path) -> None:
+    """Every level already has `time` -> idempotent no-op (no raise, values untouched)."""
+    from ingest_v1_s1_rtc import _ensure_level_time_coords
+
+    store = str(tmp_path / "cube.zarr")
+    _build_multilevel_cube(store, [1, 2, 3], levels_with_time=("r10m", "r20m", "r60m"))
+    _ensure_level_time_coords(store, "ascending")
+    og = zarr.open_group(store, mode="r", zarr_format=3)["ascending"]
+    for lvl in ("r10m", "r20m", "r60m"):
+        assert list(og[lvl]["time"][...]) == [1, 2, 3]
+
+
+def test_ensure_level_time_coords_raises_on_length_mismatch(tmp_path) -> None:
+    """A half-built cube (r20m/vv shorter than r10m/time) must fail loudly, not mis-heal with a
+    wrong-length coordinate."""
+    import pytest
+    from ingest_v1_s1_rtc import _ensure_level_time_coords
+
+    store = str(tmp_path / "cube.zarr")
+    _build_multilevel_cube(store, [1, 2], levels_with_time=("r10m",), level_lens={"r20m": 1})
+    with pytest.raises(ValueError, match="half-built"):
+        _ensure_level_time_coords(store, "ascending")
+
+
+def test_ensure_level_time_coords_raises_when_r10m_time_missing(tmp_path) -> None:
+    """r10m holds slices but no `time` -> no backfill source -> raise (wipe required), not a silent
+    invention of a coordinate."""
+    import pytest
+    from ingest_v1_s1_rtc import _ensure_level_time_coords
+
+    store = str(tmp_path / "cube.zarr")
+    _build_multilevel_cube(store, [1, 2], levels_with_time=())  # no level has `time`, incl. r10m
+    with pytest.raises(ValueError, match="backfill source"):
+        _ensure_level_time_coords(store, "ascending")
+
+
+def test_ensure_level_time_coords_skips_conditions_group(tmp_path) -> None:
+    """The `conditions` group (arrays are (y, x) only) is not a multiscale level and must never gain
+    a `time` coordinate."""
+    import numpy as np
+    from ingest_v1_s1_rtc import _ensure_level_time_coords
+
+    store = str(tmp_path / "cube.zarr")
+    _build_multilevel_cube(store, [1, 2], levels_with_time=("r10m", "r20m", "r60m"))
+    cond = zarr.open_group(store, mode="r+", zarr_format=3)["ascending"].create_group("conditions")
+    cond.create_array("gamma_area_008", shape=(4, 4), dtype="float32", dimension_names=("y", "x"))[
+        ...
+    ] = np.ones((4, 4), dtype="float32")
+
+    _ensure_level_time_coords(store, "ascending")
+
+    cond_r = zarr.open_group(store, mode="r", zarr_format=3)["ascending"]["conditions"]
+    assert "time" not in list(cond_r.array_keys())
+
+
+# ---------------------------------------------------------------------------
 # F1 -- multi-frame "daily" products whose time is masked (…txxxxxx…) are resolved upstream
 # (data-model #184); the local _normalize_masked_stamps workaround (#237) has been removed.
 # ---------------------------------------------------------------------------
@@ -549,21 +676,20 @@ def test_discover_resolves_masked_multiframe_stamp(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# T1/T2 -- concurrent transfer: the upload (via _put_files) and _get_tree issue
+# T1/T2 -- concurrent transfer: the upload (via _put_files) and the download (via _get_keys) issue
 # ONE batched call, not a per-file put_file/get_file loop (capped at _S3_CONCURRENCY).
 # (the upload side is asserted on _sync_tree below, the sole upload path.)
 # ---------------------------------------------------------------------------
 
 
-def test_get_tree_issues_single_concurrent_batch(tmp_path) -> None:
-    """_get_tree fetches the existing cube via one batched fs.get, pre-creating local parents."""
+def test_get_keys_issues_single_concurrent_batch(tmp_path) -> None:
+    """_get_keys fetches the given keys via one batched fs.get, pre-creating local parents."""
     from unittest.mock import MagicMock
 
     fs = MagicMock()
-    fs.find.return_value = ["bucket/src/zarr.json", "bucket/src/g/0.0"]
     local = tmp_path / "local"
 
-    _get_tree(fs, "bucket/src", str(local))
+    _get_keys(fs, "bucket/src", ["bucket/src/zarr.json", "bucket/src/g/0.0"], str(local))
 
     fs.get_file.assert_not_called()
     assert fs.get.call_count == 1
@@ -573,14 +699,129 @@ def test_get_tree_issues_single_concurrent_batch(tmp_path) -> None:
     assert (local / "g").is_dir()  # local parent created before the batched get
 
 
-def test_get_tree_empty_src_is_noop(tmp_path) -> None:
-    """An empty source (no keys) issues no transfer."""
+def test_get_keys_empty_is_noop(tmp_path) -> None:
+    """An empty key list issues no transfer."""
     from unittest.mock import MagicMock
 
     fs = MagicMock()
-    fs.find.return_value = []
-    _get_tree(fs, "bucket/empty", str(tmp_path / "local"))
+    _get_keys(fs, "bucket/empty", [], str(tmp_path / "local"))
     fs.get.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# T3 -- fetch-minimal append download: pull every zarr.json + the small (<=1-D) coordinate arrays,
+# but SKIP the bulk (>=2-D) vv/vh/border_mask/gamma_area_*/lia_* chunks the append never reads.
+# Classify by dimensionality (not a name denylist), so `lia_*` and future arrays are covered.
+# ---------------------------------------------------------------------------
+
+
+def _build_remote_cube_with_chunks(path: str) -> None:
+    """A realistic on-disk cube: r10m with a 1-D `time` coord + a 3-D `vv` data array, plus a
+    `conditions/gamma_area_008` 2-D array — so the fetch filter has real chunk objects to classify."""
+    import numpy as np
+
+    root = zarr.open_group(path, mode="w-", zarr_format=3)
+    og = root.create_group("ascending")
+    r10 = og.create_group("r10m")
+    r10.create_array("time", shape=(2,), dtype="int64", chunks=(512,), dimension_names=("time",))[
+        ...
+    ] = [10, 20]
+    r10.create_array(
+        "vv", shape=(2, 4, 4), dtype="float32", chunks=(1, 4, 4), dimension_names=("time", "y", "x")
+    )[...] = np.ones((2, 4, 4), dtype="float32")
+    cg = og.create_group("conditions")
+    cg.create_array(
+        "gamma_area_008", shape=(4, 4), dtype="float32", chunks=(4, 4), dimension_names=("y", "x")
+    )[...] = np.ones((4, 4), dtype="float32")
+
+
+def _relpaths(base: str) -> set[str]:
+    """All file paths under ``base``, store-relative posix."""
+    out: set[str] = set()
+    for root, _dirs, files in os.walk(base):
+        for n in files:
+            out.add(os.path.relpath(os.path.join(root, n), base).replace(os.sep, "/"))
+    return out
+
+
+def test_coordinate_array_dirs_classifies_by_dimensionality(tmp_path) -> None:
+    """time (1-D) is a coordinate dir; vv (3-D) and gamma_area_008 (2-D) are not."""
+    store = str(tmp_path / "cube.zarr")
+    _build_remote_cube_with_chunks(store)
+    coord_dirs = _coordinate_array_dirs(store)
+    assert "ascending/r10m/time" in coord_dirs
+    assert "ascending/r10m/vv" not in coord_dirs
+    assert "ascending/conditions/gamma_area_008" not in coord_dirs
+
+
+def test_fetch_for_append_keeps_metadata_and_coords_skips_bulk(tmp_path) -> None:
+    """The append fetch downloads every zarr.json + the coordinate (time) chunks, but NONE of the
+    bulk vv / gamma_area chunks — turning O(cube) into O(metadata + coords)."""
+    import fsspec
+
+    fs = fsspec.filesystem("file")
+    remote = str(tmp_path / "remote.zarr")
+    _build_remote_cube_with_chunks(remote)
+    local = str(tmp_path / "local.zarr")
+
+    _fetch_for_append(fs, remote, local)
+
+    fetched = _relpaths(local)
+    # every zarr.json present (metadata is needed to open + resize on append)
+    assert "zarr.json" in fetched
+    assert "ascending/r10m/vv/zarr.json" in fetched
+    assert "ascending/conditions/gamma_area_008/zarr.json" in fetched
+    # the coordinate chunks are present...
+    assert any(
+        f.startswith("ascending/r10m/time/") and not f.endswith("zarr.json") for f in fetched
+    )
+    # ...but the bulk data chunks are NOT fetched (the regression guard: a revert to a full fetch
+    # would pull these and fail this test)
+    assert not any(
+        f.startswith("ascending/r10m/vv/") and not f.endswith("zarr.json") for f in fetched
+    )
+    assert not any(
+        f.startswith("ascending/conditions/gamma_area_008/") and not f.endswith("zarr.json")
+        for f in fetched
+    )
+
+
+def test_fetch_for_append_then_sync_preserves_remote_bulk_chunks(tmp_path) -> None:
+    """C1 regression (data loss): after a minimal fetch the local store lacks the existing bulk
+    chunks, so a whole-cube `set(remote) - local` deletion would WIPE them. The scoped `_sync_tree`
+    must leave them on S3 while still uploading the new slice's chunks and refreshed metadata."""
+    import fsspec
+
+    fs = fsspec.filesystem("file")
+    remote = str(tmp_path / "remote.zarr")
+    _build_remote_cube_with_chunks(remote)
+    bulk_before = {
+        k
+        for k in _relpaths(remote)
+        if not k.endswith("zarr.json")
+        and (k.startswith("ascending/r10m/vv/") or k.startswith("ascending/conditions/"))
+    }
+    assert bulk_before  # sanity: there ARE bulk chunks on the "remote"
+
+    local = str(tmp_path / "local.zarr")
+    _fetch_for_append(fs, remote, local)
+    # the minimal fetch did not pull the bulk chunks
+    assert not {k for k in _relpaths(local) if k in bulk_before}
+
+    # simulate the append: write the new slice's bulk chunk + refresh vv metadata with the grown
+    # (still 3-D) shape — vv must stay classified as bulk so the scoped deletion leaves its old chunks
+    new_chunk = Path(local) / "ascending" / "r10m" / "vv" / "c" / "2" / "0" / "0"
+    new_chunk.parent.mkdir(parents=True, exist_ok=True)
+    new_chunk.write_bytes(b"new-slice-shard")
+    (Path(local) / "ascending" / "r10m" / "vv" / "zarr.json").write_text(
+        '{"node_type":"array","shape":[3,4,4]}'
+    )
+
+    _sync_tree(fs, local, remote)
+
+    after = _relpaths(remote)
+    assert bulk_before <= after  # existing bulk chunks NOT deleted (the C1 fix)
+    assert "ascending/r10m/vv/c/2/0/0" in after  # the new slice's chunk WAS uploaded
 
 
 # ---------------------------------------------------------------------------
@@ -590,14 +831,15 @@ def test_get_tree_empty_src_is_noop(tmp_path) -> None:
 
 
 def test_sync_tree_uploads_only_new_changed_and_metadata(tmp_path) -> None:
-    """Append uploads only new + size-changed chunks, every zarr.json, and deletes vanished keys —
-    no rm(recursive) of the live cube."""
+    """Append uploads only new + size-changed chunks, every zarr.json, and deletes a vanished
+    coordinate key — no rm(recursive) of the live cube. `g` is a 1-D coordinate array (its chunks
+    are deletable under the scoped deletion); a separate test covers bulk-chunk preservation."""
     from unittest.mock import MagicMock
 
     store = tmp_path / "cube.zarr"
     (store / "g").mkdir(parents=True)
-    (store / "zarr.json").write_text('{"meta":1}')  # metadata -> always re-upload
-    (store / "g" / "zarr.json").write_text('{"m":2}')  # metadata -> always re-upload
+    (store / "zarr.json").write_text('{"node_type":"group"}')  # metadata -> always re-upload
+    (store / "g" / "zarr.json").write_text('{"node_type":"array","shape":[2]}')  # 1-D coord array
     (store / "g" / "new.0").write_text("brand new shard")  # absent remotely -> upload
     (store / "g" / "same.0").write_text("unchanged")  # same size remote -> skip
     (store / "g" / "changed.0").write_text("now much bigger")  # size differs -> upload
@@ -609,7 +851,7 @@ def test_sync_tree_uploads_only_new_changed_and_metadata(tmp_path) -> None:
         "bucket/c/g/zarr.json": {"size": 99},
         "bucket/c/g/same.0": {"size": len("unchanged")},
         "bucket/c/g/changed.0": {"size": 3},  # local is larger -> changed
-        "bucket/c/g/gone.0": {"size": 5},  # not local -> delete
+        "bucket/c/g/gone.0": {"size": 5},  # not local, a coord chunk -> delete
     }
 
     _sync_tree(fs, str(store), "bucket/c")
@@ -626,7 +868,7 @@ def test_sync_tree_uploads_only_new_changed_and_metadata(tmp_path) -> None:
         "bucket/c/g/changed.0",  # new + size-changed
     }
     assert "bucket/c/g/same.0" not in sent  # unchanged chunk skipped
-    fs.rm.assert_called_once_with(["bucket/c/g/gone.0"])  # vanished key deleted
+    fs.rm.assert_called_once_with(["bucket/c/g/gone.0"])  # vanished coordinate key deleted
     # never an rm(recursive) of the whole cube
     for c in fs.rm.call_args_list:
         assert c.kwargs.get("recursive") is not True
@@ -661,6 +903,7 @@ def test_sync_tree_local_roundtrip_converges(tmp_path) -> None:
     remote = tmp_path / "remote.zarr"
     (store / "g").mkdir(parents=True)
     (store / "zarr.json").write_text('{"v":1}')
+    (store / "g" / "zarr.json").write_text('{"node_type":"array","shape":[3]}')  # 1-D coord array
     (store / "g" / "0.0").write_text("aaa")
     (store / "g" / "1.0").write_text("bbb")
 

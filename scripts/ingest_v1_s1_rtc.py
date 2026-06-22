@@ -273,14 +273,11 @@ def _put_files(fs: Any, pairs: list[tuple[str, str]]) -> None:
     fs.put(lpaths, rpaths, batch_size=_S3_CONCURRENCY)
 
 
-def _get_tree(fs: Any, src: str, local_store: str) -> None:
-    """Download every object under ``src`` to ``local_store/<relpath>`` concurrently.
-
-    Builds the key→lpath mapping, pre-creates the local parent dirs (the batched list form
-    does not), then issues a single ``fs.get`` so the existing cube is fetched concurrently
-    up to ``_S3_CONCURRENCY``. The download mirror of the ``_put_files`` upload primitive.
+def _get_keys(fs: Any, src: str, keys: list[str], local_store: str) -> None:
+    """Download the given remote ``keys`` (all under ``src``) to ``local_store/<relpath>`` in one
+    batched ``fs.get`` (concurrent up to ``_S3_CONCURRENCY``), pre-creating the local parent dirs the
+    batched list form does not. The download mirror of the ``_put_files`` upload primitive.
     """
-    keys = fs.find(src)
     if not keys:
         return
     lpaths = [
@@ -289,6 +286,65 @@ def _get_tree(fs: Any, src: str, local_store: str) -> None:
     for parent in {os.path.dirname(p) for p in lpaths}:
         os.makedirs(parent, exist_ok=True)
     fs.get(keys, lpaths, batch_size=_S3_CONCURRENCY)
+
+
+def _coordinate_array_dirs(local_store: str) -> set[str]:
+    """Store-relative dirs (posix) of every Zarr array with ``ndim <= 1`` -- the coordinate/aux
+    arrays (``time``/``x``/``y``/``absolute_orbit``/``relative_orbit``/``platform``; ``spatial_ref``
+    is 0-D). Read from the local ``zarr.json`` metadata, so it costs no network round-trips.
+
+    The bulk ``ndim >= 2`` data arrays (``vv``/``vh``/``border_mask``/``gamma_area_*``/``lia_*``) are
+    excluded. Used to (a) fetch only coordinate chunks on append and (b) scope the upload deletion so
+    a deliberately-skipped bulk chunk is never removed. Classifying by **dimensionality** (not an
+    array-name denylist) is self-maintaining and robust to sharding -- the on-disk key layout differs
+    between chunked and sharded arrays, but the logical ``shape`` does not.
+    """
+    base = Path(local_store)
+    dirs: set[str] = set()
+    for zj in base.rglob("zarr.json"):
+        meta = json.loads(zj.read_text())
+        if meta.get("node_type") == "array" and len(meta.get("shape", [])) <= 1:
+            dirs.add(zj.parent.relative_to(base).as_posix())
+    return dirs
+
+
+def _is_coordinate_key(rel: str, coord_dirs: set[str]) -> bool:
+    """True if a store-relative object path lives under a coordinate/aux (``ndim <= 1``) array dir."""
+    return any(rel == d or rel.startswith(f"{d}/") for d in coord_dirs)
+
+
+def _fetch_for_append(fs: Any, src: str, local_store: str) -> None:
+    """Fetch only what an append reads/writes: every ``zarr.json`` + the small coordinate arrays.
+
+    The append reads zarr metadata + ``r10m["vv"].shape`` and the 1-D coordinate arrays, then writes
+    a NEW time slice; it never reads the existing bulk ``vv``/``vh``/``border_mask``/``gamma_area_*``/
+    ``lia_*`` chunks (the overwhelming majority of the objects). Skipping them turns the per-append
+    fetch from O(cube) into O(metadata + coords) -- the fix for the 42-179 min outliers on large
+    cubes (the fetch is the only append phase that grows with accumulated cube size; #287 already
+    made the upload incremental).
+
+    SAFE because the bulk arrays shard with **time-extent 1** (data-model ``s1_ingest.py`` builds them
+    ``shards=(1, level_h, level_w)``): a new time index writes entirely new shard objects, never
+    read-modify-writing a skipped one; the condition arrays are single-shard and overwritten whole. If
+    that upstream sharding ever spans multiple time indices, this minimal fetch must be reverted (it
+    would corrupt via RMW of an absent shard). Two batched ``fs.get`` calls -- no per-object
+    round-trips; the single ``fs.find`` listing stays O(object count) but is a cheap LIST.
+    """
+    keys = fs.find(src)
+    if not keys:
+        return
+    meta_keys = [k for k in keys if k.rsplit("/", 1)[-1] == "zarr.json"]
+    _get_keys(fs, src, meta_keys, local_store)  # phase 1: all metadata
+    coord_dirs = _coordinate_array_dirs(
+        local_store
+    )  # classify from the local metadata (no network)
+    meta_set = set(meta_keys)
+    coord_chunks = [
+        k
+        for k in keys
+        if k not in meta_set and _is_coordinate_key(k[len(src) :].lstrip("/"), coord_dirs)
+    ]
+    _get_keys(fs, src, coord_chunks, local_store)  # phase 2: coordinate chunks only
 
 
 def _fetch_store_from_s3(s3_uri: str, local_store: str) -> None:
@@ -305,8 +361,10 @@ def _fetch_store_from_s3(s3_uri: str, local_store: str) -> None:
     src = s3_uri[len("s3://") :].rstrip("/")
     if not fs.exists(src):
         return
-    log.info("Fetching existing cube %s -> %s (append mode)", s3_uri, local_store)
-    _get_tree(fs, src, local_store)
+    log.info(
+        "Fetching existing cube %s -> %s (append mode: metadata + coords only)", s3_uri, local_store
+    )
+    _fetch_for_append(fs, src, local_store)
 
 
 def _drop_consolidated_metadata(local_store: str) -> None:
@@ -332,6 +390,80 @@ def _drop_consolidated_metadata(local_store: str) -> None:
         )
 
 
+def _level_time_axis_len(level: Any) -> int | None:
+    """Length of a multiscale level's time axis, read from its first ``time``-dimensioned data array
+    (``vv``/``vh``/``border_mask``); ``None`` if the group has no such array (e.g. the ``conditions``
+    group, whose arrays are ``(y, x)`` only)."""
+    for _name, arr in level.arrays():
+        dims = arr.metadata.dimension_names or ()
+        if dims and dims[0] == "time":
+            return int(arr.shape[0])
+    return None
+
+
+def _ensure_level_time_coords(local_store: str, orbit_direction: str) -> None:
+    """Backfill a missing per-level ``time`` coordinate before append (self-heal -> convergence).
+
+    eopf_geozarr's append resizes ``level["time"]`` on **every** multiscale level, assuming a fresh
+    build created ``time`` at each level (data-model #192). A cube built before #192 -- or left
+    half-built by an interrupted append -- can carry ``r10m/time`` yet lack it at ``r20m``/``r60m``;
+    the resize then raises ``KeyError: 'time'``. Because the dedup only reads ``r10m/time``
+    (``store_times_ns``), the crash recurs on every re-run (non-convergent). For each multiscale level
+    missing ``time``, recreate it from ``r10m/time`` -- copying its values, dtype, ``dimension_names``
+    and attrs (already the CF time attrs) -- so the backfilled coordinate is byte-identical to a fresh
+    build without hardcoding the attr dict. No-op when every level already has ``time``.
+
+    Refuses to mask a deeper corruption rather than write a wrong-length coordinate: raises if
+    ``r10m`` holds slices but no ``time`` (no backfill source) or a level's time-axis length disagrees
+    with ``r10m/time`` (a half-built cube a wipe must repair, plan T4).
+    """
+    if not Path(local_store).exists():
+        return
+    root = zarr.open_group(local_store, mode="r+", zarr_format=3)
+    if orbit_direction not in root:
+        return
+    orbit: Any = root[orbit_direction]
+    levels = dict(orbit.groups())
+    r10m = levels.get("r10m")
+    if r10m is None:
+        return
+    if "time" not in list(r10m.array_keys()):
+        r10m_len = _level_time_axis_len(r10m)
+        if r10m_len:
+            raise ValueError(
+                f"Cannot self-heal {orbit_direction}: r10m has {r10m_len} slice(s) but no `time` "
+                "coordinate (no backfill source -- wipe + reingest)"
+            )
+        return  # nothing ingested yet -> the writer creates r10m/time on the first append
+    src = r10m["time"]
+    values = np.asarray(src[...])
+    healed: list[str] = []
+    for name, level in levels.items():
+        if name == "r10m" or "time" in list(level.array_keys()):
+            continue
+        data_len = _level_time_axis_len(level)
+        if data_len is None:
+            continue  # not a multiscale level (e.g. the `conditions` group) -- no `time` belongs here
+        if data_len != int(values.shape[0]):
+            raise ValueError(
+                f"Cannot self-heal {orbit_direction}/{name}/time: data length {data_len} != "
+                f"r10m/time length {int(values.shape[0])} (half-built cube -- wipe + reingest)"
+            )
+        arr = level.create_array(
+            "time",
+            shape=values.shape,
+            dtype=src.dtype,
+            chunks=src.chunks,
+            fill_value=0,
+            dimension_names=list(src.metadata.dimension_names or ["time"]),
+        )
+        arr[...] = values
+        arr.attrs.update(dict(src.attrs))
+        healed.append(f"{orbit_direction}/{name}")
+    if healed:
+        log.info("Backfilled missing per-level `time` from r10m/time: %s", healed)
+
+
 def _sync_tree(fs: Any, local_store: str, dest: str) -> None:
     """Upload only new/changed objects under ``local_store`` to ``dest``; delete vanished keys.
 
@@ -345,7 +477,11 @@ def _sync_tree(fs: Any, local_store: str, dest: str) -> None:
       **size differs** (changed). A content-changed blosc-compressed shard almost always
       changes compressed size. NOT ETag/MD5 — s3fs uploads shards multipart, whose ETag is
       ``<md5>-<nparts>``, not the object MD5, so an MD5 compare is both wrong and pointless.
-    - deletions: drop S3 keys no longer present locally (rare — e.g. a re-chunk).
+    - deletions: drop only vanished **coordinate/metadata** keys. The append fetch
+      (``_fetch_for_append``) deliberately skips the bulk >=2-D data chunks, so they are absent
+      locally but MUST NOT be deleted from S3 -- a whole-cube ``set(remote) - local`` would wipe
+      them. Scope the deletion to the coordinate/aux arrays + ``zarr.json`` (``_coordinate_array_dirs``);
+      after a correct append every such key is present locally, so this is a no-op in the normal case.
 
     Both the presence and size checks come from the single ``fs.find`` listing — no extra
     round-trips. Keeps per-append upload flat as the cube grows.
@@ -368,7 +504,15 @@ def _sync_tree(fs: Any, local_store: str, dest: str) -> None:
             ):
                 pairs.append((lpath, rpath))
     _put_files(fs, pairs)
-    stale = sorted(set(remote_size) - local_keys)
+    # Scope deletion to coordinate/metadata keys (C1): the append fetch skips the bulk >=2-D chunks,
+    # so they are absent locally but must not be removed from S3.
+    coord_dirs = _coordinate_array_dirs(local_store)
+    stale = sorted(
+        k
+        for k in set(remote_size) - local_keys
+        if k.rsplit("/", 1)[-1] == "zarr.json"
+        or _is_coordinate_key(k[len(dest) :].lstrip("/"), coord_dirs)
+    )
     if stale:
         fs.rm(stale)
     # A mid-append failure can leave the cube between states; the per-tile Argo mutex serialises
@@ -415,6 +559,7 @@ def run_ingest(s3_geotiff_prefix: str, store: str, orbit_direction: str) -> int:
     try:
         _fetch_store_from_s3(store, local_store)  # append to the existing per-tile cube (T4)
         _drop_consolidated_metadata(local_store)  # so eopf_geozarr can resize `time` on append
+        _ensure_level_time_coords(local_store, orbit_direction)  # heal a level missing `time` (T2)
         rc = ingest_all(s3_geotiff_prefix, local_store, orbit_direction)
         if rc != 0:
             return rc
