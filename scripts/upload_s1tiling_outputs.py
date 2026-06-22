@@ -69,12 +69,17 @@ def upload_outputs(
     """
     files = collect_local_tifs(data_dir, tile_id)
     if not files:
-        log.error(
-            "No GeoTIFFs found under %s (looked in data_out/%s and data_gamma_area)",
+        # No GeoTIFFs means S1Processor found no S1 coverage for this tile/orbit/day —
+        # a legitimate empty-coverage outcome, not an error. Nothing to upload; exit 0 so
+        # the empty prefix flows to ingest, which no-ops it (exit 2 -> skip register).
+        # Returning non-zero here would re-fail the workflow on a no-coverage tile.
+        log.info(
+            "No GeoTIFFs under %s (looked in data_out/%s and data_gamma_area) — no S1 "
+            "coverage for this tile/orbit/day; nothing to upload",
             data_dir,
             tile_id,
         )
-        return 1
+        return 0
 
     # The destination is flat (basename only), so two source files sharing a
     # basename would silently overwrite each other AND dedup in the verify map --

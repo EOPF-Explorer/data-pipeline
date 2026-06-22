@@ -83,13 +83,18 @@ def test_upload_outputs_uploads_flat_and_verifies(tmp_path) -> None:
         assert (dest / f.name).stat().st_size == f.stat().st_size
 
 
-def test_upload_outputs_no_files_returns_1(tmp_path) -> None:
+def test_upload_outputs_no_files_returns_0_clean_skip(tmp_path) -> None:
+    """No GeoTIFFs = no S1 coverage for this tile/orbit/day (not an error): exit 0 so the
+    empty prefix flows to ingest, which no-ops it (exit 2). Returning 1 here would re-fail
+    the workflow on a legitimately empty tile (the 30TXT/31TGJ descending case)."""
     data_dir = tmp_path / "data"
     (data_dir / "data_out" / TILE).mkdir(parents=True)
     (data_dir / "data_gamma_area").mkdir(parents=True)
     fs = fsspec.filesystem("file")
     rc = upload_outputs(fs, data_dir, TILE, ORBIT, DATE, str(tmp_path / "bucket"))
-    assert rc == 1
+    assert rc == 0
+    # nothing was written to the destination
+    assert not (tmp_path / "bucket").exists() or not any((tmp_path / "bucket").rglob("*.tif"))
 
 
 def test_upload_outputs_verify_mismatch_returns_1(tmp_path) -> None:
