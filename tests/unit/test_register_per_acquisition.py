@@ -26,6 +26,7 @@ from register_per_acquisition import (  # noqa: E402
 CUBE = "sentinel-1-grd-rtc-staging"  # cube collection (render endpoint)
 ACQ = "sentinel-1-grd-rtc-acquisitions"  # per-acquisition collection (items go here)
 RASTER = "https://api.explorer.eopf.copernicus.eu/raster"
+STAC = "https://api.explorer.eopf.copernicus.eu/stac"
 WHEN = dt.datetime(2026, 6, 5, 6, 9, 7, tzinfo=dt.UTC)
 # sel fragment TiTiler matches against the CF-decoded datetime (colons percent-encoded)
 _SEL = "sel=time=2026-06-05T06%3A09%3A07"
@@ -83,7 +84,7 @@ def test_render_links_point_at_cube_endpoint_with_sel_datetime() -> None:
     """tilejson + viewer target the CUBE item's endpoint (not the acquisition item's), carry the
     composite render + sel=time={datetime}; never the acquisitions collection, no positional index."""
     d = decorate_acquisition_item(
-        _acq_item(), tile_id="31TCH", cube_collection=CUBE, raster_api=RASTER
+        _acq_item(), tile_id="31TCH", cube_collection=CUBE, raster_api=RASTER, stac_api_url=STAC
     )
     links = _links(d)
     for rel in ("tilejson", "viewer"):
@@ -106,7 +107,7 @@ def test_render_links_point_at_cube_endpoint_with_sel_datetime() -> None:
 
 def test_thumbnail_via_and_store_link_kept() -> None:
     d = decorate_acquisition_item(
-        _acq_item(), tile_id="31TCH", cube_collection=CUBE, raster_api=RASTER
+        _acq_item(), tile_id="31TCH", cube_collection=CUBE, raster_api=RASTER, stac_api_url=STAC
     )
     thumb = d["assets"]["thumbnail"]
     assert thumb["type"] == "image/png"
@@ -118,11 +119,13 @@ def test_thumbnail_via_and_store_link_kept() -> None:
     assert links["via"].endswith(f"/collections/{ACQ}/items/s1-rtc-31TCH-20260605t060907")
     assert "store" in links  # the caller's cube store link is preserved
     assert "/WebMercatorQuad/map.html" in links["viewer"]  # map.html deep-link into this slice
+    # related link → the parent tile datacube STAC item (cube collection)
+    assert links["related"] == f"{STAC}/collections/{CUBE}/items/s1-rtc-31TCH"
 
 
 def test_no_orbit_leak() -> None:
     """A descending item's links never reference the ascending group."""
     d = decorate_acquisition_item(
-        _acq_item(), tile_id="31TCH", cube_collection=CUBE, raster_api=RASTER
+        _acq_item(), tile_id="31TCH", cube_collection=CUBE, raster_api=RASTER, stac_api_url=STAC
     )
     assert "ascending" not in urllib.parse.unquote(str(d["links"]))

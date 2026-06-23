@@ -90,9 +90,9 @@ def render_thumbnail(
 
 
 def decorate_acquisition_item(
-    item: Item, *, tile_id: str, cube_collection: str, raster_api: str
+    item: Item, *, tile_id: str, cube_collection: str, raster_api: str, stac_api_url: str
 ) -> dict:
-    """Add the render/``via`` links + thumbnail to a per-acquisition item and return its dict.
+    """Add the render/``via``/``related`` links + thumbnail to a per-acquisition item and return its dict.
 
     Construction (single ``datetime``, run-orbit metadata, the orbit's γ⁰ asset, ``renders.rgb``) is
     already done by ``build_s1_rtc_per_acquisition_items``; this adds only the deployment links. They
@@ -100,6 +100,8 @@ def decorate_acquisition_item(
     ``sel=time={datetime}`` — no data duplication; the acquisition item is a reference into the cube,
     and the render stays slice-correct regardless of the cube's physical slice order. The ``viewer``
     link is a ``map.html`` deep-link into this acquisition's slice (``sel=time`` makes that possible).
+    A ``related`` link points at this acquisition's parent **tile datacube** STAC item
+    (``stac_api_url``/collections/``cube_collection``/items/``s1-rtc-{tile}``) for browser navigation.
     Any ``store`` link / S3 ``alternate`` blocks the caller already added are preserved.
     """
     when = item.datetime
@@ -131,6 +133,12 @@ def decorate_acquisition_item(
             "type": "text/html",
             "href": f"{EXPLORER_BASE}/collections/{collection.lower().replace('_', '-')}/items/{item_id}",
             "title": "EOPF Explorer",
+        },
+        {
+            "rel": "related",
+            "type": "application/json",
+            "href": f"{stac_api_url.rstrip('/')}/collections/{cube_collection}/items/s1-rtc-{tile_id}",
+            "title": "Parent tile datacube",
         },
     ]
     d.setdefault("assets", {})["thumbnail"] = {
@@ -219,6 +227,7 @@ def main() -> None:
                 tile_id=args.tile_id,
                 cube_collection=args.cube_collection,
                 raster_api=args.raster_api_url,
+                stac_api_url=args.stac_api_url,
             )
         )
 
