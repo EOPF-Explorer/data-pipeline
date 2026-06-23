@@ -270,7 +270,7 @@ def test_acquisitions_search_href_filters_by_tile() -> None:
     assert href.startswith("https://stac.example.com/search?")  # trailing slash stripped
     assert "collections=sentinel-1-grd-rtc-acquisitions-staging" in href
     assert "filter-lang=cql2-text" in href
-    assert "s1-rtc-31TCH-%25" in href  # id LIKE 's1-rtc-31TCH-%' (% encoded)
+    assert "grid%3Acode" in href and "MGRS-31TCH" in href  # grid:code='MGRS-31TCH'
 
 
 def test_register_adds_related_acquisitions_link() -> None:
@@ -296,7 +296,7 @@ def test_register_adds_related_acquisitions_link() -> None:
     href = related[0].href
     assert "/search?" in href
     assert "sentinel-1-grd-rtc-acquisitions-staging" in href  # derived acq collection
-    assert "s1-rtc-31TCH-%25" in href  # this tile's acquisitions
+    assert "MGRS-31TCH" in href  # this tile's acquisitions (grid:code filter)
 
 
 def test_register_acquisitions_collection_override() -> None:

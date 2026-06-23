@@ -96,11 +96,10 @@ def acquisitions_collection_of(cube_collection: str) -> str:
 def acquisitions_search_href(stac_api_url: str, acq_collection: str, tile_id: str) -> str:
     """STAC item-search URL listing this tile's per-acquisition items (self-maintaining — no enumeration).
 
-    Filters by id prefix ``s1-rtc-{tile}-`` (works today, no new property). Switch to
-    ``grid:code='MGRS-{tile}'`` once the grid extension is pinned (data-model L1). ``tile_id`` is a
-    controlled MGRS token from the cube item id, not user input.
+    Filters on the grid extension's ``grid:code='MGRS-{tile}'`` (both collections carry it since
+    data-model #205). ``tile_id`` is a controlled MGRS token from the cube item id, not user input.
     """
-    cql2 = f"id LIKE 's1-rtc-{tile_id}-%'"
+    cql2 = f"grid:code='MGRS-{tile_id}'"
     query = urlencode({"collections": acq_collection, "filter-lang": "cql2-text", "filter": cql2})
     return f"{stac_api_url.rstrip('/')}/search?{query}"
 
