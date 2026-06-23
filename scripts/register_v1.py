@@ -227,24 +227,30 @@ def _with_sel_time(query: str, sel_time: str | None) -> str:
 def add_visualization_links(
     item: Item, raster_base: str, collection_id: str, sel_time: str | None = None
 ) -> None:
-    """Add viewer/xyz/tilejson links for TiTiler visualization.
+    """Add the TiTiler visualization links.
+
+    The render path (producer ``renders`` config) emits an interactive ``map.html`` ``viewer`` + a
+    ``tilejson``; the mission fallbacks keep the legacy bare ``/viewer`` + ``xyz`` tile template.
 
     ``sel_time`` (when set) pins the render to one cube slice by datetime — the cube item passes the
     best-recent acquisition so its preview isn't the default (oldest) slice.
     """
     base_url = f"{raster_base}/collections/{collection_id}/items/{item.id}"
-    item.add_link(Link("viewer", f"{base_url}/viewer", "text/html", f"Viewer for {item.id}"))
 
     # Prefer a producer-declared render config (STAC render extension) over the
     # hardcoded mission defaults below.
     if render := _select_render(item):
         query = _with_sel_time(_render_to_query(render, include_tilesize=True), sel_time)
         title = render.get("title") or f"Visualization for {item.id}"
+        # Human-clickable interactive viewer carrying the render expression/rescale/sel. A raw
+        # {z}/{x}/{y} xyz tile template 422s when clicked in a STAC browser (the placeholders are
+        # sent to TiTiler literally); map.html fills the tile coords in itself. Machine map clients
+        # consume the tilejson link below for the tile template.
         item.add_link(
             Link(
-                "xyz",
-                f"{base_url}/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png?{query}",
-                "image/png",
+                "viewer",
+                f"{base_url}/WebMercatorQuad/map.html?{query}",
+                "text/html",
                 title,
             )
         )
@@ -259,7 +265,8 @@ def add_visualization_links(
         _add_explorer_link(item, collection_id)
         return
 
-    # Mission-specific tile configurations
+    # Mission-specific tile configurations (no producer render config): bare viewer + legacy xyz.
+    item.add_link(Link("viewer", f"{base_url}/viewer", "text/html", f"Viewer for {item.id}"))
     coll_lower = collection_id.lower()
     if coll_lower.startswith(("sentinel-1", "sentinel1")):
         # S1: VH band visualization
