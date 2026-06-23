@@ -12,7 +12,11 @@ import pytest
 scripts_dir = Path(__file__).parent.parent.parent / "scripts"
 sys.path.insert(0, str(scripts_dir))
 
-from register_v1_s1_rtc import register  # noqa: E402
+from register_v1_s1_rtc import (  # noqa: E402
+    acquisitions_collection_of,
+    acquisitions_search_href,
+    register,
+)
 
 # ---------------------------------------------------------------------------
 # Fixture
@@ -241,6 +245,81 @@ def test_matched_env_store_allowed() -> None:
 
     assert result == 0
     mock_upsert.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Cube → per-acquisition cross-link
+# ---------------------------------------------------------------------------
+
+
+def test_acquisitions_collection_derivation() -> None:
+    assert (
+        acquisitions_collection_of("sentinel-1-grd-rtc-staging")
+        == "sentinel-1-grd-rtc-acquisitions-staging"
+    )
+    assert (
+        acquisitions_collection_of("sentinel-1-grd-rtc-tests")
+        == "sentinel-1-grd-rtc-acquisitions-tests"
+    )
+
+
+def test_acquisitions_search_href_filters_by_tile() -> None:
+    href = acquisitions_search_href(
+        "https://stac.example.com/", "sentinel-1-grd-rtc-acquisitions-staging", "31TCH"
+    )
+    assert href.startswith("https://stac.example.com/search?")  # trailing slash stripped
+    assert "collections=sentinel-1-grd-rtc-acquisitions-staging" in href
+    assert "filter-lang=cql2-text" in href
+    assert "s1-rtc-31TCH-%25" in href  # id LIKE 's1-rtc-31TCH-%' (% encoded)
+
+
+def test_register_adds_related_acquisitions_link() -> None:
+    """The cube item gets one `related` link to its tile's per-acquisition search (derived coll)."""
+    with (
+        patch(f"{_MOD}.build_s1_rtc_stac_item", return_value=_make_item()),
+        patch(f"{_MOD}.warm_thumbnail_cache"),
+        patch(f"{_MOD}.slice_coverages", return_value=[]),
+        patch(f"{_MOD}.upsert_item") as mock_upsert,
+        patch(f"{_MOD}.Client"),
+    ):
+        register(
+            _STORE,
+            _COLLECTION,
+            "https://stac.example.com",
+            "https://raster.example.com",
+            "https://s3.example.com",
+        )
+
+    item = mock_upsert.call_args[0][2]
+    related = [lk for lk in item.links if lk.rel == "related"]
+    assert len(related) == 1
+    href = related[0].href
+    assert "/search?" in href
+    assert "sentinel-1-grd-rtc-acquisitions-staging" in href  # derived acq collection
+    assert "s1-rtc-31TCH-%25" in href  # this tile's acquisitions
+
+
+def test_register_acquisitions_collection_override() -> None:
+    """--acquisitions-collection overrides the derived sibling name."""
+    with (
+        patch(f"{_MOD}.build_s1_rtc_stac_item", return_value=_make_item()),
+        patch(f"{_MOD}.warm_thumbnail_cache"),
+        patch(f"{_MOD}.slice_coverages", return_value=[]),
+        patch(f"{_MOD}.upsert_item") as mock_upsert,
+        patch(f"{_MOD}.Client"),
+    ):
+        register(
+            _STORE,
+            _COLLECTION,
+            "https://stac.example.com",
+            "https://raster.example.com",
+            "https://s3.example.com",
+            acquisitions_collection="custom-acq-coll",
+        )
+
+    item = mock_upsert.call_args[0][2]
+    related = next(lk for lk in item.links if lk.rel == "related")
+    assert "collections=custom-acq-coll" in related.href
 
 
 # ---------------------------------------------------------------------------

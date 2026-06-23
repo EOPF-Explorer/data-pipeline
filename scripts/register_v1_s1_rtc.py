@@ -15,12 +15,12 @@ import argparse
 import logging
 import sys
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 sys.path.insert(0, str(Path(__file__).parent))
 
 from eopf_geozarr.stac.s1_rtc import build_s1_rtc_stac_item, pick_slice, slice_coverages
-from pystac import Item
+from pystac import Item, Link
 from pystac_client import Client
 from register_v1 import (
     add_alternate_s3_assets,
@@ -84,12 +84,34 @@ def _pin_preview_to_best_recent(item: Item, store: str) -> tuple[Item, str | Non
     return Item.from_dict(item_dict), chosen.dt.strftime("%Y-%m-%dT%H:%M:%S")
 
 
+def acquisitions_collection_of(cube_collection: str) -> str:
+    """The per-acquisition collection paired with a cube collection (its env-split sibling).
+
+    ``sentinel-1-grd-rtc-{env}`` → ``sentinel-1-grd-rtc-acquisitions-{env}``. Overridable via
+    ``--acquisitions-collection`` so platform-deploy isn't coupled to this string surgery.
+    """
+    return cube_collection.replace("sentinel-1-grd-rtc", "sentinel-1-grd-rtc-acquisitions", 1)
+
+
+def acquisitions_search_href(stac_api_url: str, acq_collection: str, tile_id: str) -> str:
+    """STAC item-search URL listing this tile's per-acquisition items (self-maintaining — no enumeration).
+
+    Filters by id prefix ``s1-rtc-{tile}-`` (works today, no new property). Switch to
+    ``grid:code='MGRS-{tile}'`` once the grid extension is pinned (data-model L1). ``tile_id`` is a
+    controlled MGRS token from the cube item id, not user input.
+    """
+    cql2 = f"id LIKE 's1-rtc-{tile_id}-%'"
+    query = urlencode({"collections": acq_collection, "filter-lang": "cql2-text", "filter": cql2})
+    return f"{stac_api_url.rstrip('/')}/search?{query}"
+
+
 def register(
     store: str,
     collection: str,
     stac_api_url: str,
     raster_api_url: str,
     s3_endpoint: str,
+    acquisitions_collection: str | None = None,
 ) -> int:
     """Build and register one S1 RTC STAC item.
 
@@ -123,6 +145,19 @@ def register(
     add_thumbnail_asset(item, raster_api_url, collection, sel_time=sel_time)
     warm_thumbnail_cache(item)
 
+    # Cross-link to this tile's per-acquisition items (one self-maintaining search link, not N
+    # enumerated links — the set grows each ingest). tile is the cube id's suffix (`s1-rtc-{tile}`).
+    tile_id = item.id.removeprefix("s1-rtc-")
+    acq_collection = acquisitions_collection or acquisitions_collection_of(collection)
+    item.add_link(
+        Link(
+            "related",
+            acquisitions_search_href(stac_api_url, acq_collection, tile_id),
+            "application/json",
+            "Per-acquisition items (this tile)",
+        )
+    )
+
     try:
         client = Client.open(stac_api_url)
         upsert_item(client, collection, item)
@@ -143,6 +178,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stac-api-url", required=True, help="STAC API base URL")
     parser.add_argument("--raster-api-url", required=True, help="TiTiler raster API base URL")
     parser.add_argument("--s3-endpoint", required=True, help="S3 endpoint URL")
+    parser.add_argument(
+        "--acquisitions-collection",
+        default=None,
+        help="per-acquisition collection for the cube→acquisitions cross-link "
+        "(default: derived as the …-acquisitions-{env} sibling of --collection)",
+    )
     return parser
 
 
@@ -156,6 +197,7 @@ def main() -> None:
             stac_api_url=args.stac_api_url,
             raster_api_url=args.raster_api_url,
             s3_endpoint=args.s3_endpoint,
+            acquisitions_collection=args.acquisitions_collection,
         )
     )
 
