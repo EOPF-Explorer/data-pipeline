@@ -67,13 +67,18 @@ def render_tilejson(
     return f"{base}/WebMercatorQuad/tilejson.json?{_render_to_query(render, include_tilesize=True)}&{_sel_time(sel_time)}"
 
 
-def render_xyz(
+def render_viewer(
     raster_api: str, cube_collection: str, tile_id: str, render: dict, sel_time: str
 ) -> str:
-    """XYZ tile template (``{z}/{x}/{y}.png``) for the cube slice at ``sel_time`` — the map preview."""
+    """Interactive ``map.html`` viewer for the cube slice at ``sel_time`` — the human-clickable map.
+
+    A raw ``{z}/{x}/{y}`` xyz tile template 422s when clicked in a STAC browser (the placeholders are
+    sent to TiTiler literally); ``map.html`` fills the tile coords in itself. ``tilejson`` (above)
+    serves the tile template to machine map clients.
+    """
     base = _cube_item_base(raster_api, cube_collection, tile_id)
     q = _render_to_query(render, include_tilesize=True)
-    return f"{base}/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png?{q}&{_sel_time(sel_time)}"
+    return f"{base}/WebMercatorQuad/map.html?{q}&{_sel_time(sel_time)}"
 
 
 def render_thumbnail(
@@ -93,9 +98,9 @@ def decorate_acquisition_item(
     already done by ``build_s1_rtc_per_acquisition_items``; this adds only the deployment links. They
     point at the shared **cube** TiTiler endpoint (``cube_collection``/``s1-rtc-{tile}``) with
     ``sel=time={datetime}`` — no data duplication; the acquisition item is a reference into the cube,
-    and the render stays slice-correct regardless of the cube's physical slice order. No ``viewer`` link
-    (TiTiler can't deep-link to a single cube slice). Any ``store`` link / S3 ``alternate`` blocks the
-    caller already added are preserved.
+    and the render stays slice-correct regardless of the cube's physical slice order. The ``viewer``
+    link is a ``map.html`` deep-link into this acquisition's slice (``sel=time`` makes that possible).
+    Any ``store`` link / S3 ``alternate`` blocks the caller already added are preserved.
     """
     when = item.datetime
     if when is None:  # per-acquisition items always carry a single datetime
@@ -116,9 +121,9 @@ def decorate_acquisition_item(
             "title": "tilejson",
         },
         {
-            "rel": "xyz",
-            "type": "image/png",
-            "href": render_xyz(raster_api, cube_collection, tile_id, render, sel_time),
+            "rel": "viewer",
+            "type": "text/html",
+            "href": render_viewer(raster_api, cube_collection, tile_id, render, sel_time),
             "title": "Sentinel-1 GRD RGB composite",
         },
         {

@@ -221,18 +221,20 @@ class TestRenderToQuery:
 
 
 class TestVisualizationFromRenders:
-    def test_xyz_and_tilejson_use_render_expression(self):
+    def test_viewer_and_tilejson_use_render_expression(self):
         item = _real_item(_s1_rgb_renders())
         add_visualization_links(item, RASTER_BASE, "sentinel-1-grd-rtc-staging")
 
-        xyz = next(link for link in item.links if link.rel == "xyz")
+        viewer = next(link for link in item.links if link.rel == "viewer")
         tilejson = next(link for link in item.links if link.rel == "tilejson")
         # render expression is used, NOT the old VH-grayscale rescale=0,219
-        for link in (xyz, tilejson):
+        for link in (viewer, tilejson):
             assert "expression=" in link.href
             assert "rescale=0%2C219" not in link.href
             assert "0.1" in link.href
-        assert "/tiles/WebMercatorQuad/{z}/{x}/{y}.png" in xyz.href
+        # the human viewer is the interactive map.html, not a raw {z}/{x}/{y} tile template
+        assert "/WebMercatorQuad/map.html" in viewer.href
+        assert not any("{z}/{x}/{y}" in link.href for link in item.links)
         assert "tilejson.json" in tilejson.href
 
     def test_thumbnail_uses_render_expression(self):
@@ -264,10 +266,10 @@ class TestSelTimePinsSlice:
         add_thumbnail_asset(item, RASTER_BASE, "sentinel-1-grd-rtc-staging", sel_time=_SEL)
         assert _SEL_Q in item.assets["thumbnail"].href
 
-    def test_xyz_and_tilejson_carry_sel_time(self):
+    def test_viewer_and_tilejson_carry_sel_time(self):
         item = _real_item(_s1_rgb_renders())
         add_visualization_links(item, RASTER_BASE, "sentinel-1-grd-rtc-staging", sel_time=_SEL)
-        for rel in ("xyz", "tilejson"):
+        for rel in ("viewer", "tilejson"):
             link = next(link for link in item.links if link.rel == rel)
             assert _SEL_Q in link.href
 

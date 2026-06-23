@@ -48,7 +48,7 @@ def _acq_item() -> pystac.Item:
             "renders": {
                 "rgb": {
                     "expression": "/descending:vv;/descending:vh;(/descending:vv)/(/descending:vh)",
-                    "rescale": [[0.0, 0.2]],
+                    "rescale": [[0.0, 0.4], [0.0, 0.1], [1.0, 15.0]],
                     "bidx": [1],
                     "tilesize": 256,
                 }
@@ -80,23 +80,28 @@ def test_acquisition_id_format() -> None:
 
 
 def test_render_links_point_at_cube_endpoint_with_sel_datetime() -> None:
-    """tilejson + xyz target the CUBE item's endpoint (not the acquisition item's), carry the composite
-    render + sel=time={datetime}; never the acquisitions collection, no positional index."""
+    """tilejson + viewer target the CUBE item's endpoint (not the acquisition item's), carry the
+    composite render + sel=time={datetime}; never the acquisitions collection, no positional index."""
     d = decorate_acquisition_item(
         _acq_item(), tile_id="31TCH", cube_collection=CUBE, raster_api=RASTER
     )
     links = _links(d)
-    for rel in ("tilejson", "xyz"):
+    for rel in ("tilejson", "viewer"):
         href = links[rel]
         assert f"/collections/{CUBE}/items/s1-rtc-31TCH" in href  # cube endpoint, not the acq item
         assert ACQ not in href
         assert "expression=" in href
-        assert "rescale=0.0%2C0.2" in href
+        # one rescale pair per expression band (vv; vh; vv/vh ratio)
+        for pair in ("rescale=0.0%2C0.4", "rescale=0.0%2C0.1", "rescale=1.0%2C15.0"):
+            assert pair in href
         assert _SEL in href
         assert "sel=time=0" not in href  # not a positional index
         assert "/descending:vv" in urllib.parse.unquote(href)  # the item's own orbit
     assert "tilejson.json" in links["tilejson"]
-    assert "{z}/{x}/{y}.png" in links["xyz"]
+    assert (
+        "/WebMercatorQuad/map.html" in links["viewer"]
+    )  # interactive viewer, not a raw tile template
+    assert "{z}/{x}/{y}" not in str(d["links"])  # the broken xyz template is gone
 
 
 def test_thumbnail_via_and_store_link_kept() -> None:
@@ -112,7 +117,7 @@ def test_thumbnail_via_and_store_link_kept() -> None:
     links = _links(d)
     assert links["via"].endswith(f"/collections/{ACQ}/items/s1-rtc-31TCH-20260605t060907")
     assert "store" in links  # the caller's cube store link is preserved
-    assert "viewer" not in links  # no viewer link for a single cube slice
+    assert "/WebMercatorQuad/map.html" in links["viewer"]  # map.html deep-link into this slice
 
 
 def test_no_orbit_leak() -> None:
