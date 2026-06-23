@@ -13,8 +13,8 @@ scripts_dir = Path(__file__).parent.parent.parent / "scripts"
 sys.path.insert(0, str(scripts_dir))
 
 from register_v1_s1_rtc import (  # noqa: E402
+    acquisitions_collection_href,
     acquisitions_collection_of,
-    acquisitions_search_href,
     register,
 )
 
@@ -263,18 +263,16 @@ def test_acquisitions_collection_derivation() -> None:
     )
 
 
-def test_acquisitions_search_href_filters_by_tile() -> None:
-    href = acquisitions_search_href(
-        "https://stac.example.com/", "sentinel-1-grd-rtc-acquisitions-staging", "31TCH"
+def test_acquisitions_collection_href() -> None:
+    href = acquisitions_collection_href(
+        "https://stac.example.com/", "sentinel-1-grd-rtc-acquisitions-staging"
     )
-    assert href.startswith("https://stac.example.com/search?")  # trailing slash stripped
-    assert "collections=sentinel-1-grd-rtc-acquisitions-staging" in href
-    assert "filter-lang=cql2-text" in href
-    assert "grid%3Acode" in href and "MGRS-31TCH" in href  # grid:code='MGRS-31TCH'
+    # the browsable collection URL (NOT a /search?filter URL, which blanks in STAC Browser)
+    assert href == "https://stac.example.com/collections/sentinel-1-grd-rtc-acquisitions-staging"
 
 
 def test_register_adds_related_acquisitions_link() -> None:
-    """The cube item gets one `related` link to its tile's per-acquisition search (derived coll)."""
+    """The cube item gets one `related` link to the browsable per-acquisition collection (derived)."""
     with (
         patch(f"{_MOD}.build_s1_rtc_stac_item", return_value=_make_item()),
         patch(f"{_MOD}.warm_thumbnail_cache"),
@@ -294,9 +292,8 @@ def test_register_adds_related_acquisitions_link() -> None:
     related = [lk for lk in item.links if lk.rel == "related"]
     assert len(related) == 1
     href = related[0].href
-    assert "/search?" in href
-    assert "sentinel-1-grd-rtc-acquisitions-staging" in href  # derived acq collection
-    assert "MGRS-31TCH" in href  # this tile's acquisitions (grid:code filter)
+    assert href.endswith("/collections/sentinel-1-grd-rtc-acquisitions-staging")  # derived coll
+    assert "/search?" not in href  # not a search URL (renders blank in STAC Browser)
 
 
 def test_register_acquisitions_collection_override() -> None:
@@ -319,7 +316,7 @@ def test_register_acquisitions_collection_override() -> None:
 
     item = mock_upsert.call_args[0][2]
     related = next(lk for lk in item.links if lk.rel == "related")
-    assert "collections=custom-acq-coll" in related.href
+    assert related.href.endswith("/collections/custom-acq-coll")
 
 
 # ---------------------------------------------------------------------------

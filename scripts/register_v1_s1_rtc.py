@@ -15,7 +15,7 @@ import argparse
 import logging
 import sys
 from pathlib import Path
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlparse
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -93,15 +93,14 @@ def acquisitions_collection_of(cube_collection: str) -> str:
     return cube_collection.replace("sentinel-1-grd-rtc", "sentinel-1-grd-rtc-acquisitions", 1)
 
 
-def acquisitions_search_href(stac_api_url: str, acq_collection: str, tile_id: str) -> str:
-    """STAC item-search URL listing this tile's per-acquisition items (self-maintaining — no enumeration).
+def acquisitions_collection_href(stac_api_url: str, acq_collection: str) -> str:
+    """STAC API URL of the per-acquisition collection — the cube→acquisitions navigation target.
 
-    Filters on the grid extension's ``grid:code='MGRS-{tile}'`` (both collections carry it since
-    data-model #205). ``tile_id`` is a controlled MGRS token from the cube item id, not user input.
+    Points at the **collection** (not a ``/search?filter=…`` URL, which STAC Browser renders as a blank
+    page). The collection page is browsable; the tile's scenes are then narrowed with its
+    ``grid:code='MGRS-{tile}'`` item-filter (both item types carry grid:code since data-model #205).
     """
-    cql2 = f"grid:code='MGRS-{tile_id}'"
-    query = urlencode({"collections": acq_collection, "filter-lang": "cql2-text", "filter": cql2})
-    return f"{stac_api_url.rstrip('/')}/search?{query}"
+    return f"{stac_api_url.rstrip('/')}/collections/{acq_collection}"
 
 
 def register(
@@ -144,16 +143,15 @@ def register(
     add_thumbnail_asset(item, raster_api_url, collection, sel_time=sel_time)
     warm_thumbnail_cache(item)
 
-    # Cross-link to this tile's per-acquisition items (one self-maintaining search link, not N
-    # enumerated links — the set grows each ingest). tile is the cube id's suffix (`s1-rtc-{tile}`).
-    tile_id = item.id.removeprefix("s1-rtc-")
+    # Cross-link to the per-acquisition items: target the browsable collection (a raw /search?filter
+    # URL renders blank in STAC Browser). Filter to this tile there via grid:code='MGRS-{tile}'.
     acq_collection = acquisitions_collection or acquisitions_collection_of(collection)
     item.add_link(
         Link(
             "related",
-            acquisitions_search_href(stac_api_url, acq_collection, tile_id),
+            acquisitions_collection_href(stac_api_url, acq_collection),
             "application/json",
-            "Per-acquisition items (this tile)",
+            "Per-acquisition items (filter by tile grid:code)",
         )
     )
 
