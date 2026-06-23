@@ -15,6 +15,7 @@ sys.path.insert(0, str(scripts_dir))
 from register_v1_s1_rtc import (  # noqa: E402
     acquisitions_collection_href,
     acquisitions_collection_of,
+    add_acquisition_links,
     register,
 )
 
@@ -92,6 +93,7 @@ def test_upserts_item_with_correct_id() -> None:
         patch(f"{_MOD}.slice_coverages", return_value=[]),  # no store read in these unit tests
         patch(f"{_MOD}.upsert_item") as mock_upsert,
         patch(f"{_MOD}.Client"),
+        patch(f"{_MOD}.add_acquisition_links"),  # no network in register() unit tests
     ):
         result = register(
             _STORE,
@@ -129,6 +131,7 @@ def test_render_rescale_propagates_to_links() -> None:
         patch(f"{_MOD}.slice_coverages", return_value=[]),
         patch(f"{_MOD}.upsert_item") as mock_upsert,
         patch(f"{_MOD}.Client"),
+        patch(f"{_MOD}.add_acquisition_links"),  # no network in register() unit tests
     ):
         result = register(
             _STORE,
@@ -153,6 +156,7 @@ def test_visualization_links_called() -> None:
         patch(f"{_MOD}.slice_coverages", return_value=[]),  # no store read in these unit tests
         patch(f"{_MOD}.upsert_item"),
         patch(f"{_MOD}.Client"),
+        patch(f"{_MOD}.add_acquisition_links"),  # no network in register() unit tests
         patch(f"{_MOD}.add_visualization_links") as mock_viz,
     ):
         register(
@@ -234,6 +238,7 @@ def test_matched_env_store_allowed() -> None:
         patch(f"{_MOD}.slice_coverages", return_value=[]),  # no store read in these unit tests
         patch(f"{_MOD}.upsert_item") as mock_upsert,
         patch(f"{_MOD}.Client"),
+        patch(f"{_MOD}.add_acquisition_links"),  # no network in register() unit tests
     ):
         result = register(
             good_store,
@@ -279,6 +284,7 @@ def test_register_adds_related_acquisitions_link() -> None:
         patch(f"{_MOD}.slice_coverages", return_value=[]),
         patch(f"{_MOD}.upsert_item") as mock_upsert,
         patch(f"{_MOD}.Client"),
+        patch(f"{_MOD}.add_acquisition_links"),  # no network in register() unit tests
     ):
         register(
             _STORE,
@@ -304,6 +310,7 @@ def test_register_acquisitions_collection_override() -> None:
         patch(f"{_MOD}.slice_coverages", return_value=[]),
         patch(f"{_MOD}.upsert_item") as mock_upsert,
         patch(f"{_MOD}.Client"),
+        patch(f"{_MOD}.add_acquisition_links"),  # no network in register() unit tests
     ):
         register(
             _STORE,
@@ -317,6 +324,59 @@ def test_register_acquisitions_collection_override() -> None:
     item = mock_upsert.call_args[0][2]
     related = next(lk for lk in item.links if lk.rel == "related")
     assert related.href.endswith("/collections/custom-acq-coll")
+
+
+def test_add_acquisition_links_enumerates_sorted() -> None:
+    """add_acquisition_links lists the tile's acquisitions as related links, sorted by datetime."""
+    import datetime as dt
+
+    feats = [
+        {
+            "id": "s1-rtc-31TCH-20260605t060842",
+            "properties": {"datetime": "2026-06-05T06:08:42Z", "sat:orbit_state": "descending"},
+        },
+        {
+            "id": "s1-rtc-31TCH-20260604t061555",
+            "properties": {"datetime": "2026-06-04T06:15:55Z", "sat:orbit_state": "ascending"},
+        },
+    ]
+
+    class _Resp:
+        def json(self):
+            return {"features": feats}
+
+    class _Http:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get(self, *a, **k):
+            return _Resp()
+
+    item = pystac.Item(
+        id="s1-rtc-31TCH",
+        geometry=None,
+        bbox=None,
+        datetime=dt.datetime(2026, 6, 7, tzinfo=dt.UTC),
+        properties={},
+    )
+    with patch(f"{_MOD}.httpx.Client", lambda *a, **k: _Http()):
+        add_acquisition_links(
+            item, "https://stac.example.com", "sentinel-1-grd-rtc-acquisitions-staging"
+        )
+
+    related = [lk for lk in item.links if lk.rel == "related"]
+    assert len(related) == 2
+    # sorted by datetime (earliest first), titled by date + orbit, href → the acquisition item
+    assert "20260604t061555" in related[0].href and related[0].title.startswith(
+        "Acquisition 2026-06-04 06:15Z"
+    )
+    assert "20260605t060842" in related[1].href
+    assert related[0].href.startswith(
+        "https://stac.example.com/collections/sentinel-1-grd-rtc-acquisitions-staging/items/"
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -17,6 +17,8 @@ import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
+import httpx
+
 sys.path.insert(0, str(Path(__file__).parent))
 
 from eopf_geozarr.stac.s1_rtc import build_s1_rtc_stac_item, pick_slice, slice_coverages
@@ -103,6 +105,46 @@ def acquisitions_collection_href(stac_api_url: str, acq_collection: str) -> str:
     return f"{stac_api_url.rstrip('/')}/collections/{acq_collection}"
 
 
+def add_acquisition_links(item: Item, stac_api_url: str, acq_collection: str) -> None:
+    """Enumerate this tile's per-acquisition items as ``related`` links on the cube item.
+
+    STAC Browser can't deep-link a filtered list (it runs CQL2 filters as POST — never in the URL —
+    and can't render a raw ItemCollection), so each acquisition is listed as a clickable link the user
+    opens directly from the cube item. Best-effort: queries the per-acquisition collection by the
+    cube's ``grid:code='MGRS-{tile}'`` (needs those items already registered; they are, each ingest).
+    """
+    stac = stac_api_url.rstrip("/")
+    tile_id = item.id.removeprefix("s1-rtc-")
+    try:
+        with httpx.Client(timeout=30.0, follow_redirects=True) as http:
+            resp = http.get(
+                f"{stac}/search",
+                params={
+                    "collections": acq_collection,
+                    "filter-lang": "cql2-text",
+                    "filter": f"grid:code='MGRS-{tile_id}'",
+                    "limit": 100,
+                },
+            )
+            feats = sorted(
+                resp.json().get("features", []), key=lambda f: f["properties"]["datetime"]
+            )
+        for f in feats:
+            when = f["properties"]["datetime"]
+            orbit = f["properties"].get("sat:orbit_state", "")
+            item.add_link(
+                Link(
+                    "related",
+                    f"{stac}/collections/{acq_collection}/items/{f['id']}",
+                    "application/geo+json",
+                    f"Acquisition {when[:16].replace('T', ' ')}Z ({orbit})",
+                )
+            )
+        log.info("Added %d per-acquisition related links for %s", len(feats), tile_id)
+    except Exception:
+        log.warning("Could not enumerate per-acquisition links for %s", tile_id, exc_info=True)
+
+
 def register(
     store: str,
     collection: str,
@@ -154,6 +196,10 @@ def register(
             "Per-acquisition items (filter by tile grid:code)",
         )
     )
+
+    # Also list this tile's per-acquisition items as individual related links (one clickable link each)
+    # so the user can open a scene directly from the cube — STAC Browser can't deep-link a filtered list.
+    add_acquisition_links(item, stac_api_url, acq_collection)
 
     try:
         client = Client.open(stac_api_url)
