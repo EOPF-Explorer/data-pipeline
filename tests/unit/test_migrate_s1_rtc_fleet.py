@@ -135,3 +135,118 @@ def test_main_list_enumerates_without_opening_stores(monkeypatch, capsys) -> Non
     out = capsys.readouterr().out
     assert f"s1-rtc-30TUM\ts3://{_PREFIX}/s1-rtc-30TUM.zarr" in out
     assert out.count("\n") == len(_ITEMS)
+
+
+def _ok_report(store, *, dry_run=False):
+    return migrate.RedriveReport(store=store, orbits=["ascending"])
+
+
+def _must_not_call(*_a, **_k):
+    raise AssertionError("this should not have been called")
+
+
+def test_backup_prefix_backs_up_each_store_before_redrive(monkeypatch) -> None:
+    """Task 3: with a backup prefix, each store is copied (to <prefix>/<item>.zarr) before its redrive."""
+    _patch_list(monkeypatch)
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        migrate.s1_store_meta, "backup_store", lambda s, b: calls.append(("backup", s, b)) or 1
+    )
+
+    def fake_redrive(store, *, dry_run=False):
+        calls.append(("redrive", store))
+        return migrate.RedriveReport(store=store, orbits=["ascending"])
+
+    monkeypatch.setattr(migrate, "redrive_store", fake_redrive)
+
+    migrate.run_fleet("http://stac", "coll", backup_prefix="s3://b/backup")
+
+    assert calls[0] == (
+        "backup",
+        f"s3://{_PREFIX}/s1-rtc-30TUM.zarr",
+        "s3://b/backup/s1-rtc-30TUM.zarr",
+    )
+    assert calls[1] == (
+        "redrive",
+        f"s3://{_PREFIX}/s1-rtc-30TUM.zarr",
+    )  # backup immediately precedes
+    assert [c[0] for c in calls] == ["backup", "redrive"] * len(_ITEMS)
+
+
+def test_dry_run_with_backup_prefix_does_not_back_up(monkeypatch) -> None:
+    """Dry-run writes nothing → no backup even if a prefix is given."""
+    _patch_list(monkeypatch)
+    monkeypatch.setattr(migrate.s1_store_meta, "backup_store", _must_not_call)
+    monkeypatch.setattr(migrate, "redrive_store", _ok_report)
+
+    migrate.run_fleet(
+        "http://stac", "coll", dry_run=True, backup_prefix="s3://b/backup"
+    )  # no raise
+
+
+def test_main_refuses_real_run_when_versioning_off_and_no_backup(monkeypatch) -> None:
+    """C2 pre-flight: a real run with versioning OFF and no --backup-prefix is refused (rc 2), no writes."""
+    _patch_list(monkeypatch)
+    monkeypatch.setattr(migrate.s1_store_meta, "s3_versioning_enabled", lambda *a, **k: False)
+    monkeypatch.setattr(migrate, "redrive_store", _must_not_call)
+
+    rc = migrate.main(["--stac-api-url", "x", "--cube-collection", "y", "--bucket", "b"])
+
+    assert rc == 2
+
+
+def test_main_proceeds_when_versioning_on(monkeypatch) -> None:
+    """C2 pre-flight: versioning ON → rely on it, proceed with the real run."""
+    _patch_list(monkeypatch)
+    monkeypatch.setattr(migrate.s1_store_meta, "s3_versioning_enabled", lambda *a, **k: True)
+    seen: list[str] = []
+    monkeypatch.setattr(
+        migrate, "redrive_store", lambda s, *, dry_run=False: seen.append(s) or _ok_report(s)
+    )
+
+    rc = migrate.main(["--stac-api-url", "x", "--cube-collection", "y", "--bucket", "b"])
+
+    assert rc == 0
+    assert len(seen) == len(_ITEMS)
+
+
+def test_rollback_restores_each_store_from_backup(monkeypatch) -> None:
+    """Task 3 AC: --rollback restores each store from <backup-prefix>/<item>.zarr (never re-derives)."""
+    _patch_list(monkeypatch)
+    restored: list[tuple] = []
+    monkeypatch.setattr(
+        migrate.s1_store_meta, "restore_store", lambda b, s: restored.append((b, s)) or 1
+    )
+    monkeypatch.setattr(migrate, "redrive_store", _must_not_call)
+
+    rc = migrate.main(
+        [
+            "--stac-api-url",
+            "x",
+            "--cube-collection",
+            "y",
+            "--rollback",
+            "--backup-prefix",
+            "s3://b/bk",
+        ]
+    )
+
+    assert rc == 0
+    assert restored[0] == ("s3://b/bk/s1-rtc-30TUM.zarr", f"s3://{_PREFIX}/s1-rtc-30TUM.zarr")
+    assert len(restored) == len(_ITEMS)
+
+
+def test_unresolvable_store_href_is_recorded_as_failed(monkeypatch) -> None:
+    """An href that doesn't resolve to s3:// (https_to_s3 → None) is failed, not crashed on Path(None)."""
+    _patch_list(monkeypatch)
+    monkeypatch.setattr(
+        migrate,
+        "https_to_s3",
+        lambda href: None if "30TWQ" in href else f"s3://{_PREFIX}/{href.rsplit('/', 1)[-1]}",
+    )
+    monkeypatch.setattr(migrate, "redrive_store", _ok_report)
+
+    fleet = migrate.run_fleet("http://stac", "coll")
+
+    assert [item for item, _ in fleet.failed] == ["s1-rtc-30TWQ"]
+    assert {"s1-rtc-30TUM", "s1-rtc-31TDG"} == set(fleet.derived)

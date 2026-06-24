@@ -12,6 +12,7 @@ writer is at the asserted behavior.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import fsspec
@@ -94,3 +95,57 @@ def set_root_attr(store_path: str | Path, key: str, value: str) -> None:
     meta = json.loads(fs.cat_file(zj))
     meta.setdefault("attributes", {})[key] = value
     fs.pipe_file(zj, json.dumps(meta).encode())
+
+
+# =============================================================================
+# Rollback / backup (Task 3) — the re-derive rewrites bulk vv/vh objects, so the migration is only
+# safe if it is reversible: prefer the bucket's own S3 versioning; else back up before the first write.
+# =============================================================================
+
+
+def s3_versioning_enabled(bucket: str, *, s3_endpoint: str | None = None) -> bool:
+    """Whether ``bucket`` has S3 object versioning enabled (the preferred per-object rollback path).
+
+    When on, an overwritten object keeps its prior version and a bad migration is reversible without a
+    pre-write copy. Endpoint resolves from ``s3_endpoint`` or ``AWS_ENDPOINT_URL``; credentials from the
+    boto3 default chain (the ``AWS_*`` env the runner sets).
+    """
+    import boto3
+
+    endpoint = s3_endpoint or os.getenv("AWS_ENDPOINT_URL")
+    client = boto3.client("s3", endpoint_url=endpoint) if endpoint else boto3.client("s3")
+    return bool(client.get_bucket_versioning(Bucket=bucket).get("Status") == "Enabled")
+
+
+def backup_store(store_path: str | Path, backup_path: str | Path) -> int:
+    """Copy every object of a store to ``backup_path`` (same filesystem); return the object count.
+
+    The fallback when the bucket has no versioning: a full pre-write copy so ``restore_store`` can bring
+    the store back byte-for-byte. (Backs up all objects, not only the vv/vh the re-derive overwrites —
+    simpler and safe; the re-derive only ever overwrites, never adds.)
+    """
+    fs, root = fsspec.core.url_to_fs(str(store_path))
+    _, dst_root = fsspec.core.url_to_fs(str(backup_path))
+    count = 0
+    for obj in fs.find(root):
+        rel = obj[len(root) :].lstrip("/")
+        fs.pipe_file(f"{dst_root.rstrip('/')}/{rel}", fs.cat_file(obj))
+        count += 1
+    return count
+
+
+def restore_store(backup_path: str | Path, store_path: str | Path) -> int:
+    """Restore a store from a ``backup_store`` copy (``--rollback``); return the object count.
+
+    Copies the backup objects back over the store. Sufficient because the re-derive only overwrites
+    existing objects (never adds), so restoring the originals — including the unmarked root ``zarr.json``
+    — fully reverts the migration.
+    """
+    fs, src_root = fsspec.core.url_to_fs(str(backup_path))
+    _, root = fsspec.core.url_to_fs(str(store_path))
+    count = 0
+    for obj in fs.find(src_root):
+        rel = obj[len(src_root) :].lstrip("/")
+        fs.pipe_file(f"{root.rstrip('/')}/{rel}", fs.cat_file(obj))
+        count += 1
+    return count

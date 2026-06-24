@@ -161,6 +161,11 @@ class FleetReport:
     failed: list[tuple[str, str]] = field(default_factory=list)  # (item_id, error message)
 
 
+def _backup_path(backup_prefix: str, item_id: str) -> str:
+    """Per-store backup location under ``backup_prefix`` (e.g. ``s3://bucket/migration-backup``)."""
+    return f"{backup_prefix.rstrip('/')}/{item_id}.zarr"
+
+
 def run_fleet(
     stac_api_url: str,
     cube_collection: str,
@@ -168,11 +173,14 @@ def run_fleet(
     dry_run: bool = False,
     only_item: str | None = None,
     skip_tiles: tuple[str, ...] = (),
+    backup_prefix: str | None = None,
 ) -> FleetReport:
     """Redrive every cube in ``cube_collection``; one bad store is logged and skipped, never aborting.
 
     Resumable: a store already at the current writer reports ``already_current`` (the marker) and is a
-    no-op, so a re-run only touches the stores that still need it.
+    no-op, so a re-run only touches the stores that still need it. When ``backup_prefix`` is set (the
+    no-versioning fallback), each store is copied there *before* it is re-derived; a backup failure marks
+    that store failed and it is not re-derived.
     """
     fleet = FleetReport()
     for item_id, href in list_cube_items(stac_api_url, cube_collection):
@@ -181,7 +189,13 @@ def run_fleet(
         if any(tile in item_id for tile in skip_tiles):
             continue
         store = https_to_s3(href)  # the STAC asset is the https gateway URI; redrive needs s3://
+        if store is None:
+            log.error("unresolvable store href for %s: %s", item_id, href)
+            fleet.failed.append((item_id, f"unresolvable store href: {href}"))
+            continue
         try:
+            if backup_prefix and not dry_run:
+                s1_store_meta.backup_store(store, _backup_path(backup_prefix, item_id))
             rpt = redrive_store(store, dry_run=dry_run)
         except Exception as exc:  # noqa: BLE001 -- the fleet must continue past one unreadable store
             log.exception("redrive failed for %s (%s)", item_id, store)
@@ -193,6 +207,39 @@ def run_fleet(
             fleet.skipped_no_border_mask.append(item_id)
         else:
             fleet.derived.append(item_id)
+    return fleet
+
+
+def run_rollback(
+    stac_api_url: str,
+    cube_collection: str,
+    backup_prefix: str,
+    *,
+    only_item: str | None = None,
+    skip_tiles: tuple[str, ...] = (),
+) -> FleetReport:
+    """Restore every cube from its ``backup_prefix`` copy (``--rollback`` of an unversioned-bucket run).
+
+    Per-store try/except like ``run_fleet``; the returned report's ``derived`` lists the restored items.
+    """
+    fleet = FleetReport()
+    for item_id, href in list_cube_items(stac_api_url, cube_collection):
+        if only_item is not None and item_id != only_item:
+            continue
+        if any(tile in item_id for tile in skip_tiles):
+            continue
+        store = https_to_s3(href)
+        if store is None:
+            log.error("unresolvable store href for %s: %s", item_id, href)
+            fleet.failed.append((item_id, f"unresolvable store href: {href}"))
+            continue
+        try:
+            s1_store_meta.restore_store(_backup_path(backup_prefix, item_id), store)
+        except Exception as exc:  # noqa: BLE001 -- restore one store; keep going
+            log.exception("rollback failed for %s (%s)", item_id, store)
+            fleet.failed.append((item_id, str(exc)))
+            continue
+        fleet.derived.append(item_id)  # "derived" == restored in the rollback report
     return fleet
 
 
@@ -211,6 +258,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--skip-tiles", nargs="*", default=[], help="tile substrings to exclude (e.g. hard-defect)"
     )
+    parser.add_argument(
+        "--bucket", default=None, help="cube bucket, for the S3-versioning pre-flight"
+    )
+    parser.add_argument(
+        "--backup-prefix",
+        default=None,
+        help="s3 prefix for pre-write backups (no-versioning fallback) and the --rollback source",
+    )
+    parser.add_argument(
+        "--rollback", action="store_true", help="restore every store from --backup-prefix"
+    )
+    parser.add_argument(
+        "--s3-endpoint",
+        default=None,
+        help="S3 endpoint for the versioning check (else AWS_ENDPOINT_URL)",
+    )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
 
@@ -219,12 +282,41 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{item_id}\t{https_to_s3(href)}")  # noqa: T201 -- CLI output
         return 0
 
+    if args.rollback:
+        if not args.backup_prefix:
+            parser.error("--rollback requires --backup-prefix")
+        rb = run_rollback(
+            args.stac_api_url,
+            args.cube_collection,
+            args.backup_prefix,
+            only_item=args.item,
+            skip_tiles=tuple(args.skip_tiles),
+        )
+        log.info("rollback: restored=%d failed=%d", len(rb.derived), len(rb.failed))
+        for item_id, err in rb.failed:
+            log.error("  FAILED %s: %s", item_id, err)
+        return 1 if rb.failed else 0
+
+    # Pre-flight rollback safety (C2): a real run must be reversible — either the bucket has S3
+    # versioning (per-object restore) or a --backup-prefix is given (each store copied before its first
+    # write). Refuse otherwise. Dry-run writes nothing, so it skips the gate.
+    if not args.dry_run and not args.backup_prefix:
+        if not args.bucket:
+            parser.error("a real run needs --bucket (for the versioning check) or --backup-prefix")
+        if not s1_store_meta.s3_versioning_enabled(args.bucket, s3_endpoint=args.s3_endpoint):
+            log.error(
+                "refusing: bucket %s has S3 versioning OFF and no --backup-prefix (C2 rollback safety)",
+                args.bucket,
+            )
+            return 2
+
     fleet = run_fleet(
         args.stac_api_url,
         args.cube_collection,
         dry_run=args.dry_run,
         only_item=args.item,
         skip_tiles=tuple(args.skip_tiles),
+        backup_prefix=args.backup_prefix,
     )
     log.info(
         "fleet %s: derived=%d already-current=%d skipped-no-border_mask=%d failed=%d",
