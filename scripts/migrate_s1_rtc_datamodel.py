@@ -79,10 +79,12 @@ def redrive_store(store_path: str | Path, *, dry_run: bool = False) -> RedriveRe
     would happen (already-current / which orbits, which lack ``border_mask``) and writes **nothing**.
     """
     s1_store_meta.assert_writer_pinned()  # R5 — refuse to run on a drifted writer
-    store_path = Path(store_path)
-    report = RedriveReport(store=str(store_path))
+    # Keep the URI as a string — `Path("s3://b/x")` collapses the `//` to `s3:/b/x` and breaks the s3
+    # store URL. zarr + the fsspec helpers accept the string for both local and s3:// paths.
+    store_path = str(store_path)
+    report = RedriveReport(store=store_path)
 
-    root_ro = zarr.open_group(str(store_path), mode="r", zarr_format=3)
+    root_ro = zarr.open_group(store_path, mode="r", zarr_format=3)
     report.orbits = [name for name, _ in root_ro.groups()]
     if dict(root_ro.attrs).get(MIGRATION_MARKER_KEY) == _marker_value():
         report.already_current = True
