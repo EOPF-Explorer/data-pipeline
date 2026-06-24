@@ -95,3 +95,50 @@ def test_set_root_attr_preserves_consolidated_metadata() -> None:
     assert meta["attributes"]["datamodel_migrated"] == "0.10.1"
     assert meta["attributes"]["existing"] == 1  # pre-existing attrs preserved
     assert meta["consolidated_metadata"] == {"kind": "inline"}  # NOT clobbered (I1)
+
+
+def test_s3_versioning_enabled_reads_bucket_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Task 3 pre-flight: reflects the bucket's versioning Status (Enabled → True, else False)."""
+    import boto3
+
+    class _FakeClient:
+        def __init__(self, status: str | None) -> None:
+            self._status = status
+
+        def get_bucket_versioning(self, Bucket: str) -> dict:  # noqa: N803 -- boto3 kwarg name
+            return {"Status": self._status} if self._status else {}
+
+    monkeypatch.setattr(boto3, "client", lambda *a, **k: _FakeClient("Enabled"))
+    assert s1_store_meta.s3_versioning_enabled("a-bucket") is True
+
+    monkeypatch.setattr(boto3, "client", lambda *a, **k: _FakeClient("Suspended"))
+    assert s1_store_meta.s3_versioning_enabled("a-bucket") is False
+
+    monkeypatch.setattr(boto3, "client", lambda *a, **k: _FakeClient(None))  # never enabled
+    assert s1_store_meta.s3_versioning_enabled("a-bucket") is False
+
+
+def test_backup_and_restore_round_trip() -> None:
+    """Task 3 AC: backup copies every store object; restore brings a mutated store back to its bytes."""
+
+    import fsspec
+
+    fs = fsspec.filesystem("memory")
+    store, backup = "/cube.zarr", "/backup/cube.zarr"
+    fs.pipe_file(f"{store}/zarr.json", b'{"node_type":"group","attributes":{}}')
+    fs.pipe_file(f"{store}/ascending/r10m/vv/c/0.0.0", b"ORIGINAL-SHARD")
+
+    n = s1_store_meta.backup_store(f"memory://{store}", f"memory://{backup}")
+    assert n == 2
+
+    # simulate redrive overwriting a vv shard + stamping the completion marker
+    fs.pipe_file(f"{store}/ascending/r10m/vv/c/0.0.0", b"MUTATED-SHARD")
+    fs.pipe_file(
+        f"{store}/zarr.json", b'{"node_type":"group","attributes":{"datamodel_migrated":"0.10.1"}}'
+    )
+
+    restored = s1_store_meta.restore_store(f"memory://{backup}", f"memory://{store}")
+
+    assert restored == 2
+    assert fs.cat_file(f"{store}/ascending/r10m/vv/c/0.0.0") == b"ORIGINAL-SHARD"
+    assert b"datamodel_migrated" not in fs.cat_file(f"{store}/zarr.json")  # marker rolled back
