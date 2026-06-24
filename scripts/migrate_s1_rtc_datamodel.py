@@ -17,6 +17,9 @@ refuses to run otherwise. See plan `the-migration-of-the-adaptive-wolf.md`.
 
 from __future__ import annotations
 
+import argparse
+import logging
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -31,6 +34,10 @@ from eopf_geozarr.conversion.s1_ingest import (
     _downsample_2d,
     consolidate_s1_store,
 )
+from migrate_s1_rtc_stac import list_cube_items
+from register_v1 import https_to_s3
+
+log = logging.getLogger("migrate_s1_rtc_datamodel")
 
 # Per-store completion marker (root attr): the migration is idempotent on the *store*, keyed by the
 # writer the re-derive ran against. Writes within a store are not atomic across objects, so a crash
@@ -57,12 +64,13 @@ def _marker_value() -> str:
     return str(eopf_geozarr.__version__)
 
 
-def redrive_store(store_path: str | Path) -> RedriveReport:
+def redrive_store(store_path: str | Path, *, dry_run: bool = False) -> RedriveReport:
     """Re-derive one cube store in place to the current data-model; return what changed.
 
     Idempotent via the per-store completion marker: a store already migrated at the current writer is
     a no-op. Follows the consolidated-metadata dance (drop → reopen ``r+`` → re-derive → marker →
-    ``consolidate_s1_store``) so the writer sees fresh per-array metadata.
+    ``consolidate_s1_store``) so the writer sees fresh per-array metadata. ``dry_run`` reports what
+    would happen (already-current / which orbits, which lack ``border_mask``) and writes **nothing**.
     """
     s1_store_meta.assert_writer_pinned()  # R5 — refuse to run on a drifted writer
     store_path = Path(store_path)
@@ -72,6 +80,12 @@ def redrive_store(store_path: str | Path) -> RedriveReport:
     report.orbits = [name for name, _ in root_ro.groups()]
     if dict(root_ro.attrs).get(MIGRATION_MARKER_KEY) == _marker_value():
         report.already_current = True
+        return report
+
+    if dry_run:  # report-only: no drop-consolidated, no r+, no writes
+        for orbit_name, orbit in root_ro.groups():
+            if "border_mask" not in orbit["r10m"]:
+                report.skipped_no_border_mask.append(orbit_name)
         return report
 
     # C1: a consolidated store serves stale array metadata to writers — drop it before reopening r+.
@@ -123,3 +137,100 @@ def redrive_store(store_path: str | Path) -> RedriveReport:
     if report.orbits:
         consolidate_s1_store(str(store_path), report.orbits[0])  # #203 — consolidates ALL orbits
     return report
+
+
+# =============================================================================
+# Fleet driver — enumerate the cube collection and redrive every store
+# =============================================================================
+
+
+@dataclass
+class FleetReport:
+    """Aggregate outcome across the collection — one item id in exactly one bucket (or ``failed``)."""
+
+    derived: list[str] = field(default_factory=list)
+    already_current: list[str] = field(default_factory=list)
+    skipped_no_border_mask: list[str] = field(default_factory=list)
+    failed: list[tuple[str, str]] = field(default_factory=list)  # (item_id, error message)
+
+
+def run_fleet(
+    stac_api_url: str,
+    cube_collection: str,
+    *,
+    dry_run: bool = False,
+    only_item: str | None = None,
+    skip_tiles: tuple[str, ...] = (),
+) -> FleetReport:
+    """Redrive every cube in ``cube_collection``; one bad store is logged and skipped, never aborting.
+
+    Resumable: a store already at the current writer reports ``already_current`` (the marker) and is a
+    no-op, so a re-run only touches the stores that still need it.
+    """
+    fleet = FleetReport()
+    for item_id, href in list_cube_items(stac_api_url, cube_collection):
+        if only_item is not None and item_id != only_item:
+            continue
+        if any(tile in item_id for tile in skip_tiles):
+            continue
+        store = https_to_s3(href)  # the STAC asset is the https gateway URI; redrive needs s3://
+        try:
+            rpt = redrive_store(store, dry_run=dry_run)
+        except Exception as exc:  # noqa: BLE001 -- the fleet must continue past one unreadable store
+            log.exception("redrive failed for %s (%s)", item_id, store)
+            fleet.failed.append((item_id, str(exc)))
+            continue
+        if rpt.already_current:
+            fleet.already_current.append(item_id)
+        elif rpt.skipped_no_border_mask:
+            fleet.skipped_no_border_mask.append(item_id)
+        else:
+            fleet.derived.append(item_id)
+    return fleet
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Redrive S1 RTC cubes to the current data-model.")
+    parser.add_argument("--stac-api-url", required=True)
+    parser.add_argument("--cube-collection", required=True)
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        dest="list_only",
+        help="enumerate items + resolved s3 store (STAC only, no S3 open); for laptop verification",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="report would-change; write nothing")
+    parser.add_argument("--item", default=None, help="redrive a single item id only")
+    parser.add_argument(
+        "--skip-tiles", nargs="*", default=[], help="tile substrings to exclude (e.g. hard-defect)"
+    )
+    args = parser.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
+
+    if args.list_only:
+        for item_id, href in list_cube_items(args.stac_api_url, args.cube_collection):
+            print(f"{item_id}\t{https_to_s3(href)}")  # noqa: T201 -- CLI output
+        return 0
+
+    fleet = run_fleet(
+        args.stac_api_url,
+        args.cube_collection,
+        dry_run=args.dry_run,
+        only_item=args.item,
+        skip_tiles=tuple(args.skip_tiles),
+    )
+    log.info(
+        "fleet %s: derived=%d already-current=%d skipped-no-border_mask=%d failed=%d",
+        "DRY-RUN" if args.dry_run else "RUN",
+        len(fleet.derived),
+        len(fleet.already_current),
+        len(fleet.skipped_no_border_mask),
+        len(fleet.failed),
+    )
+    for item_id, err in fleet.failed:
+        log.error("  FAILED %s: %s", item_id, err)
+    return 1 if fleet.failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

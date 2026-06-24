@@ -272,3 +272,18 @@ def test_conditions_get_fill_value_attr_only(fresh_cube: Path) -> None:
         assert dict(cond[name].attrs).get("_FillValue") == BACKSCATTER_CF_ATTRS["_FillValue"]
         np.testing.assert_array_equal(cond[name][:], before[name])  # data unchanged (R4: attr only)
     assert "_FillValue" not in dict(cond["y"].attrs)  # 1-D coord must be left alone
+
+
+def test_dry_run_reports_without_writing(fresh_cube: Path) -> None:
+    """Task 2: `dry_run=True` reports the plan (orbits, not-already-current) and writes nothing."""
+    _demigrate(fresh_cube)
+    before = _snapshot_bands(fresh_cube)
+
+    report = migrate.redrive_store(fresh_cube, dry_run=True)
+
+    assert report.already_current is False
+    assert set(report.orbits) == {"ascending", "descending"}
+    for key, vals in _snapshot_bands(fresh_cube).items():  # nothing re-derived
+        np.testing.assert_array_equal(vals, before[key])
+    root = zarr.open_group(str(fresh_cube), mode="r", zarr_format=3)
+    assert migrate.MIGRATION_MARKER_KEY not in dict(root.attrs)  # not marked complete
