@@ -239,3 +239,36 @@ def test_missing_border_mask_is_skipped_not_crashed(fresh_cube: Path) -> None:
     # the present-border_mask orbit was still re-derived (CF attrs restored)
     asc_vv = zarr.open_group(str(fresh_cube), mode="r", zarr_format=3)["ascending"]["r10m"]["vv"]
     assert dict(asc_vv.attrs).get("_FillValue") == BACKSCATTER_CF_ATTRS["_FillValue"]
+
+
+def _add_legacy_conditions(store: Path, orbit_name: str, suffix: str = "037") -> None:
+    """Add a legacy `conditions` group: gamma_area/lia 2-D float32 data arrays WITHOUT `_FillValue`,
+    plus a 1-D float64 `y` coordinate (which must NOT receive `_FillValue`)."""
+    s1_store_meta.drop_consolidated_metadata(store)
+    cond = zarr.open_group(str(store), mode="r+", zarr_format=3)[orbit_name].create_group(
+        "conditions"
+    )
+    rng = np.random.default_rng(99)
+    for name in (f"gamma_area_{suffix}", f"lia_{suffix}"):
+        arr = cond.create_array(
+            name, shape=(SIZE, SIZE), dtype="float32", dimension_names=["y", "x"]
+        )
+        arr[:, :] = rng.uniform(0.0, 10.0, (SIZE, SIZE)).astype(np.float32)  # legacy: no _FillValue
+    ycoord = cond.create_array("y", shape=(SIZE,), dtype="float64", dimension_names=["y"])
+    ycoord[:] = np.arange(SIZE, dtype="float64")
+
+
+def test_conditions_get_fill_value_attr_only(fresh_cube: Path) -> None:
+    """Task 1b: redrive sets `_FillValue` on conditions DATA arrays (2-D float) without touching their
+    values, and leaves coordinate arrays (1-D) alone."""
+    _add_legacy_conditions(fresh_cube, "ascending")
+    cond_ro = zarr.open_group(str(fresh_cube), mode="r", zarr_format=3)["ascending"]["conditions"]
+    before = {name: arr[:] for name, arr in cond_ro.arrays()}
+
+    migrate.redrive_store(fresh_cube)
+
+    cond = zarr.open_group(str(fresh_cube), mode="r", zarr_format=3)["ascending"]["conditions"]
+    for name in ("gamma_area_037", "lia_037"):
+        assert dict(cond[name].attrs).get("_FillValue") == BACKSCATTER_CF_ATTRS["_FillValue"]
+        np.testing.assert_array_equal(cond[name][:], before[name])  # data unchanged (R4: attr only)
+    assert "_FillValue" not in dict(cond["y"].attrs)  # 1-D coord must be left alone

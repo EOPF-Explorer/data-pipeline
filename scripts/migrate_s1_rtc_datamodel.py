@@ -26,6 +26,7 @@ import s1_store_meta
 import zarr
 from eopf_geozarr.conversion.s1_ingest import (
     BACKSCATTER_CF_ATTRS,
+    FLOAT32_NAN_FILL_VALUE,
     OVERVIEW_CHAIN,
     _downsample_2d,
     consolidate_s1_store,
@@ -44,6 +45,7 @@ class RedriveReport:
     store: str
     orbits: list[str] = field(default_factory=list)
     bands_rewritten: int = 0  # count of (orbit, band) pairs re-derived
+    conditions_fill_value_set: int = 0  # conditions data arrays given the CF _FillValue attr (#201)
     already_current: bool = False  # marker already at the current writer → no-op
     skipped_no_border_mask: list[str] = field(
         default_factory=list
@@ -104,6 +106,15 @@ def redrive_store(store_path: str | Path) -> RedriveReport:
             for level_name, _parent, _factor in OVERVIEW_CHAIN:  # #201 CF attrs at every level
                 orbit[level_name][band].attrs.update(dict(BACKSCATTER_CF_ATTRS))
             report.bands_rewritten += 1
+
+        # #201 — set the CF `_FillValue` attr (only) on conditions DATA arrays (2-D float gamma_area/
+        # lia). No data re-mask (R4): conditions nodata derives from the GeoTIFF's declared nodata,
+        # which the cube doesn't retain. Coordinate arrays (ndim <= 1) are left untouched.
+        if "conditions" in orbit:
+            for _name, cond_arr in orbit["conditions"].arrays():
+                if cond_arr.ndim >= 2 and np.issubdtype(cond_arr.dtype, np.floating):
+                    cond_arr.attrs["_FillValue"] = FLOAT32_NAN_FILL_VALUE
+                    report.conditions_fill_value_set += 1
 
     # Mark complete only if every orbit was re-derived — a store with a skipped (no-border_mask) orbit
     # stays un-marked so it is revisited rather than recorded as done (R2/R6).
