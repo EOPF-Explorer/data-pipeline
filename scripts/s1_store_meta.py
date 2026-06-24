@@ -14,6 +14,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import fsspec
+
 # Pinned writer invariants (R5). `f882a3f` == eopf-geozarr 0.10.1; the float32 NaN fill is the S2-parity
 # encoding (data-model #201); the overview chain is the level/factor ladder the re-derive walks.
 PINNED_EOPF_GEOZARR_VERSION = "0.10.1"
@@ -56,17 +58,39 @@ def assert_writer_pinned() -> None:
 
 
 def drop_consolidated_metadata(store_path: str | Path) -> int:
-    """Strip Zarr-v3 consolidated metadata from every group node of a local store; return the count.
+    """Strip Zarr-v3 consolidated metadata from every group node of a store; return the count.
 
     Reopening a consolidated store ``mode="r+"`` serves the stale consolidated array metadata to
     writers, so the migration must drop it before re-deriving (mirrors ``ingest_v1_s1_rtc.py``'s
     pre-append drop). ``eopf_geozarr`` consolidates at the orbit-group level (not just the root), so
     strip it from *every* group node; ``consolidate_s1_store`` re-consolidates at the end.
+
+    Filesystem-agnostic via fsspec so it works on the ``s3://`` stores the fleet driver passes, not
+    just local paths — a plain ``Path.rglob`` silently no-ops on ``s3://`` (C1).
     """
+    fs, root = fsspec.core.url_to_fs(str(store_path))
     dropped = 0
-    for zj in Path(store_path).rglob("zarr.json"):
-        meta = json.loads(zj.read_text())
+    for path in fs.find(root):  # all objects under the store; keep only the group zarr.json files
+        if path.rsplit("/", 1)[-1] != "zarr.json":
+            continue
+        meta = json.loads(fs.cat_file(path))
         if meta.get("node_type") == "group" and meta.pop("consolidated_metadata", None) is not None:
-            zj.write_text(json.dumps(meta))
+            fs.pipe_file(path, json.dumps(meta).encode())
             dropped += 1
     return dropped
+
+
+def set_root_attr(store_path: str | Path, key: str, value: str) -> None:
+    """Set one attribute on a store's ROOT group, preserving its ``consolidated_metadata`` (I1).
+
+    The migration writes its completion marker AFTER consolidation, so a crash before this leaves the
+    store consolidated-but-unmarked (re-derived next run) rather than marked-but-unconsolidated. Editing
+    the root ``zarr.json`` directly — rather than via a zarr handle, which can re-serialise the group
+    without the just-written consolidated metadata — guarantees that block survives. Filesystem-agnostic
+    (fsspec) for ``s3://`` parity with ``drop_consolidated_metadata``.
+    """
+    fs, root = fsspec.core.url_to_fs(str(store_path))
+    zj = f"{root}/zarr.json"
+    meta = json.loads(fs.cat_file(zj))
+    meta.setdefault("attributes", {})[key] = value
+    fs.pipe_file(zj, json.dumps(meta).encode())

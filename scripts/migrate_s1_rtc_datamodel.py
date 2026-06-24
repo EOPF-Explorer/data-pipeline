@@ -60,7 +60,13 @@ class RedriveReport:
 
 
 def _marker_value() -> str:
-    """The writer revision the migration runs against (the completion-marker value)."""
+    """The writer the migration runs against (the completion-marker value).
+
+    Deliberately version-granular (``eopf_geozarr.__version__``), not the exact git rev — two ``0.10.1``
+    builds share a marker. The precise-behaviour guarantee comes from ``assert_writer_pinned`` at run
+    time (version + fill value + OVERVIEW_CHAIN), not from the marker; the marker only answers "did *a*
+    pinned writer already migrate this store" (the option-(b) R5 scope).
+    """
     return str(eopf_geozarr.__version__)
 
 
@@ -101,23 +107,21 @@ def redrive_store(store_path: str | Path, *, dry_run: bool = False) -> RedriveRe
             # rather than crash the fleet driver.
             report.skipped_no_border_mask.append(orbit_name)
             continue
-        border_mask = np.asarray(r10m["border_mask"][:])  # (T, y, x) — authoritative, untouched
-        for band in ("vv", "vh"):
-            native = np.asarray(r10m[band][:])  # (T, y, x); legacy: 0.0 out of swath
-            masked = np.empty_like(native, dtype="float32")
-            overviews: dict[str, list[np.ndarray]] = {lvl: [] for lvl, _, _ in overview_levels}
-            # Per time-slice: mask by border_mask (#202), then walk the writer's 2-D overview chain.
-            for t in range(native.shape[0]):
-                slc = np.where(border_mask[t] == 0, np.nan, native[t]).astype("float32")
-                masked[t] = slc
+        # Re-derive ONE time-slice at a time (mirrors the writer's per-acquisition 2-D path) so peak
+        # memory stays ~one (y, x) slice + its overview chain, not the whole (T, y, x) band — real tiles
+        # are 10980² × T, multiple GB per band. Mask the native by border_mask (#202), then walk the
+        # writer's 2-D overview chain, writing each level's slice directly (no full-band buffering).
+        for t in range(int(r10m["vv"].shape[0])):
+            mask_t = np.asarray(r10m["border_mask"][t])  # (y, x) — authoritative, untouched
+            for band in ("vv", "vh"):
+                slc = np.where(mask_t == 0, np.nan, np.asarray(r10m[band][t])).astype("float32")
+                r10m[band][t] = slc
                 prev = slc
                 for level_name, _parent, factor in overview_levels:
                     prev = _downsample_2d(prev, factor, "average")
-                    overviews[level_name].append(prev)
-            r10m[band][:] = masked
-            for level_name, slices in overviews.items():
-                orbit[level_name][band][:] = np.stack(slices)
-            for level_name, _parent, _factor in OVERVIEW_CHAIN:  # #201 CF attrs at every level
+                    orbit[level_name][band][t] = prev
+        for band in ("vv", "vh"):  # #201 CF attrs at every level, once per band
+            for level_name, _parent, _factor in OVERVIEW_CHAIN:
                 orbit[level_name][band].attrs.update(dict(BACKSCATTER_CF_ATTRS))
             report.bands_rewritten += 1
 
@@ -130,12 +134,15 @@ def redrive_store(store_path: str | Path, *, dry_run: bool = False) -> RedriveRe
                     cond_arr.attrs["_FillValue"] = FLOAT32_NAN_FILL_VALUE
                     report.conditions_fill_value_set += 1
 
-    # Mark complete only if every orbit was re-derived — a store with a skipped (no-border_mask) orbit
-    # stays un-marked so it is revisited rather than recorded as done (R2/R6).
-    if not report.skipped_no_border_mask:
-        root.attrs[MIGRATION_MARKER_KEY] = _marker_value()  # before consolidation so it's captured
+    # Consolidate first (#203 — every orbit + root), then write the completion marker LAST and only if
+    # every orbit was re-derived. Ordering is crash-safety (R2): a crash before the marker leaves the
+    # store consolidated-but-unmarked → re-derived idempotently next run, never marked-but-unconsolidated
+    # (which idempotency would then skip forever). `set_root_attr` edits the root zarr.json directly so
+    # the marker doesn't clobber the consolidated metadata just written.
     if report.orbits:
-        consolidate_s1_store(str(store_path), report.orbits[0])  # #203 — consolidates ALL orbits
+        consolidate_s1_store(str(store_path), report.orbits[0])
+    if not report.skipped_no_border_mask:
+        s1_store_meta.set_root_attr(str(store_path), MIGRATION_MARKER_KEY, _marker_value())
     return report
 
 

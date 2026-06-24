@@ -184,13 +184,19 @@ def test_sets_cf_attrs_and_leaves_border_mask_untouched(fresh_cube: Path) -> Non
 
 
 def test_both_orbits_consolidated_standalone(fresh_cube: Path) -> None:
-    """criterion 4: every orbit group is consolidated, openable standalone (not via the root)."""
+    """criterion 4: every orbit group is consolidated, openable standalone (not via the root).
+
+    Also asserts the completion marker COEXISTS with consolidation (I1) — the marker is written after
+    consolidation via set_root_attr, which must not clobber the consolidated metadata.
+    """
     _demigrate(fresh_cube)
     migrate.redrive_store(fresh_cube)
 
     for orbit in ("ascending", "descending"):
         meta = (fresh_cube / orbit / "zarr.json").read_text()
         assert "consolidated_metadata" in meta, f"{orbit} not standalone-consolidated"
+    root = zarr.open_group(str(fresh_cube), mode="r", zarr_format=3)
+    assert dict(root.attrs).get(migrate.MIGRATION_MARKER_KEY) is not None  # marker + consolidation
 
 
 def test_idempotent_second_run_is_a_noop(fresh_cube: Path) -> None:

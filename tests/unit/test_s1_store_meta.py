@@ -44,3 +44,54 @@ def test_rejects_changed_overview_chain(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(s1_ingest, "OVERVIEW_CHAIN", s1_ingest.OVERVIEW_CHAIN[:-1])
     with pytest.raises(RuntimeError, match="OVERVIEW_CHAIN"):
         s1_store_meta.assert_writer_pinned()
+
+
+def test_drop_consolidated_metadata_works_on_a_remote_scheme() -> None:
+    """C1: the real fleet run passes `s3://` stores — the drop must be filesystem-agnostic, not local
+    `Path.rglob` (which silently no-ops on `s3://`). Proven here with fsspec's in-memory scheme, which
+    routes through the same `url_to_fs` path as `s3://`."""
+    import json
+
+    import fsspec
+
+    fs = fsspec.filesystem("memory")
+    base = "/drop-remote-test.zarr"
+    grp = lambda extra: json.dumps({"zarr_format": 3, "node_type": "group", **extra}).encode()  # noqa: E731
+    fs.pipe_file(f"{base}/zarr.json", grp({"consolidated_metadata": {"a": 1}}))
+    fs.pipe_file(f"{base}/ascending/zarr.json", grp({"consolidated_metadata": {"b": 2}}))
+    fs.pipe_file(f"{base}/ascending/r10m/vv/zarr.json", json.dumps({"node_type": "array"}).encode())
+
+    dropped = s1_store_meta.drop_consolidated_metadata(f"memory://{base}")
+
+    assert dropped == 2  # both group nodes stripped; the array node untouched
+    assert "consolidated_metadata" not in json.loads(fs.cat_file(f"{base}/zarr.json"))
+    assert "consolidated_metadata" not in json.loads(fs.cat_file(f"{base}/ascending/zarr.json"))
+
+
+def test_set_root_attr_preserves_consolidated_metadata() -> None:
+    """I1: the completion marker is written AFTER consolidation; set_root_attr must add it to the root
+    group's attributes WITHOUT clobbering the consolidated_metadata block just written."""
+    import json
+
+    import fsspec
+
+    fs = fsspec.filesystem("memory")
+    base = "/set-attr-test.zarr"
+    fs.pipe_file(
+        f"{base}/zarr.json",
+        json.dumps(
+            {
+                "zarr_format": 3,
+                "node_type": "group",
+                "attributes": {"existing": 1},
+                "consolidated_metadata": {"kind": "inline"},
+            }
+        ).encode(),
+    )
+
+    s1_store_meta.set_root_attr(f"memory://{base}", "datamodel_migrated", "0.10.1")
+
+    meta = json.loads(fs.cat_file(f"{base}/zarr.json"))
+    assert meta["attributes"]["datamodel_migrated"] == "0.10.1"
+    assert meta["attributes"]["existing"] == 1  # pre-existing attrs preserved
+    assert meta["consolidated_metadata"] == {"kind": "inline"}  # NOT clobbered (I1)
