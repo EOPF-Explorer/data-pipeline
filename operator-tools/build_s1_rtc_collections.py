@@ -39,12 +39,6 @@ CUBE_COLLECTION = "sentinel-1-grd-rtc-staging"
 ACQ_COLLECTION = "sentinel-1-grd-rtc-acquisitions-staging"
 _ORBITS = (("asc", "ascending"), ("desc", "descending"))
 
-# Fixed spatial extent (the STAC Browser collection-map "frame"). Pinned to the *planned* target
-# coverage — France + northern Spain (west Brittany → the longitude of Stuttgart ~9.2°E; northern
-# Spain ~42°N → ~49°N) — rather than the live-item bbox, so the frame stays stable instead of
-# drifting as new tiles ingest. [lon_min, lat_min, lon_max, lat_max]; widen here if the AOI grows.
-AOI_BBOX = [-5.2, 42.0, 9.2, 49.0]
-
 
 def _gamma0_bands() -> list[dict[str, Any]]:
     return [
@@ -124,8 +118,13 @@ def align_collection(
     """Return a copy of ``coll`` with the stale fields patched to the new model (pure, no I/O)."""
     c = copy.deepcopy(coll)
     c["item_assets"] = item_assets()
-    # Pin the spatial bbox to the fixed target AOI (stable browser frame); keep the live temporal.
-    c["extent"] = {"spatial": {"bbox": [list(AOI_BBOX)]}, "temporal": extent["temporal"]}
+    # Extent is derived from the live items. When the collection has no items yet, compute_extent
+    # yields no spatial bbox (None) — keep the base collection's spatial extent rather than write a
+    # degenerate min>max bbox (which pystac does not reject). Temporal is always taken live.
+    c["extent"] = {
+        "spatial": extent.get("spatial") or c.get("extent", {}).get("spatial"),
+        "temporal": extent["temporal"],
+    }
     c["renders"] = _collection_render()
 
     summaries = dict(c.get("summaries", {}))
@@ -175,7 +174,11 @@ def load_base(stac_url: str, collection_id: str, template_dir: Path) -> dict[str
 
 
 def compute_extent(stac_url: str, collection_id: str) -> dict[str, Any]:
-    """Spatial bbox union + temporal ``[earliest, null]`` derived from the live items."""
+    """Spatial bbox union + temporal ``[earliest, null]`` derived from the live items.
+
+    ``spatial`` is ``None`` when no item carried a bbox (e.g. an empty collection) so the caller can
+    fall back to a known frame rather than emit a degenerate ``min>max`` bbox.
+    """
     url: str | None = f"{stac_url.rstrip('/')}/collections/{collection_id}/items?limit=100"
     w = s = 1e9
     e = n = -1e9
@@ -192,10 +195,9 @@ def compute_extent(stac_url: str, collection_id: str) -> dict[str, Any]:
             if t and (tmin is None or t < tmin):
                 tmin = t
         url = next((lk["href"] for lk in page.get("links", []) if lk.get("rel") == "next"), None)
-    return {
-        "spatial": {"bbox": [[round(w, 4), round(s, 4), round(e, 4), round(n, 4)]]},
-        "temporal": {"interval": [[tmin, None]]},
-    }
+    # w stays at its 1e9 init iff no item bbox was seen (then w > e) → no live spatial bbox.
+    spatial = {"bbox": [[round(w, 4), round(s, 4), round(e, 4), round(n, 4)]]} if w <= e else None
+    return {"spatial": spatial, "temporal": {"interval": [[tmin, None]]}}
 
 
 def build(
