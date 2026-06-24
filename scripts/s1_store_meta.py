@@ -11,6 +11,9 @@ writer is at the asserted behavior.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 # Pinned writer invariants (R5). `f882a3f` == eopf-geozarr 0.10.1; the float32 NaN fill is the S2-parity
 # encoding (data-model #201); the overview chain is the level/factor ladder the re-derive walks.
 PINNED_EOPF_GEOZARR_VERSION = "0.10.1"
@@ -50,3 +53,20 @@ def assert_writer_pinned() -> None:
             f"OVERVIEW_CHAIN changed: {list(s1_ingest.OVERVIEW_CHAIN)} != {EXPECTED_OVERVIEW_CHAIN}; "
             "overview levels/factors differ from the pinned writer."
         )
+
+
+def drop_consolidated_metadata(store_path: str | Path) -> int:
+    """Strip Zarr-v3 consolidated metadata from every group node of a local store; return the count.
+
+    Reopening a consolidated store ``mode="r+"`` serves the stale consolidated array metadata to
+    writers, so the migration must drop it before re-deriving (mirrors ``ingest_v1_s1_rtc.py``'s
+    pre-append drop). ``eopf_geozarr`` consolidates at the orbit-group level (not just the root), so
+    strip it from *every* group node; ``consolidate_s1_store`` re-consolidates at the end.
+    """
+    dropped = 0
+    for zj in Path(store_path).rglob("zarr.json"):
+        meta = json.loads(zj.read_text())
+        if meta.get("node_type") == "group" and meta.pop("consolidated_metadata", None) is not None:
+            zj.write_text(json.dumps(meta))
+            dropped += 1
+    return dropped
