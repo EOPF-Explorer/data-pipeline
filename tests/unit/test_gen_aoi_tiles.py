@@ -148,11 +148,11 @@ def test_tiles_for_region_is_deterministic():
 # --- REGIONS (committed bboxes) ---------------------------------------------
 
 
-def test_regions_defines_france_with_valid_bbox():
+def test_regions_defines_western_europe_with_valid_bbox():
     m = _mod()
-    assert set(m.REGIONS) == {"france"}
-    lon0, lat0, lon1, lat1 = m.REGIONS["france"]
+    assert set(m.REGIONS) == {"western-europe"}
+    lon0, lat0, lon1, lat1 = m.REGIONS["western-europe"]
     assert lon0 < lon1 and lat0 < lat1
     assert lon0 < -5.0  # west bound reaches Brittany (Ushant ~-5.1°W)
-    assert lon1 == 9.2  # east bound stops at the longitude of Stuttgart (~9.18°E)
-    assert lat1 == 49.0  # north bound ~49°N
+    assert lon1 == 13.5  # east bound — Salzburg / eastern Dolomites (~13.5°E)
+    assert lat1 == 51.2  # north bound ~51.2°N (all of mainland France)

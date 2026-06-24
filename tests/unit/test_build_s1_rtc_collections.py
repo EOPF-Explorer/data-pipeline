@@ -66,8 +66,8 @@ def test_align_cube_drops_platform_and_processing_level() -> None:
     assert "processing:level" not in c["summaries"]
     assert "vv" not in c["item_assets"]
     assert "gamma0-rtc-backscatter-asc" in c["item_assets"]
-    # spatial extent is pinned to the fixed target AOI (stable browser frame); temporal stays live
-    assert c["extent"]["spatial"]["bbox"] == [b.AOI_BBOX]
+    # extent (spatial bbox + temporal) is derived from the live items, not a fixed frame
+    assert c["extent"]["spatial"]["bbox"] == EXTENT["spatial"]["bbox"]
     assert c["extent"]["temporal"] == EXTENT["temporal"]
     assert "rgb" in c["renders"]
     assert c["title"] == "keep me"  # good fields preserved
@@ -83,16 +83,33 @@ def test_align_acq_sets_normalized_platform() -> None:
     assert "processing:level" not in c["summaries"]
 
 
-def test_align_pins_spatial_extent_to_fixed_target_aoi() -> None:
-    # The live-derived spatial bbox is discarded in favor of a fixed AOI so the STAC Browser
-    # collection-map frame stays stable as ingestion scales out (the temporal start stays live).
+def test_align_uses_live_spatial_extent() -> None:
+    # The collection extent (spatial bbox + temporal) is the live-derived one from compute_extent —
+    # the STAC Browser frame tracks the actual ingested footprint, no fixed AOI to hand-maintain.
     c = b.align_collection(_live(False), is_cube=False, extent=EXTENT)
-    assert b.AOI_BBOX == [-5.2, 42.0, 9.2, 49.0]  # France + N Spain (Brittany → Stuttgart, N ~49°)
-    assert c["extent"]["spatial"]["bbox"] == [b.AOI_BBOX]
-    assert c["extent"]["temporal"] == EXTENT["temporal"]
+    assert c["extent"] == EXTENT
 
 
 def test_align_does_not_mutate_input() -> None:
     live = _live(True)
     b.align_collection(live, is_cube=True, extent=EXTENT)
     assert live["item_assets"] == {"vv": {}, "vh": {}, "zarr-store": {}}  # input untouched
+
+
+def test_compute_extent_returns_none_spatial_for_empty_collection(monkeypatch) -> None:
+    # A collection with no items carries no live bbox → spatial=None, so align_collection can fall
+    # back to the base frame instead of writing a degenerate (min>max) bbox.
+    monkeypatch.setattr(b, "_get_json", lambda url: {"features": [], "links": []})
+    ext = b.compute_extent("https://x/stac", "empty-collection")
+    assert ext["spatial"] is None
+    assert ext["temporal"] == {"interval": [[None, None]]}
+
+
+def test_align_falls_back_to_base_spatial_when_no_live_items() -> None:
+    # When the live extent has no spatial bbox (empty collection), the base collection's spatial
+    # extent is preserved — never a degenerate min>max bbox; the live temporal is still applied.
+    live = _live(True)
+    empty_extent = {"spatial": None, "temporal": {"interval": [["2025-01-01T00:00:00Z", None]]}}
+    c = b.align_collection(live, is_cube=True, extent=empty_extent)
+    assert c["extent"]["spatial"] == {"bbox": [[-180, -90, 180, 90]]}  # base frame kept
+    assert c["extent"]["temporal"] == empty_extent["temporal"]  # live temporal still used

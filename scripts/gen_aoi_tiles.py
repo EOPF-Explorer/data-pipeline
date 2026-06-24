@@ -1,6 +1,6 @@
 """Generate the land/DEM MGRS tile list for a region AOI (T7 Phase 2).
 
-Scaling the S1 RTC pipeline to a region (France + northern Spain) needs a deterministic, reviewable
+Scaling the S1 RTC pipeline to a region (western Europe — France + Alps) needs a deterministic, reviewable
 list of the MGRS 100 km tiles to process. This takes a region bbox, samples it on a grid into the
 MGRS tiles it overlaps, then keeps a tile only if it is BOTH (a) a real Sentinel-2 granule in the
 authoritative `eotile` S2 tiling grid AND (b) actually has DEM/land coverage. A tile whose footprint
@@ -17,12 +17,16 @@ s1tiling has no granule for it and exits 73, failing the whole cron run. Validat
 The selection is intentionally pure: the gpkg land set + the S2 tile-id set are read once (stdlib
 sqlite) and injected, so the core is testable without eotile or network. A region bbox over-includes
 some neighbouring land within the box (e.g. S England, Belgium/Luxembourg, W Germany/Switzerland,
-NW Italy); that's accepted for v1 — those are valid land tiles. A precise France polygon is a later
+Austria, NW Italy); that's accepted for v1 — those are valid land tiles. A precise polygon is a later
 refinement.
 
+The single home for the committed list is the platform-deploy `s1rtc-aoi-tiles` ConfigMap (the cron
+reads its comma-separated `western-europe:` value). Generate to a temp file, then splice it in:
+
 Usage:
-    uv run python scripts/gen_aoi_tiles.py --region france \
-      --gpkg $WORKDIR/DEM/dem_db/DEM_Union.gpkg --out aoi/france.txt
+    uv run python scripts/gen_aoi_tiles.py --region western-europe \
+      --gpkg $WORKDIR/DEM/dem_db/DEM_Union.gpkg --out /tmp/western-europe.txt
+    paste -sd ',' /tmp/western-europe.txt   # → the ConfigMap `western-europe:` value (single line)
 """
 
 from __future__ import annotations
@@ -40,12 +44,12 @@ import mgrs
 # Region AOI as a committed WGS84 bbox [lon_min, lat_min, lon_max, lat_max] (v1): simplest +
 # deterministic, over-includes some neighbouring land within the box (accepted — valid land tiles).
 REGIONS: dict[str, list[float]] = {
-    # France + northern Spain. W -5.2° (Ushant / west Brittany) → E 9.2° (longitude of Stuttgart);
-    # S 42.0° (northern Spain) → N 49.0° (clips Brittany's far-north tip and excludes Hauts-de-France).
-    # The bbox over-includes some neighbouring land within it (S England, Belgium/Luxembourg,
-    # W Germany/Switzerland, NW Italy) — all valid land tiles, S2-/DEM-filtered; a precise France
-    # polygon is a later refinement.
-    "france": [-5.2, 42.0, 9.2, 49.0],
+    # western-europe — France + the Alps (the box spans well beyond France, hence the broad name).
+    # W -5.2° (Ushant / west Brittany) → E 13.5° (Salzburg / eastern Dolomites); S 42.0° (northern
+    # Spain) → N 51.2° (covers Hauts-de-France: Lille ~50.6°N, Dunkirk ~51.1°N). The bbox includes
+    # neighbouring land: S England, Belgium/Luxembourg, W Germany/Switzerland, Austria, NW Italy —
+    # all valid land tiles, S2-/DEM-filtered; a precise polygon is a later refinement.
+    "western-europe": [-5.2, 42.0, 13.5, 51.2],
 }
 
 # Ocean denylist: real S2 granules inside a region bbox that the 1° DEM land filter keeps, but whose
@@ -54,7 +58,7 @@ REGIONS: dict[str, list[float]] = {
 # doesn't download + process all-ocean scenes. Each tile is annotated with its land fraction
 # (share of the footprint over land, ~1 km global-land-mask); threshold for this list is < 2%.
 EXCLUDE: dict[str, set[str]] = {
-    "france": {
+    "western-europe": {
         "30TWQ",  # 0.0%  Bay of Biscay
         "30TWR",  # 0.0%  Bay of Biscay
         "30UUV",  # 0.0%  Channel approaches, N of Brittany
