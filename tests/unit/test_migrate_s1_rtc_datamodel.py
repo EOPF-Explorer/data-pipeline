@@ -8,6 +8,7 @@ result reproduces the fresh cube exactly (NaN-aware values + CF attrs + standalo
 
 from __future__ import annotations
 
+import shutil
 import sys
 from pathlib import Path
 
@@ -113,9 +114,13 @@ def _snapshot_bands(store: Path) -> dict[tuple[str, str, str], np.ndarray]:
     return out
 
 
-def _demigrate(store: Path) -> None:
+def _demigrate(store: Path, *, mask_native: bool = True) -> None:
     """Turn a fresh cube into a legacy one: nodata back to 0.0 at native, ZERO the overviews, strip
-    the CF backscatter attrs, drop consolidated metadata. border_mask / time / coords untouched."""
+    the CF backscatter attrs, drop consolidated metadata. border_mask / time / coords untouched.
+
+    ``mask_native=False`` leaves the native level already NaN-masked (overviews still stale, no marker):
+    a cube left half-migrated by a crash between native and overviews — redrive must re-derive it.
+    """
     s1_store_meta.drop_consolidated_metadata(store)
     root = zarr.open_group(str(store), mode="r+", zarr_format=3)
     for _orbit, og in root.groups():
@@ -123,7 +128,8 @@ def _demigrate(store: Path) -> None:
             for band in ("vv", "vh"):
                 arr = og[level][band]
                 if level == "r10m":
-                    arr[:] = np.nan_to_num(arr[:], nan=0.0)  # legacy stored 0.0 out of swath
+                    if mask_native:
+                        arr[:] = np.nan_to_num(arr[:], nan=0.0)  # legacy stored 0.0 out of swath
                 else:
                     arr[:] = 0.0  # stale overviews — redrive must recompute these
                 for k in ("_FillValue", "standard_name", "units"):
@@ -198,3 +204,38 @@ def test_idempotent_second_run_is_a_noop(fresh_cube: Path) -> None:
     assert report2.already_current is True
     for key, vals in _snapshot_bands(fresh_cube).items():
         np.testing.assert_array_equal(vals, after_first[key])
+
+
+def test_crash_safety_redrives_a_half_migrated_store(fresh_cube: Path) -> None:
+    """criterion 6: native already masked but overviews stale + no marker → still fully re-derived.
+
+    "native is NaN-masked" is not a safe skip key (a crash between native and overviews leaves stale
+    overviews); only the completion marker is. Redrive must reproduce the writer regardless.
+    """
+    golden = _snapshot_bands(fresh_cube)
+    _demigrate(fresh_cube, mask_native=False)  # native left masked, overviews zeroed, no marker
+
+    report = migrate.redrive_store(fresh_cube)
+
+    assert report.already_current is False
+    migrated = _snapshot_bands(fresh_cube)
+    for key, expected in golden.items():
+        np.testing.assert_array_equal(migrated[key], expected, err_msg=f"mismatch at {key}")
+
+
+def test_missing_border_mask_is_skipped_not_crashed(fresh_cube: Path) -> None:
+    """criterion 7 (R6): an orbit lacking border_mask is flagged + skipped; the store is not marked."""
+    _demigrate(fresh_cube)
+    s1_store_meta.drop_consolidated_metadata(
+        fresh_cube
+    )  # so the member listing reflects the rmtree
+    shutil.rmtree(fresh_cube / "descending" / "r10m" / "border_mask")
+
+    report = migrate.redrive_store(fresh_cube)  # must not raise
+
+    assert report.skipped_no_border_mask == ["descending"]
+    # the store stays un-marked → a re-run still re-derives (never recorded as complete)
+    assert migrate.redrive_store(fresh_cube).already_current is False
+    # the present-border_mask orbit was still re-derived (CF attrs restored)
+    asc_vv = zarr.open_group(str(fresh_cube), mode="r", zarr_format=3)["ascending"]["r10m"]["vv"]
+    assert dict(asc_vv.attrs).get("_FillValue") == BACKSCATTER_CF_ATTRS["_FillValue"]

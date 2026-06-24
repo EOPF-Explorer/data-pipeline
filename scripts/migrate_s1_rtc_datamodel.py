@@ -45,6 +45,9 @@ class RedriveReport:
     orbits: list[str] = field(default_factory=list)
     bands_rewritten: int = 0  # count of (orbit, band) pairs re-derived
     already_current: bool = False  # marker already at the current writer → no-op
+    skipped_no_border_mask: list[str] = field(
+        default_factory=list
+    )  # orbits lacking border_mask (R6)
 
 
 def _marker_value() -> str:
@@ -74,8 +77,14 @@ def redrive_store(store_path: str | Path) -> RedriveReport:
     root = zarr.open_group(str(store_path), mode="r+", zarr_format=3)
 
     overview_levels = OVERVIEW_CHAIN[1:]  # (level, parent, factor) below native r10m
-    for _orbit_name, orbit in root.groups():
+    for orbit_name, orbit in root.groups():
         r10m = orbit["r10m"]
+        if "border_mask" not in r10m:
+            # R6: border_mask is the authoritative valid-data mask; a cube lacking it cannot be
+            # re-derived in place. Flag it (the store stays un-marked → revisited / handled separately)
+            # rather than crash the fleet driver.
+            report.skipped_no_border_mask.append(orbit_name)
+            continue
         border_mask = np.asarray(r10m["border_mask"][:])  # (T, y, x) — authoritative, untouched
         for band in ("vv", "vh"):
             native = np.asarray(r10m[band][:])  # (T, y, x); legacy: 0.0 out of swath
@@ -96,7 +105,10 @@ def redrive_store(store_path: str | Path) -> RedriveReport:
                 orbit[level_name][band].attrs.update(dict(BACKSCATTER_CF_ATTRS))
             report.bands_rewritten += 1
 
-    root.attrs[MIGRATION_MARKER_KEY] = _marker_value()  # set before consolidation so it's captured
+    # Mark complete only if every orbit was re-derived — a store with a skipped (no-border_mask) orbit
+    # stays un-marked so it is revisited rather than recorded as done (R2/R6).
+    if not report.skipped_no_border_mask:
+        root.attrs[MIGRATION_MARKER_KEY] = _marker_value()  # before consolidation so it's captured
     if report.orbits:
         consolidate_s1_store(str(store_path), report.orbits[0])  # #203 — consolidates ALL orbits
     return report
