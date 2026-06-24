@@ -293,3 +293,21 @@ def test_dry_run_reports_without_writing(fresh_cube: Path) -> None:
         np.testing.assert_array_equal(vals, before[key])
     root = zarr.open_group(str(fresh_cube), mode="r", zarr_format=3)
     assert migrate.MIGRATION_MARKER_KEY not in dict(root.attrs)  # not marked complete
+
+
+def test_redrive_does_not_mangle_an_s3_uri(monkeypatch) -> None:
+    """Regression (real-S3 only): `Path('s3://b/x')` collapses `//` → `s3:/b/x` and breaks the store
+    URL. redrive must pass the URI through unchanged to zarr. Local-path unit fixtures can't catch this."""
+    seen: list[str] = []
+
+    class _FakeRoot:
+        attrs: dict = {}
+
+        def groups(self):
+            return iter(())
+
+    monkeypatch.setattr(migrate.zarr, "open_group", lambda p, **_k: seen.append(p) or _FakeRoot())
+
+    migrate.redrive_store("s3://bucket/sentinel-1-grd-rtc-staging/s1-rtc-X.zarr", dry_run=True)
+
+    assert seen == ["s3://bucket/sentinel-1-grd-rtc-staging/s1-rtc-X.zarr"]  # not s3:/bucket/...

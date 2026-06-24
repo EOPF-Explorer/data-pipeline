@@ -50,6 +50,8 @@ spec:
       value: ""
     - name: skip_tiles                      # optional, space-separated tile substrings
       value: ""
+    - name: item                            # optional single item id, e.g. s1-rtc-30TUM (control tile)
+      value: ""
     - name: rollback                        # "true" → restore every store from backup_prefix
       value: "false"
   templates:
@@ -78,6 +80,7 @@ spec:
         [ "$DRY_RUN" = "true" ] && args+=(--dry-run)
         [ "$ROLLBACK" = "true" ] && args+=(--rollback)
         [ -n "$BACKUP_PREFIX" ] && args+=(--backup-prefix "$BACKUP_PREFIX")
+        [ -n "$ITEM" ] && args+=(--item "$ITEM")
         [ -n "$SKIP_TILES" ] && args+=(--skip-tiles $SKIP_TILES)
         python /app/scripts/migrate_s1_rtc_datamodel.py "${args[@]}"
       resources:
@@ -105,6 +108,8 @@ spec:
         value: "{{workflow.parameters.backup_prefix}}"
       - name: SKIP_TILES
         value: "{{workflow.parameters.skip_tiles}}"
+      - name: ITEM
+        value: "{{workflow.parameters.item}}"
       - name: AWS_ACCESS_KEY_ID
         valueFrom:
           secretKeyRef:
