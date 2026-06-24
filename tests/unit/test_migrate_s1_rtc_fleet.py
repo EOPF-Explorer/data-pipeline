@@ -250,3 +250,21 @@ def test_unresolvable_store_href_is_recorded_as_failed(monkeypatch) -> None:
 
     assert [item for item, _ in fleet.failed] == ["s1-rtc-30TWQ"]
     assert {"s1-rtc-30TUM", "s1-rtc-31TDG"} == set(fleet.derived)
+
+
+def test_main_allow_no_backup_bypasses_the_gate(monkeypatch) -> None:
+    """--allow-no-backup proceeds with a real run despite no versioning + no backup (explicit C2 opt-out);
+    the versioning check is not even called."""
+    _patch_list(monkeypatch)
+    monkeypatch.setattr(migrate.s1_store_meta, "s3_versioning_enabled", _must_not_call)
+    seen: list[str] = []
+    monkeypatch.setattr(
+        migrate, "redrive_store", lambda s, *, dry_run=False: seen.append(s) or _ok_report(s)
+    )
+
+    rc = migrate.main(
+        ["--stac-api-url", "x", "--cube-collection", "y", "--bucket", "b", "--allow-no-backup"]
+    )
+
+    assert rc == 0
+    assert len(seen) == len(_ITEMS)  # ran the fleet, gate bypassed

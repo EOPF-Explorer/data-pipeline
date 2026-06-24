@@ -54,6 +54,8 @@ spec:
       value: ""
     - name: rollback                        # "true" → restore every store from backup_prefix
       value: "false"
+    - name: allow_no_backup                 # "true" → real run with NO backup (recovery = re-ingest)
+      value: "false"
   templates:
   - name: migrate
     activeDeadlineSeconds: 21600            # 6h ceiling for the whole fleet
@@ -79,6 +81,7 @@ spec:
         )
         [ "$DRY_RUN" = "true" ] && args+=(--dry-run)
         [ "$ROLLBACK" = "true" ] && args+=(--rollback)
+        [ "$ALLOW_NO_BACKUP" = "true" ] && args+=(--allow-no-backup)
         [ -n "$BACKUP_PREFIX" ] && args+=(--backup-prefix "$BACKUP_PREFIX")
         [ -n "$ITEM" ] && args+=(--item "$ITEM")
         [ -n "$SKIP_TILES" ] && args+=(--skip-tiles $SKIP_TILES)
@@ -110,6 +113,8 @@ spec:
         value: "{{workflow.parameters.skip_tiles}}"
       - name: ITEM
         value: "{{workflow.parameters.item}}"
+      - name: ALLOW_NO_BACKUP
+        value: "{{workflow.parameters.allow_no_backup}}"
       - name: AWS_ACCESS_KEY_ID
         valueFrom:
           secretKeyRef:

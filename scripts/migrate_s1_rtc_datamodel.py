@@ -272,6 +272,12 @@ def main(argv: list[str] | None = None) -> int:
         "--rollback", action="store_true", help="restore every store from --backup-prefix"
     )
     parser.add_argument(
+        "--allow-no-backup",
+        action="store_true",
+        help="proceed with a real run despite no versioning and no --backup-prefix; recovery is by "
+        "re-ingest only (the re-derive is value-identical to a re-ingest). Explicit opt-out of C2.",
+    )
+    parser.add_argument(
         "--s3-endpoint",
         default=None,
         help="S3 endpoint for the versioning check (else AWS_ENDPOINT_URL)",
@@ -301,16 +307,22 @@ def main(argv: list[str] | None = None) -> int:
 
     # Pre-flight rollback safety (C2): a real run must be reversible — either the bucket has S3
     # versioning (per-object restore) or a --backup-prefix is given (each store copied before its first
-    # write). Refuse otherwise. Dry-run writes nothing, so it skips the gate.
-    if not args.dry_run and not args.backup_prefix:
+    # write). Refuse otherwise, unless --allow-no-backup explicitly opts out (recovery = re-ingest).
+    # Dry-run writes nothing, so it skips the gate.
+    if not args.dry_run and not args.backup_prefix and not args.allow_no_backup:
         if not args.bucket:
             parser.error("a real run needs --bucket (for the versioning check) or --backup-prefix")
         if not s1_store_meta.s3_versioning_enabled(args.bucket, s3_endpoint=args.s3_endpoint):
             log.error(
-                "refusing: bucket %s has S3 versioning OFF and no --backup-prefix (C2 rollback safety)",
+                "refusing: bucket %s has S3 versioning OFF and no --backup-prefix (C2 rollback safety); "
+                "pass --allow-no-backup to proceed with re-ingest as the only recovery path.",
                 args.bucket,
             )
             return 2
+    if args.allow_no_backup and not args.dry_run and not args.backup_prefix:
+        log.warning(
+            "--allow-no-backup: real run with NO rollback backup; recovery is re-ingest only"
+        )
 
     fleet = run_fleet(
         args.stac_api_url,
