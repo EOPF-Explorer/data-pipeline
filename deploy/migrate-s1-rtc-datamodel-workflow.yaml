@@ -1,0 +1,121 @@
+# One-off Argo Workflow: in-place S1 RTC legacy→datamodel cube migration (plan Task 4).
+#
+# Runs scripts/migrate_s1_rtc_datamodel.py against the staging cube collection in one container (no
+# fan-out — 104 small-ish stores, driver loops internally with per-store continue-on-error). The cube
+# bucket is owned by the eopfexplorer account; creds come from the in-cluster `geozarr-s3-credentials`
+# SealedSecret (NO literals here), endpoint is OVH `de`.
+#
+# Usage (the s1rtc cron MUST be suspended first — C2 concurrency):
+#   1. DRY-RUN (default, writes nothing):
+#        argo submit -n devseed-staging deploy/migrate-s1-rtc-datamodel-workflow.yaml \
+#          -p pipeline_image_version=<RC-tag>
+#   2. REAL run (only after the dry-run looks right):
+#        argo submit -n devseed-staging deploy/migrate-s1-rtc-datamodel-workflow.yaml \
+#          -p pipeline_image_version=<RC-tag> -p dry_run=false
+#      The driver's pre-flight refuses a real run unless the bucket has S3 versioning OR a
+#      `backup_prefix` is given (C2 rollback safety).
+#   3. ROLLBACK (only if a backup_prefix was used): -p rollback=true -p backup_prefix=<s3://…>
+#
+# pipeline_image_version MUST be an RC build that contains scripts/migrate_s1_rtc_datamodel.py
+# (verify: `docker run --rm <image> python /app/scripts/migrate_s1_rtc_datamodel.py --help`). The live
+# v0.8.0-s1rtc-rc2 predates this script — cut a new RC from feat--s1_grd_phase5 after the migration
+# code merges.
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: migrate-s1-rtc-datamodel-
+  namespace: devseed-staging
+spec:
+  serviceAccountName: operate-workflow-sa
+  entrypoint: migrate
+  # Success cleaned after a day; failures kept 3 days for debugging.
+  ttlStrategy:
+    secondsAfterSuccess: 86400
+    secondsAfterFailure: 259200
+  arguments:
+    parameters:
+    - name: pipeline_image_version          # REQUIRED — RC tag containing migrate_s1_rtc_datamodel.py
+      value: v0.8.0-s1rtc-rc3
+    - name: stac_api_url
+      value: https://api.explorer.eopf.copernicus.eu/stac
+    - name: cube_collection
+      value: sentinel-1-grd-rtc-staging
+    - name: bucket                          # cube bucket — for the S3-versioning pre-flight
+      value: esa-zarr-sentinel-explorer-fra
+    - name: s3_endpoint
+      value: https://s3.de.io.cloud.ovh.net
+    - name: dry_run                         # SAFE DEFAULT: report only, write nothing
+      value: "true"
+    - name: backup_prefix                   # optional s3:// prefix (no-versioning fallback / rollback)
+      value: ""
+    - name: skip_tiles                      # optional, space-separated tile substrings
+      value: ""
+    - name: rollback                        # "true" → restore every store from backup_prefix
+      value: "false"
+  templates:
+  - name: migrate
+    activeDeadlineSeconds: 21600            # 6h ceiling for the whole fleet
+    nodeSelector:
+      nodepool: pipeline
+    tolerations:
+    - key: nodepool
+      operator: Equal
+      value: pipeline
+      effect: NoSchedule
+    script:
+      image: w9mllyot.c1.de1.container-registry.ovh.net/eopf-sentinel-zarr-explorer/data-pipeline:{{workflow.parameters.pipeline_image_version}}
+      imagePullPolicy: Always
+      # Args assembled in a bash array from env (no param interpolated into the shell → no injection).
+      command: [bash]
+      source: |
+        set -uo pipefail
+        args=(
+          --stac-api-url "$STAC_API_URL"
+          --cube-collection "$CUBE_COLLECTION"
+          --bucket "$BUCKET"
+          --s3-endpoint "$S3_ENDPOINT"
+        )
+        [ "$DRY_RUN" = "true" ] && args+=(--dry-run)
+        [ "$ROLLBACK" = "true" ] && args+=(--rollback)
+        [ -n "$BACKUP_PREFIX" ] && args+=(--backup-prefix "$BACKUP_PREFIX")
+        [ -n "$SKIP_TILES" ] && args+=(--skip-tiles $SKIP_TILES)
+        python /app/scripts/migrate_s1_rtc_datamodel.py "${args[@]}"
+      resources:
+        requests:
+          # Per-slice streaming bounds peak memory; this is a starting request — Checkpoint A measures
+          # real-tile peak RSS and right-sizes (plan OQ-2).
+          memory: 8Gi
+          cpu: "2"
+      env:
+      - name: PYTHONUNBUFFERED
+        value: "1"
+      - name: STAC_API_URL
+        value: "{{workflow.parameters.stac_api_url}}"
+      - name: CUBE_COLLECTION
+        value: "{{workflow.parameters.cube_collection}}"
+      - name: BUCKET
+        value: "{{workflow.parameters.bucket}}"
+      - name: S3_ENDPOINT
+        value: "{{workflow.parameters.s3_endpoint}}"
+      - name: DRY_RUN
+        value: "{{workflow.parameters.dry_run}}"
+      - name: ROLLBACK
+        value: "{{workflow.parameters.rollback}}"
+      - name: BACKUP_PREFIX
+        value: "{{workflow.parameters.backup_prefix}}"
+      - name: SKIP_TILES
+        value: "{{workflow.parameters.skip_tiles}}"
+      - name: AWS_ACCESS_KEY_ID
+        valueFrom:
+          secretKeyRef:
+            name: geozarr-s3-credentials
+            key: AWS_ACCESS_KEY_ID
+      - name: AWS_SECRET_ACCESS_KEY
+        valueFrom:
+          secretKeyRef:
+            name: geozarr-s3-credentials
+            key: AWS_SECRET_ACCESS_KEY
+      - name: AWS_ENDPOINT_URL
+        value: "{{workflow.parameters.s3_endpoint}}"
+      - name: AWS_DEFAULT_REGION
+        value: "de"
