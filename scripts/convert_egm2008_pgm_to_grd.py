@@ -1,4 +1,8 @@
-"""Convert GeographicLib EGM2008 PGM to OTB binary .grd format.
+"""Convert GeographicLib EGM2008 PGM to OTB binary .grd format (-180..180 longitude).
+
+The output grid spans -180..180E. This matters: a 0..360 geoid leaves the entire western
+hemisphere uncovered, so OTB Superimpose returns nodata over negative longitudes (all of
+western Europe) -> the summed DEM+GEOID is dead -> the gamma0 near-range wedge (issue #306).
 
 Usage:
   python scripts/convert_egm2008_pgm_to_grd.py \
@@ -60,19 +64,24 @@ def convert(pgm: pathlib.Path, out: pathlib.Path, step: int) -> None:
 
     pixels = read_pgm_data(pgm, data_offset, pgm_height, pgm_width)
 
-    # Subsample: rows 0..pgm_height-1 step=step, cols 0..pgm_width step=step
-    # Col pgm_width wraps to 0 (360E == 0E) — duplicate the first column
-    row_idx = np.arange(0, pgm_height, step)
-    col_idx = np.arange(0, pgm_width + 1, step)  # +1 to include 360E = 0E wrap
-    col_idx_wrapped = col_idx % pgm_width
-
-    sub = pixels[np.ix_(row_idx, col_idx_wrapped)].astype(np.float32) * scale + offset
-
-    n_lat, n_lon = sub.shape
+    # Subsample rows; emit a -180..180 longitude grid (NOT 0..360).
+    # The PGM source spans 0..360E. A 0..360 output leaves the whole western hemisphere
+    # uncovered, so OTB Superimpose returns nodata over negative longitudes (all of W
+    # Europe) -> dead DEM+GEOID -> the gamma0 near-range wedge (issue #306). lon -L(W) ==
+    # 360-L(E) is the same point, so we map each -180..180 output column to the matching
+    # PGM column. Node-registered, n_lon columns incl. the wrap (-180 == +180).
     dlat = dlon = step / 60.0
+    row_idx = np.arange(0, pgm_height, step)
+    n_lon = len(np.arange(0, pgm_width + 1, step))  # same column count as 0..360 (incl. wrap)
+    out_lons = -180.0 + np.arange(n_lon) * dlon
+    pgm_cols = (np.round((out_lons % 360.0) / dlon).astype(int) * step) % pgm_width
+
+    sub = pixels[np.ix_(row_idx, pgm_cols)].astype(np.float32) * scale + offset
+
+    n_lat = sub.shape[0]
     lat_max = 90.0
     lat_min = lat_max - (n_lat - 1) * dlat
-    lon_min, lon_max = 0.0, (n_lon - 1) * dlon
+    lon_min, lon_max = -180.0, -180.0 + (n_lon - 1) * dlon
 
     print(f"  output grid: {n_lat} lat × {n_lon} lon, dlat=dlon={dlat:.4f}°")
     print(f"  lat [{lat_min}, {lat_max}]  lon [{lon_min}, {lon_max}]")
@@ -147,6 +156,21 @@ def validate(out: pathlib.Path, step: int, egm96_grd: pathlib.Path | None) -> bo
         print(
             f"  [{status}] {label:35s} expected={expected:7.3f}  got={got:7.3f}  diff={diff:.3f} m"
         )
+
+    # #306 regression guard: the grid MUST span -180..180 and cover the western hemisphere.
+    # A 0..360 grid leaves negative longitudes as nodata -> dead DEM+GEOID -> gamma0 wedge.
+    span_ok = abs(lon_min + 180.0) < 1e-4 and abs(lon_max - 180.0) < 1e-4
+    bret_row = round((lat_max - 48.75) / dlat)
+    bret_col = round((-3.75 - lon_min) / dlon) % n_lon
+    bret = float(grid[bret_row, bret_col])
+    bret_ok = 40.0 < bret < 60.0  # EGM2008 geoid over Brittany ~48-51 m
+    ok = ok and span_ok and bret_ok
+    print(
+        f"\n  [{'OK' if span_ok else 'FAIL'}] longitude span: [{lon_min:.3f}, {lon_max:.3f}] "
+        f"(must be -180..180)\n"
+        f"  [{'OK' if bret_ok else 'FAIL'}] W-hemisphere covered (Brittany 48.75N -3.75E): "
+        f"{bret:.2f} m (expect ~48-51; was nodata on the 0..360 grid)"
+    )
 
     if egm96_grd and egm96_grd.exists() and step == 15:
         expected_size = egm96_grd.stat().st_size
