@@ -41,66 +41,6 @@ EODAG_PKG = pathlib.Path("/opt/S1TilingEnv/lib/python3.10/site-packages/eodag")
 _STREAM_TIMEOUT_OLD = "DEFAULT_STREAM_REQUESTS_TIMEOUT = 60"
 _STREAM_TIMEOUT_NEW = "DEFAULT_STREAM_REQUESTS_TIMEOUT = 300"
 
-# S1FileManager filters the requested platform out of the search results in a
-# post-step. The stock filter (byte-identical in s1tiling 1.4.0 and 1.4.1) ran
-# only for len(platform_list) > 1 and matched the legacy `platformSerialIdentifier`
-# property. Both are wrong under eodag 4 + cop_dataspace:
-#   - eodag 4 dropped `platformSerialIdentifier`; products carry the STAC
-#     `platform` property ("sentinel-1a"), so filter_property matched nothing
-#     (the documented "S1A S1C -> 0 products" multi-platform bug).
-#   - the search param `platformSerialIdentifier` is also ignored by cop_dataspace
-#     OData (same class as relativeOrbitNumber), so off-platform products (notably
-#     S1D) are returned and, with the post-filter a no-op for len==1, downloaded
-#     then discarded.
-# The rewrite matches the STAC `platform` (with an S1x->sentinel-1x value map) and
-# runs for any non-empty list, dropping off-platform products before download.
-_PLATFORM_FILTER_OLD = (
-    "        # Filter platform -- if it could not be done earlier in the search() request.\n"
-    "        if len(platform_list) > 1:\n"
-    "            filtered_products = SearchResult([])\n"
-    "            for platform in platform_list:\n"
-    "                filtered_products.extend(products.filter_property(platformSerialIdentifier=platform))\n"
-    "            products = filtered_products\n"
-)
-_PLATFORM_FILTER_NEW = (
-    "        # Filter platform -- eodag 4 dropped `platformSerialIdentifier`; products\n"
-    '        # carry the STAC `platform` property ("sentinel-1a"). Map the requested\n'
-    "        # S1x codes and run for any non-empty list so a single-platform run (e.g.\n"
-    "        # S1A) also drops the off-platform products (e.g. S1D) cop_dataspace OData\n"
-    "        # returns despite the search param.\n"
-    "        if len(platform_list) >= 1:\n"
-    "            filtered_products = SearchResult([])\n"
-    "            for platform in platform_list:\n"
-    '                stac_platform = f"sentinel-1{platform[-1].lower()}"\n'
-    "                filtered_products.extend(products.filter_property(platform=stac_platform))\n"
-    "            products = filtered_products\n"
-)
-# Unique to the rewritten block -> used as the idempotency sentinel.
-_PLATFORM_FILTER_MARK = "filter_property(platform=stac_platform)"
-
-
-def _rewrite_platform_postfilter(src: str) -> str:
-    """Rewrite S1FileManager's platform post-filter for eodag 4 + single-platform.
-
-    Pure transform (no file IO) so it can be unit-tested on a fixture. Three
-    states, checked in order (mirrors `_rewrite_stream_timeout`):
-      1. already patched -> return unchanged (idempotent no-op; re-running the
-         patch in a fresh container must not error).
-      2. anchor present  -> replace and return.
-      3. neither present -> raise (s1tiling version/layout drift). A silent no-op
-         here would leak off-platform downloads (S1D) in-cluster while the patch
-         reported success -- the exact failure mode this guard exists to prevent;
-         it also forces the cluster re-check the plan requires if the seam moves.
-    """
-    if _PLATFORM_FILTER_MARK in src:
-        return src
-    if _PLATFORM_FILTER_OLD not in src:
-        raise RuntimeError(
-            "S1FileManager platform post-filter anchor not found; s1tiling layout "
-            "may have changed -- refusing to silently skip."
-        )
-    return src.replace(_PLATFORM_FILTER_OLD, _PLATFORM_FILTER_NEW, 1)
-
 
 def patch_s1filemanager() -> None:
     """Fix search() call: add collection param, remove unsupported kwargs."""
@@ -149,11 +89,6 @@ def patch_s1filemanager() -> None:
         'collection=product_type,\n                provider="cop_dataspace",',
         1,
     )
-
-    # Rewrite the platform post-filter for eodag 4 (STAC `platform`) and run it
-    # for any non-empty platform_list so a single-platform run drops off-platform
-    # (S1D) products before download. See _rewrite_platform_postfilter.
-    src = _rewrite_platform_postfilter(src)
 
     fpath.write_text(src)
     print(f"  Patched {fpath.name}")
