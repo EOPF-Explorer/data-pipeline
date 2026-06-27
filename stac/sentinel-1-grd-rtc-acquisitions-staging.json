@@ -1,7 +1,26 @@
 {
   "id": "sentinel-1-grd-rtc-acquisitions-staging",
   "type": "Collection",
-  "links": [],
+  "links": [
+    {
+      "rel": "license",
+      "href": "https://sentinel.esa.int/documents/247904/690755/Sentinel_Data_Legal_Notice",
+      "type": "application/pdf",
+      "title": "Legal notice on the use of Copernicus Sentinel Data and Service Information"
+    },
+    {
+      "rel": "related",
+      "href": "https://earth-info.nga.mil/index.php?dir=wgs84&action=wgs84#tab_egm2008",
+      "type": "text/html",
+      "title": "EGM2008 geoid model (NGA) — height reference used in orthorectification"
+    },
+    {
+      "rel": "derived_from",
+      "href": "https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-1-grd-rtc-staging",
+      "type": "application/json",
+      "title": "Sentinel-1 GRD RTC [V1 staging] — per-tile time-stacked datacube"
+    }
+  ],
   "title": "Sentinel-1 GRD RTC — per-acquisition slices [V1 staging]",
   "extent": {
     "spatial": {
@@ -74,10 +93,31 @@
     {
       "url": "https://zarr.eopf.copernicus.eu/",
       "name": "EOPF Sentinel Zarr Samples Service",
-      "roles": [
-        "host",
-        "processor"
-      ]
+      "roles": ["host", "processor"]
+    },
+    {
+      "url": "https://dataspace.copernicus.eu/",
+      "name": "Copernicus Data Space Ecosystem (CDSE)",
+      "roles": ["producer"],
+      "description": "Source of Sentinel-1 GRD Level-1 input products, downloaded via EODAG."
+    },
+    {
+      "url": "https://spacedata.copernicus.eu/collections/copernicus-digital-elevation-model",
+      "name": "Copernicus DEM GLO-30",
+      "roles": ["producer"],
+      "description": "Global 30 m Digital Elevation Model used for terrain correction and orthorectification."
+    },
+    {
+      "url": "https://gitlab.orfeo-toolbox.org/s1-tiling/s1tiling",
+      "name": "S1Tiling",
+      "roles": ["processor"],
+      "description": "Open-source Sentinel-1 tiling and RTC processing pipeline (v1.4.x) orchestrating download, orthorectification and gamma-naught RTC calibration."
+    },
+    {
+      "url": "https://www.orfeo-toolbox.org/",
+      "name": "Orfeo ToolBox (OTB) + DiapOTB",
+      "roles": ["processor"],
+      "description": "Remote sensing image processing library (v9.1.1) used for SAR orthorectification and gamma-area RTC via the DiapOTB extension."
     }
   ],
   "summaries": {
