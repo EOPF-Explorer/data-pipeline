@@ -129,7 +129,9 @@ def _delete_tile(s3: Any, tile: str, src_keys: list[str], *, execute: bool) -> i
     return deleted
 
 
-def wipe_tile_store(s3: Any, tile: str, *, workers: int, execute: bool) -> dict[str, int]:
+def wipe_tile_store(
+    s3: Any, tile: str, *, workers: int, execute: bool, skip_backup: bool = False
+) -> dict[str, int]:
     """Backup then delete one tile's cube store. Returns {source, backup, deleted} counts."""
     src_prefix = f"{STORE_PREFIX}/s1-rtc-{tile}.zarr/"
     src_keys = _list_objects(s3, src_prefix)
@@ -138,7 +140,11 @@ def wipe_tile_store(s3: Any, tile: str, *, workers: int, execute: bool) -> dict[
         return {"source": 0, "backed_up": 0, "deleted": 0}
 
     log.info("tile %s: found %d source objects", tile, len(src_keys))
-    backed_up = _backup_tile(s3, tile, src_keys, workers=workers, execute=execute)
+    backed_up = 0
+    if not skip_backup:
+        backed_up = _backup_tile(s3, tile, src_keys, workers=workers, execute=execute)
+    elif execute:
+        log.info("tile %s: skipping backup (--skip-backup)", tile)
     deleted = _delete_tile(s3, tile, src_keys, execute=execute)
     return {"source": len(src_keys), "backed_up": backed_up, "deleted": deleted}
 
@@ -159,29 +165,47 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--tiles", required=True, help="comma-separated MGRS tiles, e.g. 30TWM,31TCG")
     ap.add_argument(
-        "--workers", type=int, default=200, help="concurrent copy workers (default 200)"
+        "--workers", type=int, default=200, help="concurrent copy workers per tile (default 200)"
+    )
+    ap.add_argument(
+        "--tile-workers", type=int, default=1, help="tiles processed in parallel (default 1)"
     )
     ap.add_argument(
         "--execute",
         action="store_true",
         help="actually backup + delete (default: dry-run, lists what would happen)",
     )
+    ap.add_argument(
+        "--skip-backup",
+        action="store_true",
+        help="delete source objects without backing up first (use when data is corrupted/unwanted)",
+    )
     args = ap.parse_args()
     tiles = [t.strip() for t in args.tiles.split(",") if t.strip()]
 
     s3 = _make_s3()
 
-    total_src = total_bk = total_del = 0
-    failed = []
-    for tile in tiles:
-        try:
-            counts = wipe_tile_store(s3, tile, workers=args.workers, execute=args.execute)
-            total_src += counts["source"]
-            total_bk += counts["backed_up"]
-            total_del += counts["deleted"]
-        except Exception as exc:
-            log.error("tile %s FAILED: %s", tile, exc)
-            failed.append(tile)
+    results: list[dict[str, int]] = []
+    failed: list[str] = []
+
+    def _wipe(tile: str) -> dict[str, int]:
+        return wipe_tile_store(
+            s3, tile, workers=args.workers, execute=args.execute, skip_backup=args.skip_backup
+        )
+
+    with ThreadPoolExecutor(max_workers=args.tile_workers) as pool:
+        future_to_tile = {pool.submit(_wipe, tile): tile for tile in tiles}
+        for fut in as_completed(future_to_tile):
+            tile = future_to_tile[fut]
+            try:
+                results.append(fut.result())
+            except Exception as exc:
+                log.error("tile %s FAILED: %s", tile, exc)
+                failed.append(tile)
+
+    total_src = sum(r["source"] for r in results)
+    total_bk = sum(r["backed_up"] for r in results)
+    total_del = sum(r["deleted"] for r in results)
 
     verb = "dry-run" if not args.execute else "wiped"
     log.info(
