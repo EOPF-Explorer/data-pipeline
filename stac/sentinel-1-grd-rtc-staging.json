@@ -64,8 +64,8 @@
       "roles": ["producer", "processor"]
     },
     {
-      "url": "https://zarr.eopf.copernicus.eu/",
-      "name": "EOPF Sentinel Zarr Samples Service",
+      "url": "https://api.explorer.eopf.copernicus.eu/",
+      "name": "EOPF Explorer",
       "roles": ["host", "processor"]
     },
     {
