@@ -162,7 +162,12 @@ def existing_item_ids(stac_api_url: str, collection: str, candidate_ids: list[st
 
 
 def _upsert_items(stac_api_url: str, collection: str, items: list[dict]) -> None:
-    """DELETE-then-POST each item (pgstac has no item PUT), mirroring register_v1.upsert_item."""
+    """Unconditional DELETE-then-POST each item (pgstac has no item PUT).
+
+    register_v1.upsert_item achieves the same update semantics but reactively — it POSTs
+    first and only DELETE-then-re-POSTs on a 409. Here the caller already filters out
+    already-registered ids (incremental skip in main), so an unconditional delete is fine.
+    """
     from pystac_client import Client
 
     client = Client.open(stac_api_url)
