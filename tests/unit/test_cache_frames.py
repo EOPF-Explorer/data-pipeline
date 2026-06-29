@@ -1,0 +1,353 @@
+"""Unit tests for the S3 frame cache (scripts/cache_frames.py, Tasks 5 & 6).
+
+S3 is faked in-memory (no moto dependency): a dict of key -> bytes with the three
+operations the module uses (head_object, upload_fileobj, download_fileobj). The
+fake's ClientError 404 mirrors boto3 so cache_has()'s miss path is exercised.
+"""
+
+import io
+import sys
+import tarfile
+from pathlib import Path
+
+import pytest
+from botocore.exceptions import ClientError
+
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
+import cache_frames as cf  # noqa: E402
+
+
+# --------------------------------------------------------------------------- #
+# Fakes / helpers
+# --------------------------------------------------------------------------- #
+class FakeS3:
+    """Minimal in-memory S3 stand-in (key -> bytes)."""
+
+    def __init__(self):
+        self.store: dict[str, bytes] = {}
+        self.uploads = 0
+
+    def head_object(self, Bucket, Key):
+        if Key not in self.store:
+            raise ClientError({"Error": {"Code": "404", "Message": "Not Found"}}, "HeadObject")
+        return {"ContentLength": len(self.store[Key])}
+
+    def upload_fileobj(self, Fileobj, Bucket, Key):
+        self.store[Key] = Fileobj.read()
+        self.uploads += 1
+
+    def download_fileobj(self, Bucket, Key, Fileobj):
+        if Key not in self.store:
+            raise ClientError({"Error": {"Code": "404", "Message": "Not Found"}}, "GetObject")
+        Fileobj.write(self.store[Key])
+
+
+VALID_ID = "S1A_IW_GRDH_1SDV_20240101T060000_20240101T060025_052000_064700_ABCD"
+VALID_ID_2 = "S1A_IW_GRDH_1SDV_20240113T060000_20240113T060025_052100_064800_EF01"
+S1D_ID = "S1D_IW_GRDH_1SDV_20240102T060000_20240102T060025_001000_002000_BEEF"
+
+
+def _make_safe(data_raw, prod_id, tiff=b"raster-bytes"):
+    """Create a minimal extracted SAFE tree on disk."""
+    safe = Path(data_raw) / prod_id / f"{prod_id}.SAFE"
+    (safe / "measurement").mkdir(parents=True)
+    (safe / "manifest.safe").write_bytes(b"<xfdu:XFDU/>")
+    (safe / "measurement" / "iw-vv.tiff").write_bytes(tiff)
+    return safe
+
+
+# --------------------------------------------------------------------------- #
+# Key / id validation (the trust boundary)
+# --------------------------------------------------------------------------- #
+class TestValidateProdId:
+    def test_accepts_real_s1_id(self):
+        assert cf.validate_prod_id(VALID_ID) == VALID_ID
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "../etc/passwd",
+            "S1A_IW/../../escape",
+            "S1A_IW_GRDH/nested",
+            "S1A_IW",  # too short
+            "s1a_iw_grdh_lowercase_not_allowed_xxxxxxxxxx",
+            "X1A_IW_GRDH_1SDV_xxxxxxxxxxxxxxxx",  # wrong mission
+            "S1A_IW_GRDH_1SDV_;rm -rf",  # shell metachars
+            "",
+            "S1A_IW_GRDH_1SDV_with.dot.xxxxxxxxxx",  # '.' is path-ish, rejected
+        ],
+    )
+    def test_rejects_unsafe_ids(self, bad):
+        with pytest.raises(ValueError):
+            cf.validate_prod_id(bad)
+
+    def test_frame_key_validates_and_formats(self):
+        assert cf.frame_key("frame-cache", VALID_ID) == f"frame-cache/{VALID_ID}.tar"
+        assert cf.frame_key("frame-cache/", VALID_ID) == f"frame-cache/{VALID_ID}.tar"
+        with pytest.raises(ValueError):
+            cf.frame_key("frame-cache", "../evil")
+
+
+# --------------------------------------------------------------------------- #
+# Pull
+# --------------------------------------------------------------------------- #
+class TestPull:
+    def test_miss_reported_when_not_in_cache(self, tmp_path):
+        s3 = FakeS3()
+        assert cf.pull_frame(s3, "b", "frame-cache", VALID_ID, tmp_path) == "miss"
+
+    def test_present_is_idempotent_noop(self, tmp_path):
+        # SAFE already on disk -> "present", no cache access needed.
+        _make_safe(tmp_path, VALID_ID)
+        s3 = FakeS3()  # empty cache
+        assert cf.pull_frame(s3, "b", "frame-cache", VALID_ID, tmp_path) == "present"
+
+    def test_hit_restores_safe_tree(self, tmp_path):
+        # populate from src, pull into a fresh dst, assert the SAFE round-trips.
+        src, dst = tmp_path / "src", tmp_path / "dst"
+        src.mkdir()
+        dst.mkdir()
+        _make_safe(src, VALID_ID, tiff=b"unique-pixels")
+        s3 = FakeS3()
+        assert cf.populate_frame(s3, "b", "fc", VALID_ID, src) == "uploaded"
+
+        assert cf.pull_frame(s3, "b", "fc", VALID_ID, dst) == "hit"
+        restored = dst / VALID_ID / f"{VALID_ID}.SAFE"
+        assert (restored / "manifest.safe").is_file()
+        assert (restored / "measurement" / "iw-vv.tiff").read_bytes() == b"unique-pixels"
+
+    def test_pull_rejects_invalid_id_before_io(self, tmp_path):
+        s3 = FakeS3()
+        with pytest.raises(ValueError):
+            cf.pull_frame(s3, "b", "fc", "../escape", tmp_path)
+
+    def test_corrupt_tar_without_manifest_raises(self, tmp_path):
+        # A cache object that extracts but yields no manifest.safe = integrity fail.
+        s3 = FakeS3()
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tar:
+            info = tarfile.TarInfo(f"{VALID_ID}.SAFE/not-a-manifest")
+            data = b"x"
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+        s3.store[cf.frame_key("fc", VALID_ID)] = buf.getvalue()
+        with pytest.raises(RuntimeError):
+            cf.pull_frame(s3, "b", "fc", VALID_ID, tmp_path)
+
+    def test_failed_pull_leaves_data_raw_clean(self, tmp_path):
+        # A tar that extracts but yields no manifest must raise AND leave no partial
+        # SAFE (nor a staging dir) behind — the atomic stage-and-swap contract.
+        s3 = FakeS3()
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tar:
+            info = tarfile.TarInfo(f"{VALID_ID}.SAFE/measurement/x.tiff")
+            data = b"partial-no-manifest"
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+        s3.store[cf.frame_key("fc", VALID_ID)] = buf.getvalue()
+        with pytest.raises(RuntimeError):
+            cf.pull_frame(s3, "b", "fc", VALID_ID, tmp_path)
+        assert not (tmp_path / VALID_ID / f"{VALID_ID}.SAFE").exists()
+        prod_dir = tmp_path / VALID_ID
+        leftovers = list(prod_dir.glob(".cache-stage-*")) if prod_dir.exists() else []
+        assert leftovers == []  # staging cleaned up
+
+    def test_failed_pull_via_pull_frames_degrades_to_miss_and_clean(self, tmp_path):
+        s3 = FakeS3()
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tar:
+            info = tarfile.TarInfo(f"{VALID_ID}.SAFE/stray")
+            info.size = 1
+            tar.addfile(info, io.BytesIO(b"z"))
+        s3.store[cf.frame_key("fc", VALID_ID)] = buf.getvalue()
+        results = cf.pull_frames(s3, "b", "fc", [VALID_ID], tmp_path)
+        assert results[VALID_ID] == "miss"
+        assert not (tmp_path / VALID_ID / f"{VALID_ID}.SAFE").exists()
+
+
+class TestPullFramesParallel:
+    def test_mixed_hits_and_miss(self, tmp_path):
+        src, dst = tmp_path / "src", tmp_path / "dst"
+        src.mkdir()
+        dst.mkdir()
+        s3 = FakeS3()
+        for pid in (VALID_ID, VALID_ID_2):
+            _make_safe(src, pid)
+            cf.populate_frame(s3, "b", "fc", pid, src)
+        results = cf.pull_frames(s3, "b", "fc", [VALID_ID, VALID_ID_2, S1D_ID], dst, max_workers=3)
+        assert results[VALID_ID] == "hit"
+        assert results[VALID_ID_2] == "hit"
+        assert results[S1D_ID] == "miss"
+
+    def test_invalid_id_fails_batch_fast(self, tmp_path):
+        s3 = FakeS3()
+        with pytest.raises(ValueError):
+            cf.pull_frames(s3, "b", "fc", [VALID_ID, "../evil"], tmp_path)
+
+    def test_pull_failure_degrades_to_miss(self, tmp_path):
+        # A download that blows up must not fail the run — it becomes a miss.
+        class BoomS3(FakeS3):
+            def download_fileobj(self, Bucket, Key, Fileobj):
+                raise RuntimeError("transient S3 error")
+
+        s3 = BoomS3()
+        s3.store[cf.frame_key("fc", VALID_ID)] = b"present-but-unreadable"
+        results = cf.pull_frames(s3, "b", "fc", [VALID_ID], tmp_path)
+        assert results[VALID_ID] == "miss"
+
+
+# --------------------------------------------------------------------------- #
+# Populate
+# --------------------------------------------------------------------------- #
+class TestPopulate:
+    def test_uploads_new_frame(self, tmp_path):
+        _make_safe(tmp_path, VALID_ID)
+        s3 = FakeS3()
+        assert cf.populate_frame(s3, "b", "fc", VALID_ID, tmp_path) == "uploaded"
+        assert cf.frame_key("fc", VALID_ID) in s3.store
+
+    def test_skips_already_cached(self, tmp_path):
+        _make_safe(tmp_path, VALID_ID)
+        s3 = FakeS3()
+        cf.populate_frame(s3, "b", "fc", VALID_ID, tmp_path)
+        assert cf.populate_frame(s3, "b", "fc", VALID_ID, tmp_path) == "cached"
+        assert s3.uploads == 1  # not re-uploaded
+
+    def test_absent_when_no_safe_on_disk(self, tmp_path):
+        s3 = FakeS3()
+        assert cf.populate_frame(s3, "b", "fc", VALID_ID, tmp_path) == "absent"
+
+    def test_size_mismatch_raises(self, tmp_path):
+        # Simulate a silent partial upload: head reports a wrong length.
+        class LyingS3(FakeS3):
+            def head_object(self, Bucket, Key):
+                if Key not in self.store:
+                    raise ClientError({"Error": {"Code": "404"}}, "HeadObject")
+                return {"ContentLength": 1}  # wrong
+
+        _make_safe(tmp_path, VALID_ID)
+        with pytest.raises(RuntimeError, match="size mismatch"):
+            cf.populate_frame(LyingS3(), "b", "fc", VALID_ID, tmp_path)
+
+    def test_overwrite_reuploads(self, tmp_path):
+        _make_safe(tmp_path, VALID_ID)
+        s3 = FakeS3()
+        cf.populate_frame(s3, "b", "fc", VALID_ID, tmp_path)
+        assert cf.populate_frame(s3, "b", "fc", VALID_ID, tmp_path, overwrite=True) == "uploaded"
+        assert s3.uploads == 2
+
+
+class TestFetchOnceAcrossSharingTiles:
+    """End-to-end proof of the optimisation: across frame-sharing tiles processed
+    sequentially (the warm/steady-state case), each distinct frame is fetched from
+    CDSE exactly once instead of once per tile (~N x egress drop). Exercises the
+    real pull -> miss -> download -> populate -> next-tile-hit path.
+
+    NB: sequential = the warm steady state. The lazy-populate concurrency window
+    (>=K simultaneous first-touches double-fetch a frame) is T11's concern, not
+    modelled here.
+    """
+
+    def test_distinct_frames_fetched_once(self, tmp_path):
+        s3 = FakeS3()
+        ids = {
+            f"F{i}": f"S1A_IW_GRDH_1SDV_2024010{i}T060000_2024010{i}T060025_05200{i}_06470{i}_AB0{i}"
+            for i in range(5)
+        }
+        # 4 contiguous tiles, each sharing a frame with its neighbour (a block).
+        tiles = {"T1": ["F0", "F1"], "T2": ["F1", "F2"], "T3": ["F2", "F3"], "T4": ["F3", "F4"]}
+        cdse_fetches: list[str] = []
+
+        for tile, frames in tiles.items():
+            data_raw = tmp_path / tile
+            data_raw.mkdir()
+            prod_ids = [ids[f] for f in frames]
+            # pre-step: pull what the cache already has
+            results = cf.pull_frames(s3, "b", "fc", prod_ids, data_raw)
+            # s1processor downloads the misses from CDSE (modelled: write the SAFE)
+            for pid, status in results.items():
+                if status == "miss":
+                    cdse_fetches.append(pid)
+                    _make_safe(data_raw, pid)
+            # post-step: populate freshly-downloaded frames for the next tile
+            cf.populate_frames(s3, "b", "fc", prod_ids, data_raw)
+
+        total_pairs = sum(len(v) for v in tiles.values())  # 8 fetches without a cache
+        assert sorted(cdse_fetches) == sorted(ids.values())  # all 5 frames, no dups
+        assert len(cdse_fetches) == 5
+        assert len(cdse_fetches) < total_pairs == 8  # egress dropped 8 -> 5
+
+
+class TestDiscover:
+    def test_lists_valid_safes_skips_others(self, tmp_path):
+        _make_safe(tmp_path, VALID_ID)
+        _make_safe(tmp_path, VALID_ID_2)
+        (tmp_path / "not-a-frame").mkdir()  # ignored
+        (tmp_path / VALID_ID).joinpath("incomplete.SAFE").mkdir()  # no manifest -> ignored elsewhere
+        found = cf.discover_downloaded_frames(tmp_path)
+        assert set(found) == {VALID_ID, VALID_ID_2}
+
+    def test_empty_dir(self, tmp_path):
+        assert cf.discover_downloaded_frames(tmp_path / "missing") == []
+
+
+# --------------------------------------------------------------------------- #
+# Safe extraction (defence against malicious/corrupt cache objects)
+# --------------------------------------------------------------------------- #
+class TestSafeExtract:
+    def test_rejects_path_traversal_member(self, tmp_path):
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tar:
+            info = tarfile.TarInfo("../escape.txt")
+            info.size = 1
+            tar.addfile(info, io.BytesIO(b"x"))
+        buf.seek(0)
+        with tarfile.open(fileobj=buf, mode="r") as tar, pytest.raises(ValueError, match="escapes"):
+            cf._safe_extract(tar, tmp_path)
+
+    def test_rejects_symlink_member(self, tmp_path):
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tar:
+            info = tarfile.TarInfo("link")
+            info.type = tarfile.SYMTYPE
+            info.linkname = "/etc/passwd"
+            tar.addfile(info)
+        buf.seek(0)
+        with tarfile.open(fileobj=buf, mode="r") as tar, pytest.raises(ValueError):
+            cf._safe_extract(tar, tmp_path)
+
+    def test_rejects_hardlink_member(self, tmp_path):
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tar:
+            info = tarfile.TarInfo("hard")
+            info.type = tarfile.LNKTYPE
+            info.linkname = "manifest.safe"
+            tar.addfile(info)
+        buf.seek(0)
+        with tarfile.open(fileobj=buf, mode="r") as tar, pytest.raises(ValueError):
+            cf._safe_extract(tar, tmp_path)
+
+    def test_rejects_absolute_path_member(self, tmp_path):
+        # tarfile may strip a leading "/", so use an absolute-looking traversal that
+        # escapes regardless: the resolve()+containment check must reject it.
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tar:
+            info = tarfile.TarInfo("../../../../etc/evil")
+            info.size = 1
+            tar.addfile(info, io.BytesIO(b"x"))
+        buf.seek(0)
+        with tarfile.open(fileobj=buf, mode="r") as tar, pytest.raises(ValueError, match="escapes"):
+            cf._safe_extract(tar, tmp_path)
+
+    def test_extracts_normal_tree(self, tmp_path):
+        src = tmp_path / "src"
+        _make_safe(src, VALID_ID)
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tar:
+            tar.add(src / VALID_ID / f"{VALID_ID}.SAFE", arcname=f"{VALID_ID}.SAFE")
+        buf.seek(0)
+        dest = tmp_path / "dest"
+        dest.mkdir()
+        with tarfile.open(fileobj=buf, mode="r") as tar:
+            cf._safe_extract(tar, dest)
+        assert (dest / f"{VALID_ID}.SAFE" / "manifest.safe").is_file()
