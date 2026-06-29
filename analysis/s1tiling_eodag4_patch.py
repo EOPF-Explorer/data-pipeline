@@ -54,6 +54,15 @@ def patch_s1filemanager() -> None:
     fpath = S1T_PKG / "S1FileManager.py"
     src = fpath.read_text()
 
+    # Idempotency guard: the `collection=`/`provider=` rewrite is NOT self-reversing
+    # — a second run would re-match `collection=product_type,` and inject a duplicate
+    # `provider="cop_dataspace",` (SyntaxError: keyword argument repeated). The patch
+    # normally runs once per fresh container, but guard it so a re-run is a no-op,
+    # matching the idempotent contract of the other patches in this module.
+    if 'provider="cop_dataspace",' in src:
+        print(f"  {fpath.name} search() already patched; skipping")
+        return
+
     # Replace productType with collection (EODAG 4.0.0 rename).
     # Keeping productType alongside collection causes cop_dataspace to fail
     # silently, making EODAG fall back to peps.
