@@ -8,7 +8,8 @@ prefix, keyed by product id:
 
     {prefix}/{prod_id}.tar      <-  tar of  data_raw/{prod_id}/{prod_id}.SAFE/
 
-Two operations, wired around s1processor by the Argo template (T7):
+Operations: pull/populate are wired around s1processor by the Argo template (T7);
+evict runs periodically (e.g. a small scheduled step) to bound the cache.
 
   pull      (pre-step)   for each needed frame present in the cache, download its
                          tar and extract it into data_raw/{prod_id}/{prod_id}.SAFE/
@@ -17,6 +18,9 @@ Two operations, wired around s1processor by the Argo template (T7):
   populate  (post-step)  tar each SAFE s1processor freshly downloaded (a cache miss)
                          and upload it, so the next tile reuses it. Already-cached
                          frames are skipped.
+  evict     (retention)  delete frames whose acquisition date is older than the
+                         rolling window (--keep-days), so the cache never grows
+                         unbounded; --dry-run lists exactly what would go (T9).
 
 One tar per frame keeps the spike's single-object throughput (a SAFE is hundreds of
 small files). A pull failure degrades to a miss (s1processor just downloads it) — it
@@ -38,6 +42,7 @@ import sys
 import tarfile
 import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +54,10 @@ log = logging.getLogger("cache_frames")
 DEFAULT_ENDPOINT = "https://s3.de.io.cloud.ovh.net"
 DEFAULT_PREFIX = "frame-cache"
 DEFAULT_MAX_WORKERS = 8
+# Evict frames whose acquisition is older than this; the cron only reprocesses a
+# rolling window (lookback_days=7), so a few weeks of margin keeps recently-revisited
+# frames while bounding the cache. Tune via --keep-days.
+DEFAULT_KEEP_DAYS = 21
 
 # S1 GRD product ids look like S1A_IW_GRDH_1SDV_20240101T... — uppercase letters,
 # digits and underscores only. Anchoring + this charset rejects path traversal
@@ -276,6 +285,88 @@ def discover_downloaded_frames(data_raw: str | Path) -> list[str]:
     return out
 
 
+def _acq_date(prod_id: str) -> date:
+    """Acquisition (start) date parsed from the product id, e.g.
+    S1A_IW_GRDH_1SDV_20240101T060000_... -> 2024-01-01. The first `YYYYMMDDThhmmss`
+    field is the sensing start. Raises ValueError if absent (unexpected id shape)."""
+    m = re.search(r"_(\d{8})T\d{6}_", prod_id)
+    if not m:
+        raise ValueError(f"no acquisition timestamp in product id: {prod_id!r}")
+    return datetime.strptime(m.group(1), "%Y%m%d").date()
+
+
+def list_cached_frames(s3: Any, bucket: str, prefix: str) -> list[str]:
+    """List the product ids of frames currently in the cache (paginated). Keys that
+    aren't `{prefix}/{prod_id}.tar` with a valid id are skipped with a warning."""
+    pfx = prefix.rstrip("/") + "/"
+    out: list[str] = []
+    token: str | None = None
+    while True:
+        kw: dict[str, Any] = {"Bucket": bucket, "Prefix": pfx}
+        if token:
+            kw["ContinuationToken"] = token
+        resp = s3.list_objects_v2(**kw)
+        for obj in resp.get("Contents", []):
+            key = obj["Key"]
+            if not key.startswith(pfx) or not key.endswith(".tar"):
+                continue
+            pid = key[len(pfx):-len(".tar")]
+            try:
+                out.append(validate_prod_id(pid))
+            except ValueError:
+                log.warning("skipping unrecognised cache key: %s", key)
+        if not resp.get("IsTruncated"):
+            break
+        token = resp.get("NextContinuationToken")
+    return out
+
+
+def evict_stale(
+    s3: Any,
+    bucket: str,
+    prefix: str,
+    keep_days: int = DEFAULT_KEEP_DAYS,
+    today: date | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Remove cache frames whose acquisition date is older than `today - keep_days`,
+    so the cache tracks the rolling reprocessing window and never grows unbounded.
+
+    Keyed to the *acquisition* date (from the product id), not S3 LastModified — a
+    frame reused (pulled) many times never has its mtime refreshed, so an mtime rule
+    would wrongly evict still-in-window frames. Conservative: a frame whose date
+    can't be parsed is KEPT (never delete what we can't classify). With dry_run the
+    stale set is computed and returned but nothing is deleted.
+    """
+    today = today or date.today()
+    cutoff = today - timedelta(days=keep_days)
+    stale: list[str] = []
+    kept = 0
+    for pid in list_cached_frames(s3, bucket, prefix):
+        try:
+            acq = _acq_date(pid)
+        except ValueError:
+            log.warning("cannot parse acquisition date from %s; keeping it", pid)
+            kept += 1
+            continue
+        if acq < cutoff:
+            stale.append(pid)
+        else:
+            kept += 1
+    removed: list[str] = []
+    if not dry_run:
+        for pid in stale:
+            s3.delete_object(Bucket=bucket, Key=frame_key(prefix, pid))
+            removed.append(pid)
+    return {
+        "cutoff": cutoff.isoformat(),
+        "stale": sorted(stale),
+        "kept": kept,
+        "removed": sorted(removed),
+        "dry_run": dry_run,
+    }
+
+
 def make_s3_client(endpoint: str | None) -> Any:
     """boto3 S3 client (matches the repo convention: explicit endpoint, else the
     AWS_ENDPOINT_URL env, else AWS default). Credentials via the standard chain.
@@ -302,15 +393,19 @@ def _read_frames(args: argparse.Namespace) -> list[str]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("op", choices=("pull", "populate"))
+    parser.add_argument("op", choices=("pull", "populate", "evict"))
     parser.add_argument("--bucket", required=True)
     parser.add_argument("--prefix", default=DEFAULT_PREFIX)
     parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
-    parser.add_argument("--data-raw", required=True, help="S1Tiling data_raw directory")
+    parser.add_argument("--data-raw", help="S1Tiling data_raw directory (pull/populate)")
     parser.add_argument("--frames", help="comma/space-separated product ids")
     parser.add_argument("--frames-file", help="file with one product id per line")
     parser.add_argument("--max-workers", type=int, default=DEFAULT_MAX_WORKERS)
     parser.add_argument("--overwrite", action="store_true", help="(populate) re-upload cached frames")
+    parser.add_argument("--keep-days", type=int, default=DEFAULT_KEEP_DAYS,
+                        help="(evict) keep frames acquired within this many days")
+    parser.add_argument("--today", help="(evict) override 'today' as YYYY-MM-DD (testing/repeatable runs)")
+    parser.add_argument("--dry-run", action="store_true", help="(evict) list stale frames without deleting")
     return parser
 
 
@@ -318,6 +413,19 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s", stream=sys.stderr)
     args = build_parser().parse_args(argv)
     s3 = make_s3_client(args.endpoint)
+
+    if args.op == "evict":
+        today = date.fromisoformat(args.today) if args.today else None
+        res = evict_stale(s3, args.bucket, args.prefix, args.keep_days, today, args.dry_run)
+        log.info("frame cache evict (keep %dd, cutoff %s): %d stale, %d kept%s",
+                 args.keep_days, res["cutoff"], len(res["stale"]), res["kept"],
+                 " — dry-run, nothing deleted" if args.dry_run else f", {len(res['removed'])} removed")
+        for pid in res["stale"]:  # stdout = exactly what is (or would be) removed
+            print(pid)
+        return 0
+
+    if not args.data_raw:
+        build_parser().error(f"--data-raw is required for '{args.op}'")
 
     if args.op == "pull":
         frames = _read_frames(args)
