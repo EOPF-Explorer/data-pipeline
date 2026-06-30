@@ -97,18 +97,26 @@ def cache_has(s3: Any, bucket: str, key: str) -> bool:
 
 def _safe_extract(tar: tarfile.TarFile, dest: str | Path) -> None:
     """Extract a tar, rejecting any member that would escape dest or is a
-    link/device (defends against a malicious or corrupt cache object)."""
+    link/device (defends against a malicious or corrupt cache object).
+
+    Members are validated up front, then extracted one at a time with
+    ``tar.extract`` (never ``extractall``) so only vetted members are written and
+    we don't rely on extractall's own member handling. Each extract also applies
+    the stdlib ``data`` filter where available, as defence in depth.
+    """
     dest_root = Path(dest).resolve()
-    for member in tar.getmembers():
+    members = tar.getmembers()
+    for member in members:
         if member.issym() or member.islnk() or member.isdev():
             raise ValueError(f"unsafe tar member type for {member.name!r}")
         target = (dest_root / member.name).resolve()
         if target != dest_root and dest_root not in target.parents:
             raise ValueError(f"tar member escapes destination: {member.name!r}")
-    try:
-        tar.extractall(dest_root, filter="data")  # noqa: S202 - members pre-validated + data filter
-    except TypeError:  # `filter=` kwarg unavailable on older pythons
-        tar.extractall(dest_root)  # noqa: S202 - members pre-validated above
+    for member in members:
+        try:
+            tar.extract(member, dest_root, filter="data")
+        except TypeError:  # `filter=` kwarg unavailable on older pythons
+            tar.extract(member, dest_root)  # member pre-validated above
 
 
 def pull_frame(s3: Any, bucket: str, prefix: str, prod_id: str, data_raw: str | Path) -> str:
