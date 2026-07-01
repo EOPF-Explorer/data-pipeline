@@ -190,15 +190,45 @@ parity, heavier) vs `trigger_cdse.query_products` (already in-repo, must prove p
 - [ ] Frame-list source chosen + parity shown on ≥2 tiles (one multi-frame).
 - [ ] **If parity fails** → caching is defeated as designed; stop and rethink before T4/T5.
 
-### Task 4 — Provision the in-region S3 frame cache  <status: ready>
+### Task 4 — Provision the in-region S3 frame cache  <status: ✅ DONE 2026-07-01 (dedicated bucket, reuse creds; scoped-key hardening → T4b)>
 **What**: Stand up the cache in `platform-deploy`: an in-region S3 **cache prefix** (decide: dedicated
 bucket vs a `frame-cache/` prefix in an existing in-region bucket) + a **dedicated least-privilege key
 scoped to that prefix** (do **not** reuse the broad `geozarr-s3-credentials` output-bucket key). No RWX
 PVC. Endpoint `https://s3.de.io.cloud.ovh.net`.
 **Verify**: a throwaway pod with the dedicated key can PUT/GET under the prefix and is **denied** outside it.
+
+**RESOLVED 2026-07-01 — dedicated in-region bucket + reuse existing creds.** User provided a dedicated bucket
+**`esa-zarr-sentinel-explorer-cache`** (region `DE`, OVH project `bcc5927763514f499be7dff5af781d57`) — cleaner
+than a staging prefix (independent lifecycle for T9, isolated cost). Creds **reused**, not a new scoped key:
+the cache pre/post steps run **inside the s1tiling pod, which already mounts `geozarr-s3-credentials`** → reuse
+adds **zero new blast radius** (a scoped key only helps in a different trust context, which this isn't). Keeps
+T4 to a config choice — no Terraform / new OVH user / kubeseal / Flux — unblocking T5/T7/T10 immediately.
+- **Cache location:** bucket `esa-zarr-sentinel-explorer-cache`, prefix `frame-cache/` (objects
+  `frame-cache/{prod_id}.tar` = `cache_frames.py` `DEFAULT_PREFIX`). Endpoint `https://s3.de.io.cloud.ovh.net`,
+  region `de`. T7 passes `--bucket esa-zarr-sentinel-explorer-cache`; no code change.
+- **Creds:** reuse `geozarr-s3-credentials` (in-cluster `devseed-staging`, already mounted by s1tiling).
+- **Evidence (live, throwaway pod `t4-cache-probe2`, `amazon/aws-cli` + geozarr key):** `s3 ls` + PUT/GET/DELETE
+  of `frame-cache/.t4-probe.txt` all `ok`; probe deleted; pod deleted. (Earlier `t4-cache-probe` also ok on
+  `…-s1-l1grd-staging` + `…-tests` — reuse of the geozarr key is broadly valid.)
+
 **Acceptance criteria**:
-- [ ] Cache location + dedicated least-privilege creds documented; put/get works under the prefix, denied elsewhere.
-- [ ] Decision recorded: dedicated bucket vs prefix (cost/region/lifecycle).
+- [x] Cache location + creds documented; put/get works under the prefix (live-verified on the dedicated
+      bucket). *("denied elsewhere" is N/A for the reuse path — moved to the scoped-key follow-up T4b.)*
+- [x] Decision recorded: **dedicated bucket** `esa-zarr-sentinel-explorer-cache` (user-provided) over a
+      staging prefix — independent lifecycle (T9), isolated cost, zero-new-blast-radius creds.
+
+### Task 4b — (hardening) dedicated least-privilege cache-bucket key  <status: ready · pre-T12, not a canary blocker>
+**What**: Replace the reused `geozarr-s3-credentials` with a dedicated OVH S3 user + key scoped to
+`arn:aws:s3:::esa-zarr-sentinel-explorer-cache` + `/*` (whole dedicated bucket → simpler than prefix-scoping;
+Terraform block in `cloud-infra-deploy/infra/obj_storage.tf` per the `argo-logs` pattern: `_user` +
+`_user_s3_credential` + `_user_s3_policy` + a `_storage_object_bucket_lifecycle_configuration` for T9), then
+`kubeseal` a `frame-cache-s3-credentials-sealed.yaml` per `platform-deploy/.../SEALED-SECRETS.md`; flip the T7
+template to mount it. (Bucket is console-created → import block or just user+policy resources.)
+**Verify**: throwaway pod with the scoped key PUT/GET on `esa-zarr-sentinel-explorer-cache` **ok**, PUT to
+another bucket **denied**.
+**Acceptance criteria**:
+- [ ] Scoped key created + sealed + committed; put/get on the cache bucket ok, denied on other buckets.
+- [ ] T7 template mounts `frame-cache-s3-credentials` instead of `geozarr-s3-credentials` for the cache steps.
 
 ### Task 5 — `cache_frames.py` (pull cache-present SAFEs into `data_raw`)  <status: blocked: T4,T8>
 **What**: New `scripts/cache_frames.py`: given the tile's needed frames (source per T8) and the cache
@@ -222,7 +252,7 @@ uv run pytest tests/unit/test_cache_frames.py   # frame listing, key validation,
 **Acceptance criteria**:
 - [ ] New SAFEs uploaded (as tar); already-cached frames not re-uploaded; upload size/integrity verified.
 
-### Task 7 — Wire pre/post cache steps into the s1tiling template  <status: blocked: T5,T6,T8>
+### Task 7 — Wire pre/post cache steps into the s1tiling template  <status: 🟢 BUILT + statically validated 2026-07-01 · flag-on runtime test folded into T10 (needs merged image)>
 **What**: In `platform-deploy` `eopf-explorer-s1tiling-template.yaml`, add a **pre-step** (`cache_frames.py`)
 before `s1processor` and a **post-step** (T6) after it, **both gated by a new template param
 `enable_frame_cache` (default `false`)** via Argo `when:` — so the template ships cache-OFF (zero prod
@@ -232,12 +262,41 @@ reattaches step→step (zone-binding has bitten this project before). `s1process
 (fetches only misses). No cron-DAG change.
 **Verify**: with the flag off, a run executes neither new step (identical to today); with it on, two
 adjacent tiles sharing a frame — second after first — the second cache-hits + does **0 CDSE re-fetch**.
+
+**BUILT 2026-07-01 (branches `feat/s1-caching-t7-wiring` [data-pipeline] + `feat/s1-caching-t7-template`
+[platform-deploy]).** Two pieces:
+1. **Frame-list producer** `scripts/list_tile_frames.py` (+ `tests/unit/test_list_tile_frames.py`, 7 tests
+   green, ruff clean) — the pull step's input the plan's "add a pre-step (cache_frames.py)" assumed but
+   nothing produced: `cache_frames.py pull` takes an explicit id list, the cron's `discover` collapses to
+   one representative/pass, and s1processor searches internally. `list_tile_frames` enumerates the tile's
+   overlapping GRD frames via `tile_bbox(tile_id)` + a CDSE STAC query over `[date_start, date_end]`
+   (uncollapsed, platform-scoped). **Frame-list source = Option A (user-chosen).** Parity only moves the
+   HIT-RATE — s1tiling only reuses a pre-placed SAFE whose id is in its own search, so a wrong/extra id is
+   harmless waste and a missed id just downloads.
+2. **Template wiring** — additive (219 insert, 0 delete): 2 params (`enable_frame_cache` default `false`,
+   `frame_cache_bucket` default `esa-zarr-sentinel-explorer-cache`) + `cache-pull` step (ensure-dem→**pull**
+   →process) + `cache-populate` step (upload→**populate**), both gated `when: '…enable_frame_cache' == 'true'`,
+   both **best-effort (always exit 0)** so a list/pull/populate error only degrades to a normal CDSE fetch,
+   never a wrong output or a red run. Both templates = data-pipeline image + `pipeline` pool + `fsGroup:1000`
+   + `geozarr-s3-credentials` (T4 reuse). `populate` mounts `workspace` read-only.
+- **Static validation:** `argo lint` clean; `kubectl apply --dry-run=server` accepted by the live Argo CRD;
+  YAML step order confirmed `ensure-dem → cache-pull(gated) → process → upload → cache-populate(gated)` — so
+  **flag-off is behaviour-identical by construction** (both gated steps skipped).
+- **⚠️ Flag-ON dependency (blocks the runtime cache-hit demo → T10):** the deployed pipeline image
+  (`v0.8.0-s1rtc-rc7`) does **NOT** contain `list_tile_frames.py` (new) or `cache_frames.py` (merged after
+  rc7). Flag-on with rc7 degrades gracefully (both steps WARN + exit 0 → normal download, no cache benefit).
+  The flag-on cache-hit test therefore needs a **data-pipeline image built from `feat--s1_grd_phase5` at/after
+  the T7 merge** — pinned by T10's canary. Flag-off (default/cron) is unaffected and needs no new image.
+
 **Acceptance criteria**:
-- [ ] `enable_frame_cache=false` (default): neither pre/post step runs; behaviour identical to today.
-- [ ] `enable_frame_cache=true`, 2 frame-sharing tiles: tile-2 logs cache-hit + 0 CDSE bytes for the shared frame.
+- [x] `enable_frame_cache=false` (default): neither pre/post step runs; behaviour identical to today.
+      *(proven by construction: additive diff, both steps `when`-gated; argo-lint + server-dry-run clean.)*
+- [ ] `enable_frame_cache=true`, 2 frame-sharing tiles: tile-2 logs cache-hit + 0 CDSE bytes for the shared
+      frame. *(→ T10 canary — needs the merged pipeline image; graceful no-op proven with rc7.)*
 - [ ] Empty-coverage `exit 0` + per-tile retry/`continueOn` isolation still pass (no regression).
+      *(populate no-ops on absent/empty `data_raw`; gated steps don't alter the process/upload contract → T10.)*
 - [ ] Outputs equivalent to a no-cache run: **same acquisition set/count + per-band pixel data equal**
-      (NOT byte-for-byte — OTB embeds processing timestamps, so byte identity is not expected).
+      (NOT byte-for-byte — OTB embeds processing timestamps, so byte identity is not expected). *(→ T10.)*
 
 ### Task 9 — Cache eviction / retention  <status: blocked: T4>
 **What**: A retention policy on the cache prefix (S3 lifecycle rule or a small GC step) keyed to the AOI
