@@ -49,6 +49,7 @@ import shutil
 import sys
 import tarfile
 import tempfile
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -86,14 +87,11 @@ def validate_prod_id(prod_id: str) -> str:
 
 
 def acquisition_key(prod_id: str) -> str:
-    """The per-acquisition cache key: the product id minus its trailing unique-id
-    field (and any ``_COG`` format tag). CDSE serves each acquisition as BOTH a classic
-    SAFE (e.g. ``…_064700_ABCD``) and a COG (``…_064700_9F3E_COG``) with *different*
-    trailing ids; eodag downloads the classic while the STAC (``list_tile_frames``)
-    lists the COG. Keying by the shared acquisition — the first 8 underscore fields,
-    ``mission_mode_type_class_start_stop_orbit_datatake`` — lets a frame cached from the
-    classic id be found by the COG id. Idempotent: an id already trimmed to 8 fields
-    returns unchanged."""
+    """The per-acquisition cache key: the first 8 underscore fields of the product id
+    (``mission_mode_type_class_start_stop_orbit_datatake``), dropping the trailing
+    unique-id and any ``_COG`` tag — so CDSE's classic-SAFE and COG representations of
+    one frame (see the module docstring) map to the same cache object. Idempotent on an
+    8-field key; raises if the id has fewer than 8 fields."""
     validate_prod_id(prod_id)
     fields = prod_id.split("_")
     if len(fields) < 8:
@@ -106,32 +104,32 @@ def frame_key(prefix: str, prod_id: str) -> str:
     return f"{prefix.rstrip('/')}/{acquisition_key(prod_id)}.tar"
 
 
-def _safe_dir(data_raw: str | Path, prod_id: str) -> Path:
-    """The extracted product dir: eodag-4 puts manifest.safe + measurement/ DIRECTLY
-    under data_raw/{prod_id}/ (no nested {prod_id}.SAFE/)."""
-    return Path(data_raw) / prod_id
-
-
 def _has_manifest(safe_dir: str | Path) -> bool:
     return (Path(safe_dir) / "manifest.safe").is_file()
+
+
+def _manifest_dirs_by_acq(root: str | Path) -> Iterator[tuple[Path, str | None]]:
+    """Yield ``(dir, acquisition_key)`` for each extracted product dir under ``root``
+    (a child holding manifest.safe). The key is None for a dir whose name isn't a valid
+    S1 product id. The single scan of the classic on-disk names shared by the pull
+    present-check and the post-extract restore."""
+    base = Path(root)
+    if not base.is_dir():
+        return
+    for child in sorted(base.iterdir()):
+        if not (child.is_dir() and _has_manifest(child)):
+            continue
+        try:
+            yield child, acquisition_key(child.name)
+        except ValueError:
+            yield child, None
 
 
 def _present_dir_for_key(data_raw: str | Path, acq_key: str) -> Path | None:
     """An extracted product dir already in data_raw whose acquisition_key == acq_key,
     or None. The on-disk dir is named with the classic product id (…_ABCD); a pull
     keyed by the COG id must still recognise it as already present (idempotency)."""
-    root = Path(data_raw)
-    if not root.is_dir():
-        return None
-    for child in sorted(root.iterdir()):
-        if not (child.is_dir() and _has_manifest(child)):
-            continue
-        try:
-            if acquisition_key(child.name) == acq_key:
-                return child
-        except ValueError:
-            continue
-    return None
+    return next((d for d, k in _manifest_dirs_by_acq(data_raw) if k == acq_key), None)
 
 
 def cache_has(s3: Any, bucket: str, key: str) -> bool:
@@ -202,24 +200,18 @@ def pull_frame(s3: Any, bucket: str, prefix: str, prod_id: str, data_raw: str | 
         # Restore ONLY the product dir whose acquisition matches the key we pulled — a
         # well-formed cache tar holds exactly that one; refusing to move any other dir
         # keeps a malformed/multi-dir object from splattering unrelated SAFEs into data_raw.
-        matching, extras = [], []
-        for p in sorted(staging.iterdir()):
-            if not (p.is_dir() and _has_manifest(p)):
-                continue
-            try:
-                is_match = acquisition_key(p.name) == acq
-            except ValueError:
-                is_match = False
-            (matching if is_match else extras).append(p)
-        if not matching:
+        matched: Path | None = None
+        for cand, cand_key in _manifest_dirs_by_acq(staging):
+            if matched is None and cand_key == acq:
+                matched = cand
+            else:
+                log.warning("cache tar for %s carried an unexpected product %s; ignoring it", acq, cand.name)
+        if matched is None:
             raise RuntimeError(f"cache tar for {acq} did not yield a matching product with manifest.safe")
-        for extra in extras:
-            log.warning("cache tar for %s carried an unexpected product %s; ignoring it", acq, extra.name)
-        for safe in matching:
-            final = target_root / safe.name
-            if final.exists():
-                shutil.rmtree(final)
-            os.replace(safe, final)  # atomic on the same filesystem
+        final = target_root / matched.name
+        if final.exists():
+            shutil.rmtree(final)
+        os.replace(matched, final)  # atomic on the same filesystem
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     return "hit"
@@ -269,7 +261,8 @@ def populate_frame(
     an upload size mismatch (silent partial — the failure mode of the old
     csi-rclone writeback this design replaces)."""
     validate_prod_id(prod_id)
-    safe_dir = _safe_dir(data_raw, prod_id)
+    # eodag-4 puts manifest.safe + measurement/ directly under data_raw/{prod_id}/.
+    safe_dir = Path(data_raw) / prod_id
     if not _has_manifest(safe_dir):
         return "absent"
     key = frame_key(prefix, prod_id)
@@ -335,7 +328,7 @@ def discover_downloaded_frames(data_raw: str | Path) -> list[str]:
     if not root.is_dir():
         return out
     for child in sorted(root.iterdir()):
-        if child.is_dir() and (child / "manifest.safe").is_file():
+        if child.is_dir() and _has_manifest(child):
             try:
                 out.append(validate_prod_id(child.name))
             except ValueError:
