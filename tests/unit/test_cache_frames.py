@@ -53,10 +53,16 @@ VALID_ID = "S1A_IW_GRDH_1SDV_20240101T060000_20240101T060025_052000_064700_ABCD"
 VALID_ID_2 = "S1A_IW_GRDH_1SDV_20240113T060000_20240113T060025_052100_064800_EF01"
 S1D_ID = "S1D_IW_GRDH_1SDV_20240102T060000_20240102T060025_001000_002000_BEEF"
 
+# The same acquisition served two ways by CDSE: eodag downloads the classic SAFE,
+# list_tile_frames lists the COG. They share the first 8 fields (the acquisition key).
+CLASSIC_ID = "S1A_IW_GRDH_1SDV_20260618T051026_20260618T051051_065019_0831D4_19B8"
+COG_ID = "S1A_IW_GRDH_1SDV_20260618T051026_20260618T051051_065019_0831D4_8DC1_COG"
+
 
 def _make_safe(data_raw, prod_id, tiff=b"raster-bytes"):
-    """Create a minimal extracted SAFE tree on disk."""
-    safe = Path(data_raw) / prod_id / f"{prod_id}.SAFE"
+    """Create a minimal extracted SAFE tree on disk (eodag-4 layout: manifest.safe +
+    measurement/ live DIRECTLY under data_raw/{prod_id}/, no nested {prod_id}.SAFE/)."""
+    safe = Path(data_raw) / prod_id
     (safe / "measurement").mkdir(parents=True)
     (safe / "manifest.safe").write_bytes(b"<xfdu:XFDU/>")
     (safe / "measurement" / "iw-vv.tiff").write_bytes(tiff)
@@ -89,10 +95,36 @@ class TestValidateProdId:
             cf.validate_prod_id(bad)
 
     def test_frame_key_validates_and_formats(self):
-        assert cf.frame_key("frame-cache", VALID_ID) == f"frame-cache/{VALID_ID}.tar"
-        assert cf.frame_key("frame-cache/", VALID_ID) == f"frame-cache/{VALID_ID}.tar"
+        acq = cf.acquisition_key(VALID_ID)
+        assert cf.frame_key("frame-cache", VALID_ID) == f"frame-cache/{acq}.tar"
+        assert cf.frame_key("frame-cache/", VALID_ID) == f"frame-cache/{acq}.tar"
         with pytest.raises(ValueError):
             cf.frame_key("frame-cache", "../evil")
+
+
+class TestAcquisitionKey:
+    def test_strips_trailing_unique_id(self):
+        assert cf.acquisition_key(CLASSIC_ID) == (
+            "S1A_IW_GRDH_1SDV_20260618T051026_20260618T051051_065019_0831D4"
+        )
+
+    def test_classic_and_cog_map_to_same_key(self):
+        # the whole point: eodag's classic id and the STAC's COG id key the same tar.
+        assert cf.acquisition_key(CLASSIC_ID) == cf.acquisition_key(COG_ID)
+
+    def test_idempotent_on_a_key(self):
+        k = cf.acquisition_key(CLASSIC_ID)
+        assert cf.acquisition_key(k) == k
+
+    def test_rejects_invalid_id(self):
+        with pytest.raises(ValueError):
+            cf.acquisition_key("../evil")
+
+    def test_rejects_too_few_fields(self):
+        # valid id grammar (passes validate_prod_id) but not enough fields to name an
+        # acquisition — must fail loud rather than silently key on a truncated prefix.
+        with pytest.raises(ValueError, match="too few fields"):
+            cf.acquisition_key("S1A_IW_GRDH_TOOSHORT")
 
 
 # --------------------------------------------------------------------------- #
@@ -119,9 +151,53 @@ class TestPull:
         assert cf.populate_frame(s3, "b", "fc", VALID_ID, src) == "uploaded"
 
         assert cf.pull_frame(s3, "b", "fc", VALID_ID, dst) == "hit"
-        restored = dst / VALID_ID / f"{VALID_ID}.SAFE"
+        restored = dst / VALID_ID
         assert (restored / "manifest.safe").is_file()
         assert (restored / "measurement" / "iw-vv.tiff").read_bytes() == b"unique-pixels"
+
+    def test_cog_id_pulls_classic_cached_frame(self, tmp_path):
+        # THE parity fix: eodag downloads the classic SAFE (…_19B8); the next tile lists
+        # the same frame as a COG id (…_8DC1_COG). Populating from the classic id must be
+        # a cache HIT when pulled by the COG id, restored under the real classic dir name
+        # so S1Tiling's scan skips it.
+        src, dst = tmp_path / "src", tmp_path / "dst"
+        src.mkdir()
+        dst.mkdir()
+        _make_safe(src, CLASSIC_ID, tiff=b"classic-pixels")
+        s3 = FakeS3()
+        assert cf.populate_frame(s3, "b", "fc", CLASSIC_ID, src) == "uploaded"
+
+        assert cf.pull_frame(s3, "b", "fc", COG_ID, dst) == "hit"
+        restored = dst / CLASSIC_ID  # real classic dir name, not the COG id
+        assert (restored / "manifest.safe").is_file()
+        assert (restored / "measurement" / "iw-vv.tiff").read_bytes() == b"classic-pixels"
+        assert not (dst / COG_ID).exists()
+
+    def test_present_recognised_across_classic_cog(self, tmp_path):
+        # If the classic SAFE is already on disk, a pull by the COG id is a "present" no-op.
+        _make_safe(tmp_path, CLASSIC_ID)
+        s3 = FakeS3()
+        assert cf.pull_frame(s3, "b", "fc", COG_ID, tmp_path) == "present"
+
+    def test_pull_moves_only_matching_acquisition_dir(self, tmp_path):
+        # Defence: a (malformed) cache tar carrying an extra unrelated SAFE must restore
+        # ONLY the frame we asked for, never splatter the extra into data_raw.
+        other_id = "S1A_IW_GRDH_1SDV_20260618T052000_20260618T052025_065019_0831D4_9999"
+        src, dst = tmp_path / "src", tmp_path / "dst"
+        src.mkdir()
+        dst.mkdir()
+        _make_safe(src, CLASSIC_ID, tiff=b"want")
+        _make_safe(src, other_id, tiff=b"unwanted")
+        s3 = FakeS3()
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tar:
+            tar.add(src / CLASSIC_ID, arcname=CLASSIC_ID)
+            tar.add(src / other_id, arcname=other_id)  # extra, different acquisition
+        s3.store[cf.frame_key("fc", CLASSIC_ID)] = buf.getvalue()
+
+        assert cf.pull_frame(s3, "b", "fc", COG_ID, dst) == "hit"
+        assert (dst / CLASSIC_ID / "manifest.safe").is_file()
+        assert not (dst / other_id).exists()  # unrelated SAFE ignored
 
     def test_pull_rejects_invalid_id_before_io(self, tmp_path):
         s3 = FakeS3()
@@ -154,10 +230,8 @@ class TestPull:
         s3.store[cf.frame_key("fc", VALID_ID)] = buf.getvalue()
         with pytest.raises(RuntimeError):
             cf.pull_frame(s3, "b", "fc", VALID_ID, tmp_path)
-        assert not (tmp_path / VALID_ID / f"{VALID_ID}.SAFE").exists()
-        prod_dir = tmp_path / VALID_ID
-        leftovers = list(prod_dir.glob(".cache-stage-*")) if prod_dir.exists() else []
-        assert leftovers == []  # staging cleaned up
+        assert not (tmp_path / VALID_ID).exists()  # no partial product dir
+        assert list(tmp_path.glob(".cache-stage-*")) == []  # staging (under data_raw) cleaned up
 
     def test_failed_pull_via_pull_frames_degrades_to_miss_and_clean(self, tmp_path):
         s3 = FakeS3()
@@ -169,7 +243,7 @@ class TestPull:
         s3.store[cf.frame_key("fc", VALID_ID)] = buf.getvalue()
         results = cf.pull_frames(s3, "b", "fc", [VALID_ID], tmp_path)
         assert results[VALID_ID] == "miss"
-        assert not (tmp_path / VALID_ID / f"{VALID_ID}.SAFE").exists()
+        assert not (tmp_path / VALID_ID).exists()
 
 
 class TestPullFramesParallel:
@@ -351,13 +425,13 @@ class TestSafeExtract:
         _make_safe(src, VALID_ID)
         buf = io.BytesIO()
         with tarfile.open(fileobj=buf, mode="w") as tar:
-            tar.add(src / VALID_ID / f"{VALID_ID}.SAFE", arcname=f"{VALID_ID}.SAFE")
+            tar.add(src / VALID_ID, arcname=VALID_ID)
         buf.seek(0)
         dest = tmp_path / "dest"
         dest.mkdir()
         with tarfile.open(fileobj=buf, mode="r") as tar:
             cf._safe_extract(tar, dest)
-        assert (dest / f"{VALID_ID}.SAFE" / "manifest.safe").is_file()
+        assert (dest / VALID_ID / "manifest.safe").is_file()
 
 
 # --------------------------------------------------------------------------- #
@@ -388,7 +462,10 @@ class TestListCachedFrames:
         _seed_cache(s3, "fc", VALID_ID, VALID_ID_2)
         s3.store["fc/not-a-tar.txt"] = b"x"          # ignored (not .tar)
         s3.store["fc/garbage.tar"] = b"x"            # ignored (invalid id)
-        assert sorted(cf.list_cached_frames(s3, "b", "fc")) == sorted([VALID_ID, VALID_ID_2])
+        # cache objects are keyed by acquisition (the tar name), so list returns those.
+        assert sorted(cf.list_cached_frames(s3, "b", "fc")) == sorted(
+            [cf.acquisition_key(VALID_ID), cf.acquisition_key(VALID_ID_2)]
+        )
 
     def test_paginates(self):
         class PagedS3(FakeS3):
@@ -401,7 +478,9 @@ class TestListCachedFrames:
                         "IsTruncated": more, "NextContinuationToken": str(start + 1)}
         s3 = PagedS3()
         _seed_cache(s3, "fc", VALID_ID, VALID_ID_2, S1D_ID)
-        assert sorted(cf.list_cached_frames(s3, "b", "fc")) == sorted([VALID_ID, VALID_ID_2, S1D_ID])
+        assert sorted(cf.list_cached_frames(s3, "b", "fc")) == sorted(
+            [cf.acquisition_key(i) for i in (VALID_ID, VALID_ID_2, S1D_ID)]
+        )
 
 
 class TestEvictStale:
@@ -415,8 +494,8 @@ class TestEvictStale:
         s3 = self._seeded()
         # today=2024-01-20, keep 10 days -> cutoff 2024-01-10: 01-01 & 01-02 stale, 01-13 kept
         res = cf.evict_stale(s3, "b", "fc", keep_days=10, today=date(2024, 1, 20))
-        assert res["stale"] == sorted([VALID_ID, S1D_ID])
-        assert res["removed"] == sorted([VALID_ID, S1D_ID])
+        assert res["stale"] == sorted([cf.acquisition_key(VALID_ID), cf.acquisition_key(S1D_ID)])
+        assert res["removed"] == sorted([cf.acquisition_key(VALID_ID), cf.acquisition_key(S1D_ID)])
         assert res["kept"] == 1
         assert cf.frame_key("fc", VALID_ID) not in s3.store      # actually deleted
         assert cf.frame_key("fc", VALID_ID_2) in s3.store        # in-window retained
@@ -425,7 +504,7 @@ class TestEvictStale:
         s3 = self._seeded()
         before = dict(s3.store)
         res = cf.evict_stale(s3, "b", "fc", keep_days=10, today=date(2024, 1, 20), dry_run=True)
-        assert res["stale"] == sorted([VALID_ID, S1D_ID])   # reports what WOULD go
+        assert res["stale"] == sorted([cf.acquisition_key(VALID_ID), cf.acquisition_key(S1D_ID)])
         assert res["removed"] == []
         assert s3.store == before                            # nothing deleted
 
@@ -439,7 +518,9 @@ class TestEvictStale:
         # An on-disk key that passes id validation but whose date can't be parsed must
         # never be deleted (conservative — same principle as pull/T1).
         s3 = FakeS3()
-        weird = "S1A_NO_TIMESTAMP_AT_ALL_PADDING_XXXXXXXX"
+        # valid grammar + >=8 fields (so it forms an acquisition key), but no parseable
+        # YYYYMMDDThhmmss so its acquisition date can't be derived.
+        weird = "S1A_IW_GRDH_1SDV_NODATE_NOSTOP_052000_064700_ABCD"
         assert cf.validate_prod_id(weird) == weird  # passes the id grammar
         s3.store[cf.frame_key("fc", weird)] = b"x"
         res = cf.evict_stale(s3, "b", "fc", keep_days=1, today=date(2024, 1, 20))
@@ -458,8 +539,8 @@ class TestEvictCLI:
                           "--keep-days", "10", "--today", "2024-01-20", "--dry-run"])
         assert rc == 0
         out = capsys.readouterr().out
-        assert VALID_ID in out          # stale (2024-01-01) printed
-        assert VALID_ID_2 not in out    # in-window not printed
+        assert cf.acquisition_key(VALID_ID) in out          # stale (2024-01-01) printed
+        assert cf.acquisition_key(VALID_ID_2) not in out    # in-window not printed
 
     def test_pull_still_requires_data_raw(self):
         s3 = FakeS3()

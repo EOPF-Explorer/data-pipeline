@@ -305,7 +305,29 @@ adjacent tiles sharing a frame — second after first — the second cache-hits 
 **Acceptance criteria**:
 - [ ] Policy defined + applied; a dry-run lists exactly the stale objects it would remove.
 
-### Task 10 — A/B canary: cached vs current, 6 frame-sharing tiles  <status: blocked: T7>
+### Task 10 — A/B canary: cached vs current, 6 frame-sharing tiles  <status: 1-tile smoke run 2026-07-01 — CAUGHT + FIXED a fatal parity bug; needs re-smoke on the fix image>
+
+**⚠️ RUNTIME FINDING (1-tile smoke `s1canary-wn-cold`, 33TWN) — the cache would NEVER hit as first built.**
+The smoke SUCCEEDED as a *test*: cache-pull + `list_tile_frames` ran correctly (2 candidate frames, 2 misses
+on the cold cache), process produced valid GeoTIFFs, but **cache-populate uploaded 0** and the cache stayed
+empty. Root cause (from the archived s1processor + cache-populate logs) = two parity bugs:
+1. **Frame-id source mismatch (fatal).** `list_tile_frames` reads the CDSE **STAC `sentinel-1-grd`** collection
+   → **COG** ids (`…_0831D4_8DC1_COG`). eodag/S1Tiling downloads the **classic SAFE** (`…_0831D4_19B8` — no
+   `_COG`, *different trailing hash*). Both coexist in CDSE OData (mid-migration). STAC id ≠ SAFE dir → cache
+   key never matches → pull always misses. (An earlier OData spot-check *seemed* to confirm parity — it
+   matched on the shared datatake fragment and hit the COG record, not eodag's classic one. Only running it
+   for real exposed the truth.)
+2. **SAFE layout mismatch.** Real on-disk: `data_raw/{prod_id}/manifest.safe` (measurement/ directly under
+   `{prod_id}/`). `cache_frames` assumed `data_raw/{prod_id}/{prod_id}.SAFE/manifest.safe` → discover found 0.
+
+**✅ FIX (branch `fix/s1-caching-frame-key`, `cache_frames.py` only, 57 tests green):** key the cache by the
+**acquisition** (`acquisition_key` = first 8 id fields = mission_mode_type_class_start_stop_orbit_datatake),
+so the classic id eodag downloads and the COG id the STAC lists map to the **same** `{acq}.tar`; the tar
+preserves the real (classic) dir name so pull restores exactly what S1Tiling's scan skips. Plus the layout
+fix (`data_raw/{prod_id}/manifest.safe`, tar arcname = the real product dir). `list_tile_frames` + the T7
+template are unchanged. Proven by `test_cog_id_pulls_classic_cached_frame` (classic-populate → COG-pull = hit).
+Needs a fresh image (rc9) + an off-peak **re-smoke** to confirm the live cache-hit end-to-end.
+
 **What**: Prove the win by A/B comparison on a **6-tile canary**, not by re-asserting §4. **Both arms are
 GeoTIFF-only (skip the ingest template) and override `s3_output_bucket` to an isolated canary prefix** —
 perf comparison, no prod cube/STAC writes (see **Isolation invariants**). Both use the same image / window /
