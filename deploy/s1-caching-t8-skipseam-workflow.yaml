@@ -1,0 +1,180 @@
+# T8 — skip-seam confirmation experiment (EOPF S1 input-data caching).
+#
+# Proves the assumption the whole cache rests on: a SAFE already present under
+# data_raw/{prod_id}/{prod_id}.SAFE/ makes S1Tiling SKIP that product's CDSE
+# download. Approach: one shared workspace PVC, run S1Processor TWICE.
+#   download : normal s1processor — downloads the SAFE(s) into /data/data_raw.
+#   rerun    : clears ONLY the outputs (keeps /data/data_raw), runs S1Processor
+#              again -> if the seam works it logs "0 ... will be downloaded".
+#
+# Isolation: a NEW east tile OUTSIDE the western-europe AOI (cannot collide with
+# the live cron), GeoTIFF stays on the ephemeral per-workflow PVC — there is NO
+# upload step, so NOTHING is written to any S3 bucket or STAC. Only cost is the
+# one-time CDSE download (a narrow 1-day window keeps it to ~1-2 SAFEs).
+#
+# Submit:  argo submit -n devseed-staging t8_skipseam.yaml --watch
+# Verify:  read the `rerun` pod log — it self-reports T8 PASS/CHECK (see bottom).
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: s1cache-t8-skipseam-
+  namespace: devseed-staging
+  labels:
+    eopf.eu/experiment: s1-caching-t8-skipseam
+spec:
+  entrypoint: t8
+  serviceAccountName: operate-workflow-sa   # same SA the cron uses (RBAC for workflowtaskresults)
+  # Shared across both s1processor runs — this is what makes the pre-placed SAFE
+  # from `download` visible to `rerun` (the cron template uses a fresh PVC per run).
+  volumeClaimTemplates:
+  - metadata:
+      name: workspace
+    spec:
+      accessModes: [ReadWriteOnce]
+      storageClassName: csi-cinder-high-speed
+      resources:
+        requests:
+          storage: 40Gi
+  arguments:
+    parameters:
+    - name: tile_id
+      value: "33TWN"            # east of AOI (>13.5E), confirmed S1A+S1D on 2026-06-25
+    - name: orbit_direction
+      value: "descending"
+    - name: platform
+      value: "S1A"
+    - name: date_start
+      value: "2026-06-24"       # prod-style +/-1d around the 06-25 pass (1-day window
+    - name: date_end
+      value: "2026-06-26"       # returns nothing — S1Tiling treats the bound exclusively)
+    - name: s1tiling_image
+      value: w9mllyot.c1.de1.container-registry.ovh.net/eopf-sentinel-zarr-explorer/s1tiling:1.4.0-ubuntu-otb9.1.1
+    - name: pipeline_image_version
+      value: v0.8.0-s1rtc-rc7
+
+  templates:
+  - name: t8
+    steps:
+    - - name: ensure-dem
+        template: ensure-dem
+    - - name: download
+        template: s1processor          # run 1: populates /data/data_raw
+        arguments:
+          parameters: [{name: mode, value: "download"}]
+    - - name: rerun
+        template: s1processor          # run 2: SAFE present -> must skip download
+        arguments:
+          parameters: [{name: mode, value: "rerun"}]
+
+  # ----- Stage the tile's GLO-30 DEM into the shared workspace (copied from the cron template) -----
+  - name: ensure-dem
+    nodeSelector: {nodepool: pipeline}
+    tolerations: [{key: nodepool, operator: Equal, value: pipeline, effect: NoSchedule}]
+    securityContext: {fsGroup: 1000}
+    retryStrategy:
+      limit: "3"
+      retryPolicy: OnFailure
+      backoff: {duration: "20s", factor: "2", cap: "5m"}
+    volumes:
+    - name: dem
+      persistentVolumeClaim: {claimName: s1-dem, readOnly: true}
+    container:
+      image: w9mllyot.c1.de1.container-registry.ovh.net/eopf-sentinel-zarr-explorer/data-pipeline:{{workflow.parameters.pipeline_image_version}}
+      imagePullPolicy: IfNotPresent
+      volumeMounts:
+      - {name: dem, mountPath: /MNT, readOnly: true}
+      - {name: workspace, mountPath: /data}
+      resources:
+        requests: {memory: 1Gi, cpu: "1"}
+      env: [{name: PYTHONUNBUFFERED, value: "1"}]
+      command: [sh, -c]
+      args:
+      - |
+        set -euo pipefail
+        cp /MNT/dem_db/DEM_Union.gpkg /tmp/DEM_Union.gpkg
+        exec python3 /app/scripts/ensure_dem.py \
+          --tile-id "{{workflow.parameters.tile_id}}" \
+          --dem-dir /data/dem/COP_DEM_GLO30 \
+          --gpkg /tmp/DEM_Union.gpkg
+
+  # ----- s1processor (download | rerun) — mirrors the cron template's step -----
+  - name: s1processor
+    inputs:
+      parameters:
+      - name: mode                      # "download" (1st) or "rerun" (2nd)
+    activeDeadlineSeconds: 7200
+    nodeSelector: {nodepool: pipeline}
+    tolerations: [{key: nodepool, operator: Equal, value: pipeline, effect: NoSchedule}]
+    volumes:
+    - name: dem
+      persistentVolumeClaim: {claimName: s1-dem, readOnly: true}
+    - name: eodag
+      secret: {secretName: cdse-eodag-credentials}
+    - name: cfg-base
+      configMap: {name: s1grd-rtc-cfg-base}
+    - name: patch
+      configMap: {name: s1tiling-eodag4-patch}
+    - name: scratch
+      emptyDir: {}
+    container:
+      image: "{{workflow.parameters.s1tiling_image}}"
+      imagePullPolicy: IfNotPresent
+      volumeMounts:
+      - {name: dem, mountPath: /MNT, readOnly: true}
+      - {name: eodag, mountPath: /eo_config, readOnly: true}
+      - {name: cfg-base, mountPath: /cfg-base, readOnly: true}
+      - {name: patch, mountPath: /patch, readOnly: true}
+      - {name: workspace, mountPath: /data}
+      - {name: scratch, mountPath: /tmp/s1tiling}
+      resources:
+        requests: {memory: 16Gi, cpu: "4"}
+      env: [{name: PYTHONUNBUFFERED, value: "1"}]
+      command: [bash]
+      args:
+      - -c
+      - |
+        set -euo pipefail
+        MODE="{{inputs.parameters.mode}}"
+        TILE="{{workflow.parameters.tile_id}}"
+        ORBIT="{{workflow.parameters.orbit_direction}}"
+        PLATFORM="{{workflow.parameters.platform}}"
+        DSTART="{{workflow.parameters.date_start}}"
+        DEND="{{workflow.parameters.date_end}}"
+        if [ "$ORBIT" = "descending" ]; then OC=DES; else OC=ASC; fi
+        mkdir -p /data/config /data/data_out /data/data_gamma_area /data/data_raw /data/eof /tmp/s1tiling
+
+        if [ "$MODE" = "rerun" ]; then
+          echo "===== T8 RERUN: SAFEs already on disk in /data/data_raw ====="
+          find /data/data_raw -maxdepth 2 -name manifest.safe | sed 's|/manifest.safe||' || true
+          # Clear ONLY outputs so S1Processor must reprocess -> it will want the
+          # product, find the SAFE in data_raw, and (if the seam works) NOT re-download.
+          rm -rf /data/data_out/* /data/data_gamma_area/* 2>/dev/null || true
+        fi
+
+        sed -e "s|^roi_by_tiles : .*|roi_by_tiles : ${TILE}|" \
+            -e "s|^tiles : .*|tiles : ${TILE}|" \
+            -e "s|^orbit_direction : .*|orbit_direction : ${OC}|" \
+            -e "s|^platform_list : .*|platform_list : ${PLATFORM}|" \
+            -e "s|^first_date : .*|first_date : ${DSTART}|" \
+            -e "s|^last_date : .*|last_date : ${DEND}|" \
+            /cfg-base/S1GRD_RTC.cfg > /data/config/S1GRD_RTC.cfg
+
+        python3 /patch/s1tiling_eodag4_patch.py
+
+        set +e
+        S1Processor /data/config/S1GRD_RTC.cfg 2>&1 | tee /tmp/s1p.log
+        RC=${PIPESTATUS[0]}
+        set -e
+
+        if [ "$MODE" = "rerun" ]; then
+          echo "===== T8 VERDICT ====="
+          DL=$(grep -oE "[0-9]+ remote S1 product\(s\) will be downloaded" /tmp/s1p.log | tail -1 | grep -oE "^[0-9]+" || echo "?")
+          echo "rerun: '${DL}' product(s) will be downloaded (expect 0 = SAFE skipped)"
+          if [ "$DL" = "0" ]; then
+            echo "T8 PASS: pre-placed SAFE was NOT re-downloaded — skip-seam confirmed."
+          else
+            echo "T8 CHECK: expected 0 downloads on rerun; inspect the cache lines below:"
+            grep -iE "not yet in the .local disk. cache|will be downloaded|already" /tmp/s1p.log || true
+          fi
+        fi
+        exit "$RC"
