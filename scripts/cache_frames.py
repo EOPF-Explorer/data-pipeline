@@ -6,7 +6,15 @@ per-tile S1Tiling workflows each re-download the same frame from CDSE. This modu
 caches the *extracted SAFE tree* of each frame as one tar object in an in-region S3
 prefix, keyed by product id:
 
-    {prefix}/{prod_id}.tar      <-  tar of  data_raw/{prod_id}/{prod_id}.SAFE/
+    {prefix}/{acquisition_key}.tar   <-  tar of  data_raw/{prod_id}/
+
+The tar's root dir is the real downloaded product id (`{prod_id}/`), whose extracted
+SAFE contents (`manifest.safe`, `measurement/` …) live DIRECTLY inside it — the eodag-4
+cop_dataspace layout, NOT a nested `{prod_id}.SAFE/`. The object is keyed by the
+*acquisition* (see ``acquisition_key``), not the full product id: CDSE serves each
+acquisition as both a classic SAFE (which eodag downloads) and a COG (which the STAC
+lists) with different trailing ids, so keying by what they share lets a frame cached
+from one be found by the other.
 
 Operations: pull/populate are wired around s1processor by the Argo template (T7);
 evict runs periodically (e.g. a small scheduled step) to bound the cache.
@@ -77,20 +85,53 @@ def validate_prod_id(prod_id: str) -> str:
     return prod_id
 
 
-def frame_key(prefix: str, prod_id: str) -> str:
-    """S3 key for a frame's cache tar. Validates prod_id first."""
+def acquisition_key(prod_id: str) -> str:
+    """The per-acquisition cache key: the product id minus its trailing unique-id
+    field (and any ``_COG`` format tag). CDSE serves each acquisition as BOTH a classic
+    SAFE (e.g. ``…_064700_ABCD``) and a COG (``…_064700_9F3E_COG``) with *different*
+    trailing ids; eodag downloads the classic while the STAC (``list_tile_frames``)
+    lists the COG. Keying by the shared acquisition — the first 8 underscore fields,
+    ``mission_mode_type_class_start_stop_orbit_datatake`` — lets a frame cached from the
+    classic id be found by the COG id. Idempotent: an id already trimmed to 8 fields
+    returns unchanged."""
     validate_prod_id(prod_id)
-    return f"{prefix.rstrip('/')}/{prod_id}.tar"
+    fields = prod_id.split("_")
+    if len(fields) < 8:
+        raise ValueError(f"S1 product id has too few fields for an acquisition key: {prod_id!r}")
+    return "_".join(fields[:8])
+
+
+def frame_key(prefix: str, prod_id: str) -> str:
+    """S3 key for a frame's cache tar, keyed by acquisition (classic/COG-agnostic)."""
+    return f"{prefix.rstrip('/')}/{acquisition_key(prod_id)}.tar"
 
 
 def _safe_dir(data_raw: str | Path, prod_id: str) -> Path:
-    return Path(data_raw) / prod_id / f"{prod_id}.SAFE"
+    """The extracted product dir: eodag-4 puts manifest.safe + measurement/ DIRECTLY
+    under data_raw/{prod_id}/ (no nested {prod_id}.SAFE/)."""
+    return Path(data_raw) / prod_id
 
 
-def _is_present(data_raw: str | Path, prod_id: str) -> bool:
-    """True if the extracted SAFE is already on disk (S1Tiling's skip condition:
-    a valid manifest.safe under {prod_id}.SAFE/)."""
-    return (_safe_dir(data_raw, prod_id) / "manifest.safe").is_file()
+def _has_manifest(safe_dir: str | Path) -> bool:
+    return (Path(safe_dir) / "manifest.safe").is_file()
+
+
+def _present_dir_for_key(data_raw: str | Path, acq_key: str) -> Path | None:
+    """An extracted product dir already in data_raw whose acquisition_key == acq_key,
+    or None. The on-disk dir is named with the classic product id (…_ABCD); a pull
+    keyed by the COG id must still recognise it as already present (idempotency)."""
+    root = Path(data_raw)
+    if not root.is_dir():
+        return None
+    for child in sorted(root.iterdir()):
+        if not (child.is_dir() and _has_manifest(child)):
+            continue
+        try:
+            if acquisition_key(child.name) == acq_key:
+                return child
+        except ValueError:
+            continue
+    return None
 
 
 def cache_has(s3: Any, bucket: str, key: str) -> bool:
@@ -136,34 +177,36 @@ def pull_frame(s3: Any, bucket: str, prefix: str, prod_id: str, data_raw: str | 
     on an invalid id or a tar that does not yield a valid SAFE (integrity failure).
     """
     validate_prod_id(prod_id)
-    if _is_present(data_raw, prod_id):
+    acq = acquisition_key(prod_id)
+    if _present_dir_for_key(data_raw, acq) is not None:
         return "present"
     key = frame_key(prefix, prod_id)
     if not cache_has(s3, bucket, key):
         return "miss"
-    target = Path(data_raw) / prod_id
-    target.mkdir(parents=True, exist_ok=True)
+    target_root = Path(data_raw)
+    target_root.mkdir(parents=True, exist_ok=True)
     # Stage into a temp dir on the SAME volume, verify the manifest, then swap the
-    # SAFE in atomically. A failed or truncated pull must NOT leave a partial SAFE in
-    # data_raw — s1processor would then see a manifest-less tree and mishandle it. The
-    # tar buffer and the staging tree both live under data_raw (sized for SAFEs), not
-    # /tmp (a small emptyDir/overlay that 8-way concurrency could exhaust).
-    staging = Path(tempfile.mkdtemp(dir=target, prefix=".cache-stage-"))
+    # product dir in atomically. A failed or truncated pull must NOT leave a partial
+    # tree in data_raw — s1processor would then see a manifest-less product and mishandle
+    # it. The tar buffer and the staging tree both live under data_raw (sized for SAFEs),
+    # not /tmp (a small emptyDir/overlay that 8-way concurrency could exhaust). The tar's
+    # top dir is the real (classic) product id, which we restore as-is so S1Tiling's disk
+    # scan recognises the frame even though we looked it up by the COG id.
+    staging = Path(tempfile.mkdtemp(dir=target_root, prefix=".cache-stage-"))
     try:
-        with tempfile.TemporaryFile(dir=target) as buf:
+        with tempfile.TemporaryFile(dir=target_root) as buf:
             s3.download_fileobj(bucket, key, buf)
             buf.seek(0)
             with tarfile.open(fileobj=buf, mode="r:*") as tar:
                 _safe_extract(tar, staging)
-        staged_safe = staging / f"{prod_id}.SAFE"
-        if not (staged_safe / "manifest.safe").is_file():
-            raise RuntimeError(
-                f"cache tar for {prod_id} did not yield {prod_id}.SAFE/manifest.safe"
-            )
-        final = target / f"{prod_id}.SAFE"
-        if final.exists():
-            shutil.rmtree(final)
-        os.replace(staged_safe, final)  # atomic on the same filesystem
+        safes = [p for p in sorted(staging.iterdir()) if p.is_dir() and _has_manifest(p)]
+        if not safes:
+            raise RuntimeError(f"cache tar for {acq} did not yield a product with manifest.safe")
+        for safe in safes:
+            final = target_root / safe.name
+            if final.exists():
+                shutil.rmtree(final)
+            os.replace(safe, final)  # atomic on the same filesystem
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     return "hit"
@@ -214,16 +257,18 @@ def populate_frame(
     csi-rclone writeback this design replaces)."""
     validate_prod_id(prod_id)
     safe_dir = _safe_dir(data_raw, prod_id)
-    if not (safe_dir / "manifest.safe").is_file():
+    if not _has_manifest(safe_dir):
         return "absent"
     key = frame_key(prefix, prod_id)
     if not overwrite and cache_has(s3, bucket, key):
         return "cached"
     with tempfile.TemporaryFile() as buf:
         with tarfile.open(fileobj=buf, mode="w") as tar:
-            # arcname starts at {prod_id}.SAFE so a pull extracts into
-            # data_raw/{prod_id}/{prod_id}.SAFE/ — symmetric with pull_frame.
-            tar.add(safe_dir, arcname=f"{prod_id}.SAFE")
+            # arcname = the real product dir so a pull restores data_raw/{prod_id}/
+            # (manifest.safe + measurement/ directly inside — the eodag-4 layout that
+            # S1Tiling's disk scan skips). Keyed by acquisition (frame_key) so a sibling
+            # tile that lists this frame as a COG id still finds this classic-SAFE tar.
+            tar.add(safe_dir, arcname=prod_id)
         size = buf.tell()
         buf.seek(0)
         s3.upload_fileobj(buf, bucket, key)
@@ -277,7 +322,7 @@ def discover_downloaded_frames(data_raw: str | Path) -> list[str]:
     if not root.is_dir():
         return out
     for child in sorted(root.iterdir()):
-        if child.is_dir() and (child / f"{child.name}.SAFE" / "manifest.safe").is_file():
+        if child.is_dir() and (child / "manifest.safe").is_file():
             try:
                 out.append(validate_prod_id(child.name))
             except ValueError:
