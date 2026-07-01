@@ -120,6 +120,12 @@ class TestAcquisitionKey:
         with pytest.raises(ValueError):
             cf.acquisition_key("../evil")
 
+    def test_rejects_too_few_fields(self):
+        # valid id grammar (passes validate_prod_id) but not enough fields to name an
+        # acquisition — must fail loud rather than silently key on a truncated prefix.
+        with pytest.raises(ValueError, match="too few fields"):
+            cf.acquisition_key("S1A_IW_GRDH_TOOSHORT")
+
 
 # --------------------------------------------------------------------------- #
 # Pull
@@ -172,6 +178,26 @@ class TestPull:
         _make_safe(tmp_path, CLASSIC_ID)
         s3 = FakeS3()
         assert cf.pull_frame(s3, "b", "fc", COG_ID, tmp_path) == "present"
+
+    def test_pull_moves_only_matching_acquisition_dir(self, tmp_path):
+        # Defence: a (malformed) cache tar carrying an extra unrelated SAFE must restore
+        # ONLY the frame we asked for, never splatter the extra into data_raw.
+        other_id = "S1A_IW_GRDH_1SDV_20260618T052000_20260618T052025_065019_0831D4_9999"
+        src, dst = tmp_path / "src", tmp_path / "dst"
+        src.mkdir()
+        dst.mkdir()
+        _make_safe(src, CLASSIC_ID, tiff=b"want")
+        _make_safe(src, other_id, tiff=b"unwanted")
+        s3 = FakeS3()
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tar:
+            tar.add(src / CLASSIC_ID, arcname=CLASSIC_ID)
+            tar.add(src / other_id, arcname=other_id)  # extra, different acquisition
+        s3.store[cf.frame_key("fc", CLASSIC_ID)] = buf.getvalue()
+
+        assert cf.pull_frame(s3, "b", "fc", COG_ID, dst) == "hit"
+        assert (dst / CLASSIC_ID / "manifest.safe").is_file()
+        assert not (dst / other_id).exists()  # unrelated SAFE ignored
 
     def test_pull_rejects_invalid_id_before_io(self, tmp_path):
         s3 = FakeS3()

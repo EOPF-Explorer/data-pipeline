@@ -199,10 +199,23 @@ def pull_frame(s3: Any, bucket: str, prefix: str, prod_id: str, data_raw: str | 
             buf.seek(0)
             with tarfile.open(fileobj=buf, mode="r:*") as tar:
                 _safe_extract(tar, staging)
-        safes = [p for p in sorted(staging.iterdir()) if p.is_dir() and _has_manifest(p)]
-        if not safes:
-            raise RuntimeError(f"cache tar for {acq} did not yield a product with manifest.safe")
-        for safe in safes:
+        # Restore ONLY the product dir whose acquisition matches the key we pulled — a
+        # well-formed cache tar holds exactly that one; refusing to move any other dir
+        # keeps a malformed/multi-dir object from splattering unrelated SAFEs into data_raw.
+        matching, extras = [], []
+        for p in sorted(staging.iterdir()):
+            if not (p.is_dir() and _has_manifest(p)):
+                continue
+            try:
+                is_match = acquisition_key(p.name) == acq
+            except ValueError:
+                is_match = False
+            (matching if is_match else extras).append(p)
+        if not matching:
+            raise RuntimeError(f"cache tar for {acq} did not yield a matching product with manifest.safe")
+        for extra in extras:
+            log.warning("cache tar for %s carried an unexpected product %s; ignoring it", acq, extra.name)
+        for safe in matching:
             final = target_root / safe.name
             if final.exists():
                 shutil.rmtree(final)
