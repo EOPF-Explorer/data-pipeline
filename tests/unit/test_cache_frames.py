@@ -41,6 +41,13 @@ class FakeS3:
             raise ClientError({"Error": {"Code": "404", "Message": "Not Found"}}, "GetObject")
         Fileobj.write(self.store[Key])
 
+    def list_objects_v2(self, Bucket, Prefix="", ContinuationToken=None):
+        keys = sorted(k for k in self.store if k.startswith(Prefix))
+        return {"Contents": [{"Key": k} for k in keys], "IsTruncated": False}
+
+    def delete_object(self, Bucket, Key):
+        self.store.pop(Key, None)
+
 
 VALID_ID = "S1A_IW_GRDH_1SDV_20240101T060000_20240101T060025_052000_064700_ABCD"
 VALID_ID_2 = "S1A_IW_GRDH_1SDV_20240113T060000_20240113T060025_052100_064800_EF01"
@@ -351,3 +358,111 @@ class TestSafeExtract:
         with tarfile.open(fileobj=buf, mode="r") as tar:
             cf._safe_extract(tar, dest)
         assert (dest / f"{VALID_ID}.SAFE" / "manifest.safe").is_file()
+
+
+# --------------------------------------------------------------------------- #
+# Eviction / retention (T9)
+# --------------------------------------------------------------------------- #
+from datetime import date  # noqa: E402
+
+
+def _seed_cache(s3, prefix, *prod_ids):
+    for pid in prod_ids:
+        s3.store[cf.frame_key(prefix, pid)] = b"tarbytes"
+
+
+class TestAcqDate:
+    def test_parses_start_date(self):
+        # VALID_ID acquisition start = 2024-01-01
+        assert cf._acq_date(VALID_ID) == date(2024, 1, 1)
+        assert cf._acq_date(VALID_ID_2) == date(2024, 1, 13)
+
+    def test_raises_on_no_timestamp(self):
+        with pytest.raises(ValueError):
+            cf._acq_date("S1A_IW_GRDH_no_timestamp_here_xxxxxxxxxx")
+
+
+class TestListCachedFrames:
+    def test_lists_tar_keys_only(self, tmp_path):
+        s3 = FakeS3()
+        _seed_cache(s3, "fc", VALID_ID, VALID_ID_2)
+        s3.store["fc/not-a-tar.txt"] = b"x"          # ignored (not .tar)
+        s3.store["fc/garbage.tar"] = b"x"            # ignored (invalid id)
+        assert sorted(cf.list_cached_frames(s3, "b", "fc")) == sorted([VALID_ID, VALID_ID_2])
+
+    def test_paginates(self):
+        class PagedS3(FakeS3):
+            def list_objects_v2(self, Bucket, Prefix="", ContinuationToken=None):
+                keys = sorted(k for k in self.store if k.startswith(Prefix))
+                start = int(ContinuationToken or 0)
+                page = keys[start:start + 1]
+                more = start + 1 < len(keys)
+                return {"Contents": [{"Key": k} for k in page],
+                        "IsTruncated": more, "NextContinuationToken": str(start + 1)}
+        s3 = PagedS3()
+        _seed_cache(s3, "fc", VALID_ID, VALID_ID_2, S1D_ID)
+        assert sorted(cf.list_cached_frames(s3, "b", "fc")) == sorted([VALID_ID, VALID_ID_2, S1D_ID])
+
+
+class TestEvictStale:
+    # cache holds frames acquired 2024-01-01, 2024-01-02, 2024-01-13
+    def _seeded(self):
+        s3 = FakeS3()
+        _seed_cache(s3, "fc", VALID_ID, S1D_ID, VALID_ID_2)
+        return s3
+
+    def test_removes_only_stale(self):
+        s3 = self._seeded()
+        # today=2024-01-20, keep 10 days -> cutoff 2024-01-10: 01-01 & 01-02 stale, 01-13 kept
+        res = cf.evict_stale(s3, "b", "fc", keep_days=10, today=date(2024, 1, 20))
+        assert res["stale"] == sorted([VALID_ID, S1D_ID])
+        assert res["removed"] == sorted([VALID_ID, S1D_ID])
+        assert res["kept"] == 1
+        assert cf.frame_key("fc", VALID_ID) not in s3.store      # actually deleted
+        assert cf.frame_key("fc", VALID_ID_2) in s3.store        # in-window retained
+
+    def test_dry_run_deletes_nothing(self):
+        s3 = self._seeded()
+        before = dict(s3.store)
+        res = cf.evict_stale(s3, "b", "fc", keep_days=10, today=date(2024, 1, 20), dry_run=True)
+        assert res["stale"] == sorted([VALID_ID, S1D_ID])   # reports what WOULD go
+        assert res["removed"] == []
+        assert s3.store == before                            # nothing deleted
+
+    def test_keeps_everything_within_window(self):
+        s3 = self._seeded()
+        res = cf.evict_stale(s3, "b", "fc", keep_days=3650, today=date(2024, 1, 20))
+        assert res["stale"] == []
+        assert res["kept"] == 3
+
+    def test_unparseable_acq_date_is_kept(self):
+        # An on-disk key that passes id validation but whose date can't be parsed must
+        # never be deleted (conservative — same principle as pull/T1).
+        s3 = FakeS3()
+        weird = "S1A_NO_TIMESTAMP_AT_ALL_PADDING_XXXXXXXX"
+        assert cf.validate_prod_id(weird) == weird  # passes the id grammar
+        s3.store[cf.frame_key("fc", weird)] = b"x"
+        res = cf.evict_stale(s3, "b", "fc", keep_days=1, today=date(2024, 1, 20))
+        assert res["stale"] == []
+        assert res["kept"] == 1
+        assert cf.frame_key("fc", weird) in s3.store
+
+
+class TestEvictCLI:
+    def test_evict_does_not_require_data_raw(self, capsys):
+        s3 = FakeS3()
+        _seed_cache(s3, "fc", VALID_ID, VALID_ID_2)
+        import unittest.mock as mock
+        with mock.patch.object(cf, "make_s3_client", return_value=s3):
+            rc = cf.main(["evict", "--bucket", "b", "--prefix", "fc",
+                          "--keep-days", "10", "--today", "2024-01-20", "--dry-run"])
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert VALID_ID in out          # stale (2024-01-01) printed
+        assert VALID_ID_2 not in out    # in-window not printed
+
+    def test_pull_still_requires_data_raw(self):
+        s3 = FakeS3()
+        import unittest.mock as mock
+        with mock.patch.object(cf, "make_s3_client", return_value=s3), pytest.raises(SystemExit):
+            cf.main(["pull", "--bucket", "b", "--frames", VALID_ID])
