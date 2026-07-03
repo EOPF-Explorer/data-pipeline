@@ -14,6 +14,7 @@ import argparse
 import datetime as dt
 import json
 import logging
+import math
 import os
 import subprocess
 from pathlib import Path
@@ -42,11 +43,27 @@ STATE_FILE = Path("data/.processed_products.json")
 State = dict[str, dict[str, list[dict[str, str]]]]
 
 
-def tile_bbox(tile_id: str) -> list[float]:
-    """Return the WGS84 bbox [lon_min, lat_min, lon_max, lat_max] of an MGRS 100 km square.
+# An S2 tile is a 109.8 km square anchored at the NW corner of its MGRS 100 km square, so it
+# extends 9.8 km beyond the square's east and south edges. `mgrs` only knows the 100 km square;
+# the un-padded bbox starved AgglomerateDEM of the easternmost DEM cell on 32TMT (exit 66,
+# 2026-07-02 — see claude-docs/plans/s1_ensure_dem_true_tile_bbox.md).
+S2_TILE_OVERHANG_M = 109_800.0 - 100_000.0
+# The true tile also pokes past the square-corner bbox on the west/north sides: grid convergence
+# tilts the edges (~9800·tan γ, ≤ ~0.7 km at the 84° MGRS limit) and parallel curvature bows the
+# N/S edges between the sampled corners (sagitta ≈ 236·tan(lat) m, ≤ ~2.3 km at 84°). A flat 3 km
+# tolerance bounds both anywhere the grid exists; measured worst case in the AOI+33H sweep test is
+# ~0.42 km. Cost: the DEM window gains a 1° cell only within 3 km of a degree boundary.
+BBOX_TOLERANCE_M = 3_000.0
+METERS_PER_DEG_LAT = 111_320.0
 
-    The square's corners are not axis-aligned in lat/lon, so the bbox is the min/max over all four
-    corners. Raises ``ValueError`` for a malformed/unknown tile id.
+
+def tile_bbox(tile_id: str) -> list[float]:
+    """Return the WGS84 bbox [lon_min, lat_min, lon_max, lat_max] of the true S2 tile extent.
+
+    The MGRS square's corners are not axis-aligned in lat/lon, so start from the min/max over
+    all four corners, then pad east and south to the 109.8 km S2 extent plus the projection
+    tolerance on every side (the pole-most latitude gives the widest east pad, keeping the bbox
+    conservative). Raises ``ValueError`` for a malformed/unknown tile id.
     """
     m = mgrs.MGRS()
     corners = ["0000000000", "9999900000", "0000099999", "9999999999"]  # SW, SE, NW, NE
@@ -56,7 +73,14 @@ def tile_bbox(tile_id: str) -> list[float]:
         raise ValueError(f"invalid MGRS tile id: {tile_id!r}") from exc
     lats = [lat for lat, _ in latlon]
     lons = [lon for _, lon in latlon]
-    return [min(lons), min(lats), max(lons), max(lats)]
+    meters_per_deg_lon = METERS_PER_DEG_LAT * math.cos(
+        math.radians(max(abs(lat) for lat in lats))  # pole-most latitude ⇒ widest, conservative
+    )
+    dlat = (S2_TILE_OVERHANG_M + BBOX_TOLERANCE_M) / METERS_PER_DEG_LAT
+    dlon = (S2_TILE_OVERHANG_M + BBOX_TOLERANCE_M) / meters_per_deg_lon
+    tol_lat = BBOX_TOLERANCE_M / METERS_PER_DEG_LAT
+    tol_lon = BBOX_TOLERANCE_M / meters_per_deg_lon
+    return [min(lons) - tol_lon, min(lats) - dlat, max(lons) + dlon, max(lats) + tol_lat]
 
 
 def _item_date(item: object) -> str | None:

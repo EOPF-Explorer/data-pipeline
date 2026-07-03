@@ -27,17 +27,90 @@ from watch_cdse_and_process import (  # noqa: E402
 _MOD = "watch_cdse_and_process"
 
 
-def test_tile_bbox_31tch_matches_mgrs_square() -> None:
-    """31TCH bbox is the MGRS 100 km square corners (min/max), not the spec's rounded AOI.
+def test_tile_bbox_31tch_pads_mgrs_square_east_and_south() -> None:
+    """31TCH bbox = the MGRS 100 km square padded east+south to the true 109.8 km S2 extent.
 
-    Validated against mgrs 1.5.4 on 2026-06-05: the four corners of 31TCH yield
-    [0.533, 42.427, 1.784, 43.346] — intentionally tighter/offset vs the spec's [0,42,2,43].
+    S2 tiles are anchored at the NW corner of their MGRS square, so only the east and south
+    edges move. MGRS square corners (mgrs 1.5.4, 2026-06-05): [0.533, 42.427, 1.784, 43.346].
     """
-    bbox = tile_bbox("31TCH")
-    expected = [0.533, 42.427, 1.784, 43.346]
-    assert len(bbox) == 4
-    for got, want in zip(bbox, expected, strict=True):
-        assert got == pytest.approx(want, abs=0.05)
+    square = [0.533, 42.427, 1.784, 43.346]
+    lon_min, lat_min, lon_max, lat_max = tile_bbox("31TCH")
+    assert 0.0 < square[0] - lon_min < 0.06  # west: tolerance only (~3 km)
+    assert 0.0 < lat_max - square[3] < 0.05  # north: tolerance only (~3 km)
+    assert 0.09 < square[1] - lat_min < 0.16  # south: overhang + tolerance ≈ 12.8 km ≈ 0.115°
+    assert 0.12 < lon_max - square[2] < 0.22  # east: (overhang + tolerance) / cos(lat)
+
+
+def test_tile_bbox_32tmt_covers_true_s2_extent() -> None:
+    """Regression (prod exit-66, 2026-07-02): bbox must cover the tile's TRUE corners.
+
+    32TMT truly spans lon 7.6629..9.1305, lat 46.8582..47.8536 (s1tiling `tile_origin` from the
+    failed run, cross-checked against eotile `s2_with_overlap.gpkg`). The MGRS 100 km square
+    stops at 8.99999°E — 9.8 km short — which starved AgglomerateDEM of N48/E013.
+    """
+    lon_min, lat_min, lon_max, lat_max = tile_bbox("32TMT")
+    assert lon_min <= 7.6629
+    assert lat_min <= 46.8582
+    assert lon_max >= 9.1305
+    assert lat_max >= 47.8536
+
+
+def test_dem_window_32tmt_includes_e013() -> None:
+    """Regression: the exact production failure — the DEM window must reach the N48/E013 cell.
+
+    The S1C desc-168 frame over 32TMT extends to 13.016°E; s1tiling needs
+    Copernicus_DSM_10_N48_00_E013_00 and aborts (exit 66) without it.
+    """
+    from ensure_dem import tiles_for_bbox
+
+    assert (48, 13) in tiles_for_bbox(tile_bbox("32TMT"))
+
+
+def test_dem_window_32upb_includes_n51_n52_e016() -> None:
+    """Regression: second production victim (2026-06-23 run) — 32UPB's window must reach E016.
+
+    The S1A desc frame over 32UPB needs Copernicus_DSM_10_N51_00_E016_00 and
+    N52_00_E016_00; the un-padded MGRS-square bbox stopped the window at E015.
+    """
+    from ensure_dem import tiles_for_bbox
+
+    cells = tiles_for_bbox(tile_bbox("32UPB"))
+    assert (51, 16) in cells
+    assert (52, 16) in cells
+
+
+def test_tile_bbox_covers_eotile_truth_across_aoi_and_south() -> None:
+    """Ground truth sweep: padded bbox ⊇ the real S2 footprint for every western-europe AOI tile.
+
+    Uses eotile's bundled ``s2_with_overlap.gpkg`` (the true 109.8 km footprints) via its sqlite
+    rtree (mins rounded down / maxs rounded up ⇒ conservative). Also sweeps the 33H** tiles as a
+    southern-hemisphere sign check on the east/south pad. Skips when eotile isn't installed
+    (data-only helper, not a project dep): run locally with `uv pip install eotile --no-deps`.
+    """
+    import sqlite3
+    import warnings
+
+    eotile = pytest.importorskip("eotile")
+    gpkg = next(Path(eotile.__file__).parent.rglob("s2_with_overlap.gpkg"))
+    con = sqlite3.connect(str(gpkg))
+    aoi = (-5.2, 42.0, 13.5, 51.2)  # western-europe AOI bbox (platform-deploy ConfigMap)
+    rows = con.execute(
+        "SELECT t.id, r.minx, r.miny, r.maxx, r.maxy FROM s2_with_overlap t "
+        "JOIN rtree_s2_with_overlap_geom r ON t.fid = r.id "
+        "WHERE (r.maxx >= ? AND r.minx <= ? AND r.maxy >= ? AND r.miny <= ?) "
+        "OR t.id LIKE '33H%' ORDER BY t.id",
+        (aoi[0], aoi[2], aoi[1], aoi[3]),
+    ).fetchall()
+    assert len(rows) > 150  # the AOI alone holds 163 tiles
+    for tile_id, minx, miny, maxx, maxy in rows:
+        with warnings.catch_warnings():
+            # mgrs warns when a corner of the 100 km square hangs outside its lat band — benign
+            warnings.simplefilter("ignore", RuntimeWarning)
+            lon_min, lat_min, lon_max, lat_max = tile_bbox(tile_id)
+        assert lon_min <= minx and lat_min <= miny, f"{tile_id}: bbox misses SW of truth"
+        assert lon_max >= maxx and lat_max >= maxy, f"{tile_id}: bbox misses NE of truth"
+        for over in (minx - lon_min, miny - lat_min, lon_max - maxx, lat_max - maxy):
+            assert over < 0.1, f"{tile_id}: over-pad {over:.4f}° — pad model drifted"
 
 
 def test_tile_bbox_order_is_lonmin_latmin_lonmax_latmax() -> None:

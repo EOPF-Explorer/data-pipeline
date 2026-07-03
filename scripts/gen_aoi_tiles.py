@@ -68,6 +68,10 @@ EXCLUDE: dict[str, set[str]] = {
         "30TUT",  # 0.1%  offshore SW Brittany
         "31TFH",  # 1.1%  Gulf of Lion
         "32TLN",  # 1.7%  Ligurian Sea
+        # Surfaced when tile_bbox gained the true 109.8 km S2 extent (their bbox now touches the
+        # part-land N46/W003 cell); the tiles themselves end at −2.87°E, all open sea.
+        "30TVR",  # 0.0%  Bay of Biscay
+        "30TVS",  # 0.0%  Bay of Biscay
     },
 }
 
