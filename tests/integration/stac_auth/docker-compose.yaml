@@ -1,0 +1,85 @@
+# Local integration harness for the STAC Transactions auth chain (plan Task INT).
+# client (stac_auth) -> proxy (JWKS validation + method/path/scope gating) -> stac -> pgstac,
+# with a real Keycloak minting client-credentials tokens. See README.md.
+#
+# Issuer/JWKS trick: Keycloak's frontend (issuer) is pinned to http://localhost:8066/auth
+# (reachable from the host-run pytest), while KC_HOSTNAME_BACKCHANNEL_DYNAMIC makes the
+# JWKS/token backchannel follow the request host — so the proxy fetches JWKS at
+# http://keycloak:8080/auth (in-network container port) yet the token `iss` still matches.
+# Keycloak listens on 8080 inside the container; the host reaches it on 8066.
+name: stac-auth-int
+
+services:
+  database-pg:
+    image: ghcr.io/stac-utils/pgstac:v0.9.5
+    environment:
+      POSTGRES_USER: username
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: postgis
+      PGUSER: username
+      PGPASSWORD: password
+      PGDATABASE: postgis
+    command: postgres -N 500
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U username -d postgis"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  stac:
+    image: ghcr.io/stac-utils/stac-fastapi-pgstac:6.1.1
+    environment:
+      APP_HOST: 0.0.0.0
+      APP_PORT: "8080"
+      POSTGRES_USER: username
+      POSTGRES_PASS: password
+      POSTGRES_DBNAME: postgis
+      POSTGRES_HOST_READER: database-pg
+      POSTGRES_HOST_WRITER: database-pg
+      POSTGRES_PORT: "5432"
+      ENABLE_TRANSACTIONS_EXTENSIONS: "TRUE"
+    # depends_on waits only for container start, not DB readiness; gate on the
+    # healthcheck and self-heal the startup race with a restart policy.
+    restart: on-failure
+    depends_on:
+      database-pg:
+        condition: service_healthy
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HTTP_RELATIVE_PATH: /auth
+      KC_HOSTNAME: http://localhost:8066/auth
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_HOSTNAME_STRICT: "false"
+      KC_HEALTH_ENABLED: "true"
+    volumes:
+      - ./realm-eoxhub.json:/opt/keycloak/data/import/realm-eoxhub.json:ro
+    ports:
+      - "8066:8080"
+
+  proxy:
+    image: ghcr.io/developmentseed/stac-auth-proxy:latest
+    environment:
+      UPSTREAM_URL: http://stac:8080
+      OIDC_DISCOVERY_URL: http://localhost:8066/auth/realms/eoxhub/.well-known/openid-configuration
+      OIDC_DISCOVERY_INTERNAL_URL: http://keycloak:8080/auth/realms/eoxhub/.well-known/openid-configuration
+      ALLOWED_JWT_AUDIENCES: stac-api
+      DEFAULT_PUBLIC: "true"
+      # Restated write surface, each entry requiring the stac:write scope (mirrors prod T6).
+      PRIVATE_ENDPOINTS: >-
+        {"^/collections$": [["POST", "stac:write"]],
+         "^/collections/([^/]+)$": [["PUT", "stac:write"], ["PATCH", "stac:write"], ["DELETE", "stac:write"]],
+         "^/collections/([^/]+)/items$": [["POST", "stac:write"]],
+         "^/collections/([^/]+)/items/([^/]+)$": [["PUT", "stac:write"], ["DELETE", "stac:write"]],
+         "^/collections/([^/]+)/bulk_items$": [["POST", "stac:write"]]}
+    ports:
+      - "8067:8000"
+    # Proxy fetches Keycloak discovery on startup; restart until it is reachable.
+    restart: on-failure
+    depends_on:
+      - stac
+      - keycloak

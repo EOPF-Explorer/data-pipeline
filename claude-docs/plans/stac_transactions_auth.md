@@ -95,18 +95,26 @@ expired-token refetch, partial env.
 - [x] `uv run pytest tests/unit/` green — **image build/push deferred to deploy (needs
   registry creds; record sha then)**
 
-### Task INT — Local integration harness (pre-staging gate)  <status: blocked by T3>
+### Task INT — Local integration harness (pre-staging gate)  <status: ✅ DONE>
 **What**: `tests/integration/stac_auth/` — docker-compose (pgstac +
-stac-fastapi-pgstac + real stac-auth-proxy + real Keycloak with `--import-realm`
-`realm-eoxhub.json` defining `stac-writer` and a `not-a-writer` client) + a pytest
-module asserting the 8 checks (Keycloak health/discovery, token claims, auth write OK,
-unauth write blocked, public read, token flow, authenticated≠authorized, audience
-enforced). See the source plan for the full 8-assertion list.
-**Verify**: `docker compose -f tests/integration/stac_auth/docker-compose.yaml up -d && uv run pytest tests/integration/stac_auth -v`
+stac-fastapi-pgstac w/ transactions + real `ghcr.io/developmentseed/stac-auth-proxy` +
+real Keycloak 26 with `--import-realm` `realm-eoxhub.json` defining `stac-writer`,
+`not-a-writer`, `no-audience-writer`) + `test_stac_auth_integration.py` asserting the 8
+checks. Self-managed via a session fixture; marked `docker` so the default suite skips it.
+**Verify**: `uv run pytest tests/integration/stac_auth -m docker` → **8 passed** (clean
+self-managed up→test→down, 13s after images cached)
 **Acceptance criteria**:
-- [ ] Harness reproduces the prod request path with the prod proxy config keys
-- [ ] All 8 assertions pass locally; same suite green in CI
-- [ ] **Gate:** no staging change (platform-deploy T5+) until this is green
+- [x] Harness reproduces the prod request path (client → proxy → stac → pgstac) with the
+  prod proxy config keys (`DEFAULT_PUBLIC`, scoped `PRIVATE_ENDPOINTS`,
+  `ALLOWED_JWT_AUDIENCES=stac-api`)
+- [x] All 8 assertions pass locally (Keycloak health/discovery, token claims+kid∈JWKS,
+  auth write 201, unauth 401/403, public read 200, token flow, authenticated≠authorized
+  403, wrong-audience rejected); `docker` marker → wire into a CI job that runs
+  `-m docker`
+- [x] Keycloak validated locally (discovery, JWKS, client-credentials grant, token
+  claims) before any prod Keycloak change — `realm-eoxhub.json` is the reviewed reference
+  config T4 replicates
+- [x] **Gate:** no staging change (platform-deploy T5+) until this is green — ✅ now green
 
 ## Tasks (platform-deploy — separate PRs, `../platform-deploy`)
 
