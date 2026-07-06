@@ -60,22 +60,28 @@ Rollout invariant: **token-first, enforce-second.**
   `OIDC_CLIENT_ID`/`OIDC_CLIENT_SECRET` (env); cache until ~expiry. Returns `None` if env
   unset (no-op for local/dev).
 - `auth_headers() -> dict`: `{"Authorization": f"Bearer {token}"}` or `{}`.
-- `open_client(url) -> Client`: `Client.open(url, headers=auth_headers() or None)`.
-  Verified (pystac-client 0.9.0): headers passed to `Client.open` land on
-  `_stac_io.session.headers`, so raw `session.post/delete` inherit `Authorization`.
-**Verify**: `uv run pytest tests/unit/test_stac_auth.py` → 11 passed (100% cov)
+- `bearer_auth(request)`: a `requests` auth hook that attaches a **fresh** Bearer to
+  every request (re-reads the cached token per call) — so a batch that outlives the token
+  can't send a stale one.
+- `open_client(url) -> Client`: `Client.open(url)` then `session.auth = bearer_auth` on
+  the pystac `StacApiIO` session, so the raw `session.post/delete` used by `upsert_item`
+  carry a per-request-fresh token. **One freshness mechanism** shared with the operator
+  sessions (simplify-pass altitude fix); the httpx PUT site merges `auth_headers()`.
+**Verify**: `uv run pytest tests/unit/test_stac_auth.py` → all pass; shared fixtures in
+`tests/unit/conftest.py`
 **Acceptance criteria**:
-- [x] No env set → `get_token()` returns `None`, `auth_headers()` is `{}`,
-  `open_client` opens unauthenticated (`headers=None`) — back-compat
-- [x] Env set → token fetched once, cached; header injected; a real
-  `StacApiIO(headers=...)` carries `Authorization` on its session
+- [x] No env set → `get_token()` returns `None`, `auth_headers()` is `{}`, `bearer_auth`
+  adds no header, `open_client` opens unauthenticated — back-compat
+- [x] Env set → token fetched once, cached; `bearer_auth` attaches it per request
+  (validated end-to-end through the real proxy in Task INT)
 - [x] Token endpoint failure surfaces a clear error (no silent unauthenticated write)
 
 ### Task 2 — Inject the helper at all 7 write sites  <status: ✅ DONE (8 sites — see †)>
 **What**: Replace `Client.open(...)` with `stac_auth.open_client(...)` at the 5 pystac
-sites; attach `auth_headers()` to the httpx PUT (`aggregate_items.py` L190) and the
-`requests` sessions (`manage_collections.py` L56, `manage_item.py` L112 †). Surgical —
-only client/session construction lines change; read-only `Client.open` calls stay as-is.
+sites; merge `auth_headers()` into the httpx PUT (`aggregate_items.py` L190); set
+`session.auth = stac_auth.bearer_auth` on the operator `requests` sessions
+(`manage_collections.py` L56, `manage_item.py` L112 †). Surgical — only client/session
+construction lines change; read-only `Client.open` calls stay as-is.
 **Verify**: `uv run pytest tests/unit/ -k "register or storage_tier or aggregate or manage"` → 204 passed
 **Acceptance criteria**:
 - [x] Each write site attaches the Bearer header when OIDC env is set (mock-asserted in T3)

@@ -12,39 +12,10 @@ import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
+import requests
 
 scripts_dir = Path(__file__).parent.parent.parent / "scripts"
 sys.path.insert(0, str(scripts_dir))
-
-import stac_auth  # noqa: E402
-
-OIDC_ENV = {
-    "OIDC_TOKEN_URL": "https://kc.example.com/realms/eoxhub/protocol/openid-connect/token",
-    "OIDC_CLIENT_ID": "stac-writer",
-    "OIDC_CLIENT_SECRET": "s3cr3t",  # noqa: S105
-}
-
-
-@pytest.fixture(autouse=True)
-def _reset_and_env(monkeypatch):
-    for key in OIDC_ENV:
-        monkeypatch.delenv(key, raising=False)
-    stac_auth._cached_token = None
-    stac_auth._cached_expiry = 0.0
-    yield
-
-
-def _set_oidc_env(monkeypatch):
-    for key, value in OIDC_ENV.items():
-        monkeypatch.setenv(key, value)
-
-
-def _token_response():
-    resp = MagicMock()
-    resp.raise_for_status.return_value = None
-    resp.json.return_value = {"access_token": "test-token", "expires_in": 300}
-    return resp
 
 
 def _httpx_cm(get_json):
@@ -81,10 +52,9 @@ def _source_item_dict():
 # --- Behavioral: session-based write sites -----------------------------------
 
 
-def test_aggregate_items_put_authenticated(monkeypatch):
+def test_aggregate_items_put_authenticated(oidc_env, token_response):
     import aggregate_items
 
-    _set_oidc_env(monkeypatch)
     captured = {}
 
     def mock_put(url, json=None, headers=None):  # noqa: ARG001
@@ -96,7 +66,7 @@ def test_aggregate_items_put_authenticated(monkeypatch):
     http = _httpx_cm({"id": "c", "links": []})
     http.put = mock_put
     with (
-        patch("stac_auth.httpx.post", return_value=_token_response()),
+        patch("stac_auth.httpx.post", return_value=token_response()),
         patch("aggregate_items.httpx.Client", return_value=http),
     ):
         aggregate_items.update_collection_links(
@@ -125,36 +95,40 @@ def test_aggregate_items_put_unauthenticated_without_env():
     assert "Authorization" not in captured["headers"]
 
 
-def test_manage_collections_session_authenticated(monkeypatch):
+def _auth_header_on_write(session) -> str | None:
+    """Send a request through the session's per-request auth hook, return its header."""
+    prepared = session.auth(requests.Request("POST", "https://api.test/stac/collections").prepare())
+    return prepared.headers.get("Authorization")
+
+
+def test_manage_collections_session_authenticated(oidc_env, token_response):
     import manage_collections
 
-    _set_oidc_env(monkeypatch)
-    with patch("stac_auth.httpx.post", return_value=_token_response()):
-        mgr = manage_collections.STACCollectionManager("https://api.test/stac")
-    assert mgr.session.headers["Authorization"] == "Bearer test-token"
+    mgr = manage_collections.STACCollectionManager("https://api.test/stac")
+    with patch("stac_auth.httpx.post", return_value=token_response()):
+        assert _auth_header_on_write(mgr.session) == "Bearer test-token"
 
 
 def test_manage_collections_session_unauthenticated_without_env():
     import manage_collections
 
     mgr = manage_collections.STACCollectionManager("https://api.test/stac")
-    assert "Authorization" not in mgr.session.headers
+    assert _auth_header_on_write(mgr.session) is None
 
 
-def test_manage_item_session_authenticated(monkeypatch):
+def test_manage_item_session_authenticated(oidc_env, token_response):
     import manage_item
 
-    _set_oidc_env(monkeypatch)
-    with patch("stac_auth.httpx.post", return_value=_token_response()):
-        mgr = manage_item.STACItemManager("https://api.test/stac")
-    assert mgr.session.headers["Authorization"] == "Bearer test-token"
+    mgr = manage_item.STACItemManager("https://api.test/stac")
+    with patch("stac_auth.httpx.post", return_value=token_response()):
+        assert _auth_header_on_write(mgr.session) == "Bearer test-token"
 
 
 def test_manage_item_session_unauthenticated_without_env():
     import manage_item
 
     mgr = manage_item.STACItemManager("https://api.test/stac")
-    assert "Authorization" not in mgr.session.headers
+    assert _auth_header_on_write(mgr.session) is None
 
 
 # --- Delegation: pystac write sites open via the helper ----------------------

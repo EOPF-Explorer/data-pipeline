@@ -22,6 +22,7 @@ import threading
 import time
 
 import httpx
+import requests
 from pystac_client import Client
 
 logger = logging.getLogger(__name__)
@@ -94,11 +95,27 @@ def auth_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"} if token else {}
 
 
-def open_client(url: str) -> Client:
-    """Open a pystac Client with the Bearer header applied to its session.
+def bearer_auth(request: requests.PreparedRequest) -> requests.PreparedRequest:
+    """`requests` auth hook — attach a fresh Bearer header to every request.
 
-    Headers passed to ``Client.open`` land on ``_stac_io.session.headers``, so the raw
-    ``session.post/delete`` calls used by ``upsert_item`` inherit ``Authorization``.
-    Passes ``headers=None`` when unauthenticated (identical to a bare ``Client.open``).
+    Wired onto every requests-backed write session (``open_client`` for pystac, and the
+    operator tools' sessions) via ``session.auth = stac_auth.bearer_auth``. Each request
+    re-reads the cached token — which ``get_token`` refreshes near expiry — so a batch
+    that outlives the token can't send a stale one. A no-op when OIDC env is unset.
     """
-    return Client.open(url, headers=auth_headers() or None)
+    request.headers.update(auth_headers())
+    return request
+
+
+def open_client(url: str) -> Client:
+    """Open a pystac Client whose session attaches a fresh Bearer per request.
+
+    pystac-client's ``StacApiIO`` wraps a ``requests.Session``; wiring ``bearer_auth`` onto
+    it means the raw ``session.post/delete`` calls used by ``upsert_item`` carry a token
+    that stays fresh even across a batch that outlives it. A no-op when OIDC env is unset;
+    the landing-page fetch during ``Client.open`` is an unauthenticated public GET.
+    """
+    client = Client.open(url)
+    if client._stac_io is not None:
+        client._stac_io.session.auth = bearer_auth
+    return client

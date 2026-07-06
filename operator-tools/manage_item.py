@@ -112,7 +112,7 @@ class STACItemManager:
         self.api_url = api_url.rstrip("/")
         self.session = requests.Session()
         self.session.headers.update({"Content-Type": "application/json"})
-        self.session.headers.update(stac_auth.auth_headers())
+        self.session.auth = stac_auth.bearer_auth
 
     def get_item(self, collection_id: str, item_id: str) -> dict[str, Any] | None:
         """

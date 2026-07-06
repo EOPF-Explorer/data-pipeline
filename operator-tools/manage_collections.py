@@ -56,7 +56,7 @@ class STACCollectionManager:
         self.api_url = api_url.rstrip("/")
         self.session = requests.Session()
         self.session.headers.update({"Content-Type": "application/json"})
-        self.session.headers.update(stac_auth.auth_headers())
+        self.session.auth = stac_auth.bearer_auth
         self.item_manager = STACItemManager(api_url)
 
     def get_collection_items(self, collection_id: str) -> list[dict[str, Any]]:

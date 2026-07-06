@@ -175,29 +175,23 @@ def test_helper_token_flow(writer_env):
     assert refetched  # refetch path works
 
 
-# 7 — Authenticated != authorized (valid token, no stac:write) → 403 ----------
+# 7 & 8 — Authenticated but unauthorized: a valid realm token still can't write ----
+# without stac:write (7), and can't write with the wrong/missing audience (8).
 
 
-def test_authenticated_but_unauthorized_blocked():
-    token = _client_credentials_token(*NOT_A_WRITER)
+@pytest.mark.parametrize(
+    ("creds", "allowed_status"),
+    [
+        pytest.param(NOT_A_WRITER, {403}, id="valid-token-no-stac:write"),
+        pytest.param(NO_AUDIENCE, {401, 403}, id="stac:write-but-wrong-audience"),
+    ],
+)
+def test_authenticated_but_unauthorized_rejected(creds, allowed_status):
+    token = _client_credentials_token(*creds)
     r = httpx.post(
         f"{PROXY_URL}/collections/{COLLECTION_ID}/items",
         json=ITEM,
         headers={"Authorization": f"Bearer {token}"},
         timeout=30,
     )
-    assert r.status_code == 403, r.text
-
-
-# 8 — Audience enforced (has stac:write, wrong/missing aud) → rejected ---------
-
-
-def test_wrong_audience_rejected():
-    token = _client_credentials_token(*NO_AUDIENCE)
-    r = httpx.post(
-        f"{PROXY_URL}/collections/{COLLECTION_ID}/items",
-        json=ITEM,
-        headers={"Authorization": f"Bearer {token}"},
-        timeout=30,
-    )
-    assert r.status_code in (401, 403), r.text
+    assert r.status_code in allowed_status, r.text
