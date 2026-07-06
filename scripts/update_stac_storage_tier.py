@@ -22,8 +22,8 @@ if str(scripts_dir) not in sys.path:
     sys.path.insert(0, str(scripts_dir))
 
 import httpx  # noqa: E402
+import stac_auth  # noqa: E402
 from pystac import Item  # noqa: E402
-from pystac_client import Client  # noqa: E402
 from register_v1 import https_to_s3  # noqa: E402
 from storage_tier_utils import (  # noqa: E402
     extract_region_from_endpoint,
@@ -384,9 +384,9 @@ def update_stac_item(
                 "s3_failed": assets_s3_failed,
             }
 
-        client = Client.open(stac_api_url)
+        client = stac_auth.open_client(stac_api_url)
         base_url = str(client.self_href).rstrip("/")
-        # Private attr; always set after Client.open() but guard for strict typing and -O.
+        # Private attr; always set after open_client() but guard for strict typing and -O.
         if client._stac_io is None:
             raise RuntimeError("pystac-client session not initialized")
         stac_session = client._stac_io.session

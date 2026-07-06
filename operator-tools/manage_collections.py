@@ -39,6 +39,7 @@ scripts_dir = Path(__file__).parent.parent / "scripts"
 if str(scripts_dir) not in sys.path:
     sys.path.insert(0, str(scripts_dir))
 
+import stac_auth  # noqa: E402
 from storage_tier_utils import get_s3_storage_info  # noqa: E402
 
 
@@ -55,6 +56,7 @@ class STACCollectionManager:
         self.api_url = api_url.rstrip("/")
         self.session = requests.Session()
         self.session.headers.update({"Content-Type": "application/json"})
+        self.session.headers.update(stac_auth.auth_headers())
         self.item_manager = STACItemManager(api_url)
 
     def get_collection_items(self, collection_id: str) -> list[dict[str, Any]]:

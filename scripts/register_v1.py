@@ -11,6 +11,7 @@ import urllib.parse
 from urllib.parse import urlparse
 
 import httpx
+import stac_auth
 import zarr
 from pystac import Asset, Item, Link
 from pystac.extensions.projection import ProjectionExtension
@@ -872,7 +873,7 @@ def run_registration(
     add_derived_from_link(item, source_url)
 
     # 13. Register to STAC API
-    client = Client.open(stac_api_url)
+    client = stac_auth.open_client(stac_api_url)
     upsert_item(client, collection, item)
 
     logger.info(

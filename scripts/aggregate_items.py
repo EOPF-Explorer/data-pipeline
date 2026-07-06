@@ -24,6 +24,7 @@ import sys
 
 import boto3
 import httpx
+import stac_auth
 from pystac_client import Client
 
 # Configure logging (set LOG_LEVEL=DEBUG for verbose output)
@@ -190,7 +191,7 @@ def update_collection_links(
         put_resp = http.put(
             collection_url,
             json=collection_data,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", **stac_auth.auth_headers()},
         )
         put_resp.raise_for_status()
 

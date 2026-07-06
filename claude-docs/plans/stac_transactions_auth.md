@@ -30,6 +30,13 @@ edits at the 7 write sites; helper is a no-op when OIDC env is absent.
 | `scripts/update_stac_storage_tier.py` (L387) | DELETE+POST items | `Client.open` → `open_client` |
 | `scripts/aggregate_items.py` (httpx PUT L190) | PUT collections | attach `auth_headers()` |
 | `operator-tools/manage_collections.py` (session L56) | POST/DELETE items+collections | `session.headers.update(auth_headers())` |
+| `operator-tools/manage_item.py` (session L112) † | POST/DELETE items | `session.headers.update(auth_headers())` |
+
+† **Discovered during T2 (not in the original 7):** the operator tool delegates item
+writes to `manage_item.STACItemManager`, which owns a separate `requests.Session`. Left
+unauthenticated it would break operator item edits under enforcement (T7), contradicting
+the Done-definition's "all operator writes succeed token-authenticated". Same one-line
+pattern; authenticated alongside `manage_collections.py`.
 
 ## Dependency graph
 

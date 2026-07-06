@@ -21,9 +21,9 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).parent))
 
+import stac_auth
 from eopf_geozarr.stac.s1_rtc import build_s1_rtc_stac_item, pick_slice, slice_coverages
 from pystac import Item, Link
-from pystac_client import Client
 from register_v1 import (
     add_alternate_s3_assets,
     add_store_link,
@@ -202,7 +202,7 @@ def register(
     add_acquisition_links(item, stac_api_url, acq_collection)
 
     try:
-        client = Client.open(stac_api_url)
+        client = stac_auth.open_client(stac_api_url)
         upsert_item(client, collection, item)
     except Exception:
         log.exception("Failed to upsert item %s to %s", item.id, stac_api_url)
