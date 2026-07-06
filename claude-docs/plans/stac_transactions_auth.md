@@ -54,7 +54,7 @@ Rollout invariant: **token-first, enforce-second.**
 
 ## Tasks (this repo)
 
-### Task 1 — Shared OIDC auth helper  <status: NEXT>
+### Task 1 — Shared OIDC auth helper  <status: ✅ DONE>
 **What**: New `scripts/stac_auth.py`:
 - `get_token()`: client-credentials grant against `OIDC_TOKEN_URL` with
   `OIDC_CLIENT_ID`/`OIDC_CLIENT_SECRET` (env); cache until ~expiry. Returns `None` if env
@@ -63,35 +63,37 @@ Rollout invariant: **token-first, enforce-second.**
 - `open_client(url) -> Client`: `Client.open(url, headers=auth_headers() or None)`.
   Verified (pystac-client 0.9.0): headers passed to `Client.open` land on
   `_stac_io.session.headers`, so raw `session.post/delete` inherit `Authorization`.
-**Verify**: `uv run pytest tests/unit/test_stac_auth.py`
+**Verify**: `uv run pytest tests/unit/test_stac_auth.py` → 11 passed (100% cov)
 **Acceptance criteria**:
-- [ ] No env set → `get_token()` returns `None`, `auth_headers()` is `{}`,
+- [x] No env set → `get_token()` returns `None`, `auth_headers()` is `{}`,
   `open_client` opens unauthenticated (`headers=None`) — back-compat
-- [ ] Env set → token fetched once, cached; header injected; a real
+- [x] Env set → token fetched once, cached; header injected; a real
   `StacApiIO(headers=...)` carries `Authorization` on its session
-- [ ] Token endpoint failure surfaces a clear error (no silent unauthenticated write)
+- [x] Token endpoint failure surfaces a clear error (no silent unauthenticated write)
 
-### Task 2 — Inject the helper at all 7 write sites  <status: blocked by T1>
+### Task 2 — Inject the helper at all 7 write sites  <status: ✅ DONE (8 sites — see †)>
 **What**: Replace `Client.open(...)` with `stac_auth.open_client(...)` at the 5 pystac
 sites; attach `auth_headers()` to the httpx PUT (`aggregate_items.py` L190) and the
-`requests` session (`manage_collections.py` L56). Surgical — only client/session
-construction lines change. `manage_collections.py`'s read-only `Client.open` calls stay
-as-is.
-**Verify**: `uv run pytest tests/unit/ -k "register or storage_tier or aggregate or manage_collections"`
+`requests` sessions (`manage_collections.py` L56, `manage_item.py` L112 †). Surgical —
+only client/session construction lines change; read-only `Client.open` calls stay as-is.
+**Verify**: `uv run pytest tests/unit/ -k "register or storage_tier or aggregate or manage"` → 204 passed
 **Acceptance criteria**:
-- [ ] Each of the 7 sites attaches the Bearer header when OIDC env is set (mock-asserted)
-- [ ] Existing register/storage-tier/aggregate tests still pass unchanged
-- [ ] No behavior change when env is unset
+- [x] Each write site attaches the Bearer header when OIDC env is set (mock-asserted in T3)
+- [x] Existing register/storage-tier/aggregate tests still pass (2 retargeted to the new seam)
+- [x] No behavior change when env is unset (helper no-op; unset tests green)
 
-### Task 3 — Tests for auth helper + injection  <status: blocked by T1,T2>
-**What**: `tests/unit/test_stac_auth.py` (fetch/cache/no-op/error/expiry) + extend the
-7 sites' tests to assert header presence with a mocked token endpoint. Adversarial:
-token-endpoint 401, missing secret, expired-token refetch.
-**Verify**: `uv run pytest`
+### Task 3 — Tests for auth helper + injection  <status: ✅ DONE>
+**What**: `tests/unit/test_stac_auth.py` (fetch/cache/no-op/error/expiry) +
+`tests/unit/test_write_sites_authenticated.py` asserting header presence per site with a
+mocked token endpoint. Adversarial: token-endpoint 401, missing access_token,
+expired-token refetch, partial env.
+**Verify**: `uv run pytest tests/unit/` → 539 passed
 **Acceptance criteria**:
-- [ ] Helper covered incl. error/expiry paths
-- [ ] Each write site has a test proving it authenticates
-- [ ] `uv run pytest` green; build+push image (record sha)
+- [x] Helper covered incl. error/expiry paths (11 tests)
+- [x] Each write site has a test proving it authenticates (10 tests; storage_tier via its
+  retargeted existing test)
+- [x] `uv run pytest tests/unit/` green — **image build/push deferred to deploy (needs
+  registry creds; record sha then)**
 
 ### Task INT — Local integration harness (pre-staging gate)  <status: blocked by T3>
 **What**: `tests/integration/stac_auth/` — docker-compose (pgstac +
