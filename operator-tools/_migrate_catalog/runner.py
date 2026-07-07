@@ -1,6 +1,7 @@
 import copy
 import json
 import logging
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,13 @@ import requests
 from pystac_client import Client
 
 from _migrate_catalog.types import MigrationFn, MigrationResult
+
+# Add scripts directory to path for the shared OIDC auth helper
+_scripts_dir = Path(__file__).parent.parent.parent / "scripts"
+if str(_scripts_dir) not in sys.path:
+    sys.path.insert(0, str(_scripts_dir))
+
+import stac_auth  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +43,8 @@ class STACMigrationRunner:
         self.api_url = api_url.rstrip("/")
         self.session = requests.Session()
         self.session.headers.update({"Content-Type": "application/json"})
+        # Authenticate the delete/post migration writes (no-op when OIDC env is unset).
+        self.session.auth = stac_auth.bearer_auth
         self._recovery_file: Path | None = None
         if recovery_dir is not None:
             timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
@@ -91,7 +101,7 @@ class STACMigrationRunner:
                 f"Processing items from '{collection_id}'{' (dry run)' if dry_run else ''}..."
             )
 
-        with click.progressbar(length=total, show_pos=True, show_percent=True) as bar:
+        with click.progressbar(length=total, show_pos=True, show_percent=True) as bar:  # type: ignore[var-annotated]  # click.progressbar generic (pre-existing)
             for page in search.pages():
                 for item_dict in (item.to_dict() for item in page.items):
                     item_id = item_dict.get("id", "unknown")
@@ -163,7 +173,7 @@ class STACMigrationRunner:
         skipped = 0
         failed = 0
         pending_bar = 0
-        with click.progressbar(
+        with click.progressbar(  # type: ignore[var-annotated]  # click.progressbar generic (pre-existing)
             length=total, show_pos=True, show_percent=True, update_min_steps=100
         ) as bar:
             for page in search.pages():

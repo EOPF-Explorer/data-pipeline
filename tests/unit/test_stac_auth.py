@@ -109,9 +109,84 @@ def test_token_response_without_access_token_raises(oidc_env):
         stac_auth.get_token()
 
 
-def test_partial_env_is_noop(monkeypatch):
-    """Missing any one of the three vars → unauthenticated (no half-configured writes)."""
-    monkeypatch.setenv("OIDC_TOKEN_URL", "https://kc.example.com/token")
-    monkeypatch.setenv("OIDC_CLIENT_ID", "stac-writer")
-    # OIDC_CLIENT_SECRET intentionally unset
+_ENV = {
+    "OIDC_TOKEN_URL": "https://kc.example.com/token",
+    "OIDC_CLIENT_ID": "stac-writer",
+    "OIDC_CLIENT_SECRET": "s3cr3t",  # noqa: S105
+}
+
+
+@pytest.mark.parametrize("missing", list(_ENV))
+def test_partial_env_is_noop(monkeypatch, missing):
+    """Missing ANY one of the three vars → unauthenticated (no half-configured writes)."""
+    for key, value in _ENV.items():
+        if key != missing:  # the autouse fixture already cleared `missing`
+            monkeypatch.setenv(key, value)
     assert stac_auth.get_token() is None
+
+
+def test_malformed_token_json_raises(oidc_env):
+    """Token endpoint returns non-JSON → raise, never a silent unauthenticated write."""
+    bad = MagicMock()
+    bad.raise_for_status.return_value = None
+    bad.json.side_effect = ValueError("not json")
+    with patch("stac_auth.httpx.post", return_value=bad), pytest.raises(RuntimeError):
+        stac_auth.get_token()
+
+
+def test_missing_expires_in_defaults(oidc_env):
+    """No expires_in in the response → token still returned (defaults to 300s cache)."""
+    resp = MagicMock()
+    resp.raise_for_status.return_value = None
+    resp.json.return_value = {"access_token": "test-token"}  # no expires_in
+    with patch("stac_auth.httpx.post", return_value=resp):
+        assert stac_auth.get_token() == "test-token"
+
+
+# --- Fail-closed at the WRITE (not just the helper) --------------------------
+
+
+def test_write_fails_closed_when_token_endpoint_fails(oidc_env):
+    """A configured-but-failing token endpoint must make the actual WRITE raise and never
+    send an unauthenticated request (bearer_auth runs in prepare_request, before send)."""
+    bad = MagicMock()
+    bad.raise_for_status.side_effect = RuntimeError("500 Server Error")
+
+    session = requests.Session()
+    session.auth = stac_auth.bearer_auth
+
+    class _NoSend(requests.adapters.HTTPAdapter):
+        def send(self, *args, **kwargs):
+            raise AssertionError("unauthenticated request must not be sent")
+
+    session.mount("https://", _NoSend())
+    with patch("stac_auth.httpx.post", return_value=bad), pytest.raises(RuntimeError):
+        session.post("https://stac.example.com/collections", json={})
+
+
+def test_open_client_session_post_carries_bearer(oidc_env, token_response):
+    """Behavioral: a real requests.Session wired by open_client carries the Bearer on POST
+    (guards the whole pystac write path, which the per-site delegation tests only mock)."""
+    real_session = requests.Session()
+    fake_io = MagicMock()
+    fake_io.session = real_session
+    fake_client = MagicMock()
+    fake_client._stac_io = fake_io
+
+    captured: dict[str, str | None] = {}
+
+    class _Capture(requests.adapters.HTTPAdapter):
+        def send(self, request, *args, **kwargs):
+            captured["auth"] = request.headers.get("Authorization")
+            resp = requests.models.Response()
+            resp.status_code = 200
+            return resp
+
+    real_session.mount("https://", _Capture())
+    with (
+        patch("stac_auth.Client.open", return_value=fake_client),
+        patch("stac_auth.httpx.post", return_value=token_response()),
+    ):
+        client = stac_auth.open_client("https://stac.example.com")
+        client._stac_io.session.post("https://stac.example.com/collections", json={})
+    assert captured["auth"] == "Bearer test-token"

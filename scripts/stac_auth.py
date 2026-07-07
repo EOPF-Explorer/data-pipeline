@@ -3,15 +3,15 @@
 A no-op when the OIDC env is absent, so local/dev and any unconfigured environment keep
 writing unauthenticated. When ``OIDC_TOKEN_URL`` / ``OIDC_CLIENT_ID`` /
 ``OIDC_CLIENT_SECRET`` are all set, ``get_token`` fetches (and caches) a client-credentials
-bearer that ``open_client`` injects into the pystac-client session — the raw
-``session.post/delete`` calls used by ``upsert_item`` then carry ``Authorization``
-automatically (pystac-client 0.9.0 applies ``Client.open(headers=...)`` to
-``_stac_io.session.headers``).
+bearer that ``open_client`` wires onto the pystac-client session via
+``session.auth = bearer_auth``. ``requests`` re-runs the auth hook on every
+``session.post/delete`` (used by ``upsert_item``), so each write carries a fresh
+``Authorization`` header — even across a batch that outlives the token.
 
 A configured-but-failing token endpoint raises rather than degrading to a silent
 unauthenticated write.
 
-See ``claude-docs/plans/stac_transactions_auth.md`` (Task 1).
+Design tracked out-of-repo (session memory + PR description); this is Task 1.
 """
 
 from __future__ import annotations
@@ -75,7 +75,11 @@ def get_token() -> str | None:
             resp.raise_for_status()
             payload = resp.json()
         except Exception as exc:  # clear, non-silent failure
-            raise RuntimeError(f"OIDC token request to {token_url} failed: {exc}") from exc
+            # Only the exception TYPE in the message (never interpolate the exception near
+            # credential handling); `from exc` keeps the full traceback for debugging.
+            raise RuntimeError(
+                f"OIDC token request to {token_url} failed: {type(exc).__name__}"
+            ) from exc
 
         access_token = payload.get("access_token")
         if not access_token:

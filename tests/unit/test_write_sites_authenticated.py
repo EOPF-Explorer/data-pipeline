@@ -200,6 +200,35 @@ def test_register_v0_opens_via_helper():
     mock_upsert.assert_called_once()
 
 
+def test_wipe_s1rtc_open_session_via_helper():
+    """wipe_s1rtc_tiles DELETEs through the session from stac_auth.open_client, not a bare
+    Client.open — so the wipe authenticates once enforcement is on."""
+    import wipe_s1rtc_tiles
+
+    client = MagicMock()
+    client.self_href = "https://api.test/stac"
+    with patch("wipe_s1rtc_tiles.stac_auth.open_client", return_value=client) as mock_open:
+        session, base = wipe_s1rtc_tiles._open_session("https://api.test/stac")
+    mock_open.assert_called_once_with("https://api.test/stac")
+    assert session is client._stac_io.session
+    assert base == "https://api.test/stac"
+
+
+def test_migrate_runner_session_authenticated(oidc_env, token_response):
+    from _migrate_catalog.runner import STACMigrationRunner
+
+    runner = STACMigrationRunner("https://api.test/stac")
+    with patch("stac_auth.httpx.post", return_value=token_response()):
+        assert _auth_header_on_write(runner.session) == "Bearer test-token"
+
+
+def test_migrate_runner_session_unauthenticated_without_env():
+    from _migrate_catalog.runner import STACMigrationRunner
+
+    runner = STACMigrationRunner("https://api.test/stac")
+    assert _auth_header_on_write(runner.session) is None
+
+
 def test_register_v1_opens_via_helper():
     import register_v1
 

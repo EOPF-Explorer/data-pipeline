@@ -62,7 +62,9 @@ services:
       - "8066:8080"
 
   proxy:
-    image: ghcr.io/developmentseed/stac-auth-proxy:latest
+    # Pinned for reproducibility (was :latest). v1.1.1 carries ALLOWED_JWT_AUDIENCES;
+    # matches what :latest resolved to when this harness was validated.
+    image: ghcr.io/developmentseed/stac-auth-proxy:v1.1.1
     environment:
       UPSTREAM_URL: http://stac:8080
       OIDC_DISCOVERY_URL: http://localhost:8066/auth/realms/eoxhub/.well-known/openid-configuration
