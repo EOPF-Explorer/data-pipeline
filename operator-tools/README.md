@@ -230,7 +230,7 @@ uv run operator-tools/migrate_catalog.py clone sentinel-2-l2a-staging sentinel-2
 
 **Documentation:** See [README_MIGRATIONS.md](./README_MIGRATIONS.md) for the full safe migration procedure, CLI reference, and instructions for writing new migrations.
 
-### 4. `submit_test_workflow_wh.py` - HTTP Webhook Submission
+### 4. `submit_test_workflow_wh.py` - HTTP Webhook Submission (single item)
 
 Submits a single test STAC item via HTTP webhook endpoint.
 
@@ -253,9 +253,100 @@ Edit the script to change:
 
 - `source_url`: STAC item URL to process
 - `collection`: Target collection name
-- `action`: Processing action (e.g., `convert-v1-s2-hp`, or `convert-v1-s2-hp`)
+- `action`: Processing action (e.g., `convert-v1-s2-hp`)
 
-### 5. `submit_stac_items_notebook.ipynb` - Interactive STAC Search & Submit
+### 5. `submit_test_workflow_wh_list.py` - HTTP Webhook Submission (hardcoded list)
+
+Submits a hardcoded list of items via HTTP webhook, one workflow per item, with a 1s delay between submissions.
+
+**Use case:** Batch-reprocessing a known fixed set of items (list is edited directly in the script)
+
+**Usage:**
+
+```bash
+uv run operator-tools/submit_test_workflow_wh_list.py
+```
+
+**Configuration:** Edit the `products` list and `payload` fields inside the script.
+
+### 6. `submit_storage_tier_workflows.py` - Batch Storage Tier Change via Argo
+
+Queries STAC in 24h windows over a date range and submits one `batch-change-storage-tier` webhook payload per window, triggering the `eopf-storage-tier-batch-job` WorkflowTemplate via Argo Events. Each workflow fans out over all items in that window in parallel (up to `--parallelism` pods at a time). This is the preferred approach for large date ranges — one Argo Workflow per day keeps job history clean and avoids submitting hundreds of individual workflows.
+
+**Use case:** Change the S3 storage class (e.g., to `STANDARD_IA`) for thousands of items over a multi-month date range.
+
+**Prerequisites:**
+
+- Pipeline webhook service running (port-forward, see above)
+- `requests` and `pystac-client` Python packages (already in project deps)
+- Argo Events sensor `eopf-explorer-storage-tier` deployed in the cluster (see `platform-deploy` repo)
+
+**Usage:**
+
+```bash
+# Dry run — logs what would be submitted without sending any requests
+python operator-tools/submit_storage_tier_workflows.py \
+    --start-date 2024-01-01 \
+    --end-date 2024-06-01 \
+    --collection sentinel-2-l2a-staging \
+    --storage-class STANDARD_IA \
+    --dry-run
+
+# Live run (port-forward must be active)
+python operator-tools/submit_storage_tier_workflows.py \
+    --start-date 2024-01-01 \
+    --end-date 2024-06-01 \
+    --collection sentinel-2-l2a-staging \
+    --storage-class STANDARD_IA \
+    --webhook-url http://localhost:12000/samples
+
+# Registered-window backlog — window on when items were *registered*
+# (properties.created) rather than sensed, to drain a bulk-conversion backlog
+# to STANDARD. Uses a CQL2 filter instead of the datetime= range.
+python operator-tools/submit_storage_tier_workflows.py \
+    --date-field created \
+    --start-date 2025-11-01 \
+    --end-date 2026-04-08 \
+    --collection sentinel-2-l2a \
+    --storage-class STANDARD \
+    --process-all-assets \
+    --dry-run
+```
+
+**All options:**
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--start-date` | required | Start of date range (`YYYY-MM-DD`) |
+| `--end-date` | required | End of date range (`YYYY-MM-DD`) |
+| `--collection` | required | STAC collection ID |
+| `--date-field` | `datetime` | Item date to window on: sensing `datetime`, registration `created`, or last-modified `updated`. Non-default fields use a CQL2 `between` filter |
+| `--storage-class` | `STANDARD` | Target S3 storage class |
+| `--stac-api-url` | prod API URL | STAC API endpoint to query |
+| `--s3-endpoint` | OVH Cloud | S3 endpoint passed to Argo workflows |
+| `--pipeline-image-version` | `v1.6.1` | Docker image tag for Argo jobs |
+| `--process-all-assets` | false | Process all assets (not just reflectance) |
+| `--webhook-url` | `localhost:12000/samples` | Webhook endpoint |
+| `--delay` | `1.0` | Seconds between window submissions |
+| `--dry-run` | false | Log payloads without sending |
+
+**Payload format** (one per 24h window):
+```json
+{
+  "action": "batch-change-storage-tier",
+  "item_ids": ["S2A_MSIL2A_...", "S2B_MSIL2A_..."],
+  "collection": "sentinel-2-l2a-staging",
+  "storage_class": "STANDARD_IA",
+  "stac_api_url": "https://...",
+  "s3_endpoint": "https://...",
+  "pipeline_image_version": "v1.6.1",
+  "process_all_assets": "false"
+}
+```
+
+**Cluster-side:** The `eopf-explorer-storage-tier` Argo Events Sensor (in `platform-deploy`) listens for `action: "batch-change-storage-tier"` and triggers `eopf-storage-tier-batch-job`, which fans out over `item_ids` — running change-tier + STAC metadata update for each item in parallel. Empty windows (no items found) are skipped without submitting a webhook.
+
+### 7. `submit_stac_items_notebook.ipynb` - Interactive STAC Search & Submit
 
 Jupyter notebook for searching and batch submitting STAC items.
 
@@ -333,6 +424,9 @@ python manage_collections.py clean test-coll --clean-s3 -y
 | `manage_collections.py` | Viewing collection statistics | `python manage_collections.py info coll-id --s3-stats` |
 | `manage_collections.py` | Batch operations on all items | `python manage_collections.py clean coll-id --clean-s3 -y` |
 | `manage_collections.py` | Collection lifecycle management | `python manage_collections.py create/delete` |
+| `submit_test_workflow_wh.py` | Testing pipeline with one known item | edit script then `uv run submit_test_workflow_wh.py` |
+| `submit_test_workflow_wh_list.py` | Reprocessing a small known fixed set | edit products list then `uv run submit_test_workflow_wh_list.py` |
+| `submit_storage_tier_workflows.py` | Changing storage tier for a large date range (one Argo batch workflow per 24h window) | `python submit_storage_tier_workflows.py --start-date ... --dry-run` |
 
 ### Benefits of This Workflow
 
