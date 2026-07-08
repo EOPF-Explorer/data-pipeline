@@ -299,6 +299,18 @@ python operator-tools/submit_storage_tier_workflows.py \
     --collection sentinel-2-l2a-staging \
     --storage-class STANDARD_IA \
     --webhook-url http://localhost:12000/samples
+
+# Registered-window backlog — window on when items were *registered*
+# (properties.created) rather than sensed, to drain a bulk-conversion backlog
+# to STANDARD. Uses a CQL2 filter instead of the datetime= range.
+python operator-tools/submit_storage_tier_workflows.py \
+    --date-field created \
+    --start-date 2025-11-01 \
+    --end-date 2026-04-08 \
+    --collection sentinel-2-l2a \
+    --storage-class STANDARD \
+    --process-all-assets \
+    --dry-run
 ```
 
 **All options:**
@@ -308,7 +320,8 @@ python operator-tools/submit_storage_tier_workflows.py \
 | `--start-date` | required | Start of date range (`YYYY-MM-DD`) |
 | `--end-date` | required | End of date range (`YYYY-MM-DD`) |
 | `--collection` | required | STAC collection ID |
-| `--storage-class` | `STANDARD_IA` | Target S3 storage class |
+| `--date-field` | `datetime` | Item date to window on: sensing `datetime`, registration `created`, or last-modified `updated`. Non-default fields use a CQL2 `between` filter |
+| `--storage-class` | `STANDARD` | Target S3 storage class |
 | `--stac-api-url` | prod API URL | STAC API endpoint to query |
 | `--s3-endpoint` | OVH Cloud | S3 endpoint passed to Argo workflows |
 | `--pipeline-image-version` | `v1.6.1` | Docker image tag for Argo jobs |

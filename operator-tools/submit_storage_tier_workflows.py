@@ -46,15 +46,36 @@ def generate_time_windows(
 
 
 def query_stac_items(
-    stac_api_url: str, collection: str, window_start: str, window_end: str
+    stac_api_url: str,
+    collection: str,
+    window_start: str,
+    window_end: str,
+    date_field: str = "datetime",
 ) -> list[str]:
-    """Query STAC for items with datetime in the given window. Returns list of item IDs."""
+    """Query STAC for items whose ``date_field`` falls in the window. Returns item IDs.
+
+    ``date_field="datetime"`` uses pystac-client's native ``datetime=`` range
+    (the item's sensing time). Other fields (``created``, ``updated``) filter on
+    the registration/update timestamp via a CQL2 ``between`` filter, since those
+    properties are not reachable through the ``datetime=`` kwarg.
+    """
     catalog = Client.open(stac_api_url)
-    search = catalog.search(
-        collections=[collection],
-        datetime=f"{window_start}/{window_end}",
-        limit=100,
-    )
+    if date_field == "datetime":
+        search = catalog.search(
+            collections=[collection],
+            datetime=f"{window_start}/{window_end}",
+            limit=100,
+        )
+    else:
+        search = catalog.search(
+            collections=[collection],
+            filter={
+                "op": "between",
+                "args": [{"property": date_field}, window_start, window_end],
+            },
+            filter_lang="cql2-json",
+            limit=100,
+        )
     return [item.id for item in search.items()]
 
 
@@ -68,6 +89,7 @@ def submit_batch(webhook_url: str, payload: dict[str, object], dry_run: bool) ->
             webhook_url,
             json=payload,
             headers={"Content-Type": "application/json"},
+            timeout=30,
         )
         if response.status_code != 200:
             logger.warning(
@@ -87,7 +109,14 @@ def main() -> None:
     parser.add_argument("--start-date", required=True, help="Start date (YYYY-MM-DD)")
     parser.add_argument("--end-date", required=True, help="End date (YYYY-MM-DD)")
     parser.add_argument("--collection", required=True, help="STAC collection ID")
-    parser.add_argument("--storage-class", default="STANDARD_IA", help="S3 storage class")
+    parser.add_argument(
+        "--date-field",
+        choices=["datetime", "created", "updated"],
+        default="datetime",
+        help="Item date to window on: sensing 'datetime' (default), registration "
+        "'created', or last-modified 'updated'. Non-default fields use a CQL2 filter.",
+    )
+    parser.add_argument("--storage-class", default="STANDARD", help="S3 storage class")
     parser.add_argument("--stac-api-url", default="https://api.explorer.eopf.copernicus.eu/stac")
     parser.add_argument("--s3-endpoint", default="https://s3.de.io.cloud.ovh.net")
     parser.add_argument("--pipeline-image-version", default="v1.6.1")
@@ -118,7 +147,9 @@ def main() -> None:
 
     for i, (window_start, window_end) in enumerate(windows, 1):
         logger.info(f"[{i}/{len(windows)}] Querying window {window_start} to {window_end}")
-        item_ids = query_stac_items(args.stac_api_url, args.collection, window_start, window_end)
+        item_ids = query_stac_items(
+            args.stac_api_url, args.collection, window_start, window_end, args.date_field
+        )
         logger.info(f"  Found {len(item_ids)} items")
 
         if not item_ids:

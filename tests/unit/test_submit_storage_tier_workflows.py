@@ -100,6 +100,64 @@ class TestQueryStacItems:
 
         assert result == []
 
+    def test_date_field_created_uses_cql2_between(self) -> None:
+        """A non-default date_field switches to a CQL2 `between` filter on that property."""
+        mock_item = MagicMock()
+        mock_item.id = "item-a"
+        mock_search = MagicMock()
+        mock_search.items.return_value = [mock_item]
+
+        mock_catalog = MagicMock()
+        mock_catalog.search.return_value = mock_search
+
+        with patch("submit_storage_tier_workflows.Client") as mock_client:
+            mock_client.open.return_value = mock_catalog
+            result = query_stac_items(
+                "https://stac.example.com",
+                "sentinel-2",
+                "2024-01-01T00:00:00Z",
+                "2024-01-02T00:00:00Z",
+                date_field="created",
+            )
+
+        assert result == ["item-a"]
+        mock_catalog.search.assert_called_once_with(
+            collections=["sentinel-2"],
+            filter={
+                "op": "between",
+                "args": [
+                    {"property": "created"},
+                    "2024-01-01T00:00:00Z",
+                    "2024-01-02T00:00:00Z",
+                ],
+            },
+            filter_lang="cql2-json",
+            limit=100,
+        )
+
+    def test_default_date_field_uses_datetime_range(self) -> None:
+        """The default date_field keeps the native pystac-client datetime= range query."""
+        mock_search = MagicMock()
+        mock_search.items.return_value = []
+        mock_catalog = MagicMock()
+        mock_catalog.search.return_value = mock_search
+
+        with patch("submit_storage_tier_workflows.Client") as mock_client:
+            mock_client.open.return_value = mock_catalog
+            query_stac_items(
+                "https://stac.example.com",
+                "sentinel-2",
+                "2024-01-01T00:00:00Z",
+                "2024-01-02T00:00:00Z",
+                date_field="datetime",
+            )
+
+        mock_catalog.search.assert_called_once_with(
+            collections=["sentinel-2"],
+            datetime="2024-01-01T00:00:00Z/2024-01-02T00:00:00Z",
+            limit=100,
+        )
+
 
 class TestSubmitBatch:
     def test_dry_run_does_not_send_request(self) -> None:
@@ -234,6 +292,83 @@ class TestMainEmptyWindowSkip:
         assert submitted_payloads[0]["item_ids"] == ["item-1", "item-2"]
         assert submitted_payloads[0]["action"] == "batch-change-storage-tier"
         assert "parallelism" not in submitted_payloads[0]
+
+
+class TestMainDateFieldForwarding:
+    def test_date_field_forwarded_to_query(self) -> None:
+        """`--date-field created` reaches query_stac_items."""
+        captured: list[str] = []
+
+        def capture_query(
+            stac_api_url: str,
+            collection: str,
+            window_start: str,
+            window_end: str,
+            date_field: str,
+        ) -> list[str]:
+            captured.append(date_field)
+            return []
+
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "submit_storage_tier_workflows.py",
+                    "--start-date",
+                    "2024-01-01",
+                    "--end-date",
+                    "2024-01-02",
+                    "--collection",
+                    "sentinel-2-l2a",
+                    "--date-field",
+                    "created",
+                    "--dry-run",
+                ],
+            ),
+            patch(
+                "submit_storage_tier_workflows.query_stac_items",
+                side_effect=capture_query,
+            ),
+        ):
+            from submit_storage_tier_workflows import main
+
+            main()
+
+        assert captured == ["created"]
+
+    def test_default_storage_class_is_standard(self) -> None:
+        """The submitted payload defaults storage_class to STANDARD."""
+        submitted_payloads: list[dict[str, object]] = []
+
+        def capture(url: str, payload: dict[str, object], dry_run: bool) -> bool:
+            submitted_payloads.append(payload)
+            return True
+
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "submit_storage_tier_workflows.py",
+                    "--start-date",
+                    "2024-01-01",
+                    "--end-date",
+                    "2024-01-02",
+                    "--collection",
+                    "sentinel-2-l2a",
+                    "--dry-run",
+                ],
+            ),
+            patch(
+                "submit_storage_tier_workflows.query_stac_items",
+                return_value=["item-1"],
+            ),
+            patch("submit_storage_tier_workflows.submit_batch", side_effect=capture),
+        ):
+            from submit_storage_tier_workflows import main
+
+            main()
+
+        assert submitted_payloads[0]["storage_class"] == "STANDARD"
 
 
 class TestMainDateValidation:
