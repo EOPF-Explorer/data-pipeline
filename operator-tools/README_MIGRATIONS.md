@@ -13,6 +13,7 @@ is shown when the API supports `numberMatched`.
 |---|---|
 | `fix_url_encoding` | Replace `+` with `%20` in asset/link href query strings (RFC 3986 compliance) |
 | `fix_zarr_media_type` | Fix zarr media types (`vnd+zarr` → `vnd.zarr`, `version=2` → `version=3`, add missing `version=3`) and remove `zipped_product` asset |
+| `add_xyz_link` | Add a `rel=xyz` `{z}/{x}/{y}.png` tile template after the `tilejson` link (derived from the tilejson href). Idempotent + S2-safe; skips the known-legacy items whose tilejson is a bare `.../WebMercatorQuad` href. |
 
 ## Safe Migration Procedure
 
@@ -103,6 +104,7 @@ Commands:
     --dry-run                              Preview changes without updating
     --yes / -y                             Skip confirmation prompt
     --page-size INT   (default: 100)       Items fetched per API page
+    --ids TEXT        (repeatable)         Restrict the run to specific item ids (canary)
   verify COLLECTION_ID                     Check if migration is fully applied
     --migration TEXT  (repeatable)         Migration(s) to verify
     --page-size INT   (default: 100)       Items fetched per API page

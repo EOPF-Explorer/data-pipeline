@@ -62,6 +62,7 @@ class STACMigrationRunner:
         migration_name: str,
         dry_run: bool = False,
         page_size: int = 100,
+        ids: list[str] | None = None,
     ) -> MigrationResult:
         started_at = datetime.now(UTC).isoformat()
         result = MigrationResult(
@@ -78,7 +79,15 @@ class STACMigrationRunner:
         )
 
         catalog = Client.open(self.api_url)
-        search = catalog.search(collections=[collection_id], max_items=None, limit=page_size)
+        # `ids` restricts the run to specific items (the canary path) via the same code path,
+        # recovery JSONL, and history as the full run. Omitted from the call when unset so the
+        # full-collection search stays byte-identical (backcompat).
+        if ids:
+            search = catalog.search(
+                collections=[collection_id], ids=ids, max_items=None, limit=page_size
+            )
+        else:
+            search = catalog.search(collections=[collection_id], max_items=None, limit=page_size)
 
         total = search.matched()
         if total is not None:

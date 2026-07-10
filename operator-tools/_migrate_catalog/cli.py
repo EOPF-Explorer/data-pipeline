@@ -47,6 +47,12 @@ def cli(ctx: click.Context, api_url: str | None, history_file: str | None) -> No
 @click.option("--dry-run", is_flag=True, help="Show changes without updating")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
 @click.option("--page-size", default=100, show_default=True, help="Items per page when fetching")
+@click.option(
+    "--ids",
+    "ids",
+    multiple=True,
+    help="Restrict the run to specific item ids (repeatable) — e.g. a single-tile canary",
+)
 @click.pass_context
 def run(
     ctx: click.Context,
@@ -55,6 +61,7 @@ def run(
     dry_run: bool,
     yes: bool,
     page_size: int,
+    ids: tuple[str, ...],
 ) -> None:
     """Run one or more migrations on a collection."""
     for name in migration_names:
@@ -86,13 +93,20 @@ def run(
         click.echo(f"Description: {description}")
         click.echo(f"Collection:  {collection_id}")
         click.echo(f"API:         {api_url}")
+        if ids:
+            click.echo(f"IDs:         {', '.join(ids)}")
         if not click.confirm("Proceed?", default=False):
             click.echo("Aborted.")
             return
 
     runner = STACMigrationRunner(api_url, recovery_dir=history_file.parent)
     result = runner.run_migration(
-        collection_id, migration_fn, migration_name, dry_run=dry_run, page_size=page_size
+        collection_id,
+        migration_fn,
+        migration_name,
+        dry_run=dry_run,
+        page_size=page_size,
+        ids=list(ids) or None,
     )
 
     click.echo()

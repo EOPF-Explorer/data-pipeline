@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from _migrate_catalog.history import load_history, record_run, was_migration_run
+from _migrate_catalog.migrations.add_xyz_link import add_xyz_link
 from _migrate_catalog.migrations.fix_url_encoding import fix_url_encoding
 from _migrate_catalog.migrations.fix_zarr_media_type import fix_zarr_media_type
 from _migrate_catalog.runner import STACMigrationRunner, compose_migrations
@@ -175,6 +176,116 @@ class TestFixZarrMediaType:
         assert result2 is None
 
 
+_TJ_BASE = (
+    "https://api.example.com/raster/collections/sentinel-1-grd-rtc-staging"
+    "/items/s1-rtc-31TCG/WebMercatorQuad/tilejson.json"
+)
+_TJ_QUERY = "expression=%2Fdescending%3Avv&rescale=0.0%2C0.2&sel=time=2026-06-07T05%3A52%3A48"
+_TJ_HREF = f"{_TJ_BASE}?{_TJ_QUERY}"
+
+
+def _item_with_tilejson(*, viewer_title=None, render_title=None, extra_links=None) -> dict:
+    """A STAC item carrying a well-formed tilejson link (+ optional viewer/renders), no xyz yet."""
+    links = [
+        {"rel": "self", "href": "https://api.example.com/stac/.../s1-rtc-31TCG"},
+        {"rel": "tilejson", "type": "application/json", "href": _TJ_HREF, "title": "tilejson"},
+    ]
+    if viewer_title is not None:
+        links.append(
+            {
+                "rel": "viewer",
+                "type": "text/html",
+                "href": f"{_TJ_BASE.replace('tilejson.json', 'map.html')}?{_TJ_QUERY}",
+                "title": viewer_title,
+            }
+        )
+    links.extend(extra_links or [])
+    item: dict = {"id": "s1-rtc-31TCG", "links": links, "assets": {}}
+    if render_title is not None:
+        item["properties"] = {"renders": {"rgb": {"title": render_title}}}
+    return item
+
+
+class TestAddXyzLink:
+    def test_adds_xyz_after_tilejson(self):
+        item = _item_with_tilejson()
+        result = add_xyz_link(item)
+        assert result is not None
+        rels = [lk["rel"] for lk in result["links"]]
+        assert rels.count("xyz") == 1
+        assert rels.index("xyz") == rels.index("tilejson") + 1
+        xyz = next(lk for lk in result["links"] if lk["rel"] == "xyz")
+        assert xyz["type"] == "image/png"
+        assert "/tiles/WebMercatorQuad/{z}/{x}/{y}.png?" in xyz["href"]
+
+    def test_query_preserved_including_encoded_sel_time(self):
+        result = add_xyz_link(_item_with_tilejson())
+        assert result is not None
+        xyz = next(lk for lk in result["links"] if lk["rel"] == "xyz")
+        # query byte-identical to tilejson's (incl. percent-encoded sel=time colons)
+        assert xyz["href"].split("?", 1)[1] == _TJ_QUERY
+
+    def test_title_from_viewer_first(self):
+        # live per-acq items carry both a viewer title and a renders title — viewer wins for parity
+        result = add_xyz_link(
+            _item_with_tilejson(
+                viewer_title="Sentinel-1 GRD RGB composite", render_title="VV, VH, VV/VH composite"
+            )
+        )
+        assert result is not None
+        xyz = next(lk for lk in result["links"] if lk["rel"] == "xyz")
+        assert xyz["title"] == "Sentinel-1 GRD RGB composite"
+
+    def test_title_from_renders_when_no_viewer(self):
+        result = add_xyz_link(_item_with_tilejson(render_title="VV, VH, VV/VH composite"))
+        assert result is not None
+        xyz = next(lk for lk in result["links"] if lk["rel"] == "xyz")
+        assert xyz["title"] == "VV, VH, VV/VH composite"
+
+    def test_title_fallback_when_no_viewer_or_renders(self):
+        result = add_xyz_link(_item_with_tilejson())
+        assert result is not None
+        xyz = next(lk for lk in result["links"] if lk["rel"] == "xyz")
+        assert xyz["title"] == "XYZ tile template"
+
+    def test_skips_when_xyz_already_present(self):
+        item = _item_with_tilejson(
+            extra_links=[{"rel": "xyz", "type": "image/png", "href": "https://x/{z}/{x}/{y}.png"}]
+        )
+        assert add_xyz_link(item) is None
+
+    def test_skips_legacy_bare_tilejson(self):
+        # the 3 known-legacy items carry .../WebMercatorQuad (no /tilejson.json?) — deriving xyz
+        # would emit garbage; they're slated for wipe+re-ingest, so skip them.
+        item = {
+            "id": "s1-rtc-31TCJ",
+            "links": [
+                {
+                    "rel": "tilejson",
+                    "type": "application/json",
+                    "href": "https://api.example.com/raster/.../s1-rtc-31TCJ/WebMercatorQuad",
+                }
+            ],
+            "assets": {},
+        }
+        assert add_xyz_link(item) is None
+
+    def test_skips_when_no_tilejson(self):
+        item = {"id": "x", "links": [{"rel": "self", "href": "https://x"}], "assets": {}}
+        assert add_xyz_link(item) is None
+
+    def test_does_not_mutate_input(self):
+        item = _item_with_tilejson()
+        original_rels = [lk["rel"] for lk in item["links"]]
+        add_xyz_link(item)
+        assert [lk["rel"] for lk in item["links"]] == original_rels
+
+    def test_idempotent(self):
+        result1 = add_xyz_link(_item_with_tilejson())
+        assert result1 is not None
+        assert add_xyz_link(result1) is None
+
+
 def _make_mock_search(items_dicts: list, total: int | None = None) -> MagicMock:
     """Build a mock pystac_client search that yields one page with the given items."""
     mock_items = []
@@ -264,6 +375,35 @@ class TestSTACMigrationRunner:
         assert result.items_modified == 1
         assert result.items_skipped == 1
         runner._update_item.assert_called_once()
+
+    def test_ids_are_passed_to_search(self, item_clean):
+        # Canary path: run_migration(ids=[...]) restricts the search to those item ids so the
+        # single-tile run uses the exact same code path/recovery/history as the full run.
+        runner = self._make_runner()
+        mock_search = _make_mock_search([item_clean], total=1)
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = mock_search
+            runner.run_migration(
+                "test-col", fix_zarr_media_type, "fix_zarr_media_type", ids=["item-a", "item-b"]
+            )
+
+        mock_client.open.return_value.search.assert_called_once_with(
+            collections=["test-col"], ids=["item-a", "item-b"], max_items=None, limit=100
+        )
+
+    def test_no_ids_omits_ids_filter(self, item_clean):
+        # Without ids the full-collection search must not pass an ids filter (backcompat).
+        runner = self._make_runner()
+        mock_search = _make_mock_search([item_clean], total=1)
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = mock_search
+            runner.run_migration("test-col", fix_zarr_media_type, "fix_zarr_media_type")
+
+        mock_client.open.return_value.search.assert_called_once_with(
+            collections=["test-col"], max_items=None, limit=100
+        )
 
     def test_clone_collection_copies_metadata_and_items(self):
         runner = STACMigrationRunner("https://api.example.com/stac")
