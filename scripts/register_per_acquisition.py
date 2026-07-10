@@ -127,26 +127,30 @@ def decorate_acquisition_item(
     item_id = d["id"]
     collection = d.get("collection", "")
     render = d["properties"]["renders"]["rgb"]
+    # Mirror the cube's link conventions (register_v1.add_visualization_links) so both item types
+    # render an identical "Additional Resources" section in STAC Browser: order
+    # store→viewer→tilejson→xyz, viewer/xyz titled by the render composite, tilejson "TileJSON for {id}".
+    render_title = render.get("title") or f"Visualization for {item_id}"
     store_links = [lk for lk in d.get("links", []) if lk.get("rel") == "store"]
     d["links"] = [
         *store_links,
         {
+            "rel": "viewer",
+            "type": "text/html",
+            "href": render_viewer(raster_api, cube_collection, tile_id, render, sel_time),
+            "title": render_title,
+        },
+        {
             "rel": "tilejson",
             "type": "application/json",
             "href": render_tilejson(raster_api, cube_collection, tile_id, render, sel_time),
-            "title": "tilejson",
+            "title": f"TileJSON for {item_id}",
         },
         {
             "rel": "xyz",
             "type": "image/png",
             "href": render_xyz(raster_api, cube_collection, tile_id, render, sel_time),
-            "title": "Sentinel-1 GRD RGB composite",
-        },
-        {
-            "rel": "viewer",
-            "type": "text/html",
-            "href": render_viewer(raster_api, cube_collection, tile_id, render, sel_time),
-            "title": "Sentinel-1 GRD RGB composite",
+            "title": render_title,
         },
         {
             "rel": "via",

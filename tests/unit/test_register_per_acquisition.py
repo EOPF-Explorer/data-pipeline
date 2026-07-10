@@ -48,6 +48,7 @@ def _acq_item() -> pystac.Item:
             "sat:orbit_state": "descending",
             "renders": {
                 "rgb": {
+                    "title": "VV, VH, VV/VH composite",
                     "expression": "/descending:vv;/descending:vh;(/descending:vv)/(/descending:vh)",
                     "rescale": [[0.0, 0.4], [0.0, 0.1], [1.0, 15.0]],
                     "bidx": [1],
@@ -116,13 +117,27 @@ def test_xyz_link_shape() -> None:
     xyz = next(lk for lk in d["links"] if lk["rel"] == "xyz")
     assert "/tiles/WebMercatorQuad/{z}/{x}/{y}.png?" in xyz["href"]
     assert xyz["type"] == "image/png"
-    assert xyz["title"] == "Sentinel-1 GRD RGB composite"  # matches the sibling viewer title
+    assert xyz["title"] == "VV, VH, VV/VH composite"  # the render composite title (as on the cube)
     # ordered immediately after tilejson
     rels = [lk["rel"] for lk in d["links"]]
     assert rels.index("xyz") == rels.index("tilejson") + 1
     # query byte-identical to the tilejson link's
     tj = next(lk for lk in d["links"] if lk["rel"] == "tilejson")
     assert xyz["href"].split("?", 1)[1] == tj["href"].split("?", 1)[1]
+
+
+def test_link_titles_and_order_match_cube_convention() -> None:
+    """Acq visualization links mirror the cube (register_v1): order store→viewer→tilejson→xyz,
+    viewer/xyz titled by the render composite, tilejson 'TileJSON for {id}'."""
+    d = decorate_acquisition_item(
+        _acq_item(), tile_id="31TCH", cube_collection=CUBE, raster_api=RASTER, stac_api_url=STAC
+    )
+    rels = [lk["rel"] for lk in d["links"]]
+    assert rels == ["store", "viewer", "tilejson", "xyz", "via", "related"]
+    by_rel = {lk["rel"]: lk for lk in d["links"]}
+    assert by_rel["viewer"]["title"] == "VV, VH, VV/VH composite"
+    assert by_rel["xyz"]["title"] == "VV, VH, VV/VH composite"
+    assert by_rel["tilejson"]["title"] == "TileJSON for s1-rtc-31TCH-20260605t060907"
 
 
 def test_thumbnail_via_and_store_link_kept() -> None:
