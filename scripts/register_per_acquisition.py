@@ -67,14 +67,28 @@ def render_tilejson(
     return f"{base}/WebMercatorQuad/tilejson.json?{_render_to_query(render, include_tilesize=True)}&{_sel_time(sel_time)}"
 
 
+def render_xyz(
+    raster_api: str, cube_collection: str, tile_id: str, render: dict, sel_time: str
+) -> str:
+    """``{z}/{x}/{y}.png`` tile template for the cube slice at ``sel_time`` — for machine map clients.
+
+    Same endpoint/query as ``render_tilejson`` but the raw ``tiles/.../{z}/{x}/{y}.png`` template that
+    XYZ clients (QGIS/Leaflet/OpenLayers) substitute before requesting. The ``map.html`` ``viewer``
+    (below) stays the human-clickable link; both coexist, as on S2.
+    """
+    base = _cube_item_base(raster_api, cube_collection, tile_id)
+    q = _render_to_query(render, include_tilesize=True)
+    return f"{base}/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png?{q}&{_sel_time(sel_time)}"
+
+
 def render_viewer(
     raster_api: str, cube_collection: str, tile_id: str, render: dict, sel_time: str
 ) -> str:
     """Interactive ``map.html`` viewer for the cube slice at ``sel_time`` — the human-clickable map.
 
     A raw ``{z}/{x}/{y}`` xyz tile template 422s when clicked in a STAC browser (the placeholders are
-    sent to TiTiler literally); ``map.html`` fills the tile coords in itself. ``tilejson`` (above)
-    serves the tile template to machine map clients.
+    sent to TiTiler literally); ``map.html`` fills the tile coords in itself. ``tilejson``/``xyz``
+    (above) serve the tile template to machine map clients.
     """
     base = _cube_item_base(raster_api, cube_collection, tile_id)
     q = _render_to_query(render, include_tilesize=True)
@@ -121,6 +135,12 @@ def decorate_acquisition_item(
             "type": "application/json",
             "href": render_tilejson(raster_api, cube_collection, tile_id, render, sel_time),
             "title": "tilejson",
+        },
+        {
+            "rel": "xyz",
+            "type": "image/png",
+            "href": render_xyz(raster_api, cube_collection, tile_id, render, sel_time),
+            "title": "Sentinel-1 GRD RGB composite",
         },
         {
             "rel": "viewer",

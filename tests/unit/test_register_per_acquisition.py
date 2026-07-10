@@ -87,7 +87,7 @@ def test_render_links_point_at_cube_endpoint_with_sel_datetime() -> None:
         _acq_item(), tile_id="31TCH", cube_collection=CUBE, raster_api=RASTER, stac_api_url=STAC
     )
     links = _links(d)
-    for rel in ("tilejson", "viewer"):
+    for rel in ("tilejson", "viewer", "xyz"):
         href = links[rel]
         assert f"/collections/{CUBE}/items/s1-rtc-31TCH" in href  # cube endpoint, not the acq item
         assert ACQ not in href
@@ -102,7 +102,27 @@ def test_render_links_point_at_cube_endpoint_with_sel_datetime() -> None:
     assert (
         "/WebMercatorQuad/map.html" in links["viewer"]
     )  # interactive viewer, not a raw tile template
-    assert "{z}/{x}/{y}" not in str(d["links"])  # the broken xyz template is gone
+    # the sole {z}/{x}/{y} template is the machine-facing rel=xyz link
+    xyz_hrefs = [lk["href"] for lk in d["links"] if "{z}/{x}/{y}" in lk["href"]]
+    assert xyz_hrefs == [links["xyz"]]
+
+
+def test_xyz_link_shape() -> None:
+    """The xyz link carries the literal {z}/{x}/{y} template (catches f-string escaping bugs),
+    is image/png, ordered right after tilejson, and shares tilejson's exact query."""
+    d = decorate_acquisition_item(
+        _acq_item(), tile_id="31TCH", cube_collection=CUBE, raster_api=RASTER, stac_api_url=STAC
+    )
+    xyz = next(lk for lk in d["links"] if lk["rel"] == "xyz")
+    assert "/tiles/WebMercatorQuad/{z}/{x}/{y}.png?" in xyz["href"]
+    assert xyz["type"] == "image/png"
+    assert xyz["title"] == "Sentinel-1 GRD RGB composite"  # matches the sibling viewer title
+    # ordered immediately after tilejson
+    rels = [lk["rel"] for lk in d["links"]]
+    assert rels.index("xyz") == rels.index("tilejson") + 1
+    # query byte-identical to the tilejson link's
+    tj = next(lk for lk in d["links"] if lk["rel"] == "tilejson")
+    assert xyz["href"].split("?", 1)[1] == tj["href"].split("?", 1)[1]
 
 
 def test_thumbnail_via_and_store_link_kept() -> None:
