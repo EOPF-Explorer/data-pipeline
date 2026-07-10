@@ -27,6 +27,10 @@ logger = logging.getLogger(__name__)
 # Shared by register_v1 (stamp at registration) and the backfill migration.
 DEFAULT_RETENTION_DAYS = 183
 
+# STAC timestamps extension that defines properties.expires. Shared by the
+# register-time stamp and the backfill migration so both declare the same URL.
+TIMESTAMPS_EXTENSION = "https://stac-extensions.github.io/timestamps/v1.1.0/schema.json"
+
 # S3 delete_objects accepts at most 1000 keys per call; we stay well under.
 BATCH_SIZE = 200
 

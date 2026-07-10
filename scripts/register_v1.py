@@ -16,7 +16,7 @@ import zarr
 from pystac import Asset, Item, Link
 from pystac.extensions.projection import ProjectionExtension
 from pystac_client import Client
-from s3_item_cleanup import DEFAULT_RETENTION_DAYS
+from s3_item_cleanup import DEFAULT_RETENTION_DAYS, TIMESTAMPS_EXTENSION
 from storage_tier_utils import extract_region_from_endpoint, get_s3_storage_class
 
 # Configure logging (set LOG_LEVEL=DEBUG for verbose output)
@@ -341,9 +341,6 @@ def add_derived_from_link(item: Item, source_url: str) -> None:
         )
     )
     logger.debug(f"Added derived_from link: {source_url}")
-
-
-TIMESTAMPS_EXTENSION = "https://stac-extensions.github.io/timestamps/v1.1.0/schema.json"
 
 
 def resolve_retention_days() -> int:
