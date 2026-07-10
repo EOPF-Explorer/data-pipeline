@@ -596,11 +596,12 @@ class TestSTACMigrationRunner:
         rels = [lk["rel"] for lk in body["links"]]
         assert rels.index("xyz") == rels.index("tilejson") + 1
 
-    def test_reads_raw_dicts_so_unmodelable_items_dont_abort(self):
+    def test_unmodelable_item_failed_without_delete(self):
         # A live item can carry an asset with no href (e.g. s1-rtc-30TWQ) that pystac's
-        # Item.from_dict rejects. run_migration must iterate raw dicts (items_as_dicts), not
-        # pystac Item objects, so one malformed item can't abort the whole run.
-        runner = self._make_runner()
+        # Item.from_dict rejects. It is READ fine (raw dicts, so it can't abort the run) but it
+        # cannot be turned into a transaction-valid POST body — so it must be reported failed and
+        # NEVER deleted. A delete-then-failed-POST would lose the item entirely.
+        runner = self._make_runner()  # _update_item (delete + post) is a MagicMock
         hrefless = {
             "id": "s1-rtc-30TWQ",
             "assets": {"vv": {"roles": ["data"]}},  # no href — pystac would raise KeyError
@@ -623,8 +624,9 @@ class TestSTACMigrationRunner:
             result = runner.run_migration("test-col", add_xyz_link, "add_xyz_link")
 
         assert result.items_processed == 1
-        assert result.items_modified == 1
-        assert result.items_failed == 0
+        assert result.items_modified == 0
+        assert result.items_failed == 1
+        runner._update_item.assert_not_called()  # never delete an item we can't re-POST
 
     def test_clone_collection_copies_metadata_and_items(self):
         runner = STACMigrationRunner("https://api.example.com/stac")

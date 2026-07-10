@@ -15,19 +15,20 @@ from _migrate_catalog.types import MigrationFn, MigrationResult
 logger = logging.getLogger(__name__)
 
 
-def _transaction_body(item_dict: dict[str, Any]) -> dict[str, Any]:
-    """A transaction-valid POST body for a raw STAC-API item dict.
+def _transaction_body(item_dict: dict[str, Any]) -> dict[str, Any] | None:
+    """A transaction-valid POST body for a raw STAC-API item dict, or ``None`` if one can't be built.
 
     The GET/search representation omits nullable-but-required fields — notably
     ``properties.datetime`` on datacube items (null datetime) — which the transaction POST
-    rejects with 400. pystac re-materializes them (and preserves link order). Fall back to the
-    raw dict for items pystac can't model (e.g. an asset with no href), so such an item fails its
-    own POST in isolation rather than aborting the whole run.
+    rejects with 400. pystac re-materializes them (and preserves link order). Returns ``None`` for
+    items pystac can't model (e.g. an asset with no href): such an item can't be safely round-tripped
+    through the transaction API, so the caller must skip it WITHOUT deleting — a delete-then-failed
+    POST would lose the item.
     """
     try:
         return pystac.Item.from_dict(item_dict).to_dict()
     except Exception:
-        return item_dict
+        return None
 
 
 def compose_migrations(fns: list[MigrationFn]) -> MigrationFn:
@@ -130,8 +131,21 @@ class STACMigrationRunner:
                     elif dry_run:
                         result.items_modified += 1
                     else:
-                        self._update_item(collection_id, item_id, _transaction_body(modified))
-                        result.items_modified += 1
+                        body = _transaction_body(modified)
+                        if body is None:
+                            # Can't build a valid POST body — skip WITHOUT deleting (a
+                            # delete-then-failed-POST would lose the item).
+                            result.items_failed += 1
+                            result.errors.append(
+                                {
+                                    "item_id": item_id,
+                                    "error": "cannot build a transaction-valid POST body "
+                                    "(pystac can't model it); skipped without deleting",
+                                }
+                            )
+                        else:
+                            self._update_item(collection_id, item_id, body)
+                            result.items_modified += 1
                 except Exception as e:
                     result.items_failed += 1
                     result.errors.append({"item_id": item_id, "error": str(e)})
