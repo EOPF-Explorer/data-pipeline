@@ -133,11 +133,27 @@ def test_link_titles_and_order_match_cube_convention() -> None:
         _acq_item(), tile_id="31TCH", cube_collection=CUBE, raster_api=RASTER, stac_api_url=STAC
     )
     rels = [lk["rel"] for lk in d["links"]]
-    assert rels == ["store", "viewer", "tilejson", "xyz", "via", "related"]
+    # two related links (parent + sibling-collection filter) so STAC Browser groups the section
+    assert rels == ["store", "viewer", "tilejson", "xyz", "via", "related", "related"]
     by_rel = {lk["rel"]: lk for lk in d["links"]}
     assert by_rel["viewer"]["title"] == "VV, VH, VV/VH composite"
     assert by_rel["xyz"]["title"] == "VV, VH, VV/VH composite"
     assert by_rel["tilejson"]["title"] == "TileJSON for s1-rtc-31TCH-20260605t060907"
+
+
+def test_two_related_links_for_stac_browser_grouping() -> None:
+    """Acq items carry two related links — parent cube + sibling acquisitions collection — so a rel
+    group has >=2 entries and STAC Browser renders grouped 'Additional Resources' category headers."""
+    d = decorate_acquisition_item(
+        _acq_item(), tile_id="31TCH", cube_collection=CUBE, raster_api=RASTER, stac_api_url=STAC
+    )
+    related = [lk for lk in d["links"] if lk["rel"] == "related"]
+    assert len(related) == 2
+    titles = [lk["title"] for lk in related]
+    assert titles == ["Parent tile datacube", "Per-acquisition items (filter by tile grid:code)"]
+    filt = related[1]
+    assert filt["href"] == f"{STAC}/collections/{ACQ}"  # the sibling acquisitions collection
+    assert filt["type"] == "application/json"
 
 
 def test_thumbnail_via_and_store_link_kept() -> None:
@@ -154,8 +170,11 @@ def test_thumbnail_via_and_store_link_kept() -> None:
     assert links["via"].endswith(f"/collections/{ACQ}/items/s1-rtc-31TCH-20260605t060907")
     assert "store" in links  # the caller's cube store link is preserved
     assert "/WebMercatorQuad/map.html" in links["viewer"]  # map.html deep-link into this slice
-    # related link → the parent tile datacube STAC item (cube collection)
-    assert links["related"] == f"{STAC}/collections/{CUBE}/items/s1-rtc-31TCH"
+    # the parent related link → the parent tile datacube STAC item (cube collection)
+    parent = next(
+        lk for lk in d["links"] if lk["rel"] == "related" and lk["title"] == "Parent tile datacube"
+    )
+    assert parent["href"] == f"{STAC}/collections/{CUBE}/items/s1-rtc-31TCH"
 
 
 def test_no_orbit_leak() -> None:

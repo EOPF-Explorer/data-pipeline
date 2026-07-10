@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from _migrate_catalog.history import load_history, record_run, was_migration_run
+from _migrate_catalog.migrations.add_acquisitions_filter_link import add_acquisitions_filter_link
 from _migrate_catalog.migrations.add_xyz_link import add_xyz_link
 from _migrate_catalog.migrations.align_visualization_links import align_visualization_links
 from _migrate_catalog.migrations.fix_url_encoding import fix_url_encoding
@@ -432,6 +433,78 @@ class TestAlignVisualizationLinks:
         assert rels == ["store", "viewer", "tilejson", "xyz", "via", "related"]
         by_rel = {lk["rel"]: lk for lk in result["links"]}
         assert by_rel["xyz"]["title"] == "VV, VH, VV/VH composite"
+
+
+_FILTER_TITLE = "Per-acquisition items (filter by tile grid:code)"
+
+
+def _acq_item_no_filter() -> dict:
+    """An aligned acquisition item carrying only the single parent related link (no filter link)."""
+    stac = "https://api.example.com/stac"
+    acq_coll = "sentinel-1-grd-rtc-acquisitions-staging"
+    return {
+        "id": "s1-rtc-31TCG-20260701t175417",
+        "collection": acq_coll,
+        "properties": {"renders": {"rgb": {"title": "VV, VH, VV/VH composite"}}},
+        "links": [
+            {
+                "rel": "self",
+                "href": f"{stac}/collections/{acq_coll}/items/s1-rtc-31TCG-20260701t175417",
+            },
+            {"rel": "store", "title": "Zarr Store", "href": "https://x/z"},
+            {"rel": "viewer", "title": "VV, VH, VV/VH composite", "href": "https://x/v"},
+            {"rel": "tilejson", "title": "TileJSON for s1-rtc-...", "href": "https://x/t"},
+            {"rel": "xyz", "title": "VV, VH, VV/VH composite", "href": "https://x/xyz"},
+            {"rel": "via", "title": "EOPF Explorer", "href": "https://x/e"},
+            {
+                "rel": "related",
+                "type": "application/json",
+                "href": f"{stac}/collections/sentinel-1-grd-rtc-staging/items/s1-rtc-31TCG",
+                "title": "Parent tile datacube",
+            },
+        ],
+        "assets": {},
+    }
+
+
+class TestAddAcquisitionsFilterLink:
+    def test_adds_filter_link_after_parent(self):
+        result = add_acquisitions_filter_link(_acq_item_no_filter())
+        assert result is not None
+        related = [lk for lk in result["links"] if lk["rel"] == "related"]
+        assert [lk["title"] for lk in related] == ["Parent tile datacube", _FILTER_TITLE]
+
+    def test_filter_href_targets_the_acquisitions_collection(self):
+        result = add_acquisitions_filter_link(_acq_item_no_filter())
+        assert result is not None
+        filt = next(lk for lk in result["links"] if lk.get("title") == _FILTER_TITLE)
+        assert (
+            filt["href"]
+            == "https://api.example.com/stac/collections/sentinel-1-grd-rtc-acquisitions-staging"
+        )
+        assert filt["rel"] == "related"
+        assert filt["type"] == "application/json"
+
+    def test_now_two_related_links_triggers_grouping(self):
+        result = add_acquisitions_filter_link(_acq_item_no_filter())
+        assert result is not None
+        assert sum(1 for lk in result["links"] if lk["rel"] == "related") == 2
+
+    def test_idempotent(self):
+        result1 = add_acquisitions_filter_link(_acq_item_no_filter())
+        assert result1 is not None
+        assert add_acquisitions_filter_link(result1) is None
+
+    def test_skips_non_acquisition_item(self):
+        # No "Parent tile datacube" related link (e.g. a cube or S2 item) → not an acq item → skip.
+        item = _canonical_cube_item()
+        assert add_acquisitions_filter_link(item) is None
+
+    def test_does_not_mutate_input(self):
+        item = _acq_item_no_filter()
+        before = len(item["links"])
+        add_acquisitions_filter_link(item)
+        assert len(item["links"]) == before
 
 
 def _make_mock_search(items_dicts: list, total: int | None = None) -> MagicMock:

@@ -114,9 +114,11 @@ def decorate_acquisition_item(
     ``sel=time={datetime}`` — no data duplication; the acquisition item is a reference into the cube,
     and the render stays slice-correct regardless of the cube's physical slice order. The ``viewer``
     link is a ``map.html`` deep-link into this acquisition's slice (``sel=time`` makes that possible).
-    A ``related`` link points at this acquisition's parent **tile datacube** STAC item
-    (``stac_api_url``/collections/``cube_collection``/items/``s1-rtc-{tile}``) for browser navigation.
-    Any ``store`` link / S3 ``alternate`` blocks the caller already added are preserved.
+    Two ``related`` links are added: the parent **tile datacube** STAC item
+    (``stac_api_url``/collections/``cube_collection``/items/``s1-rtc-{tile}``) and the sibling
+    **acquisitions collection** ("Per-acquisition items (filter by tile grid:code)"). Two links on
+    one rel is what makes STAC Browser render the grouped "Additional Resources" section (category
+    headers) rather than a flat list. Any ``store`` link / S3 ``alternate`` blocks are preserved.
     """
     when = item.datetime
     if when is None:  # per-acquisition items always carry a single datetime
@@ -163,6 +165,16 @@ def decorate_acquisition_item(
             "type": "application/json",
             "href": f"{stac_api_url.rstrip('/')}/collections/{cube_collection}/items/s1-rtc-{tile_id}",
             "title": "Parent tile datacube",
+        },
+        # Second related link (mirrors register_v1_s1_rtc on the cube): points at the sibling
+        # acquisitions collection. Two related links give STAC Browser a rel group with >=2 entries,
+        # which is what flips its LinkList to the grouped "Additional Resources" rendering (category
+        # headers) instead of a flat list.
+        {
+            "rel": "related",
+            "type": "application/json",
+            "href": f"{stac_api_url.rstrip('/')}/collections/{collection}",
+            "title": "Per-acquisition items (filter by tile grid:code)",
         },
     ]
     d.setdefault("assets", {})["thumbnail"] = {

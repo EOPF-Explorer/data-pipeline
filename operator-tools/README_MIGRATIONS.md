@@ -15,6 +15,7 @@ is shown when the API supports `numberMatched`.
 | `fix_zarr_media_type` | Fix zarr media types (`vnd+zarr` → `vnd.zarr`, `version=2` → `version=3`, add missing `version=3`) and remove `zipped_product` asset |
 | `add_xyz_link` | Add a `rel=xyz` `{z}/{x}/{y}.png` tile template after the `tilejson` link (derived from the tilejson href). Idempotent + S2-safe; skips the known-legacy items whose tilejson is a bare `.../WebMercatorQuad` href. |
 | `align_visualization_links` | Align viewer/tilejson/xyz link titles + order to the canonical cube form (render title for viewer/xyz, `TileJSON for {id}`, order store→viewer→tilejson→xyz). No-op on already-canonical cube items and on S2 (no render config). Compose with `add_xyz_link` to backfill the xyz link too. |
+| `add_acquisitions_filter_link` | Add the sibling-collection `Per-acquisition items (filter by tile grid:code)` related link to acquisition items, giving `related` ≥2 entries so STAC Browser renders the grouped "Additional Resources" categories. Scoped to acquisition items (identified by their `Parent tile datacube` link); no-op on cube/S2. |
 
 ## Safe Migration Procedure
 
