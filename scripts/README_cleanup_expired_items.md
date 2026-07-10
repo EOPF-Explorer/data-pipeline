@@ -62,8 +62,12 @@ s3_objects_deleted, s3_objects_failed, s3_remaining, stac_deleted, status
 `status` is one of: `dry_run`, `deleted`, `s3_validation_failed`,
 `auth_required` (STAC DELETE returned 401/403 — expected once the
 stac-auth-proxy enforcement lands; wire the bearer in `_session()`),
-`no_expires`, `not_expired`, `excluded`, `wrong_bucket`. Exit code is `1` if any
-item failed.
+`already_gone` (re-fetch got 404 — already deleted, idempotent success),
+`refetch_failed` (re-fetch errored — the item is skipped rather than acted on
+with stale data), `no_expires`, `not_expired`, `excluded`, `wrong_bucket`.
+
+Exit code is `1` if any item ended in `s3_validation_failed`, `auth_required`,
+`refetch_failed`, or a `stac_delete_http_*` status. `already_gone` is a success.
 
 ## Notes on the discovery query (verified live 2026-07-10)
 

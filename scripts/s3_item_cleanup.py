@@ -15,7 +15,9 @@ Behaviour preserved from the original:
 """
 
 import logging
+import os
 from collections import defaultdict
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
 
@@ -31,8 +33,48 @@ DEFAULT_RETENTION_DAYS = 183
 # register-time stamp and the backfill migration so both declare the same URL.
 TIMESTAMPS_EXTENSION = "https://stac-extensions.github.io/timestamps/v1.1.0/schema.json"
 
+# Canonical rendering of properties.expires. LOAD-BEARING: pgstac compares
+# `expires` as a JSONB string, so string ordering must equal chronological
+# ordering. A single zero-padded UTC "Z" format guarantees that. Every producer
+# (register, backfill) and the cleanup discovery query MUST use this one format
+# — do not introduce a second one (coordination#183, verified live 2026-07-10).
+EXPIRES_TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
 # S3 delete_objects accepts at most 1000 keys per call; we stay well under.
 BATCH_SIZE = 200
+
+
+def format_expires(dt: datetime) -> str:
+    """Render a datetime as the canonical STAC ``expires`` timestamp."""
+    return dt.strftime(EXPIRES_TS_FORMAT)
+
+
+def parse_stac_timestamp(value: str) -> datetime:
+    """Parse a STAC RFC3339 timestamp (``Z`` or ``+00:00``) to aware UTC."""
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+
+
+def env_int(name: str, default: int) -> int:
+    """Read an int env var. Unset **or empty** returns ``default`` — an empty
+    value in a manifest (e.g. ``EXPIRES_RETENTION_DAYS: ""``) must not crash the
+    caller. ``"0"`` is honoured as 0."""
+    value = os.getenv(name)
+    return int(value) if value else default
+
+
+def load_exclude_ids(path: str | None) -> set[str]:
+    """Read a newline-delimited item-ID denylist. Blank lines and ``#`` comments
+    are ignored. Shared by the cleanup script (``--exclude-file``) and the
+    backfill migration (``EXPIRES_EXCLUDE_FILE``) so the format cannot drift."""
+    if not path:
+        return set()
+    ids: set[str] = set()
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                ids.add(stripped)
+    return ids
 
 
 def extract_s3_urls_from_item(item_dict: dict) -> set[str]:

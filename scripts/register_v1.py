@@ -16,7 +16,12 @@ import zarr
 from pystac import Asset, Item, Link
 from pystac.extensions.projection import ProjectionExtension
 from pystac_client import Client
-from s3_item_cleanup import DEFAULT_RETENTION_DAYS, TIMESTAMPS_EXTENSION
+from s3_item_cleanup import (
+    DEFAULT_RETENTION_DAYS,
+    TIMESTAMPS_EXTENSION,
+    env_int,
+    format_expires,
+)
 from storage_tier_utils import extract_region_from_endpoint, get_s3_storage_class
 
 # Configure logging (set LOG_LEVEL=DEBUG for verbose output)
@@ -346,10 +351,10 @@ def add_derived_from_link(item: Item, source_url: str) -> None:
 def resolve_retention_days() -> int:
     """Retention window (days) from EXPIRES_RETENTION_DAYS, default 183.
 
-    ``0`` disables expiry stamping (for manual/demo registrations). See
-    coordination#183.
+    ``0`` disables expiry stamping (for manual/demo registrations). An unset or
+    empty value falls back to the default. See coordination#183.
     """
-    return int(os.getenv("EXPIRES_RETENTION_DAYS", str(DEFAULT_RETENTION_DAYS)))
+    return env_int("EXPIRES_RETENTION_DAYS", DEFAULT_RETENTION_DAYS)
 
 
 def add_expires(item: Item, retention_days: int) -> None:
@@ -363,7 +368,7 @@ def add_expires(item: Item, retention_days: int) -> None:
         return
 
     expires = datetime.now(UTC) + timedelta(days=retention_days)
-    item.properties["expires"] = expires.strftime("%Y-%m-%dT%H:%M:%SZ")
+    item.properties["expires"] = format_expires(expires)
 
     if not hasattr(item, "stac_extensions"):
         item.stac_extensions = []

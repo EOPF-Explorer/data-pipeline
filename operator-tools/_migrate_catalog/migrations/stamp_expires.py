@@ -29,24 +29,30 @@ import logging
 import os
 import sys
 from collections import Counter
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
 from _migrate_catalog.migrations._registry import migration
 
-# scripts/ (baked into the pipeline image) is the single source for the
-# retention constant and the timestamps extension URL. operator-tools/ is not on
-# the path at runtime, so bootstrap it the way manage_item.py does.
+# scripts/ (baked into the pipeline image) is the single source for the retention
+# constant, the timestamps extension URL, and the expires timestamp helpers.
+# operator-tools/ is not on the path at runtime, so bootstrap it like
+# manage_item.py does.
 _scripts_dir = Path(__file__).resolve().parents[3] / "scripts"
 if str(_scripts_dir) not in sys.path:
     sys.path.insert(0, str(_scripts_dir))
 
-from s3_item_cleanup import DEFAULT_RETENTION_DAYS, TIMESTAMPS_EXTENSION  # noqa: E402
+from s3_item_cleanup import (  # noqa: E402
+    DEFAULT_RETENTION_DAYS,
+    TIMESTAMPS_EXTENSION,
+    env_int,
+    format_expires,
+    load_exclude_ids,
+    parse_stac_timestamp,
+)
 
 logger = logging.getLogger(__name__)
-
-ISO_Z = "%Y-%m-%dT%H:%M:%SZ"
 
 # Outcome histogram (reason -> count), including "stamped". A dry-run's totals
 # are the histogram the team reviews. Reset with reset_histogram().
@@ -55,25 +61,6 @@ SKIP_HISTOGRAM: Counter[str] = Counter()
 
 def reset_histogram() -> None:
     SKIP_HISTOGRAM.clear()
-
-
-def _parse(value: str) -> datetime:
-    """Parse a STAC RFC3339 timestamp (``Z`` or ``+00:00``) to aware UTC."""
-    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
-
-
-def _load_exclude_ids(path: str | None) -> set[str]:
-    """Newline-delimited item-ID denylist; blank lines and ``#`` comments
-    ignored. Same format as the cleanup script's ``--exclude-file``."""
-    if not path:
-        return set()
-    ids: set[str] = set()
-    with open(path, encoding="utf-8") as fh:
-        for line in fh:
-            stripped = line.strip()
-            if stripped and not stripped.startswith("#"):
-                ids.add(stripped)
-    return ids
 
 
 def classify_and_stamp(
@@ -102,13 +89,13 @@ def classify_and_stamp(
     if gap_threshold_days is not None:
         acquired = props.get("datetime")
         if acquired:
-            gap_days = (_parse(created) - _parse(acquired)).days
+            gap_days = (parse_stac_timestamp(created) - parse_stac_timestamp(acquired)).days
             if gap_days > gap_threshold_days:
                 return None, "demo_gap"
 
-    expires = _parse(created) + timedelta(days=retention_days)
+    expires = parse_stac_timestamp(created) + timedelta(days=retention_days)
     result = copy.deepcopy(item)
-    result.setdefault("properties", {})["expires"] = expires.strftime(ISO_Z)
+    result.setdefault("properties", {})["expires"] = format_expires(expires)
     extensions = result.setdefault("stac_extensions", [])
     if TIMESTAMPS_EXTENSION not in extensions:
         extensions.append(TIMESTAMPS_EXTENSION)
@@ -116,8 +103,8 @@ def classify_and_stamp(
 
 
 def _resolve_config() -> tuple[int, set[str], int | None]:
-    retention_days = int(os.getenv("EXPIRES_RETENTION_DAYS", str(DEFAULT_RETENTION_DAYS)))
-    exclude_ids = _load_exclude_ids(os.getenv("EXPIRES_EXCLUDE_FILE"))
+    retention_days = env_int("EXPIRES_RETENTION_DAYS", DEFAULT_RETENTION_DAYS)
+    exclude_ids = load_exclude_ids(os.getenv("EXPIRES_EXCLUDE_FILE"))
     gap_env = os.getenv("EXPIRES_DEMO_GAP_DAYS")
     gap_threshold_days = int(gap_env) if gap_env else None
     return retention_days, exclude_ids, gap_threshold_days

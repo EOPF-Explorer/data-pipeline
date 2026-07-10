@@ -197,3 +197,10 @@ class TestResolveRetentionDays:
     def test_zero_disables(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("EXPIRES_RETENTION_DAYS", "0")
         assert resolve_retention_days() == 0
+
+    def test_empty_env_falls_back_to_default_not_crash(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # An empty value in a manifest must not crash the registration hot path.
+        monkeypatch.setenv("EXPIRES_RETENTION_DAYS", "")
+        assert resolve_retention_days() == 183

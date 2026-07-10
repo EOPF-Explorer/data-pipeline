@@ -37,6 +37,9 @@ from s3_item_cleanup import (
     count_s3_objects_for_item,
     delete_s3_objects_for_item,
     extract_s3_urls_from_item,
+    format_expires,
+    load_exclude_ids,
+    parse_stac_timestamp,
 )
 
 logging.basicConfig(
@@ -49,16 +52,14 @@ for lib in ["botocore", "s3fs", "aiobotocore", "urllib3", "httpx", "httpcore"]:
 
 DEFAULT_ALLOWED_BUCKET = "esa-zarr-sentinel-explorer-fra"
 DEFAULT_MAX_ITEMS = 100
-ISO_Z = "%Y-%m-%dT%H:%M:%SZ"
+
+# Per-item statuses that make the run exit non-zero. `already_gone` is NOT here
+# (idempotent success); `stac_delete_http_*` is matched separately by prefix.
+FAILURE_STATUSES = frozenset({"s3_validation_failed", "auth_required", "refetch_failed"})
 
 
 def _now() -> datetime:
     return datetime.now(UTC)
-
-
-def _parse_expires(value: str) -> datetime:
-    """Parse a STAC RFC3339 timestamp (``Z`` or ``+00:00``) to aware UTC."""
-    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
 
 
 def build_search_kwargs(collection: str, now: datetime, max_items: int) -> dict[str, Any]:
@@ -69,25 +70,11 @@ def build_search_kwargs(collection: str, now: datetime, max_items: int) -> dict[
         "filter_lang": "cql2-json",
         "filter": {
             "op": "<",
-            "args": [{"property": "expires"}, now.strftime(ISO_Z)],
+            "args": [{"property": "expires"}, format_expires(now)],
         },
         "sortby": "+properties.expires",
         "max_items": max_items,
     }
-
-
-def load_exclude_ids(path: str | None) -> set[str]:
-    """Read a newline-delimited item-ID denylist. Blank lines and ``#``
-    comments are ignored."""
-    if not path:
-        return set()
-    ids: set[str] = set()
-    with open(path, encoding="utf-8") as fh:
-        for line in fh:
-            stripped = line.strip()
-            if stripped and not stripped.startswith("#"):
-                ids.add(stripped)
-    return ids
 
 
 def evaluate_guards(
@@ -105,7 +92,7 @@ def evaluate_guards(
     expires = item.get("properties", {}).get("expires")
     if not expires:
         return False, "no_expires"
-    if _parse_expires(expires) >= now:
+    if parse_stac_timestamp(expires) >= now:
         return False, "not_expired"
     if item.get("id") in exclude_ids:
         return False, "excluded"
@@ -118,7 +105,7 @@ def evaluate_guards(
 def _audit(item: dict[str, Any], dry_run: bool, status: str, **fields: Any) -> dict[str, Any]:
     """Build one audit record with a stable field set."""
     record = {
-        "ts": _now().strftime(ISO_Z),
+        "ts": format_expires(_now()),
         "event": "cleanup_item",
         "dry_run": dry_run,
         "collection": item.get("collection"),
@@ -256,28 +243,34 @@ def run_cleanup(args: argparse.Namespace) -> int:
     failures = 0
     processed = 0
     for stale in search.items_as_dicts():
-        # Re-fetch fresh: the search index can lag the catalogue.
-        fresh = _fetch_item(session, stac_base_url, args.collection, stale["id"]) or stale
-        record = process_item(
-            fresh,
-            now=now,
-            exclude_ids=exclude_ids,
-            allowed_bucket=args.allowed_bucket,
-            s3_client=s3_client,
-            session=session,
-            stac_base_url=stac_base_url,
-            dry_run=dry_run,
-        )
+        # Re-fetch fresh: the search index can lag the catalogue. On any fetch
+        # problem we must NOT fall back to the stale snapshot for a destructive
+        # delete — a 404 means the item is already gone (idempotent success),
+        # and a transient error means we can't safely act, so we skip and flag.
+        fresh, outcome = _fetch_item(session, stac_base_url, args.collection, stale["id"])
+        if outcome == "gone":
+            record = _audit(stale, dry_run, "already_gone")
+        elif outcome != "ok" or fresh is None:
+            record = _audit(stale, dry_run, "refetch_failed")
+        else:
+            record = process_item(
+                fresh,
+                now=now,
+                exclude_ids=exclude_ids,
+                allowed_bucket=args.allowed_bucket,
+                s3_client=s3_client,
+                session=session,
+                stac_base_url=stac_base_url,
+                dry_run=dry_run,
+            )
         print(json.dumps(record), flush=True)
         counts[record["status"]] = counts.get(record["status"], 0) + 1
         processed += 1
-        if record["status"] in ("s3_validation_failed", "auth_required") or record[
-            "status"
-        ].startswith("stac_delete_http_"):
+        if record["status"] in FAILURE_STATUSES or record["status"].startswith("stac_delete_http_"):
             failures += 1
 
     summary = {
-        "ts": _now().strftime(ISO_Z),
+        "ts": format_expires(_now()),
         "event": "cleanup_summary",
         "dry_run": dry_run,
         "collection": args.collection,
@@ -294,16 +287,25 @@ def _fetch_item(
     stac_base_url: str,
     collection: str,
     item_id: str,
-) -> dict[str, Any] | None:
+) -> tuple[dict[str, Any] | None, str]:
+    """Re-fetch one item. Returns (item, outcome):
+    - ("ok"): fresh item retrieved
+    - ("gone"): 404 — already deleted from the catalogue (idempotent success)
+    - ("error"): any other status or transport error — caller must skip, not
+      act on stale data
+    """
     url = f"{stac_base_url.rstrip('/')}/collections/{collection}/items/{item_id}"
     try:
         resp = session.get(url, timeout=30)
         if resp.status_code == 200:
             result: dict[str, Any] = resp.json()
-            return result
+            return result, "ok"
+        if resp.status_code == 404:
+            return None, "gone"
+        logger.warning("Re-fetch of %s returned HTTP %d", item_id, resp.status_code)
     except requests.RequestException as exc:
         logger.warning("Re-fetch failed for %s: %s", item_id, exc)
-    return None
+    return None, "error"
 
 
 def main(argv: list[str] | None = None) -> int:

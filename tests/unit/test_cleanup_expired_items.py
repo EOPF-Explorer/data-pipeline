@@ -10,14 +10,15 @@ boto3 and the STAC session are mocked — no network.
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import pytest
 from cleanup_expired_items import (
     build_search_kwargs,
     evaluate_guards,
-    load_exclude_ids,
     process_item,
+    run_cleanup,
 )
 
 BUCKET = "esa-zarr-sentinel-explorer-fra"
@@ -115,19 +116,6 @@ def test_guard_refuses_asset_outside_allowed_bucket(wrong_bucket_item: dict) -> 
     )
     assert ok is False
     assert reason == "wrong_bucket"
-
-
-# === load_exclude_ids ===
-
-
-def test_load_exclude_ids_none_is_empty() -> None:
-    assert load_exclude_ids(None) == set()
-
-
-def test_load_exclude_ids_reads_newline_ids(tmp_path: Path) -> None:
-    f = tmp_path / "exclude.txt"
-    f.write_text("item-a\n# a comment\n\nitem-b\n")
-    assert load_exclude_ids(str(f)) == {"item-a", "item-b"}
 
 
 # === process_item: dry-run is the default behaviour ===
@@ -302,3 +290,105 @@ def test_audit_record_is_json_serialisable(expired_item: dict) -> None:
     )
     line = json.dumps(rec)
     assert json.loads(line)["item_id"] == "S2_expired_item"
+
+
+# === run_cleanup orchestration (review finding 2) ===
+
+
+def _args(execute: bool = False, max_items: int = 100) -> SimpleNamespace:
+    return SimpleNamespace(
+        stac_api_url="https://stac.example.com",
+        collection="sentinel-2-l2a-staging",
+        s3_endpoint=None,
+        allowed_bucket=BUCKET,
+        max_items=max_items,
+        exclude_file=None,
+        execute=execute,
+    )
+
+
+def _run_with(
+    stale_items, *, get_status, get_body=None, s3=None, session_delete=200, execute=False
+):
+    """Drive run_cleanup with a mocked STAC client / HTTP session / S3 client.
+
+    get_status: HTTP status the re-fetch GET returns.
+    get_body:   JSON body for a 200 re-fetch (defaults to the stale item).
+    """
+    client = MagicMock()
+    client.self_href = "https://stac.example.com"
+    client.search.return_value.items_as_dicts.return_value = iter(stale_items)
+
+    session = MagicMock()
+
+    def _get(url, timeout=30):
+        resp = MagicMock()
+        resp.status_code = get_status
+        resp.json.return_value = get_body if get_body is not None else stale_items[0]
+        return resp
+
+    session.get.side_effect = _get
+    session.delete.return_value = MagicMock(status_code=session_delete)
+
+    s3 = s3 or MagicMock()
+
+    with (
+        patch("cleanup_expired_items.Client.open", return_value=client),
+        patch("cleanup_expired_items._session", return_value=session),
+        patch("cleanup_expired_items._s3_client", return_value=s3),
+    ):
+        code = run_cleanup(_args(execute=execute))
+    return code, session, s3
+
+
+def _capture_lines(capsys) -> list[dict]:
+    out = capsys.readouterr().out.strip().splitlines()
+    return [json.loads(line) for line in out]  # every line MUST be JSON
+
+
+def test_run_cleanup_dry_run_emits_json_and_makes_no_deletes(expired_item, capsys) -> None:
+    s3 = MagicMock()
+    s3.get_paginator.return_value = _paginator([["a", "b"]])  # dry-run counts only
+
+    code, session, s3 = _run_with([expired_item], get_status=200, s3=s3, execute=False)
+
+    records = _capture_lines(capsys)
+    assert code == 0
+    assert [r["event"] for r in records] == ["cleanup_item", "cleanup_summary"]
+    assert records[0]["status"] == "dry_run"
+    s3.delete_objects.assert_not_called()
+    session.delete.assert_not_called()
+
+
+def test_run_cleanup_execute_validation_failure_exits_1(expired_item, capsys) -> None:
+    s3 = MagicMock()
+    s3.get_paginator.return_value = _paginator([["a", "b"]])
+    s3.delete_objects.return_value = {
+        "Deleted": [],
+        "Errors": [{"Key": "a", "Code": "AccessDenied"}],
+    }
+
+    code, session, _ = _run_with([expired_item], get_status=200, s3=s3, execute=True)
+
+    records = _capture_lines(capsys)
+    assert code == 1
+    assert records[0]["status"] == "s3_validation_failed"
+    session.delete.assert_not_called()  # STAC item retained
+
+
+def test_run_cleanup_refetch_404_is_already_gone_not_a_failure(expired_item, capsys) -> None:
+    code, _, s3 = _run_with([expired_item], get_status=404, execute=True)
+
+    records = _capture_lines(capsys)
+    assert code == 0  # idempotent success
+    assert records[0]["status"] == "already_gone"
+    s3.delete_objects.assert_not_called()  # never acted on stale data
+
+
+def test_run_cleanup_refetch_error_skips_and_exits_1(expired_item, capsys) -> None:
+    code, _, s3 = _run_with([expired_item], get_status=500, execute=True)
+
+    records = _capture_lines(capsys)
+    assert code == 1
+    assert records[0]["status"] == "refetch_failed"
+    s3.delete_objects.assert_not_called()  # did NOT fall back to stale + delete

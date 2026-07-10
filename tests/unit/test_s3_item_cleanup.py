@@ -180,3 +180,72 @@ def test_count_returns_zero_when_head_object_missing() -> None:
     count = count_s3_objects_for_item(client, {f"s3://{BUCKET}/item/gone.tif"})
 
     assert count == 0
+
+
+# === Shared expires helpers (Task 1 consolidation, review findings 4/5/6) ===
+
+from datetime import UTC, datetime  # noqa: E402
+
+from s3_item_cleanup import (  # noqa: E402
+    EXPIRES_TS_FORMAT,
+    env_int,
+    format_expires,
+    load_exclude_ids,
+    parse_stac_timestamp,
+)
+
+
+class TestTimestampHelpers:
+    def test_format_expires_is_zero_padded_utc_z(self) -> None:
+        assert format_expires(datetime(2025, 1, 2, 3, 4, 5, tzinfo=UTC)) == "2025-01-02T03:04:05Z"
+
+    def test_parse_round_trips_the_canonical_format(self) -> None:
+        dt = datetime(2025, 7, 10, 12, 30, 0, tzinfo=UTC)
+        assert parse_stac_timestamp(format_expires(dt)) == dt
+
+    def test_parse_accepts_offset_form(self) -> None:
+        assert parse_stac_timestamp("2025-01-01T00:00:00+00:00") == datetime(2025, 1, 1, tzinfo=UTC)
+
+    def test_canonical_format_constant_is_stable(self) -> None:
+        # Load-bearing: pgstac string-compares expires, so this must not change.
+        assert EXPIRES_TS_FORMAT == "%Y-%m-%dT%H:%M:%SZ"
+
+
+class TestEnvInt:
+    def test_unset_returns_default(self, monkeypatch: object) -> None:
+        monkeypatch.delenv("X_ENVINT_PROBE", raising=False)  # type: ignore[attr-defined]
+        assert env_int("X_ENVINT_PROBE", 183) == 183
+
+    def test_empty_string_returns_default(self, monkeypatch: object) -> None:
+        monkeypatch.setenv("X_ENVINT_PROBE", "")  # type: ignore[attr-defined]
+        assert env_int("X_ENVINT_PROBE", 183) == 183
+
+    def test_zero_is_honoured(self, monkeypatch: object) -> None:
+        monkeypatch.setenv("X_ENVINT_PROBE", "0")  # type: ignore[attr-defined]
+        assert env_int("X_ENVINT_PROBE", 183) == 0
+
+    def test_value_is_parsed(self, monkeypatch: object) -> None:
+        monkeypatch.setenv("X_ENVINT_PROBE", "30")  # type: ignore[attr-defined]
+        assert env_int("X_ENVINT_PROBE", 183) == 30
+
+
+class TestLoadExcludeIds:
+    def test_none_is_empty(self) -> None:
+        assert load_exclude_ids(None) == set()
+
+    def test_reads_newline_ids_ignoring_comments_and_blanks(self, tmp_path: Path) -> None:
+        f = tmp_path / "exclude.txt"
+        f.write_text("item-a\n# a comment\n\nitem-b\n")
+        assert load_exclude_ids(str(f)) == {"item-a", "item-b"}
+
+
+def test_consumers_share_one_format_helper() -> None:
+    """Regression guard for the load-bearing format: register and cleanup must
+    use the shared helper, not a private copy (review finding 4)."""
+    import cleanup_expired_items
+    import register_v1
+    import s3_item_cleanup
+
+    assert register_v1.format_expires is s3_item_cleanup.format_expires
+    assert cleanup_expired_items.format_expires is s3_item_cleanup.format_expires
+    assert cleanup_expired_items.parse_stac_timestamp is s3_item_cleanup.parse_stac_timestamp
