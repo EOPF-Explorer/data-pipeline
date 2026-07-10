@@ -13,6 +13,56 @@ is shown when the API supports `numberMatched`.
 |---|---|
 | `fix_url_encoding` | Replace `+` with `%20` in asset/link href query strings (RFC 3986 compliance) |
 | `fix_zarr_media_type` | Fix zarr media types (`vnd+zarr` → `vnd.zarr`, `version=2` → `version=3`, add missing `version=3`) and remove `zipped_product` asset |
+| `stamp_expires` | Backfill `properties.expires = created + retention` (timestamps ext); skips already-stamped, excluded, and (optionally) large `created − datetime` gaps. See [stamp_expires](#stamp_expires-backfill-retention-expiry) below |
+
+## `stamp_expires` (backfill retention expiry)
+
+Backfills `properties.expires` onto existing items so the cleanup cron can drain
+them ([coordination#183](https://github.com/EOPF-Explorer/coordination/issues/183)).
+New items are stamped at registration; this migration covers the pre-existing
+catalogue. Companion doc: [scripts/README_cleanup_expired_items.md](../scripts/README_cleanup_expired_items.md).
+
+**Rule**: `expires = created + retention` (default 183 days, from
+`s3_item_cleanup.DEFAULT_RETENTION_DAYS`), plus the timestamps extension URL.
+Strict by design — items older than the window become immediately past-expiry,
+so the first cleanup runs drain a backlog (bounded by the cron's `--max-items`).
+
+**Configuration (environment):**
+
+| Env | Default | Effect |
+|---|---|---|
+| `EXPIRES_RETENTION_DAYS` | `183` | Retention window added to `created` |
+| `EXPIRES_EXCLUDE_FILE` | (unset) | Newline-delimited item-ID denylist, never stamped (`#` comments ok) |
+| `EXPIRES_DEMO_GAP_DAYS` | (unset) | If set, skip items whose `created − datetime` gap exceeds this many days (`demo_gap`) |
+
+**Demo-data protection is layered:**
+
+- **Primary — the exclude file.** Enumerate demo item IDs (e.g. the 2021 scenes)
+  in `EXPIRES_EXCLUDE_FILE`. They are never stamped, so they carry no `expires`
+  and are structurally undeletable.
+- **Secondary — the gap heuristic (disabled by default).** A large
+  `created − datetime` gap *can* indicate manually-ingested demo data — but
+  bulk catalogue-conversion campaigns also produce large gaps, so a naive
+  threshold would leave exactly the oldest, most-bloating data unstamped
+  forever. **Do not assume a threshold.** Run a dry-run first, read the outcome
+  histogram (logged per item + tallied), then either enumerate demo items in the
+  exclude file (preferred) or set `EXPIRES_DEMO_GAP_DAYS` from the data.
+
+**⚠️ Pre-run check (open question): does `properties.created` survive the
+DELETE-then-POST round-trip?** The framework deletes and re-POSTs each item;
+pgstac may re-stamp `created` server-side. Before a real backfill, migrate one
+staging item and confirm `created` is unchanged — the whole rule depends on it.
+If it is re-stamped, preserve the original `created` in the POST body.
+
+```bash
+# Dry-run: review the skip-reason / stamped histogram in the logs first.
+uv run operator-tools/migrate_catalog.py run --migration stamp_expires \
+  sentinel-2-l2a-staging --dry-run
+
+# Confirm coverage afterwards (exits 1 while unstamped items remain).
+uv run operator-tools/migrate_catalog.py verify --migration stamp_expires \
+  sentinel-2-l2a-staging
+```
 
 ## Safe Migration Procedure
 
