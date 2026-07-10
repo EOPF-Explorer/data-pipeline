@@ -215,8 +215,28 @@ class TestVisualizationFromRenders:
             assert "0.1" in link.href
         # the human viewer is the interactive map.html, not a raw {z}/{x}/{y} tile template
         assert "/WebMercatorQuad/map.html" in viewer.href
-        assert not any("{z}/{x}/{y}" in link.href for link in item.links)
+        # the sole raw {z}/{x}/{y} tile template is the machine-facing rel=xyz link
+        xyz_links = [link for link in item.links if "{z}/{x}/{y}" in link.href]
+        assert [link.rel for link in xyz_links] == ["xyz"]
         assert "tilejson.json" in tilejson.href
+
+    def test_xyz_tile_template_from_render(self):
+        item = _real_item(_s1_rgb_renders())
+        add_visualization_links(item, RASTER_BASE, "sentinel-1-grd-rtc-staging")
+
+        xyz = [link for link in item.links if link.rel == "xyz"]
+        assert len(xyz) == 1
+        xyz = xyz[0]
+        # raw XYZ tile template for machine map clients (QGIS/Leaflet/OpenLayers)
+        assert "/tiles/WebMercatorQuad/{z}/{x}/{y}.png?" in xyz.href
+        assert xyz.media_type == "image/png"
+        assert xyz.title == "VV, VH, VV/VH composite"
+        # query is byte-identical to the tilejson link's query
+        tilejson = next(link for link in item.links if link.rel == "tilejson")
+        assert xyz.href.split("?", 1)[1] == tilejson.href.split("?", 1)[1]
+        # ordered immediately after tilejson
+        rels = [link.rel for link in item.links]
+        assert rels.index("xyz") == rels.index("tilejson") + 1
 
     def test_thumbnail_uses_render_expression(self):
         item = _real_item(_s1_rgb_renders())
@@ -233,6 +253,17 @@ class TestVisualizationFromRenders:
         add_thumbnail_asset(item, RASTER_BASE, "sentinel-1-grd-rtc-staging")
         # legacy VH grayscale path still applies when no render config present
         assert "thumbnail" in item.assets
+
+    def test_s2_fallback_xyz_unchanged(self):
+        # No-renders S2 item must keep the legacy hardcoded true-color xyz template
+        # untouched (no-regression guarantee for the deliberate reversal on S1).
+        item = _real_item()  # no renders property
+        add_visualization_links(item, RASTER_BASE, "sentinel-2-l2a")
+        xyz = next(link for link in item.links if link.rel == "xyz")
+        assert "/tiles/WebMercatorQuad/{z}/{x}/{y}.png?" in xyz.href
+        assert xyz.media_type == "image/png"
+        assert xyz.title == "Sentinel-2 L2A True Color"
+        assert "color_formula=" in xyz.href
 
 
 _SEL = "2026-06-07T05:52:48"
@@ -253,6 +284,12 @@ class TestSelTimePinsSlice:
         for rel in ("viewer", "tilejson"):
             link = next(link for link in item.links if link.rel == rel)
             assert _SEL_Q in link.href
+
+    def test_xyz_carries_sel_time(self):
+        item = _real_item(_s1_rgb_renders())
+        add_visualization_links(item, RASTER_BASE, "sentinel-1-grd-rtc-staging", sel_time=_SEL)
+        xyz = next(link for link in item.links if link.rel == "xyz")
+        assert _SEL_Q in xyz.href
 
     def test_no_sel_time_by_default_backcompat(self):
         # sel_time omitted (S2 + any other caller) => links/thumbnail unchanged, no sel.
