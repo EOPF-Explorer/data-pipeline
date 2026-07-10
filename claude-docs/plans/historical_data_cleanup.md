@@ -117,12 +117,14 @@ data-pipeline PR-A(T1..T5) → release image vX → platform PR(T6) → gates �
 ## Open questions
 
 1. 183 days vs calendar 6 months (`relativedelta`) — assume 183d unless team objects. (owner: team)
-2. **Does `properties.created` survive migrate_catalog's DELETE-then-POST?** pgstac may re-stamp — spot-check one staging item before T9; if re-stamped, preserve original `created` in POST body and confirm honored. (owner: implementer; blocks T9)
+2. ✅ **RESOLVED 2026-07-10 — `properties.created` SURVIVES.** Live probe on `sentinel-2-l2a-staging`: an item POSTed with `created=2019-03-15` kept that value both on the initial POST and after a full DELETE-then-POST round-trip. pgstac honors the body's `created`; the migration needs no special handling. (was: blocks T9)
 3. Demo-protection rule — exclude list primary; heuristic threshold vs pipeline-era `created` cutoff decided from the T4 dry-run skip histogram (bulk-conversion items must NOT be left unstamped). (owner: team; blocks T9)
 4. Prod `max_items_per_run` + `activeDeadlineSeconds` — sized from T7 measured wall-time and drain-rate math. (owner: team)
 5. S3 bucket versioning on `esa-zarr-sentinel-explorer-fra` as delete-reversibility backstop — decide before T10 (issue #183 prerequisite). (owner: platform)
-6. **Is `expires` a pgstac queryable on this deployment?** If rejected/ignored, add to eoapi queryables config (platform-deploy prerequisite for T6). (owner: implementer; verified at first T3 live dry-run)
-7. **Can `geozarr-s3-credentials` DeleteObject on the S2 bucket — or should the cleanup cron get a scoped credential?** (owner: platform; blocks T7 real-delete test)
+6. ✅ **RESOLVED 2026-07-10 — `expires` is filterable; no eoapi config change needed.** Verified through the real code path (`build_search_kwargs` + `pystac_client.search`): a probe with `expires=2020-06` is returned by `expires < 2020-12` and excluded by `expires < 2020-03`. `expires` is not an advertised queryable, but the collection schema is `additionalProperties: true` so pgstac filters it via JSONB; the fixed `%Y-%m-%dT%H:%M:%SZ` format makes string ordering == chronological. ⚠️ **Gotcha:** the STAC `POST /search` API requires `sortby` as a **list** (`[{"field": …, "direction": "asc"}]`); a bare string `"+properties.expires"` returns HTTP 400. `pystac_client` converts the string form for us, so the cleanup script is fine — but any direct API/curl caller (e.g. a future Argo raw-HTTP step) must send the array form. (was: prerequisite for T6)
+7. ✅ **RESOLVED 2026-07-10 — `geozarr-s3-credentials` CAN DeleteObject on `esa-zarr-sentinel-explorer-fra`.** A signed, non-destructive `DeleteObject` on a nonexistent key returned HTTP 204 (a lacking permission returns 403). No scoped credential is required for T6/T7; a least-privilege `cleanup-s3-credentials` remains an optional hardening choice. (was: blocks T7)
+
+> **Verification method (2026-07-10):** all live checks used a throwaway item ID `zzz-verify-probe-DELETEME-*` in `sentinel-2-l2a-staging`, deleted in a `finally` block (confirmed `GET → 404`), and a signed nonexistent-key S3 probe that removes nothing. Kubeconfig `~/DevDS/EOPF/data-pipeline/.work/kubeconfig`; STAC `api.explorer.eopf.copernicus.eu/stac`; S3 endpoint `https://s3.de.io.cloud.ovh.net`.
 
 ## Verification (end-to-end)
 

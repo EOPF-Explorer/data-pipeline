@@ -86,4 +86,20 @@ trail. Nothing is enabled in production without documented approval on #183.
 - S3 delete is validated (`count == 0`) before the STAC item is removed.
 - Cron ships suspended + dry-run; real deletion is an explicit opt-in at two
   levels (`--execute` flag and `dry_run=false` param).
+
+## Live verification (2026-07-10, staging)
+
+Three technical prerequisites that gated real deletion were verified against
+`sentinel-2-l2a-staging` (throwaway probe items, always cleaned up):
+
+- **`expires` is filterable** through the real code path (`build_search_kwargs`
+  + `pystac_client.search`) — no eoapi queryables config change needed. Caveat:
+  raw `POST /search` needs `sortby` as a list, not a string (pystac_client
+  handles this; direct callers must not).
+- **`geozarr-s3-credentials` can DeleteObject** on `esa-zarr-sentinel-explorer-fra`
+  (HTTP 204) — no scoped credential required.
+- **`created` survives** the migration's DELETE-then-POST — pgstac honors the
+  body value, so the backfill needs no special handling.
+
+See the plan's Open Questions (Q2, Q6, Q7) for the evidence and method.
 ```

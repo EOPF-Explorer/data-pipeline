@@ -65,6 +65,20 @@ stac-auth-proxy enforcement lands; wire the bearer in `_session()`),
 `no_expires`, `not_expired`, `excluded`, `wrong_bucket`. Exit code is `1` if any
 item failed.
 
+## Notes on the discovery query (verified live 2026-07-10)
+
+- `expires` is **filterable** even though it is not an advertised queryable — the
+  collection schema is `additionalProperties: true`, so pgstac filters it via
+  JSONB. Because both `register_v1` and `stamp_expires` emit a single fixed
+  `%Y-%m-%dT%H:%M:%SZ` format, string ordering equals chronological ordering, so
+  `expires < now` selects correctly. **The fixed timestamp format is load-bearing**
+  — do not introduce a second format.
+- ⚠️ The STAC `POST /search` API requires `sortby` as a **list**
+  (`[{"field": "properties.expires", "direction": "asc"}]`); a bare string
+  `"+properties.expires"` returns **HTTP 400**. This script goes through
+  `pystac_client`, which converts the string form for us — but any **direct
+  API / curl caller** (e.g. a future Argo raw-HTTP step) must send the array form.
+
 ## Local dry-run
 
 ```bash
