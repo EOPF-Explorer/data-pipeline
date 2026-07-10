@@ -609,6 +609,9 @@ from _migrate_catalog.migrations.stamp_expires import (  # noqa: E402
 from s3_item_cleanup import (  # noqa: E402
     DEFAULT_RETENTION_DAYS,
     TIMESTAMPS_EXTENSION,
+    format_expires,
+    load_exclude_ids,
+    parse_stac_timestamp,
 )
 
 
@@ -742,9 +745,8 @@ class TestStampExpiresMigration:
 def test_stamp_expires_uses_shared_format_helper() -> None:
     """The backfill must use the shared expires helpers, not private copies
     (review finding 4 — one load-bearing timestamp format)."""
-    import s3_item_cleanup
     from _migrate_catalog.migrations import stamp_expires as se
 
-    assert se.format_expires is s3_item_cleanup.format_expires
-    assert se.parse_stac_timestamp is s3_item_cleanup.parse_stac_timestamp
-    assert se.load_exclude_ids is s3_item_cleanup.load_exclude_ids
+    assert se.format_expires is format_expires
+    assert se.parse_stac_timestamp is parse_stac_timestamp
+    assert se.load_exclude_ids is load_exclude_ids

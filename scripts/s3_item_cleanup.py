@@ -143,8 +143,10 @@ def _collect_keys_by_bucket(
                 for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
                     for obj in page.get("Contents", []):
                         keys_by_bucket[bucket].append(obj["Key"])
-            except ClientError:
-                pass
+            except ClientError as exc:
+                # Best-effort listing: a prefix we can't enumerate is skipped
+                # (its keys simply won't be deleted this pass).
+                logger.debug("Listing failed for s3://%s/%s: %s — skipping", bucket, prefix, exc)
 
         keys_by_bucket[bucket].extend(individual_keys)
 
@@ -245,15 +247,21 @@ def count_s3_objects_for_item(
                 paginator = s3_client.get_paginator("list_objects_v2")
                 for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
                     count += len(page.get("Contents", []))
-            except ClientError:
-                pass
+            except ClientError as exc:
+                # Best-effort count: an unlistable prefix is treated as 0 here.
+                logger.debug(
+                    "Listing failed for s3://%s/%s: %s — counted as 0", bucket, prefix, exc
+                )
 
         # Count individual files
         for key in individual_keys:
             try:
                 s3_client.head_object(Bucket=bucket, Key=key)
                 count += 1
-            except ClientError:
-                pass
+            except ClientError as exc:
+                # Missing or unreadable key does not count toward the total.
+                logger.debug(
+                    "head_object failed for s3://%s/%s: %s — not counted", bucket, key, exc
+                )
 
     return count

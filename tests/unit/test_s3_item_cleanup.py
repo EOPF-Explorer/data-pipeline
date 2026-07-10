@@ -10,15 +10,21 @@ operator-tools/manage_item.py (coordination#183, Task 1):
 boto3 is fully mocked — no network, no AWS.
 """
 
+import importlib.util
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import s3_item_cleanup
 from s3_item_cleanup import (
     DEFAULT_RETENTION_DAYS,
+    EXPIRES_TS_FORMAT,
     count_s3_objects_for_item,
     delete_s3_objects_for_item,
+    env_int,
     extract_s3_urls_from_item,
+    format_expires,
+    load_exclude_ids,
+    parse_stac_timestamp,
 )
 
 BUCKET = "esa-zarr-sentinel-explorer-fra"
@@ -35,8 +41,9 @@ def test_default_retention_days_is_183() -> None:
 def test_module_does_not_depend_on_click() -> None:
     """scripts/ is baked into the pipeline image without click; batch
     progress must go through logging, not click.progressbar."""
-    assert not hasattr(s3_item_cleanup, "click")
-    source = Path(s3_item_cleanup.__file__).read_text()
+    spec = importlib.util.find_spec("s3_item_cleanup")
+    assert spec is not None and spec.origin is not None
+    source = Path(spec.origin).read_text()
     assert "import click" not in source
     assert "click.progressbar" not in source
 
@@ -184,16 +191,6 @@ def test_count_returns_zero_when_head_object_missing() -> None:
 
 # === Shared expires helpers (Task 1 consolidation, review findings 4/5/6) ===
 
-from datetime import UTC, datetime  # noqa: E402
-
-from s3_item_cleanup import (  # noqa: E402
-    EXPIRES_TS_FORMAT,
-    env_int,
-    format_expires,
-    load_exclude_ids,
-    parse_stac_timestamp,
-)
-
 
 class TestTimestampHelpers:
     def test_format_expires_is_zero_padded_utc_z(self) -> None:
@@ -244,8 +241,7 @@ def test_consumers_share_one_format_helper() -> None:
     use the shared helper, not a private copy (review finding 4)."""
     import cleanup_expired_items
     import register_v1
-    import s3_item_cleanup
 
-    assert register_v1.format_expires is s3_item_cleanup.format_expires
-    assert cleanup_expired_items.format_expires is s3_item_cleanup.format_expires
-    assert cleanup_expired_items.parse_stac_timestamp is s3_item_cleanup.parse_stac_timestamp
+    assert register_v1.format_expires is format_expires
+    assert cleanup_expired_items.format_expires is format_expires
+    assert cleanup_expired_items.parse_stac_timestamp is parse_stac_timestamp
