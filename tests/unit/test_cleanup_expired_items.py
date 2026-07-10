@@ -1,0 +1,304 @@
+"""Unit tests for scripts/cleanup_expired_items.py (coordination#183, Task 3).
+
+The cleanup script discovers items whose STAC ``expires`` is in the past and
+drains them (S3 delete -> validate 0 remaining -> STAC delete). Safety is the
+whole point, so the tests focus on the guards and the dry-run default.
+
+boto3 and the STAC session are mocked — no network.
+"""
+
+import json
+from datetime import UTC, datetime
+from pathlib import Path
+from unittest.mock import MagicMock
+
+import pytest
+from cleanup_expired_items import (
+    build_search_kwargs,
+    evaluate_guards,
+    load_exclude_ids,
+    process_item,
+)
+
+BUCKET = "esa-zarr-sentinel-explorer-fra"
+NOW = datetime(2026, 7, 10, 0, 0, 0, tzinfo=UTC)
+FIXTURES = Path(__file__).parent.parent / "fixtures" / "cleanup_expired"
+
+
+def _fixture(name: str) -> dict:
+    return json.loads((FIXTURES / f"{name}.json").read_text())
+
+
+@pytest.fixture
+def expired_item() -> dict:
+    return _fixture("expired")
+
+
+@pytest.fixture
+def no_expires_item() -> dict:
+    return _fixture("no_expires")
+
+
+@pytest.fixture
+def wrong_bucket_item() -> dict:
+    return _fixture("wrong_bucket")
+
+
+def _paginator(pages: list[list[str]]) -> MagicMock:
+    """A get_paginator mock whose paginate() yields the given key-pages,
+    one list of keys per successive call (side_effect)."""
+    paginator = MagicMock()
+    paginator.paginate.side_effect = [[{"Contents": [{"Key": k} for k in keys]}] for keys in pages]
+    return paginator
+
+
+def _response(status_code: int) -> MagicMock:
+    resp = MagicMock()
+    resp.status_code = status_code
+    return resp
+
+
+# === Discovery query (CQL2 / sort / cap) ===
+
+
+def test_build_search_kwargs_uses_cql2_expires_less_than_now() -> None:
+    kwargs = build_search_kwargs("sentinel-2-l2a-staging", NOW, 25)
+    assert kwargs["collections"] == ["sentinel-2-l2a-staging"]
+    assert kwargs["filter_lang"] == "cql2-json"
+    assert kwargs["filter"] == {
+        "op": "<",
+        "args": [{"property": "expires"}, "2026-07-10T00:00:00Z"],
+    }
+
+
+def test_build_search_kwargs_sorts_and_caps() -> None:
+    kwargs = build_search_kwargs("sentinel-2-l2a-staging", NOW, 25)
+    assert kwargs["sortby"] == "+properties.expires"
+    assert kwargs["max_items"] == 25
+
+
+# === Guards ===
+
+
+def test_guard_allows_expired_item_in_allowed_bucket(expired_item: dict) -> None:
+    ok, reason = evaluate_guards(expired_item, now=NOW, exclude_ids=set(), allowed_bucket=BUCKET)
+    assert (ok, reason) == (True, "ok")
+
+
+def test_guard_refuses_item_without_expires(no_expires_item: dict) -> None:
+    ok, reason = evaluate_guards(no_expires_item, now=NOW, exclude_ids=set(), allowed_bucket=BUCKET)
+    assert ok is False
+    assert reason == "no_expires"
+
+
+def test_guard_refuses_item_not_yet_expired(expired_item: dict) -> None:
+    expired_item["properties"]["expires"] = "2099-01-01T00:00:00Z"
+    ok, reason = evaluate_guards(expired_item, now=NOW, exclude_ids=set(), allowed_bucket=BUCKET)
+    assert ok is False
+    assert reason == "not_expired"
+
+
+def test_guard_refuses_excluded_id(expired_item: dict) -> None:
+    ok, reason = evaluate_guards(
+        expired_item,
+        now=NOW,
+        exclude_ids={"S2_expired_item"},
+        allowed_bucket=BUCKET,
+    )
+    assert ok is False
+    assert reason == "excluded"
+
+
+def test_guard_refuses_asset_outside_allowed_bucket(wrong_bucket_item: dict) -> None:
+    ok, reason = evaluate_guards(
+        wrong_bucket_item, now=NOW, exclude_ids=set(), allowed_bucket=BUCKET
+    )
+    assert ok is False
+    assert reason == "wrong_bucket"
+
+
+# === load_exclude_ids ===
+
+
+def test_load_exclude_ids_none_is_empty() -> None:
+    assert load_exclude_ids(None) == set()
+
+
+def test_load_exclude_ids_reads_newline_ids(tmp_path: Path) -> None:
+    f = tmp_path / "exclude.txt"
+    f.write_text("item-a\n# a comment\n\nitem-b\n")
+    assert load_exclude_ids(str(f)) == {"item-a", "item-b"}
+
+
+# === process_item: dry-run is the default behaviour ===
+
+
+def test_dry_run_makes_no_delete_calls(expired_item: dict) -> None:
+    s3 = MagicMock()
+    s3.get_paginator.return_value = _paginator([["a", "b", "c"]])
+    session = MagicMock()
+
+    rec = process_item(
+        expired_item,
+        now=NOW,
+        exclude_ids=set(),
+        allowed_bucket=BUCKET,
+        s3_client=s3,
+        session=session,
+        stac_base_url="https://stac.example.com",
+        dry_run=True,
+    )
+
+    s3.delete_objects.assert_not_called()
+    session.delete.assert_not_called()
+    assert rec["dry_run"] is True
+    assert rec["status"] == "dry_run"
+    assert rec["s3_remaining"] == 3  # count of objects that WOULD be deleted
+
+
+def test_dry_run_skips_guarded_item_without_counting(no_expires_item: dict) -> None:
+    s3 = MagicMock()
+    session = MagicMock()
+
+    rec = process_item(
+        no_expires_item,
+        now=NOW,
+        exclude_ids=set(),
+        allowed_bucket=BUCKET,
+        s3_client=s3,
+        session=session,
+        stac_base_url="https://stac.example.com",
+        dry_run=True,
+    )
+
+    s3.delete_objects.assert_not_called()
+    session.delete.assert_not_called()
+    assert rec["status"] == "no_expires"
+    assert rec["stac_deleted"] is False
+
+
+# === process_item: real deletion path ===
+
+
+def test_execute_deletes_s3_then_stac_when_validation_clean(
+    expired_item: dict,
+) -> None:
+    s3 = MagicMock()
+    # First paginate (delete listing) returns 2 keys; second (count) returns none.
+    s3.get_paginator.return_value = _paginator([["a", "b"], []])
+    s3.delete_objects.return_value = {
+        "Deleted": [{"Key": "a"}, {"Key": "b"}],
+        "Errors": [],
+    }
+    session = MagicMock()
+    session.delete.return_value = _response(204)
+
+    rec = process_item(
+        expired_item,
+        now=NOW,
+        exclude_ids=set(),
+        allowed_bucket=BUCKET,
+        s3_client=s3,
+        session=session,
+        stac_base_url="https://stac.example.com",
+        dry_run=False,
+    )
+
+    s3.delete_objects.assert_called_once()
+    session.delete.assert_called_once()
+    assert rec["status"] == "deleted"
+    assert rec["stac_deleted"] is True
+    assert rec["s3_objects_deleted"] == 2
+    assert rec["s3_remaining"] == 0
+
+
+def test_execute_retains_stac_item_when_s3_validation_fails(
+    expired_item: dict,
+) -> None:
+    s3 = MagicMock()
+    s3.get_paginator.return_value = _paginator([["a", "b"]])
+    # One object fails to delete -> failed > 0 -> must not touch STAC.
+    s3.delete_objects.return_value = {
+        "Deleted": [{"Key": "a"}],
+        "Errors": [{"Key": "b", "Code": "AccessDenied"}],
+    }
+    session = MagicMock()
+
+    rec = process_item(
+        expired_item,
+        now=NOW,
+        exclude_ids=set(),
+        allowed_bucket=BUCKET,
+        s3_client=s3,
+        session=session,
+        stac_base_url="https://stac.example.com",
+        dry_run=False,
+    )
+
+    session.delete.assert_not_called()
+    assert rec["status"] == "s3_validation_failed"
+    assert rec["stac_deleted"] is False
+
+
+def test_execute_reports_auth_required_on_403(expired_item: dict) -> None:
+    s3 = MagicMock()
+    s3.get_paginator.return_value = _paginator([["a"], []])
+    s3.delete_objects.return_value = {"Deleted": [{"Key": "a"}], "Errors": []}
+    session = MagicMock()
+    session.delete.return_value = _response(403)
+
+    rec = process_item(
+        expired_item,
+        now=NOW,
+        exclude_ids=set(),
+        allowed_bucket=BUCKET,
+        s3_client=s3,
+        session=session,
+        stac_base_url="https://stac.example.com",
+        dry_run=False,
+    )
+
+    assert rec["status"] == "auth_required"
+    assert rec["stac_deleted"] is False
+
+
+def test_execute_treats_404_stac_delete_as_success(expired_item: dict) -> None:
+    s3 = MagicMock()
+    s3.get_paginator.return_value = _paginator([["a"], []])
+    s3.delete_objects.return_value = {"Deleted": [{"Key": "a"}], "Errors": []}
+    session = MagicMock()
+    session.delete.return_value = _response(404)
+
+    rec = process_item(
+        expired_item,
+        now=NOW,
+        exclude_ids=set(),
+        allowed_bucket=BUCKET,
+        s3_client=s3,
+        session=session,
+        stac_base_url="https://stac.example.com",
+        dry_run=False,
+    )
+
+    assert rec["status"] == "deleted"
+    assert rec["stac_deleted"] is True
+
+
+# === Audit records are JSON-serialisable ===
+
+
+def test_audit_record_is_json_serialisable(expired_item: dict) -> None:
+    s3 = MagicMock()
+    s3.get_paginator.return_value = _paginator([["a", "b", "c"]])
+    rec = process_item(
+        expired_item,
+        now=NOW,
+        exclude_ids=set(),
+        allowed_bucket=BUCKET,
+        s3_client=s3,
+        session=MagicMock(),
+        stac_base_url="https://stac.example.com",
+        dry_run=True,
+    )
+    line = json.dumps(rec)
+    assert json.loads(line)["item_id"] == "S2_expired_item"

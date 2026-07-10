@@ -1,0 +1,20 @@
+{
+  "type": "Feature",
+  "stac_version": "1.0.0",
+  "id": "S2_expired_item",
+  "collection": "sentinel-2-l2a-staging",
+  "properties": {
+    "datetime": "2025-01-01T00:00:00Z",
+    "expires": "2025-07-01T00:00:00Z"
+  },
+  "assets": {
+    "reflectance": {
+      "href": "https://s3.example.com/esa-zarr-sentinel-explorer-fra/S2_expired_item/data.zarr",
+      "alternate": {
+        "s3": {
+          "href": "s3://esa-zarr-sentinel-explorer-fra/S2_expired_item/data.zarr/"
+        }
+      }
+    }
+  }
+}

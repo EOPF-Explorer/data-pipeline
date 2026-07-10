@@ -1,0 +1,19 @@
+{
+  "type": "Feature",
+  "stac_version": "1.0.0",
+  "id": "S2_demo_no_expires",
+  "collection": "sentinel-2-l2a-staging",
+  "properties": {
+    "datetime": "2021-05-01T00:00:00Z"
+  },
+  "assets": {
+    "reflectance": {
+      "href": "https://s3.example.com/esa-zarr-sentinel-explorer-fra/S2_demo_no_expires/data.zarr",
+      "alternate": {
+        "s3": {
+          "href": "s3://esa-zarr-sentinel-explorer-fra/S2_demo_no_expires/data.zarr/"
+        }
+      }
+    }
+  }
+}
