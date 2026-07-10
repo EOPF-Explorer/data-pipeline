@@ -3,6 +3,10 @@ from typing import Any
 from _migrate_catalog.migrations._registry import migration
 from _migrate_catalog.types import apply_item_transform
 
+# These MUST match scripts.stac_link_titles (the registration emitters) — the migration gates on
+# _PARENT_TITLE, so a drift would make it silently skip every item. A drift-guard test in
+# tests/unit/test_migrate_catalog.py asserts they stay in sync (the two live in separate packages,
+# so they can't share an import at runtime).
 _FILTER_TITLE = "Per-acquisition items (filter by tile grid:code)"
 _PARENT_TITLE = "Parent tile datacube"
 

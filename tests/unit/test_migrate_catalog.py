@@ -506,6 +506,15 @@ class TestAddAcquisitionsFilterLink:
         add_acquisitions_filter_link(item)
         assert len(item["links"]) == before
 
+    def test_gate_titles_match_registration_source_of_truth(self):
+        # The migration gates on these titles; if register_* renames them the migration would
+        # silently skip every item. Bind them to the shared constants (drift guard).
+        from _migrate_catalog.migrations import add_acquisitions_filter_link as mod
+        from stac_link_titles import ACQUISITIONS_FILTER_TITLE, PARENT_DATACUBE_TITLE
+
+        assert mod._PARENT_TITLE == PARENT_DATACUBE_TITLE
+        assert mod._FILTER_TITLE == ACQUISITIONS_FILTER_TITLE
+
 
 def _make_mock_search(items_dicts: list, total: int | None = None) -> MagicMock:
     """Build a mock pystac_client search that yields one page with the given items."""

@@ -28,6 +28,7 @@ from eopf_geozarr.stac.s1_rtc import acquisition_id as acquisition_id  # re-expo
 from eopf_geozarr.stac.s1_rtc import build_s1_rtc_per_acquisition_items
 from pystac import Item
 from register_v1 import EXPLORER_BASE, _render_to_query
+from stac_link_titles import ACQUISITIONS_FILTER_TITLE, PARENT_DATACUBE_TITLE
 
 # Per-acquisition collections are env-split like the cube collections (…-tests/-staging/-prod). The
 # code default targets the test env (local/CP-A runs); the Argo cron passes --collection …-staging.
@@ -164,7 +165,7 @@ def decorate_acquisition_item(
             "rel": "related",
             "type": "application/json",
             "href": f"{stac_api_url.rstrip('/')}/collections/{cube_collection}/items/s1-rtc-{tile_id}",
-            "title": "Parent tile datacube",
+            "title": PARENT_DATACUBE_TITLE,
         },
         # Second related link (mirrors register_v1_s1_rtc on the cube): points at the sibling
         # acquisitions collection. Two related links give STAC Browser a rel group with >=2 entries,
@@ -174,7 +175,7 @@ def decorate_acquisition_item(
             "rel": "related",
             "type": "application/json",
             "href": f"{stac_api_url.rstrip('/')}/collections/{collection}",
-            "title": "Per-acquisition items (filter by tile grid:code)",
+            "title": ACQUISITIONS_FILTER_TITLE,
         },
     ]
     d.setdefault("assets", {})["thumbnail"] = {

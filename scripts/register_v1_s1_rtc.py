@@ -34,6 +34,7 @@ from register_v1 import (
     warm_thumbnail_cache,
 )
 from run_ingest_register import check_env_consistency
+from stac_link_titles import ACQUISITIONS_FILTER_TITLE
 
 log = logging.getLogger(__name__)
 
@@ -193,7 +194,7 @@ def register(
             "related",
             acquisitions_collection_href(stac_api_url, acq_collection),
             "application/json",
-            "Per-acquisition items (filter by tile grid:code)",
+            ACQUISITIONS_FILTER_TITLE,
         )
     )
 
