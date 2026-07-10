@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from _migrate_catalog.history import load_history, record_run, was_migration_run
 from _migrate_catalog.migrations.add_xyz_link import add_xyz_link
+from _migrate_catalog.migrations.align_visualization_links import align_visualization_links
 from _migrate_catalog.migrations.fix_url_encoding import fix_url_encoding
 from _migrate_catalog.migrations.fix_zarr_media_type import fix_zarr_media_type
 from _migrate_catalog.runner import STACMigrationRunner, compose_migrations
@@ -284,6 +285,153 @@ class TestAddXyzLink:
         result1 = add_xyz_link(_item_with_tilejson())
         assert result1 is not None
         assert add_xyz_link(result1) is None
+
+
+def _nav_links() -> list:
+    return [
+        {"rel": "collection", "href": "https://x/c"},
+        {"rel": "parent", "href": "https://x/p"},
+        {"rel": "root", "href": "https://x/r"},
+        {"rel": "self", "href": "https://x/s"},
+    ]
+
+
+def _old_acq_item() -> dict:
+    """An acquisition item as the OLD register_per_acquisition emitted it: order
+    store→tilejson→xyz→viewer, tilejson titled 'tilejson', viewer/xyz hardcoded."""
+    q = "expression=a&sel=time=2026-07-01T17%3A54%3A17"
+    base = (
+        "https://api.example.com/raster/collections/sentinel-1-grd-rtc-staging/items/s1-rtc-31TCG"
+    )
+    return {
+        "id": "s1-rtc-31TCG-20260701t175417",
+        "properties": {"renders": {"rgb": {"title": "VV, VH, VV/VH composite"}}},
+        "links": [
+            *_nav_links(),
+            {"rel": "store", "title": "Zarr Store", "href": "https://x/z"},
+            {
+                "rel": "tilejson",
+                "type": "application/json",
+                "title": "tilejson",
+                "href": f"{base}/WebMercatorQuad/tilejson.json?{q}",
+            },
+            {
+                "rel": "xyz",
+                "type": "image/png",
+                "title": "Sentinel-1 GRD RGB composite",
+                "href": f"{base}/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png?{q}",
+            },
+            {
+                "rel": "viewer",
+                "type": "text/html",
+                "title": "Sentinel-1 GRD RGB composite",
+                "href": f"{base}/WebMercatorQuad/map.html?{q}",
+            },
+            {"rel": "via", "type": "text/html", "title": "EOPF Explorer", "href": "https://x/e"},
+            {
+                "rel": "related",
+                "type": "application/json",
+                "title": "Parent tile datacube",
+                "href": "https://x/pt",
+            },
+        ],
+        "assets": {},
+    }
+
+
+def _canonical_cube_item() -> dict:
+    """A cube item already in the canonical form register_v1 emits — align must no-op on it."""
+    return {
+        "id": "s1-rtc-31TCG",
+        "properties": {"renders": {"rgb": {"title": "VV, VH, VV/VH composite"}}},
+        "links": [
+            *_nav_links(),
+            {"rel": "store", "title": "Zarr Store", "href": "https://x/z"},
+            {"rel": "viewer", "title": "VV, VH, VV/VH composite", "href": "https://x/v"},
+            {"rel": "tilejson", "title": "TileJSON for s1-rtc-31TCG", "href": "https://x/t"},
+            {"rel": "xyz", "title": "VV, VH, VV/VH composite", "href": "https://x/xyz"},
+            {"rel": "via", "title": "EOPF Explorer", "href": "https://x/e"},
+            {"rel": "related", "title": "Acquisition A", "href": "https://x/a1"},
+            {"rel": "related", "title": "Acquisition B", "href": "https://x/a2"},
+        ],
+        "assets": {},
+    }
+
+
+class TestAlignVisualizationLinks:
+    def test_retitles_viewer_tilejson_xyz(self):
+        result = align_visualization_links(_old_acq_item())
+        assert result is not None
+        by_rel = {lk["rel"]: lk for lk in result["links"]}
+        assert by_rel["viewer"]["title"] == "VV, VH, VV/VH composite"
+        assert by_rel["xyz"]["title"] == "VV, VH, VV/VH composite"
+        assert by_rel["tilejson"]["title"] == "TileJSON for s1-rtc-31TCG-20260701t175417"
+
+    def test_reorders_non_nav_to_canonical(self):
+        result = align_visualization_links(_old_acq_item())
+        assert result is not None
+        rels = [lk["rel"] for lk in result["links"]]
+        non_nav = [r for r in rels if r not in {"collection", "parent", "root", "self"}]
+        assert non_nav == ["store", "viewer", "tilejson", "xyz", "via", "related"]
+
+    def test_preserves_related_order_and_count(self):
+        item = _old_acq_item()
+        item["links"].append({"rel": "related", "title": "Second related", "href": "https://x/pt2"})
+        result = align_visualization_links(item)
+        assert result is not None
+        related = [lk for lk in result["links"] if lk["rel"] == "related"]
+        assert [lk["title"] for lk in related] == ["Parent tile datacube", "Second related"]
+
+    def test_noop_on_canonical_cube_item(self):
+        assert align_visualization_links(_canonical_cube_item()) is None
+
+    def test_skips_item_without_renders(self):
+        item = {"id": "s2", "properties": {}, "links": _nav_links(), "assets": {}}
+        assert align_visualization_links(item) is None
+
+    def test_retitles_even_when_xyz_absent(self):
+        item = _old_acq_item()
+        item["links"] = [lk for lk in item["links"] if lk["rel"] != "xyz"]
+        result = align_visualization_links(item)
+        assert result is not None
+        by_rel = {lk["rel"]: lk for lk in result["links"]}
+        assert by_rel["tilejson"]["title"] == "TileJSON for s1-rtc-31TCG-20260701t175417"
+        assert by_rel["viewer"]["title"] == "VV, VH, VV/VH composite"
+
+    def test_render_title_fallback_when_untitled(self):
+        item = _old_acq_item()
+        del item["properties"]["renders"]["rgb"]["title"]
+        result = align_visualization_links(item)
+        assert result is not None
+        by_rel = {lk["rel"]: lk for lk in result["links"]}
+        assert by_rel["viewer"]["title"] == "Visualization for s1-rtc-31TCG-20260701t175417"
+
+    def test_does_not_mutate_input(self):
+        item = _old_acq_item()
+        before = [lk["rel"] for lk in item["links"]]
+        align_visualization_links(item)
+        assert [lk["rel"] for lk in item["links"]] == before
+
+    def test_idempotent(self):
+        result1 = align_visualization_links(_old_acq_item())
+        assert result1 is not None
+        assert align_visualization_links(result1) is None
+
+    def test_composes_with_add_xyz_link(self):
+        # Full backfill path: add xyz (item without one) then align → canonical form.
+        item = _old_acq_item()
+        item["links"] = [lk for lk in item["links"] if lk["rel"] != "xyz"]
+        composed = compose_migrations([add_xyz_link, align_visualization_links])
+        result = composed(item)
+        assert result is not None
+        rels = [
+            lk["rel"]
+            for lk in result["links"]
+            if lk["rel"] not in {"collection", "parent", "root", "self"}
+        ]
+        assert rels == ["store", "viewer", "tilejson", "xyz", "via", "related"]
+        by_rel = {lk["rel"]: lk for lk in result["links"]}
+        assert by_rel["xyz"]["title"] == "VV, VH, VV/VH composite"
 
 
 def _make_mock_search(items_dicts: list, total: int | None = None) -> MagicMock:
