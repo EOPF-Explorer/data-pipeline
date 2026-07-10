@@ -298,6 +298,9 @@ def _make_mock_search(items_dicts: list, total: int | None = None) -> MagicMock:
     mock_search = MagicMock()
     mock_search.matched.return_value = total
     mock_search.pages.return_value = [mock_page] if mock_items else []
+    # run_migration consumes raw dicts (robust to items pystac can't model); clone/fetch still
+    # use .pages()/.items.
+    mock_search.items_as_dicts.return_value = list(items_dicts)
     return mock_search
 
 
@@ -404,6 +407,76 @@ class TestSTACMigrationRunner:
         mock_client.open.return_value.search.assert_called_once_with(
             collections=["test-col"], max_items=None, limit=100
         )
+
+    def test_post_body_normalized_so_datacube_items_dont_400(self):
+        # Datacube items have null datetime, which the STAC GET/search view omits from
+        # properties — but the transaction POST requires the key. run_migration must normalize
+        # the POST body (via pystac) so it re-materializes properties.datetime.
+        runner = self._make_runner()  # _update_item is a MagicMock
+        item = {
+            "type": "Feature",
+            "stac_version": "1.0.0",
+            "id": "s1-rtc-31TCG",
+            "geometry": {"type": "Polygon", "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 0]]]},
+            "bbox": [0, 0, 1, 1],
+            "properties": {  # note: NO "datetime" key (null-datetime datacube), only start/end
+                "start_datetime": "2026-06-01T00:00:00Z",
+                "end_datetime": "2026-07-01T00:00:00Z",
+            },
+            "links": [
+                {
+                    "rel": "tilejson",
+                    "type": "application/json",
+                    "href": "https://x/WebMercatorQuad/tilejson.json?expression=a",
+                }
+            ],
+            "assets": {},
+            "collection": "sentinel-1-grd-rtc-staging",
+        }
+        mock_search = MagicMock()
+        mock_search.matched.return_value = 1
+        mock_search.items_as_dicts.return_value = [item]
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = mock_search
+            runner.run_migration("test-col", add_xyz_link, "add_xyz_link")
+
+        runner._update_item.assert_called_once()
+        _, _, body = runner._update_item.call_args[0]
+        assert "datetime" in body["properties"]  # key present (None) for the transaction API
+        # xyz stays immediately after tilejson through normalization
+        rels = [lk["rel"] for lk in body["links"]]
+        assert rels.index("xyz") == rels.index("tilejson") + 1
+
+    def test_reads_raw_dicts_so_unmodelable_items_dont_abort(self):
+        # A live item can carry an asset with no href (e.g. s1-rtc-30TWQ) that pystac's
+        # Item.from_dict rejects. run_migration must iterate raw dicts (items_as_dicts), not
+        # pystac Item objects, so one malformed item can't abort the whole run.
+        runner = self._make_runner()
+        hrefless = {
+            "id": "s1-rtc-30TWQ",
+            "assets": {"vv": {"roles": ["data"]}},  # no href — pystac would raise KeyError
+            "links": [
+                {
+                    "rel": "tilejson",
+                    "type": "application/json",
+                    "href": "https://x/WebMercatorQuad/tilejson.json?expression=a",
+                }
+            ],
+        }
+        mock_search = MagicMock()
+        mock_search.matched.return_value = 1
+        mock_search.items_as_dicts.return_value = [hrefless]
+        # Prove the runner does NOT touch the pystac-parsing path.
+        mock_search.pages.side_effect = KeyError("href")
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = mock_search
+            result = runner.run_migration("test-col", add_xyz_link, "add_xyz_link")
+
+        assert result.items_processed == 1
+        assert result.items_modified == 1
+        assert result.items_failed == 0
 
     def test_clone_collection_copies_metadata_and_items(self):
         runner = STACMigrationRunner("https://api.example.com/stac")
