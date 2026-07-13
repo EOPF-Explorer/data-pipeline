@@ -73,7 +73,10 @@ def build_search_kwargs(collection: str, now: datetime, max_items: int) -> dict[
             "op": "<",
             "args": [{"property": "expires"}, format_expires(now)],
         },
-        "sortby": "+properties.expires",
+        # Oldest-expiry first. `id` is a unique tiebreaker: a whole backfill batch
+        # can share one `expires` day, and keyset pagination silently under-returns
+        # across pages when the sort has no total order.
+        "sortby": ["+properties.expires", "+id"],
         "max_items": max_items,
     }
 
@@ -264,10 +267,16 @@ def run_cleanup(args: argparse.Namespace) -> int:
 
     search = client.search(**build_search_kwargs(args.collection, now, args.max_items))
 
+    # Materialise the whole result set BEFORE deleting anything. The search
+    # paginates with a keyset token anchored on the last item returned; deleting
+    # items mid-iteration removes that anchor, so the next page fails with
+    # "Could not find item using token". max_items bounds this list.
+    stale_items = list(search.items_as_dicts())
+
     counts: dict[str, int] = {}
     failures = 0
     processed = 0
-    for stale in search.items_as_dicts():
+    for stale in stale_items:
         # Re-fetch fresh: the search index can lag the catalogue. On any fetch
         # problem we must NOT fall back to the stale snapshot for a destructive
         # delete — a 404 means the item is already gone (idempotent success),

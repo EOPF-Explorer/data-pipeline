@@ -75,7 +75,10 @@ def test_build_search_kwargs_uses_cql2_expires_less_than_now() -> None:
 
 def test_build_search_kwargs_sorts_and_caps() -> None:
     kwargs = build_search_kwargs("sentinel-2-l2a-staging", NOW, 25)
-    assert kwargs["sortby"] == "+properties.expires"
+    # Oldest-expiry first, with `id` as a unique tiebreaker: many items can share
+    # the same `expires` (a whole backfill batch expires the same day), and keyset
+    # pagination silently under-returns across pages without a total order.
+    assert kwargs["sortby"] == ["+properties.expires", "+id"]
     assert kwargs["max_items"] == 25
 
 
@@ -497,3 +500,47 @@ def test_run_cleanup_refetch_error_skips_and_exits_1(expired_item, capsys) -> No
     assert code == 1
     assert records[0]["status"] == "refetch_failed"
     s3.delete_objects.assert_not_called()  # did NOT fall back to stale + delete
+
+
+def test_run_cleanup_paginates_fully_before_deleting(expired_item) -> None:
+    """Regression: discovery must be materialised before any delete. The search
+    paginates with a keyset token anchored on the last item; deleting mid-
+    iteration removes that anchor and the next page 404s the token."""
+    items = [dict(expired_item, id="a"), dict(expired_item, id="b")]
+    yielded: list[str] = []
+
+    def gen():
+        for it in items:
+            yielded.append(it["id"])
+            yield it
+
+    client = MagicMock()
+    client.self_href = "https://stac.example.com"
+    client.search.return_value.items_as_dicts.side_effect = gen
+
+    session = MagicMock()
+
+    def _get(url, timeout=30):
+        # First re-fetch (before any delete) must already see the whole page set.
+        assert yielded == ["a", "b"], "search was not fully paginated before mutating"
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = items[0]
+        return resp
+
+    session.get.side_effect = _get
+    session.delete.return_value = MagicMock(status_code=204)
+
+    s3 = MagicMock()
+    paginator = MagicMock()
+    paginator.paginate.return_value = [{"Contents": []}]  # nothing in S3
+    s3.get_paginator.return_value = paginator
+
+    with (
+        patch("cleanup_expired_items.Client.open", return_value=client),
+        patch("cleanup_expired_items._session", return_value=session),
+        patch("cleanup_expired_items._s3_client", return_value=s3),
+    ):
+        run_cleanup(_args(execute=True))
+
+    assert yielded == ["a", "b"]
