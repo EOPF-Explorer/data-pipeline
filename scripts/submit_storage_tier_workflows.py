@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
-"""Submit storage tier change workflows via HTTP webhook for a date range of STAC items.
+"""Submit storage tier change workflows via HTTP webhook for a set of STAC items.
 
-Queries STAC in 24h windows and POSTs one webhook payload per window,
-triggering the eopf-storage-tier-batch-job WorkflowTemplate via Argo Events.
-Each workflow fans out to per-item parallel processing within Argo.
+Selects items by an explicit ``created``/``datetime`` window or by age
+(``--min-age-days`` [``--max-age-days``] — e.g. a daily 72h catch-up band),
+excludes those already at the target tier, and POSTs one webhook payload per
+sub-window/batch. Each POST triggers the eopf-storage-tier-batch-job
+WorkflowTemplate via Argo Events, which fans out to per-item processing.
+
+Lives in scripts/ (not operator-tools/) so it ships in the pipeline image and
+the tier-down CronWorkflow can run it in-cluster.
 """
 
 import argparse
@@ -11,21 +16,15 @@ import logging
 import sys
 import time
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import cast
 
 import requests
 from pystac_client import Client
 
 # The tier-aware selection reuses the proven client-side predicate and tier map
-# from the scripts/ package. Bootstrap scripts/ onto sys.path so this operator
-# tool imports them at runtime the same way the test config (pythonpath) does.
-_SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
-if str(_SCRIPTS_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_DIR))
-
-from query_storage_tier_items import is_already_migrated  # noqa: E402
-from update_stac_storage_tier import TIER_TO_SCHEME  # noqa: E402
+# from the same scripts/ package (both are on the path in-image and under pytest).
+from query_storage_tier_items import is_already_migrated
+from update_stac_storage_tier import TIER_TO_SCHEME
 
 logging.basicConfig(
     level=logging.INFO,
