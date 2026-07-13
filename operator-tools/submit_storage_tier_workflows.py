@@ -78,6 +78,21 @@ def resolve_window_bounds(
     return start, end
 
 
+def chunk_item_ids(item_ids: list[str], max_batch_size: int | None) -> list[list[str]]:
+    """Split ``item_ids`` into batches of at most ``max_batch_size`` (one webhook payload each).
+
+    Bounds the payload size / per-workflow fan-out for age mode, whose single-sided
+    query has no time window to chunk on. ``max_batch_size`` of ``None`` or ``<= 0``
+    means no chunking — a single batch, preserving the pre-existing behaviour. An
+    empty input yields no batches (the caller skips empty selections).
+    """
+    if not item_ids:
+        return []
+    if max_batch_size is None or max_batch_size <= 0:
+        return [item_ids]
+    return [item_ids[i : i + max_batch_size] for i in range(0, len(item_ids), max_batch_size)]
+
+
 def generate_time_windows(
     start_date: datetime, end_date: datetime, window_hours: int = 24
 ) -> list[tuple[str, str]]:
@@ -200,9 +215,18 @@ def main() -> None:
     parser.add_argument(
         "--date-field",
         choices=["datetime", "created", "updated"],
-        default="datetime",
-        help="Item date to window on: sensing 'datetime' (default), registration "
-        "'created', or last-modified 'updated'. Non-default fields use a CQL2 filter.",
+        default=None,
+        help="Item date to select on: sensing 'datetime', registration 'created', "
+        "or last-modified 'updated'. Non-'datetime' fields use a CQL2 filter. "
+        "Defaults to 'created' with --min-age-days, else 'datetime'.",
+    )
+    parser.add_argument(
+        "--max-batch-size",
+        type=int,
+        default=None,
+        help="Max item IDs per webhook payload (per spawned workflow). Larger "
+        "selections are split across multiple payloads. Default: no limit (one "
+        "payload per window). Recommended for the recurring cron to bound fan-out.",
     )
     parser.add_argument("--storage-class", default="STANDARD", help="S3 storage class")
     parser.add_argument("--stac-api-url", default="https://api.explorer.eopf.copernicus.eu/stac")
@@ -227,6 +251,10 @@ def main() -> None:
         logger.error(str(e))
         sys.exit(1)
 
+    # Default the date field per mode: age-based selection is meaningful on the
+    # registration timestamp, so an omitted --date-field means `created` there.
+    date_field = args.date_field or ("created" if args.min_age_days is not None else "datetime")
+
     target_storage_ref = TIER_TO_SCHEME.get(args.storage_class)
     if target_storage_ref is None:
         logger.warning(
@@ -239,7 +267,7 @@ def main() -> None:
         # Age mode: single-sided, one open-lower-bound query and payload.
         end_iso = end_date.isoformat().replace("+00:00", "Z")
         windows: list[tuple[str | None, str]] = [(None, end_iso)]
-        logger.info(f"Age mode: selecting items with {args.date_field} < {end_iso}")
+        logger.info(f"Age mode: selecting items with {date_field} < {end_iso}")
     else:
         windows = list(generate_time_windows(start_date, end_date))
         logger.info(
@@ -248,6 +276,7 @@ def main() -> None:
 
     total_submitted = 0
     total_failed = 0
+    submissions = 0
 
     for i, (window_start, window_end) in enumerate(windows, 1):
         logger.info(f"[{i}/{len(windows)}] Querying window {window_start} to {window_end}")
@@ -256,33 +285,36 @@ def main() -> None:
             args.collection,
             window_start,
             window_end,
-            args.date_field,
+            date_field,
             target_storage_ref,
         )
-        logger.info(f"  Found {len(item_ids)} items")
-
         if not item_ids:
-            logger.info("  Skipping empty window")
+            logger.info("  Found 0 items — skipping")
             continue
 
-        payload: dict[str, object] = {
-            "action": "batch-change-storage-tier",
-            "item_ids": item_ids,
-            "collection": args.collection,
-            "storage_class": args.storage_class,
-            "stac_api_url": args.stac_api_url,
-            "s3_endpoint": args.s3_endpoint,
-            "pipeline_image_version": args.pipeline_image_version,
-            "process_all_assets": str(args.process_all_assets).lower(),
-        }
-        success = submit_batch(args.webhook_url, payload, args.dry_run)
-        if success:
-            total_submitted += 1
-        else:
-            total_failed += 1
+        batches = chunk_item_ids(item_ids, args.max_batch_size)
+        logger.info(f"  Found {len(item_ids)} items → {len(batches)} payload(s)")
 
-        if i < len(windows):
-            time.sleep(args.delay)
+        for batch in batches:
+            # Space out submissions (webhook politeness); no leading/trailing sleep.
+            if submissions > 0:
+                time.sleep(args.delay)
+            payload: dict[str, object] = {
+                "action": "batch-change-storage-tier",
+                "item_ids": batch,
+                "collection": args.collection,
+                "storage_class": args.storage_class,
+                "stac_api_url": args.stac_api_url,
+                "s3_endpoint": args.s3_endpoint,
+                "pipeline_image_version": args.pipeline_image_version,
+                "process_all_assets": str(args.process_all_assets).lower(),
+            }
+            success = submit_batch(args.webhook_url, payload, args.dry_run)
+            submissions += 1
+            if success:
+                total_submitted += 1
+            else:
+                total_failed += 1
 
     logger.info(f"Done. Submitted: {total_submitted}, Failed: {total_failed}")
 
