@@ -152,6 +152,10 @@ line-ending = "auto"
 
 [tool.mypy]
 python_version = "3.13"
+# Mirror the pytest `pythonpath` so operator-tools modules resolve cross-directory
+# imports from scripts/ (e.g. submit_storage_tier_workflows importing the shared
+# tier predicate) regardless of which files are passed to mypy.
+mypy_path = ["scripts", "operator-tools"]
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true

@@ -11,16 +11,69 @@ import logging
 import sys
 import time
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import cast
 
 import requests
 from pystac_client import Client
+
+# The tier-aware selection reuses the proven client-side predicate and tier map
+# from the scripts/ package. Bootstrap scripts/ onto sys.path so this operator
+# tool imports them at runtime the same way the test config (pythonpath) does.
+_SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
+from query_storage_tier_items import is_already_migrated  # noqa: E402
+from update_stac_storage_tier import TIER_TO_SCHEME  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+
+def _utcnow() -> datetime:
+    """Return the current UTC time. Seam for injecting a fixed 'today' in tests."""
+    return datetime.now(UTC)
+
+
+def compute_age_cutoff(min_age_days: int, *, today: datetime) -> datetime:
+    """Return the `created` upper bound for age-based selection: ``today - min_age_days``.
+
+    Items whose ``created`` is *before* this cutoff are older than ``min_age_days``.
+    """
+    return today - timedelta(days=min_age_days)
+
+
+def resolve_window_bounds(
+    *,
+    min_age_days: int | None,
+    start_date: str | None,
+    end_date: str | None,
+    today: datetime,
+) -> tuple[datetime | None, datetime]:
+    """Resolve the two selection modes to ``(start, end)`` datetimes.
+
+    - Age mode (``min_age_days`` set): single-sided, returns ``(None, today - min_age_days)``.
+      The open lower bound relies on the tier-aware filter to stay cheap.
+    - Explicit mode (``start_date`` and ``end_date`` set): windowed, returns both bounds.
+
+    The two modes are mutually exclusive. Raises ``ValueError`` on an invalid combination.
+    """
+    has_explicit = start_date is not None or end_date is not None
+    if min_age_days is not None and has_explicit:
+        raise ValueError("--min-age-days and --start-date/--end-date are mutually exclusive")
+    if min_age_days is not None:
+        return None, compute_age_cutoff(min_age_days, today=today)
+    if not (start_date is not None and end_date is not None):
+        raise ValueError("provide --min-age-days, or both --start-date and --end-date")
+    start = datetime.fromisoformat(start_date).replace(tzinfo=UTC)
+    end = datetime.fromisoformat(end_date).replace(tzinfo=UTC)
+    if end <= start:
+        raise ValueError("--end-date must be after --start-date")
+    return start, end
 
 
 def generate_time_windows(
@@ -48,9 +101,10 @@ def generate_time_windows(
 def query_stac_items(
     stac_api_url: str,
     collection: str,
-    window_start: str,
+    window_start: str | None,
     window_end: str,
     date_field: str = "datetime",
+    target_storage_ref: str | None = None,
 ) -> list[str]:
     """Query STAC for items whose ``date_field`` falls in the window. Returns item IDs.
 
@@ -58,9 +112,26 @@ def query_stac_items(
     (the item's sensing time). Other fields (``created``, ``updated``) filter on
     the registration/update timestamp via a CQL2 ``between`` filter, since those
     properties are not reachable through the ``datetime=`` kwarg.
+
+    ``window_start=None`` issues a single-sided selection (``date_field < window_end``)
+    for the recurring age-based tier-down: every item older than the cutoff, with no
+    lower bound. This is only meaningful for the ``created``/``updated`` fields.
+
+    ``target_storage_ref`` (e.g. ``"standard"``) filters out items already at the
+    target tier, using the same asset-level ``storage:refs`` check as the optimizer
+    (``is_already_migrated``). This keeps a recurring run cheap and makes a re-run a
+    zero-item no-op. When ``None`` no tier filter is applied.
     """
     catalog = Client.open(stac_api_url)
-    if date_field == "datetime":
+    if window_start is None:
+        # Single-sided open lower bound for age-based selection.
+        search = catalog.search(
+            collections=[collection],
+            filter={"op": "<", "args": [{"property": date_field}, window_end]},
+            filter_lang="cql2-json",
+            limit=100,
+        )
+    elif date_field == "datetime":
         search = catalog.search(
             collections=[collection],
             datetime=f"{window_start}/{window_end}",
@@ -76,6 +147,10 @@ def query_stac_items(
             filter_lang="cql2-json",
             limit=100,
         )
+    if target_storage_ref is not None:
+        return [
+            item.id for item in search.items() if not is_already_migrated(item, target_storage_ref)
+        ]
     return [item.id for item in search.items()]
 
 
@@ -106,8 +181,19 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Submit storage tier batch workflows via webhook for a date range of STAC items."
     )
-    parser.add_argument("--start-date", required=True, help="Start date (YYYY-MM-DD)")
-    parser.add_argument("--end-date", required=True, help="End date (YYYY-MM-DD)")
+    parser.add_argument(
+        "--start-date", help="Start date (YYYY-MM-DD). Use with --end-date for a fixed window."
+    )
+    parser.add_argument(
+        "--end-date", help="End date (YYYY-MM-DD). Use with --start-date for a fixed window."
+    )
+    parser.add_argument(
+        "--min-age-days",
+        type=int,
+        help="Select items older than this many days by --date-field (single-sided, "
+        "no lower bound). For the recurring tier-down cron. Mutually exclusive with "
+        "--start-date/--end-date.",
+    )
     parser.add_argument("--collection", required=True, help="STAC collection ID")
     parser.add_argument(
         "--date-field",
@@ -129,18 +215,28 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        start_date = datetime.fromisoformat(args.start_date).replace(tzinfo=UTC)
-        end_date = datetime.fromisoformat(args.end_date).replace(tzinfo=UTC)
+        start_date, end_date = resolve_window_bounds(
+            min_age_days=args.min_age_days,
+            start_date=args.start_date,
+            end_date=args.end_date,
+            today=_utcnow(),
+        )
     except ValueError as e:
-        logger.error(f"Invalid date format: {e}")
+        logger.error(str(e))
         sys.exit(1)
 
-    if end_date <= start_date:
-        logger.error("--end-date must be after --start-date")
-        sys.exit(1)
+    target_storage_ref = TIER_TO_SCHEME.get(args.storage_class)
 
-    windows = generate_time_windows(start_date, end_date)
-    logger.info(f"Processing {len(windows)} 24h windows from {args.start_date} to {args.end_date}")
+    end_iso = end_date.isoformat().replace("+00:00", "Z")
+    if start_date is None:
+        # Age mode: single-sided, one open-lower-bound query and payload.
+        windows: list[tuple[str | None, str]] = [(None, end_iso)]
+        logger.info(f"Age mode: selecting items with {args.date_field} < {end_iso}")
+    else:
+        windows = list(generate_time_windows(start_date, end_date))
+        logger.info(
+            f"Processing {len(windows)} 24h windows from {args.start_date} to {args.end_date}"
+        )
 
     total_submitted = 0
     total_failed = 0
@@ -148,7 +244,12 @@ def main() -> None:
     for i, (window_start, window_end) in enumerate(windows, 1):
         logger.info(f"[{i}/{len(windows)}] Querying window {window_start} to {window_end}")
         item_ids = query_stac_items(
-            args.stac_api_url, args.collection, window_start, window_end, args.date_field
+            args.stac_api_url,
+            args.collection,
+            window_start,
+            window_end,
+            args.date_field,
+            target_storage_ref,
         )
         logger.info(f"  Found {len(item_ids)} items")
 

@@ -7,10 +7,26 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from submit_storage_tier_workflows import (
+    compute_age_cutoff,
     generate_time_windows,
     query_stac_items,
+    resolve_window_bounds,
     submit_batch,
 )
+
+
+class _FakeAsset:
+    def __init__(self, ref: str | None) -> None:
+        s3: dict[str, object] = {}
+        if ref is not None:
+            s3["storage:refs"] = [ref]
+        self.extra_fields = {"alternate": {"s3": s3}}
+
+
+class _FakeItem:
+    def __init__(self, item_id: str, ref: str | None) -> None:
+        self.id = item_id
+        self.assets = {"data": _FakeAsset(ref)}
 
 
 class TestGenerateTimeWindows:
@@ -155,6 +171,138 @@ class TestQueryStacItems:
         mock_catalog.search.assert_called_once_with(
             collections=["sentinel-2"],
             datetime="2024-01-01T00:00:00Z/2024-01-02T00:00:00Z",
+            limit=100,
+        )
+
+
+class TestComputeAgeCutoff:
+    def test_subtracts_days_from_injected_today(self) -> None:
+        today = datetime(2026, 7, 13, tzinfo=UTC)
+        assert compute_age_cutoff(90, today=today) == datetime(2026, 4, 14, tzinfo=UTC)
+
+    def test_zero_days_is_today(self) -> None:
+        today = datetime(2026, 7, 13, 12, 0, 0, tzinfo=UTC)
+        assert compute_age_cutoff(0, today=today) == today
+
+
+class TestResolveWindowBounds:
+    def test_min_age_days_open_lower_bound(self) -> None:
+        """Age mode returns (None, today - min_age_days) — single-sided."""
+        today = datetime(2026, 7, 13, tzinfo=UTC)
+        start, end = resolve_window_bounds(
+            min_age_days=90, start_date=None, end_date=None, today=today
+        )
+        assert start is None
+        assert end == datetime(2026, 4, 14, tzinfo=UTC)
+
+    def test_explicit_dates_pass_through(self) -> None:
+        today = datetime(2026, 7, 13, tzinfo=UTC)
+        start, end = resolve_window_bounds(
+            min_age_days=None,
+            start_date="2026-03-03",
+            end_date="2026-04-08",
+            today=today,
+        )
+        assert start == datetime(2026, 3, 3, tzinfo=UTC)
+        assert end == datetime(2026, 4, 8, tzinfo=UTC)
+
+    def test_both_modes_is_error(self) -> None:
+        today = datetime(2026, 7, 13, tzinfo=UTC)
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            resolve_window_bounds(
+                min_age_days=90,
+                start_date="2026-03-03",
+                end_date="2026-04-08",
+                today=today,
+            )
+
+    def test_neither_mode_is_error(self) -> None:
+        today = datetime(2026, 7, 13, tzinfo=UTC)
+        with pytest.raises(ValueError, match="--min-age-days"):
+            resolve_window_bounds(min_age_days=None, start_date=None, end_date=None, today=today)
+
+    def test_explicit_end_before_start_is_error(self) -> None:
+        today = datetime(2026, 7, 13, tzinfo=UTC)
+        with pytest.raises(ValueError, match="after"):
+            resolve_window_bounds(
+                min_age_days=None,
+                start_date="2026-06-01",
+                end_date="2026-01-01",
+                today=today,
+            )
+
+
+class TestQueryStacItemsTierFilter:
+    def test_excludes_items_already_in_target_tier(self) -> None:
+        """With target_storage_ref set, items already at that tier are dropped."""
+        already = _FakeItem("already-standard", "standard")
+        needs = _FakeItem("needs-move", "performance")
+        mock_search = MagicMock()
+        mock_search.items.return_value = [already, needs]
+        mock_catalog = MagicMock()
+        mock_catalog.search.return_value = mock_search
+
+        with patch("submit_storage_tier_workflows.Client") as mock_client:
+            mock_client.open.return_value = mock_catalog
+            result = query_stac_items(
+                "https://stac.example.com",
+                "sentinel-2",
+                "2026-01-01T00:00:00Z",
+                "2026-04-14T00:00:00Z",
+                date_field="created",
+                target_storage_ref="standard",
+            )
+
+        assert result == ["needs-move"]
+
+    def test_all_already_standard_returns_empty(self) -> None:
+        """A window where every item is already STANDARD selects nothing (idempotent re-run)."""
+        mock_search = MagicMock()
+        mock_search.items.return_value = [
+            _FakeItem("a", "standard"),
+            _FakeItem("b", "standard"),
+        ]
+        mock_catalog = MagicMock()
+        mock_catalog.search.return_value = mock_search
+
+        with patch("submit_storage_tier_workflows.Client") as mock_client:
+            mock_client.open.return_value = mock_catalog
+            result = query_stac_items(
+                "https://stac.example.com",
+                "sentinel-2",
+                None,
+                "2026-04-14T00:00:00Z",
+                date_field="created",
+                target_storage_ref="standard",
+            )
+
+        assert result == []
+
+    def test_open_lower_bound_uses_less_than_filter(self) -> None:
+        """window_start=None issues a single-sided CQL2 '<' filter on the date field."""
+        mock_search = MagicMock()
+        mock_search.items.return_value = []
+        mock_catalog = MagicMock()
+        mock_catalog.search.return_value = mock_search
+
+        with patch("submit_storage_tier_workflows.Client") as mock_client:
+            mock_client.open.return_value = mock_catalog
+            query_stac_items(
+                "https://stac.example.com",
+                "sentinel-2",
+                None,
+                "2026-04-14T00:00:00Z",
+                date_field="created",
+                target_storage_ref="standard",
+            )
+
+        mock_catalog.search.assert_called_once_with(
+            collections=["sentinel-2"],
+            filter={
+                "op": "<",
+                "args": [{"property": "created"}, "2026-04-14T00:00:00Z"],
+            },
+            filter_lang="cql2-json",
             limit=100,
         )
 
@@ -305,6 +453,7 @@ class TestMainDateFieldForwarding:
             window_start: str,
             window_end: str,
             date_field: str,
+            target_storage_ref: str | None,
         ) -> list[str]:
             captured.append(date_field)
             return []
@@ -369,6 +518,86 @@ class TestMainDateFieldForwarding:
             main()
 
         assert submitted_payloads[0]["storage_class"] == "STANDARD"
+
+
+class TestMainMinAgeMode:
+    def test_min_age_days_issues_single_sided_tier_aware_query(self) -> None:
+        """--min-age-days runs one open-lower-bound query with the target tier ref."""
+        captured: list[dict[str, object]] = []
+
+        def capture_query(
+            stac_api_url: str,
+            collection: str,
+            window_start: str | None,
+            window_end: str,
+            date_field: str,
+            target_storage_ref: str | None,
+        ) -> list[str]:
+            captured.append(
+                {
+                    "window_start": window_start,
+                    "window_end": window_end,
+                    "date_field": date_field,
+                    "target_storage_ref": target_storage_ref,
+                }
+            )
+            return []
+
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "submit_storage_tier_workflows.py",
+                    "--min-age-days",
+                    "90",
+                    "--collection",
+                    "sentinel-2-l2a",
+                    "--date-field",
+                    "created",
+                    "--storage-class",
+                    "STANDARD",
+                    "--dry-run",
+                ],
+            ),
+            patch(
+                "submit_storage_tier_workflows._utcnow",
+                return_value=datetime(2026, 7, 13, tzinfo=UTC),
+            ),
+            patch(
+                "submit_storage_tier_workflows.query_stac_items",
+                side_effect=capture_query,
+            ),
+        ):
+            from submit_storage_tier_workflows import main
+
+            main()
+
+        assert len(captured) == 1
+        assert captured[0]["window_start"] is None
+        assert captured[0]["window_end"] == "2026-04-14T00:00:00Z"
+        assert captured[0]["date_field"] == "created"
+        assert captured[0]["target_storage_ref"] == "standard"
+
+    def test_min_age_days_and_explicit_dates_exit(self) -> None:
+        with patch(
+            "sys.argv",
+            [
+                "submit_storage_tier_workflows.py",
+                "--min-age-days",
+                "90",
+                "--start-date",
+                "2026-03-03",
+                "--end-date",
+                "2026-04-08",
+                "--collection",
+                "sentinel-2-l2a",
+            ],
+        ):
+            with pytest.raises(SystemExit) as exc_info:
+                from submit_storage_tier_workflows import main
+
+                main()
+            assert exc_info.value.code == 1
 
 
 class TestMainDateValidation:
