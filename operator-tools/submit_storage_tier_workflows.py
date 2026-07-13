@@ -66,6 +66,8 @@ def resolve_window_bounds(
     if min_age_days is not None and has_explicit:
         raise ValueError("--min-age-days and --start-date/--end-date are mutually exclusive")
     if min_age_days is not None:
+        if min_age_days < 0:
+            raise ValueError("--min-age-days must be >= 0")
         return None, compute_age_cutoff(min_age_days, today=today)
     if not (start_date is not None and end_date is not None):
         raise ValueError("provide --min-age-days, or both --start-date and --end-date")
@@ -226,10 +228,16 @@ def main() -> None:
         sys.exit(1)
 
     target_storage_ref = TIER_TO_SCHEME.get(args.storage_class)
+    if target_storage_ref is None:
+        logger.warning(
+            f"--storage-class {args.storage_class!r} is not a known tier "
+            f"({sorted(TIER_TO_SCHEME)}); the already-at-target filter is DISABLED, "
+            "so every item in range will be selected."
+        )
 
-    end_iso = end_date.isoformat().replace("+00:00", "Z")
     if start_date is None:
         # Age mode: single-sided, one open-lower-bound query and payload.
+        end_iso = end_date.isoformat().replace("+00:00", "Z")
         windows: list[tuple[str | None, str]] = [(None, end_iso)]
         logger.info(f"Age mode: selecting items with {args.date_field} < {end_iso}")
     else:

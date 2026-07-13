@@ -221,6 +221,11 @@ class TestResolveWindowBounds:
         with pytest.raises(ValueError, match="--min-age-days"):
             resolve_window_bounds(min_age_days=None, start_date=None, end_date=None, today=today)
 
+    def test_negative_min_age_days_is_error(self) -> None:
+        today = datetime(2026, 7, 13, tzinfo=UTC)
+        with pytest.raises(ValueError, match=">= 0"):
+            resolve_window_bounds(min_age_days=-5, start_date=None, end_date=None, today=today)
+
     def test_explicit_end_before_start_is_error(self) -> None:
         today = datetime(2026, 7, 13, tzinfo=UTC)
         with pytest.raises(ValueError, match="after"):
