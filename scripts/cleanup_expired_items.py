@@ -32,6 +32,7 @@ from urllib.parse import urlparse
 
 import boto3
 import requests
+from botocore.exceptions import ClientError
 from pystac_client import Client
 from s3_item_cleanup import (
     count_s3_objects_for_item,
@@ -138,6 +139,16 @@ def _delete_stac_item(
     return False, f"stac_delete_http_{resp.status_code}"
 
 
+def _has_managed_assets(item: dict[str, Any]) -> bool:
+    """True if the item has any asset this tool would manage in S3 — i.e. a
+    non-thumbnail asset. ``extract_s3_urls_from_item`` skips thumbnails, so an
+    item with only thumbnails (or none) has no data for us to orphan."""
+    for asset in item.get("assets", {}).values():
+        if "thumbnail" not in asset.get("roles", []):
+            return True
+    return False
+
+
 def process_item(
     item: dict[str, Any],
     *,
@@ -162,21 +173,35 @@ def process_item(
 
     s3_urls = extract_s3_urls_from_item(item)
 
-    if dry_run:
-        would_delete = count_s3_objects_for_item(s3_client, s3_urls)
-        return _audit(item, dry_run, "dry_run", s3_remaining=would_delete)
+    # Fail closed (review finding F1): if the item carries managed (non-thumbnail)
+    # assets but none resolve to an s3:// URL, we cannot locate — let alone
+    # validate the deletion of — its storage. Deleting the STAC item now would
+    # orphan that data while the audit falsely reports "0 remaining". Skip it.
+    if not s3_urls and _has_managed_assets(item):
+        return _audit(item, dry_run, "no_s3_urls")
 
-    deleted, failed = delete_s3_objects_for_item(s3_client, s3_urls)
-    if failed > 0:
-        return _audit(
-            item,
-            dry_run,
-            "s3_validation_failed",
-            s3_objects_deleted=deleted,
-            s3_objects_failed=failed,
-        )
+    # All S3 listing/counting is fail-closed: an unlistable prefix raises rather
+    # than reporting 0, so an S3 outage mid-run keeps the STAC item (F2).
+    try:
+        if dry_run:
+            would_delete = count_s3_objects_for_item(s3_client, s3_urls)
+            return _audit(item, dry_run, "dry_run", s3_remaining=would_delete)
 
-    remaining = count_s3_objects_for_item(s3_client, s3_urls)
+        deleted, failed = delete_s3_objects_for_item(s3_client, s3_urls)
+        if failed > 0:
+            return _audit(
+                item,
+                dry_run,
+                "s3_validation_failed",
+                s3_objects_deleted=deleted,
+                s3_objects_failed=failed,
+            )
+
+        remaining = count_s3_objects_for_item(s3_client, s3_urls)
+    except ClientError as exc:
+        logger.warning("S3 error validating %s: %s — retaining STAC item", item.get("id"), exc)
+        return _audit(item, dry_run, "s3_validation_failed")
+
     if remaining > 0:
         return _audit(
             item,

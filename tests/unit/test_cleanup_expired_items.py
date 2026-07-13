@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from botocore.exceptions import ClientError
 from cleanup_expired_items import (
     build_search_kwargs,
     evaluate_guards,
@@ -210,6 +211,110 @@ def test_execute_retains_stac_item_when_s3_validation_fails(
         "Deleted": [{"Key": "a"}],
         "Errors": [{"Key": "b", "Code": "AccessDenied"}],
     }
+    session = MagicMock()
+
+    rec = process_item(
+        expired_item,
+        now=NOW,
+        exclude_ids=set(),
+        allowed_bucket=BUCKET,
+        s3_client=s3,
+        session=session,
+        stac_base_url="https://stac.example.com",
+        dry_run=False,
+    )
+
+    session.delete.assert_not_called()
+    assert rec["status"] == "s3_validation_failed"
+    assert rec["stac_deleted"] is False
+
+
+def _https_only(key: str = "data") -> dict:
+    """A data asset whose only href is HTTPS (no alternate.s3) -> extraction
+    yields nothing, so the item's S3 storage is unresolvable."""
+    return {
+        key: {
+            "href": (
+                "https://s3.example.com/esa-zarr-sentinel-explorer-fra/" "tests-output/x.zarr/data"
+            ),
+            "type": "application/vnd+zarr",
+            "roles": ["data"],
+        }
+    }
+
+
+def _client_error(code: str = "InternalError") -> ClientError:
+    return ClientError({"Error": {"Code": code, "Message": code}}, "ListObjectsV2")
+
+
+def test_execute_refuses_item_with_unresolvable_s3(expired_item: dict) -> None:
+    """Review finding F1: an expired item whose assets yield no s3:// URL must
+    NOT be STAC-deleted — that would orphan its data. Fail closed."""
+    expired_item["assets"] = _https_only()
+    s3 = MagicMock()
+    session = MagicMock()
+
+    rec = process_item(
+        expired_item,
+        now=NOW,
+        exclude_ids=set(),
+        allowed_bucket=BUCKET,
+        s3_client=s3,
+        session=session,
+        stac_base_url="https://stac.example.com",
+        dry_run=False,
+    )
+
+    s3.delete_objects.assert_not_called()
+    session.delete.assert_not_called()
+    assert rec["status"] == "no_s3_urls"
+    assert rec["stac_deleted"] is False
+
+
+def test_dry_run_flags_unresolvable_s3_as_no_s3_urls(expired_item: dict) -> None:
+    expired_item["assets"] = _https_only()
+    rec = process_item(
+        expired_item,
+        now=NOW,
+        exclude_ids=set(),
+        allowed_bucket=BUCKET,
+        s3_client=MagicMock(),
+        session=MagicMock(),
+        stac_base_url="https://stac.example.com",
+        dry_run=True,
+    )
+    assert rec["status"] == "no_s3_urls"
+
+
+def test_execute_allows_expired_item_with_no_assets(expired_item: dict) -> None:
+    """Boundary: an expired item with NO assets has nothing to orphan, so the
+    fail-closed guard must not block its STAC deletion."""
+    expired_item["assets"] = {}
+    session = MagicMock()
+    session.delete.return_value = _response(204)
+
+    rec = process_item(
+        expired_item,
+        now=NOW,
+        exclude_ids=set(),
+        allowed_bucket=BUCKET,
+        s3_client=MagicMock(),
+        session=session,
+        stac_base_url="https://stac.example.com",
+        dry_run=False,
+    )
+
+    assert rec["status"] == "deleted"
+    assert rec["stac_deleted"] is True
+
+
+def test_execute_retains_stac_item_when_s3_listing_fails(expired_item: dict) -> None:
+    """Review finding F2: if S3 listing errors mid-run, 'remaining' must not be
+    read as 0 — we cannot validate, so keep the STAC item."""
+    s3 = MagicMock()
+    paginator = MagicMock()
+    paginator.paginate.side_effect = _client_error()
+    s3.get_paginator.return_value = paginator
     session = MagicMock()
 
     rec = process_item(

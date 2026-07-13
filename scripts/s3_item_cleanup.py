@@ -138,15 +138,15 @@ def _collect_keys_by_bucket(
                 individual_keys.add(key)
 
         for prefix in prefixes_to_delete:
-            try:
-                paginator = s3_client.get_paginator("list_objects_v2")
-                for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-                    for obj in page.get("Contents", []):
-                        keys_by_bucket[bucket].append(obj["Key"])
-            except ClientError as exc:
-                # Best-effort listing: a prefix we can't enumerate is skipped
-                # (its keys simply won't be deleted this pass).
-                logger.debug("Listing failed for s3://%s/%s: %s — skipping", bucket, prefix, exc)
+            # Fail closed: an unlistable prefix means we cannot know its object
+            # set. Silently treating it as empty would let the caller "validate
+            # 0 remaining" and delete the STAC item while the data lives on
+            # (orphaned). Let the ClientError propagate so the caller keeps the
+            # item and reports s3_validation_failed.
+            paginator = s3_client.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+                for obj in page.get("Contents", []):
+                    keys_by_bucket[bucket].append(obj["Key"])
 
         keys_by_bucket[bucket].extend(individual_keys)
 
@@ -243,15 +243,12 @@ def count_s3_objects_for_item(
 
         # Count objects under prefixes
         for prefix in prefixes_to_check:
-            try:
-                paginator = s3_client.get_paginator("list_objects_v2")
-                for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-                    count += len(page.get("Contents", []))
-            except ClientError as exc:
-                # Best-effort count: an unlistable prefix is treated as 0 here.
-                logger.debug(
-                    "Listing failed for s3://%s/%s: %s — counted as 0", bucket, prefix, exc
-                )
+            # Fail closed (see _collect_keys_by_bucket): an unlistable prefix must
+            # not be silently counted as 0 — that defeats the validate-0 gate the
+            # caller relies on before deleting the STAC item. Let it propagate.
+            paginator = s3_client.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+                count += len(page.get("Contents", []))
 
         # Count individual files
         for key in individual_keys:
@@ -259,9 +256,11 @@ def count_s3_objects_for_item(
                 s3_client.head_object(Bucket=bucket, Key=key)
                 count += 1
             except ClientError as exc:
-                # Missing or unreadable key does not count toward the total.
-                logger.debug(
-                    "head_object failed for s3://%s/%s: %s — not counted", bucket, key, exc
-                )
+                # A genuinely-absent key (404) legitimately counts as 0; any other
+                # error is unverifiable state and must propagate (fail closed).
+                code = exc.response.get("Error", {}).get("Code", "")
+                if code not in ("404", "NoSuchKey", "NotFound"):
+                    raise
+                logger.debug("head_object 404 for s3://%s/%s — not counted", bucket, key)
 
     return count
