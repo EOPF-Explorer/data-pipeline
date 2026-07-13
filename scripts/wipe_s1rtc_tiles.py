@@ -35,6 +35,8 @@ import argparse
 import logging
 from typing import Any
 
+import stac_auth
+
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger("wipe_s1rtc_tiles")
 
@@ -81,10 +83,10 @@ def find_acquisition_items(stac_api_url: str, acq_collection: str, tile: str) ->
 
 
 def _open_session(stac_api_url: str) -> tuple[Any, str]:
-    """Return ``(session, self_href)`` from pystac-client (mirrors retract_ascending_acquisitions)."""
-    from pystac_client import Client
-
-    client = Client.open(stac_api_url)
+    """Return ``(session, self_href)`` from pystac-client; the session carries a Bearer via
+    ``stac_auth.open_client`` so the DELETEs authenticate once enforcement is on (no-op when
+    OIDC env is unset)."""
+    client = stac_auth.open_client(stac_api_url)
     io = client._stac_io
     assert io is not None  # noqa: S101  # nosec B101 -- pystac-client sets this after open()
     return io.session, str(client.self_href).rstrip("/")

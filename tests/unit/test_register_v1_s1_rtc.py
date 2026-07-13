@@ -92,7 +92,7 @@ def test_upserts_item_with_correct_id() -> None:
         patch(f"{_MOD}.warm_thumbnail_cache"),
         patch(f"{_MOD}.slice_coverages", return_value=[]),  # no store read in these unit tests
         patch(f"{_MOD}.upsert_item") as mock_upsert,
-        patch(f"{_MOD}.Client"),
+        patch(f"{_MOD}.stac_auth.open_client"),
         patch(f"{_MOD}.add_acquisition_links"),  # no network in register() unit tests
     ):
         result = register(
@@ -130,7 +130,7 @@ def test_render_rescale_propagates_to_links() -> None:
         patch(f"{_MOD}.warm_thumbnail_cache"),
         patch(f"{_MOD}.slice_coverages", return_value=[]),
         patch(f"{_MOD}.upsert_item") as mock_upsert,
-        patch(f"{_MOD}.Client"),
+        patch(f"{_MOD}.stac_auth.open_client"),
         patch(f"{_MOD}.add_acquisition_links"),  # no network in register() unit tests
     ):
         result = register(
@@ -155,7 +155,7 @@ def test_visualization_links_called() -> None:
         patch(f"{_MOD}.warm_thumbnail_cache"),
         patch(f"{_MOD}.slice_coverages", return_value=[]),  # no store read in these unit tests
         patch(f"{_MOD}.upsert_item"),
-        patch(f"{_MOD}.Client"),
+        patch(f"{_MOD}.stac_auth.open_client"),
         patch(f"{_MOD}.add_acquisition_links"),  # no network in register() unit tests
         patch(f"{_MOD}.add_visualization_links") as mock_viz,
     ):
@@ -237,7 +237,7 @@ def test_matched_env_store_allowed() -> None:
         patch(f"{_MOD}.warm_thumbnail_cache"),
         patch(f"{_MOD}.slice_coverages", return_value=[]),  # no store read in these unit tests
         patch(f"{_MOD}.upsert_item") as mock_upsert,
-        patch(f"{_MOD}.Client"),
+        patch(f"{_MOD}.stac_auth.open_client"),
         patch(f"{_MOD}.add_acquisition_links"),  # no network in register() unit tests
     ):
         result = register(
@@ -283,7 +283,7 @@ def test_register_adds_related_acquisitions_link() -> None:
         patch(f"{_MOD}.warm_thumbnail_cache"),
         patch(f"{_MOD}.slice_coverages", return_value=[]),
         patch(f"{_MOD}.upsert_item") as mock_upsert,
-        patch(f"{_MOD}.Client"),
+        patch(f"{_MOD}.stac_auth.open_client"),
         patch(f"{_MOD}.add_acquisition_links"),  # no network in register() unit tests
     ):
         register(
@@ -309,7 +309,7 @@ def test_register_acquisitions_collection_override() -> None:
         patch(f"{_MOD}.warm_thumbnail_cache"),
         patch(f"{_MOD}.slice_coverages", return_value=[]),
         patch(f"{_MOD}.upsert_item") as mock_upsert,
-        patch(f"{_MOD}.Client"),
+        patch(f"{_MOD}.stac_auth.open_client"),
         patch(f"{_MOD}.add_acquisition_links"),  # no network in register() unit tests
     ):
         register(

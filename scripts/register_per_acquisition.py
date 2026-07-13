@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import urllib.parse
 
+import stac_auth
 from eopf_geozarr.stac.s1_rtc import acquisition_id as acquisition_id  # re-export for trigger_cdse
 from eopf_geozarr.stac.s1_rtc import build_s1_rtc_per_acquisition_items
 from pystac import Item
@@ -189,11 +190,9 @@ def decorate_acquisition_item(
 
 def existing_item_ids(stac_api_url: str, collection: str, candidate_ids: list[str]) -> set[str]:
     """Of ``candidate_ids``, those already present in ``collection`` (one STAC search, not N lookups)."""
-    from pystac_client import Client
-
     if not candidate_ids:
         return set()
-    client = Client.open(stac_api_url)
+    client = stac_auth.open_client(stac_api_url)
     search = client.search(collections=[collection], ids=candidate_ids, limit=len(candidate_ids))
     return {it["id"] for it in search.items_as_dicts()}
 
@@ -205,9 +204,7 @@ def _upsert_items(stac_api_url: str, collection: str, items: list[dict]) -> None
     first and only DELETE-then-re-POSTs on a 409. Here the caller already filters out
     already-registered ids (incremental skip in main), so an unconditional delete is fine.
     """
-    from pystac_client import Client
-
-    client = Client.open(stac_api_url)
+    client = stac_auth.open_client(stac_api_url)
     io = client._stac_io
     assert io is not None  # noqa: S101  # nosec B101 -- pystac-client always sets this after open()
     base = str(client.self_href).rstrip("/")
