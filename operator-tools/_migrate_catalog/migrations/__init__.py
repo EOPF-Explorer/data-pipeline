@@ -2,6 +2,6 @@
 from _migrate_catalog.migrations import fix_url_encoding as _  # noqa: F401
 from _migrate_catalog.migrations import fix_zarr_media_type as __  # noqa: F401
 from _migrate_catalog.migrations import stamp_expires as ___  # noqa: F401
-from _migrate_catalog.migrations._registry import MIGRATIONS, migration
+from _migrate_catalog.migrations._registry import MIGRATIONS, Migration, migration
 
-__all__ = ["MIGRATIONS", "migration"]
+__all__ = ["MIGRATIONS", "Migration", "migration"]

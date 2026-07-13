@@ -31,9 +31,12 @@ import sys
 from collections import Counter
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from _migrate_catalog.migrations._registry import migration
+
+if TYPE_CHECKING:
+    from _migrate_catalog.types import MigrationResult
 
 # scripts/ (baked into the pipeline image) is the single source for the retention
 # constant, the timestamps extension URL, and the expires timestamp helpers.
@@ -61,6 +64,33 @@ SKIP_HISTOGRAM: Counter[str] = Counter()
 
 def reset_histogram() -> None:
     SKIP_HISTOGRAM.clear()
+
+
+def report(result: MigrationResult) -> str:
+    """Render the outcome histogram and cross-check it against the run's own
+    counts, so the surfaced numbers can't silently drift from what happened.
+
+    Only ``stamped`` items are written, so they end up either modified or failed;
+    every other reason is a skip. If that identity doesn't hold — a stale count,
+    a miscount, or items that errored before they could be classified — say so
+    loudly rather than print a breakdown that looks authoritative.
+    """
+    lines = ["Outcome histogram:"]
+    for reason in sorted(SKIP_HISTOGRAM):
+        lines.append(f"  {reason:<16} {SKIP_HISTOGRAM[reason]}")
+
+    stamped = SKIP_HISTOGRAM.get("stamped", 0)
+    skips = sum(SKIP_HISTOGRAM.values()) - stamped
+    reconciles = (
+        stamped == result.items_modified + result.items_failed and skips == result.items_skipped
+    )
+    if not reconciles:
+        lines.append(
+            "  WARNING: histogram does not reconcile with run counts "
+            f"(processed={result.items_processed}, modified={result.items_modified}, "
+            f"skipped={result.items_skipped}, failed={result.items_failed})"
+        )
+    return "\n".join(lines)
 
 
 def classify_and_stamp(
@@ -114,6 +144,8 @@ def _resolve_config() -> tuple[int, set[str], int | None]:
     "stamp_expires",
     "Backfill properties.expires = created + retention (timestamps ext); "
     "skips already-stamped, excluded, and (optionally) large created-datetime gaps",
+    reporter=report,
+    reset=reset_histogram,
 )
 def stamp_expires(item: dict[str, Any]) -> dict[str, Any] | None:
     """Stamp ``expires`` on one item. Config from the environment

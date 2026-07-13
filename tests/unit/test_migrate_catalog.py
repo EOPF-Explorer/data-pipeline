@@ -750,3 +750,92 @@ def test_stamp_expires_uses_shared_format_helper() -> None:
     assert se.format_expires is format_expires
     assert se.parse_stac_timestamp is parse_stac_timestamp
     assert se.load_exclude_ids is load_exclude_ids
+
+
+# === Histogram surfacing + reconciliation (review finding: histogram invisible) ===
+
+
+def _result(
+    *, processed: int, modified: int, skipped: int, failed: int = 0, dry_run: bool = False
+) -> MigrationResult:
+    return MigrationResult(
+        migration_name="stamp_expires",
+        collection_id="c",
+        started_at="",
+        completed_at="",
+        items_processed=processed,
+        items_modified=modified,
+        items_skipped=skipped,
+        items_failed=failed,
+        dry_run=dry_run,
+        errors=[],
+    )
+
+
+class TestHistogramReporting:
+    def test_registry_entry_exposes_fn_reporter_and_reset(self) -> None:
+        m = MIGRATIONS["stamp_expires"]
+        assert m.fn is stamp_expires
+        assert m.reporter is not None
+        assert m.reset is reset_histogram
+
+    def test_report_lists_reason_counts(self) -> None:
+        from _migrate_catalog.migrations.stamp_expires import report
+
+        reset_histogram()
+        SKIP_HISTOGRAM["stamped"] = 2
+        SKIP_HISTOGRAM["excluded"] = 1
+        text = report(_result(processed=3, modified=2, skipped=1))
+        assert "stamped" in text
+        assert "excluded" in text
+        assert "WARNING" not in text  # reconciles
+
+    def test_report_warns_when_histogram_does_not_reconcile(self) -> None:
+        from _migrate_catalog.migrations.stamp_expires import report
+
+        reset_histogram()
+        SKIP_HISTOGRAM["stamped"] = 5  # classified 5 stampable...
+        text = report(_result(processed=2, modified=2, skipped=0))  # ...but run saw 2
+        assert "WARNING" in text
+
+    def test_reset_clears_counts_between_runs(self) -> None:
+        SKIP_HISTOGRAM["stamped"] = 9
+        reset_histogram()
+        assert sum(SKIP_HISTOGRAM.values()) == 0
+
+
+class TestRunCommandSurfacesHistogram:
+    def test_run_resets_then_prints_histogram(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import importlib
+
+        from click.testing import CliRunner
+
+        # The package shadows its `cli` submodule with the group function, so
+        # resolve the real module object from sys.modules to patch it.
+        climod = importlib.import_module("_migrate_catalog.cli")
+
+        monkeypatch.delenv("EXPIRES_EXCLUDE_FILE", raising=False)
+        monkeypatch.delenv("EXPIRES_DEMO_GAP_DAYS", raising=False)
+        SKIP_HISTOGRAM.clear()
+        SKIP_HISTOGRAM["stamped"] = 99  # stale — must be cleared before the run
+
+        seen_at_start = {}
+
+        def fake_run(collection_id, fn, name, dry_run, page_size):  # noqa: ANN001
+            seen_at_start["total"] = sum(SKIP_HISTOGRAM.values())  # proves reset ran first
+            fn(_stampable_item(item_id="a"))
+            fn(_stampable_item(item_id="b", expires="2025-07-01T00:00:00Z"))
+            return _result(processed=2, modified=1, skipped=1, dry_run=True)
+
+        runner_inst = MagicMock()
+        runner_inst.run_migration.side_effect = fake_run
+        monkeypatch.setattr(climod, "STACMigrationRunner", lambda *a, **k: runner_inst)
+
+        res = CliRunner().invoke(
+            climod.cli, ["run", "coll", "--migration", "stamp_expires", "--dry-run"]
+        )
+
+        assert res.exit_code == 0, res.output
+        assert seen_at_start["total"] == 0  # histogram was reset before processing
+        assert "stamped" in res.output
+        assert "already_stamped" in res.output
