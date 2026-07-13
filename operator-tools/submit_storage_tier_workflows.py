@@ -53,22 +53,40 @@ def resolve_window_bounds(
     start_date: str | None,
     end_date: str | None,
     today: datetime,
+    max_age_days: int | None = None,
 ) -> tuple[datetime | None, datetime]:
-    """Resolve the two selection modes to ``(start, end)`` datetimes.
+    """Resolve the selection modes to ``(start, end)`` datetimes.
 
-    - Age mode (``min_age_days`` set): single-sided, returns ``(None, today - min_age_days)``.
-      The open lower bound relies on the tier-aware filter to stay cheap.
-    - Explicit mode (``start_date`` and ``end_date`` set): windowed, returns both bounds.
+    - Age mode (``min_age_days`` set):
+      - without ``max_age_days`` → single-sided ``(None, today - min_age_days)``;
+        the open lower bound relies on the tier filter and Plan 1 to stay tractable.
+      - with ``max_age_days`` → a bounded age band ``(today - max_age_days,
+        today - min_age_days)``, i.e. items whose ``created`` age is in
+        ``[min_age_days, max_age_days]``. This is the recurring cron's catch-up
+        window: run daily with e.g. ``--min-age-days 90 --max-age-days 93`` so each
+        run covers a 72h band and a missed day is still picked up by the overlap.
+    - Explicit mode (``start_date`` and ``end_date`` set): windowed, returns both.
 
-    The two modes are mutually exclusive. Raises ``ValueError`` on an invalid combination.
+    The age and explicit modes are mutually exclusive. Raises ``ValueError`` on an
+    invalid combination.
     """
     has_explicit = start_date is not None or end_date is not None
+    if max_age_days is not None and min_age_days is None:
+        raise ValueError("--max-age-days requires --min-age-days")
     if min_age_days is not None and has_explicit:
-        raise ValueError("--min-age-days and --start-date/--end-date are mutually exclusive")
+        raise ValueError(
+            "--min-age-days/--max-age-days and --start-date/--end-date are mutually exclusive"
+        )
     if min_age_days is not None:
         if min_age_days < 0:
             raise ValueError("--min-age-days must be >= 0")
-        return None, compute_age_cutoff(min_age_days, today=today)
+        end = compute_age_cutoff(min_age_days, today=today)
+        if max_age_days is None:
+            return None, end
+        if max_age_days <= min_age_days:
+            raise ValueError("--max-age-days must be greater than --min-age-days")
+        # Older bound is further in the past: today - max_age_days.
+        return compute_age_cutoff(max_age_days, today=today), end
     if not (start_date is not None and end_date is not None):
         raise ValueError("provide --min-age-days, or both --start-date and --end-date")
     start = datetime.fromisoformat(start_date).replace(tzinfo=UTC)
@@ -207,9 +225,17 @@ def main() -> None:
     parser.add_argument(
         "--min-age-days",
         type=int,
-        help="Select items older than this many days by --date-field (single-sided, "
-        "no lower bound). For the recurring tier-down cron. Mutually exclusive with "
-        "--start-date/--end-date.",
+        help="Select items older than this many days by --date-field. Single-sided "
+        "(no lower bound) unless --max-age-days is also given. For the recurring "
+        "tier-down cron. Mutually exclusive with --start-date/--end-date.",
+    )
+    parser.add_argument(
+        "--max-age-days",
+        type=int,
+        help="Upper age bound (requires --min-age-days): select the age band "
+        "[min_age_days, max_age_days], i.e. created in [today-max, today-min]. Use "
+        "for a daily catch-up window, e.g. --min-age-days 90 --max-age-days 93 "
+        "(72h band) run daily so a missed day is still covered by the overlap.",
     )
     parser.add_argument("--collection", required=True, help="STAC collection ID")
     parser.add_argument(
@@ -235,6 +261,13 @@ def main() -> None:
     parser.add_argument("--process-all-assets", action="store_true")
     parser.add_argument("--webhook-url", default="http://localhost:12000/samples")
     parser.add_argument(
+        "--window-hours",
+        type=int,
+        default=24,
+        help="Sub-window size (hours) a bounded range is split into, one webhook "
+        "payload per sub-window (default: 24). N/A to single-sided age mode.",
+    )
+    parser.add_argument(
         "--delay", type=float, default=1.0, help="Delay between window submissions in seconds"
     )
     parser.add_argument("--dry-run", action="store_true")
@@ -243,6 +276,7 @@ def main() -> None:
     try:
         start_date, end_date = resolve_window_bounds(
             min_age_days=args.min_age_days,
+            max_age_days=args.max_age_days,
             start_date=args.start_date,
             end_date=args.end_date,
             today=_utcnow(),
@@ -264,14 +298,19 @@ def main() -> None:
         )
 
     if start_date is None:
-        # Age mode: single-sided, one open-lower-bound query and payload.
+        # Single-sided age mode: one open-lower-bound query and payload.
         end_iso = end_date.isoformat().replace("+00:00", "Z")
         windows: list[tuple[str | None, str]] = [(None, end_iso)]
         logger.info(f"Age mode: selecting items with {date_field} < {end_iso}")
     else:
-        windows = list(generate_time_windows(start_date, end_date))
+        # Bounded range (explicit dates or a --min/--max age band): split into
+        # --window-hours sub-windows, one webhook payload each.
+        start_iso = start_date.isoformat().replace("+00:00", "Z")
+        end_iso = end_date.isoformat().replace("+00:00", "Z")
+        windows = list(generate_time_windows(start_date, end_date, args.window_hours))
         logger.info(
-            f"Processing {len(windows)} 24h windows from {args.start_date} to {args.end_date}"
+            f"Processing {len(windows)} {args.window_hours}h window(s) from "
+            f"{start_iso} to {end_iso} on {date_field}"
         )
 
     total_submitted = 0

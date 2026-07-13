@@ -251,6 +251,40 @@ class TestResolveWindowBounds:
         with pytest.raises(ValueError, match=">= 0"):
             resolve_window_bounds(min_age_days=-5, start_date=None, end_date=None, today=today)
 
+    def test_min_and_max_age_days_bounded_band(self) -> None:
+        """--min-age-days 90 --max-age-days 93 = the 72h age band [today-93d, today-90d]."""
+        today = datetime(2026, 7, 13, tzinfo=UTC)
+        start, end = resolve_window_bounds(
+            min_age_days=90, max_age_days=93, start_date=None, end_date=None, today=today
+        )
+        assert start == datetime(2026, 4, 11, tzinfo=UTC)  # today - 93d (older bound)
+        assert end == datetime(2026, 4, 14, tzinfo=UTC)  # today - 90d (younger bound)
+
+    def test_max_age_requires_min_age(self) -> None:
+        today = datetime(2026, 7, 13, tzinfo=UTC)
+        with pytest.raises(ValueError, match="requires --min-age-days"):
+            resolve_window_bounds(
+                min_age_days=None, max_age_days=93, start_date=None, end_date=None, today=today
+            )
+
+    def test_max_age_not_greater_than_min_is_error(self) -> None:
+        today = datetime(2026, 7, 13, tzinfo=UTC)
+        with pytest.raises(ValueError, match="greater than --min-age-days"):
+            resolve_window_bounds(
+                min_age_days=90, max_age_days=90, start_date=None, end_date=None, today=today
+            )
+
+    def test_max_age_with_explicit_dates_is_error(self) -> None:
+        today = datetime(2026, 7, 13, tzinfo=UTC)
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            resolve_window_bounds(
+                min_age_days=90,
+                max_age_days=93,
+                start_date="2026-03-03",
+                end_date="2026-04-08",
+                today=today,
+            )
+
     def test_explicit_end_before_start_is_error(self) -> None:
         today = datetime(2026, 7, 13, tzinfo=UTC)
         with pytest.raises(ValueError, match="after"):
@@ -731,6 +765,68 @@ class TestMainMinAgeMode:
             main()
 
         assert submitted == [["i1", "i2"], ["i3", "i4"], ["i5"]]
+
+    def test_daily_72h_catchup_band_queries_between_window(self) -> None:
+        """--min-age-days 90 --max-age-days 93 --window-hours 72 = one 72h between-query."""
+        captured: list[dict[str, object]] = []
+
+        def capture_query(
+            stac_api_url: str,
+            collection: str,
+            window_start: str | None,
+            window_end: str,
+            date_field: str,
+            target_storage_ref: str | None,
+        ) -> list[str]:
+            captured.append(
+                {
+                    "start": window_start,
+                    "end": window_end,
+                    "field": date_field,
+                    "ref": target_storage_ref,
+                }
+            )
+            return []
+
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "submit_storage_tier_workflows.py",
+                    "--min-age-days",
+                    "90",
+                    "--max-age-days",
+                    "93",
+                    "--window-hours",
+                    "72",
+                    "--collection",
+                    "sentinel-2-l2a",
+                    "--dry-run",
+                ],
+            ),
+            patch(
+                "submit_storage_tier_workflows._utcnow",
+                return_value=datetime(2026, 7, 13, tzinfo=UTC),
+            ),
+            patch(
+                "submit_storage_tier_workflows.query_stac_items",
+                side_effect=capture_query,
+            ),
+        ):
+            from submit_storage_tier_workflows import main
+
+            main()
+
+        # One 72h window covering [today-93d, today-90d], selecting by created,
+        # excluding items already at the target tier.
+        assert captured == [
+            {
+                "start": "2026-04-11T00:00:00Z",
+                "end": "2026-04-14T00:00:00Z",
+                "field": "created",
+                "ref": "standard",
+            }
+        ]
 
     def test_min_age_days_and_explicit_dates_exit(self) -> None:
         with patch(
