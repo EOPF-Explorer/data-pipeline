@@ -1,4 +1,7 @@
 # Import migration modules to trigger @migration registration
+from _migrate_catalog.migrations import add_acquisitions_filter_link as _____  # noqa: F401
+from _migrate_catalog.migrations import add_xyz_link as ___  # noqa: F401
+from _migrate_catalog.migrations import align_visualization_links as ____  # noqa: F401
 from _migrate_catalog.migrations import fix_url_encoding as _  # noqa: F401
 from _migrate_catalog.migrations import fix_zarr_media_type as __  # noqa: F401
 from _migrate_catalog.migrations._registry import MIGRATIONS, migration

@@ -229,8 +229,9 @@ def add_visualization_links(
 ) -> None:
     """Add the TiTiler visualization links.
 
-    The render path (producer ``renders`` config) emits an interactive ``map.html`` ``viewer`` + a
-    ``tilejson``; the mission fallbacks keep the legacy bare ``/viewer`` + ``xyz`` tile template.
+    The render path (producer ``renders`` config) emits an interactive ``map.html`` ``viewer``, a
+    ``tilejson`` and an ``xyz`` ``{z}/{x}/{y}`` tile template (for machine map clients); the mission
+    fallbacks keep the legacy bare ``/viewer`` + ``xyz`` tile template.
 
     ``sel_time`` (when set) pins the render to one cube slice by datetime — the cube item passes the
     best-recent acquisition so its preview isn't the default (oldest) slice.
@@ -242,10 +243,11 @@ def add_visualization_links(
     if render := _select_render(item):
         query = _with_sel_time(_render_to_query(render, include_tilesize=True), sel_time)
         title = render.get("title") or f"Visualization for {item.id}"
-        # Human-clickable interactive viewer carrying the render expression/rescale/sel. A raw
-        # {z}/{x}/{y} xyz tile template 422s when clicked in a STAC browser (the placeholders are
-        # sent to TiTiler literally); map.html fills the tile coords in itself. Machine map clients
-        # consume the tilejson link below for the tile template.
+        # Human-clickable interactive viewer carrying the render expression/rescale/sel. map.html
+        # fills the tile coords in itself, so it stays clickable in a STAC browser (unlike the raw
+        # {z}/{x}/{y} xyz template below, whose placeholders 422 if a human clicks them). The xyz
+        # link is for machine map clients (QGIS/Leaflet/OpenLayers) that substitute z/x/y before
+        # requesting — both coexist, as on S2.
         item.add_link(
             Link(
                 "viewer",
@@ -260,6 +262,14 @@ def add_visualization_links(
                 f"{base_url}/WebMercatorQuad/tilejson.json?{query}",
                 "application/json",
                 f"TileJSON for {item.id}",
+            )
+        )
+        item.add_link(
+            Link(
+                "xyz",
+                f"{base_url}/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png?{query}",
+                "image/png",
+                title,
             )
         )
         _add_explorer_link(item, collection_id)

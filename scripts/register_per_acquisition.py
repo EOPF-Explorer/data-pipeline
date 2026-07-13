@@ -29,6 +29,7 @@ from eopf_geozarr.stac.s1_rtc import acquisition_id as acquisition_id  # re-expo
 from eopf_geozarr.stac.s1_rtc import build_s1_rtc_per_acquisition_items
 from pystac import Item
 from register_v1 import EXPLORER_BASE, _render_to_query
+from stac_link_titles import ACQUISITIONS_FILTER_TITLE, PARENT_DATACUBE_TITLE
 
 # Per-acquisition collections are env-split like the cube collections (…-tests/-staging/-prod). The
 # code default targets the test env (local/CP-A runs); the Argo cron passes --collection …-staging.
@@ -68,14 +69,28 @@ def render_tilejson(
     return f"{base}/WebMercatorQuad/tilejson.json?{_render_to_query(render, include_tilesize=True)}&{_sel_time(sel_time)}"
 
 
+def render_xyz(
+    raster_api: str, cube_collection: str, tile_id: str, render: dict, sel_time: str
+) -> str:
+    """``{z}/{x}/{y}.png`` tile template for the cube slice at ``sel_time`` — for machine map clients.
+
+    Same endpoint/query as ``render_tilejson`` but the raw ``tiles/.../{z}/{x}/{y}.png`` template that
+    XYZ clients (QGIS/Leaflet/OpenLayers) substitute before requesting. The ``map.html`` ``viewer``
+    (below) stays the human-clickable link; both coexist, as on S2.
+    """
+    base = _cube_item_base(raster_api, cube_collection, tile_id)
+    q = _render_to_query(render, include_tilesize=True)
+    return f"{base}/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png?{q}&{_sel_time(sel_time)}"
+
+
 def render_viewer(
     raster_api: str, cube_collection: str, tile_id: str, render: dict, sel_time: str
 ) -> str:
     """Interactive ``map.html`` viewer for the cube slice at ``sel_time`` — the human-clickable map.
 
     A raw ``{z}/{x}/{y}`` xyz tile template 422s when clicked in a STAC browser (the placeholders are
-    sent to TiTiler literally); ``map.html`` fills the tile coords in itself. ``tilejson`` (above)
-    serves the tile template to machine map clients.
+    sent to TiTiler literally); ``map.html`` fills the tile coords in itself. ``tilejson``/``xyz``
+    (above) serve the tile template to machine map clients.
     """
     base = _cube_item_base(raster_api, cube_collection, tile_id)
     q = _render_to_query(render, include_tilesize=True)
@@ -101,9 +116,11 @@ def decorate_acquisition_item(
     ``sel=time={datetime}`` — no data duplication; the acquisition item is a reference into the cube,
     and the render stays slice-correct regardless of the cube's physical slice order. The ``viewer``
     link is a ``map.html`` deep-link into this acquisition's slice (``sel=time`` makes that possible).
-    A ``related`` link points at this acquisition's parent **tile datacube** STAC item
-    (``stac_api_url``/collections/``cube_collection``/items/``s1-rtc-{tile}``) for browser navigation.
-    Any ``store`` link / S3 ``alternate`` blocks the caller already added are preserved.
+    Two ``related`` links are added: the parent **tile datacube** STAC item
+    (``stac_api_url``/collections/``cube_collection``/items/``s1-rtc-{tile}``) and the sibling
+    **acquisitions collection** ("Per-acquisition items (filter by tile grid:code)"). Two links on
+    one rel is what makes STAC Browser render the grouped "Additional Resources" section (category
+    headers) rather than a flat list. Any ``store`` link / S3 ``alternate`` blocks are preserved.
     """
     when = item.datetime
     if when is None:  # per-acquisition items always carry a single datetime
@@ -114,20 +131,30 @@ def decorate_acquisition_item(
     item_id = d["id"]
     collection = d.get("collection", "")
     render = d["properties"]["renders"]["rgb"]
+    # Mirror the cube's link conventions (register_v1.add_visualization_links) so both item types
+    # render an identical "Additional Resources" section in STAC Browser: order
+    # store→viewer→tilejson→xyz, viewer/xyz titled by the render composite, tilejson "TileJSON for {id}".
+    render_title = render.get("title") or f"Visualization for {item_id}"
     store_links = [lk for lk in d.get("links", []) if lk.get("rel") == "store"]
     d["links"] = [
         *store_links,
         {
-            "rel": "tilejson",
-            "type": "application/json",
-            "href": render_tilejson(raster_api, cube_collection, tile_id, render, sel_time),
-            "title": "tilejson",
-        },
-        {
             "rel": "viewer",
             "type": "text/html",
             "href": render_viewer(raster_api, cube_collection, tile_id, render, sel_time),
-            "title": "Sentinel-1 GRD RGB composite",
+            "title": render_title,
+        },
+        {
+            "rel": "tilejson",
+            "type": "application/json",
+            "href": render_tilejson(raster_api, cube_collection, tile_id, render, sel_time),
+            "title": f"TileJSON for {item_id}",
+        },
+        {
+            "rel": "xyz",
+            "type": "image/png",
+            "href": render_xyz(raster_api, cube_collection, tile_id, render, sel_time),
+            "title": render_title,
         },
         {
             "rel": "via",
@@ -139,7 +166,17 @@ def decorate_acquisition_item(
             "rel": "related",
             "type": "application/json",
             "href": f"{stac_api_url.rstrip('/')}/collections/{cube_collection}/items/s1-rtc-{tile_id}",
-            "title": "Parent tile datacube",
+            "title": PARENT_DATACUBE_TITLE,
+        },
+        # Second related link (mirrors register_v1_s1_rtc on the cube): points at the sibling
+        # acquisitions collection. Two related links give STAC Browser a rel group with >=2 entries,
+        # which is what flips its LinkList to the grouped "Additional Resources" rendering (category
+        # headers) instead of a flat list.
+        {
+            "rel": "related",
+            "type": "application/json",
+            "href": f"{stac_api_url.rstrip('/')}/collections/{collection}",
+            "title": ACQUISITIONS_FILTER_TITLE,
         },
     ]
     d.setdefault("assets", {})["thumbnail"] = {
