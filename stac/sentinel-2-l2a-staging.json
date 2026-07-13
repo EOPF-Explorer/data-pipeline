@@ -40,6 +40,12 @@
       "type": "image/jpeg",
       "roles": ["baselayer", "invisible"],
       "title": "EOxCloudless 2024"
+    },
+    {
+      "rel": "style",
+      "href": "https://raw.githubusercontent.com/EOPF-Explorer/eodash-assets/refs/heads/main/styles/geozarr.json",
+      "type": "application/json",
+      "asset:keys": ["reflectance"]
     }
   ],
   "title": "Sentinel-2 Level-2A [V1 staging]",
@@ -308,5 +314,6 @@
     "https://stac-extensions.github.io/scientific/v1.0.0/schema.json",
     "https://stac-extensions.github.io/datacube/v2.3.0/schema.json"
   ],
+  "eodash:layerExclusive": true,
   "eodash:rasterform": "https://raw.githubusercontent.com/EOPF-Explorer/eodash-assets/refs/heads/main/forms/bandsform.json"
 }
