@@ -6,12 +6,29 @@ from pathlib import Path
 from typing import Any
 
 import click
+import pystac
 import requests
 from pystac_client import Client
 
 from _migrate_catalog.types import MigrationFn, MigrationResult
 
 logger = logging.getLogger(__name__)
+
+
+def _transaction_body(item_dict: dict[str, Any]) -> dict[str, Any] | None:
+    """A transaction-valid POST body for a raw STAC-API item dict, or ``None`` if one can't be built.
+
+    The GET/search representation omits nullable-but-required fields — notably
+    ``properties.datetime`` on datacube items (null datetime) — which the transaction POST
+    rejects with 400. pystac re-materializes them (and preserves link order). Returns ``None`` for
+    items pystac can't model (e.g. an asset with no href): such an item can't be safely round-tripped
+    through the transaction API, so the caller must skip it WITHOUT deleting — a delete-then-failed
+    POST would lose the item.
+    """
+    try:
+        return pystac.Item.from_dict(item_dict).to_dict()
+    except Exception:
+        return None
 
 
 def compose_migrations(fns: list[MigrationFn]) -> MigrationFn:
@@ -62,6 +79,7 @@ class STACMigrationRunner:
         migration_name: str,
         dry_run: bool = False,
         page_size: int = 100,
+        ids: list[str] | None = None,
     ) -> MigrationResult:
         started_at = datetime.now(UTC).isoformat()
         result = MigrationResult(
@@ -78,7 +96,15 @@ class STACMigrationRunner:
         )
 
         catalog = Client.open(self.api_url)
-        search = catalog.search(collections=[collection_id], max_items=None, limit=page_size)
+        # `ids` restricts the run to specific items (the canary path) via the same code path,
+        # recovery JSONL, and history as the full run. Omitted from the call when unset so the
+        # full-collection search stays byte-identical (backcompat).
+        if ids:
+            search = catalog.search(
+                collections=[collection_id], ids=ids, max_items=None, limit=page_size
+            )
+        else:
+            search = catalog.search(collections=[collection_id], max_items=None, limit=page_size)
 
         total = search.matched()
         if total is not None:
@@ -91,24 +117,39 @@ class STACMigrationRunner:
                 f"Processing items from '{collection_id}'{' (dry run)' if dry_run else ''}..."
             )
 
+        # Iterate raw item dicts, not pystac Item objects: some live items carry an asset with no
+        # href (e.g. s1-rtc-30TWQ) that pystac's Item.from_dict rejects, and one such item must not
+        # abort the whole run. The migration functions operate on dicts anyway.
         with click.progressbar(length=total, show_pos=True, show_percent=True) as bar:
-            for page in search.pages():
-                for item_dict in (item.to_dict() for item in page.items):
-                    item_id = item_dict.get("id", "unknown")
-                    result.items_processed += 1
-                    try:
-                        modified = migration_fn(item_dict)
-                        if modified is None:
-                            result.items_skipped += 1
-                        elif dry_run:
-                            result.items_modified += 1
+            for item_dict in search.items_as_dicts():
+                item_id = item_dict.get("id", "unknown")
+                result.items_processed += 1
+                try:
+                    modified = migration_fn(item_dict)
+                    if modified is None:
+                        result.items_skipped += 1
+                    elif dry_run:
+                        result.items_modified += 1
+                    else:
+                        body = _transaction_body(modified)
+                        if body is None:
+                            # Can't build a valid POST body — skip WITHOUT deleting (a
+                            # delete-then-failed-POST would lose the item).
+                            result.items_failed += 1
+                            result.errors.append(
+                                {
+                                    "item_id": item_id,
+                                    "error": "cannot build a transaction-valid POST body "
+                                    "(pystac can't model it); skipped without deleting",
+                                }
+                            )
                         else:
-                            self._update_item(collection_id, item_id, modified)
+                            self._update_item(collection_id, item_id, body)
                             result.items_modified += 1
-                    except Exception as e:
-                        result.items_failed += 1
-                        result.errors.append({"item_id": item_id, "error": str(e)})
-                    bar.update(1)
+                except Exception as e:
+                    result.items_failed += 1
+                    result.errors.append({"item_id": item_id, "error": str(e)})
+                bar.update(1)
 
         result.completed_at = datetime.now(UTC).isoformat()
         return result

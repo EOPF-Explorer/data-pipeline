@@ -6,6 +6,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from _migrate_catalog.history import load_history, record_run, was_migration_run
+from _migrate_catalog.migrations.add_acquisitions_filter_link import add_acquisitions_filter_link
+from _migrate_catalog.migrations.add_xyz_link import add_xyz_link
+from _migrate_catalog.migrations.align_visualization_links import align_visualization_links
 from _migrate_catalog.migrations.fix_url_encoding import fix_url_encoding
 from _migrate_catalog.migrations.fix_zarr_media_type import fix_zarr_media_type
 from _migrate_catalog.runner import STACMigrationRunner, compose_migrations
@@ -175,6 +178,344 @@ class TestFixZarrMediaType:
         assert result2 is None
 
 
+_TJ_BASE = (
+    "https://api.example.com/raster/collections/sentinel-1-grd-rtc-staging"
+    "/items/s1-rtc-31TCG/WebMercatorQuad/tilejson.json"
+)
+_TJ_QUERY = "expression=%2Fdescending%3Avv&rescale=0.0%2C0.2&sel=time=2026-06-07T05%3A52%3A48"
+_TJ_HREF = f"{_TJ_BASE}?{_TJ_QUERY}"
+
+
+def _item_with_tilejson(*, viewer_title=None, render_title=None, extra_links=None) -> dict:
+    """A STAC item carrying a well-formed tilejson link (+ optional viewer/renders), no xyz yet."""
+    links = [
+        {"rel": "self", "href": "https://api.example.com/stac/.../s1-rtc-31TCG"},
+        {"rel": "tilejson", "type": "application/json", "href": _TJ_HREF, "title": "tilejson"},
+    ]
+    if viewer_title is not None:
+        links.append(
+            {
+                "rel": "viewer",
+                "type": "text/html",
+                "href": f"{_TJ_BASE.replace('tilejson.json', 'map.html')}?{_TJ_QUERY}",
+                "title": viewer_title,
+            }
+        )
+    links.extend(extra_links or [])
+    item: dict = {"id": "s1-rtc-31TCG", "links": links, "assets": {}}
+    if render_title is not None:
+        item["properties"] = {"renders": {"rgb": {"title": render_title}}}
+    return item
+
+
+class TestAddXyzLink:
+    def test_adds_xyz_after_tilejson(self):
+        item = _item_with_tilejson()
+        result = add_xyz_link(item)
+        assert result is not None
+        rels = [lk["rel"] for lk in result["links"]]
+        assert rels.count("xyz") == 1
+        assert rels.index("xyz") == rels.index("tilejson") + 1
+        xyz = next(lk for lk in result["links"] if lk["rel"] == "xyz")
+        assert xyz["type"] == "image/png"
+        assert "/tiles/WebMercatorQuad/{z}/{x}/{y}.png?" in xyz["href"]
+
+    def test_query_preserved_including_encoded_sel_time(self):
+        result = add_xyz_link(_item_with_tilejson())
+        assert result is not None
+        xyz = next(lk for lk in result["links"] if lk["rel"] == "xyz")
+        # query byte-identical to tilejson's (incl. percent-encoded sel=time colons)
+        assert xyz["href"].split("?", 1)[1] == _TJ_QUERY
+
+    def test_title_from_viewer_first(self):
+        # live per-acq items carry both a viewer title and a renders title — viewer wins for parity
+        result = add_xyz_link(
+            _item_with_tilejson(
+                viewer_title="Sentinel-1 GRD RGB composite", render_title="VV, VH, VV/VH composite"
+            )
+        )
+        assert result is not None
+        xyz = next(lk for lk in result["links"] if lk["rel"] == "xyz")
+        assert xyz["title"] == "Sentinel-1 GRD RGB composite"
+
+    def test_title_from_renders_when_no_viewer(self):
+        result = add_xyz_link(_item_with_tilejson(render_title="VV, VH, VV/VH composite"))
+        assert result is not None
+        xyz = next(lk for lk in result["links"] if lk["rel"] == "xyz")
+        assert xyz["title"] == "VV, VH, VV/VH composite"
+
+    def test_title_fallback_when_no_viewer_or_renders(self):
+        result = add_xyz_link(_item_with_tilejson())
+        assert result is not None
+        xyz = next(lk for lk in result["links"] if lk["rel"] == "xyz")
+        assert xyz["title"] == "XYZ tile template"
+
+    def test_skips_when_xyz_already_present(self):
+        item = _item_with_tilejson(
+            extra_links=[{"rel": "xyz", "type": "image/png", "href": "https://x/{z}/{x}/{y}.png"}]
+        )
+        assert add_xyz_link(item) is None
+
+    def test_skips_legacy_bare_tilejson(self):
+        # the 3 known-legacy items carry .../WebMercatorQuad (no /tilejson.json?) — deriving xyz
+        # would emit garbage; they're slated for wipe+re-ingest, so skip them.
+        item = {
+            "id": "s1-rtc-31TCJ",
+            "links": [
+                {
+                    "rel": "tilejson",
+                    "type": "application/json",
+                    "href": "https://api.example.com/raster/.../s1-rtc-31TCJ/WebMercatorQuad",
+                }
+            ],
+            "assets": {},
+        }
+        assert add_xyz_link(item) is None
+
+    def test_skips_when_no_tilejson(self):
+        item = {"id": "x", "links": [{"rel": "self", "href": "https://x"}], "assets": {}}
+        assert add_xyz_link(item) is None
+
+    def test_does_not_mutate_input(self):
+        item = _item_with_tilejson()
+        original_rels = [lk["rel"] for lk in item["links"]]
+        add_xyz_link(item)
+        assert [lk["rel"] for lk in item["links"]] == original_rels
+
+    def test_idempotent(self):
+        result1 = add_xyz_link(_item_with_tilejson())
+        assert result1 is not None
+        assert add_xyz_link(result1) is None
+
+
+def _nav_links() -> list:
+    return [
+        {"rel": "collection", "href": "https://x/c"},
+        {"rel": "parent", "href": "https://x/p"},
+        {"rel": "root", "href": "https://x/r"},
+        {"rel": "self", "href": "https://x/s"},
+    ]
+
+
+def _old_acq_item() -> dict:
+    """An acquisition item as the OLD register_per_acquisition emitted it: order
+    store→tilejson→xyz→viewer, tilejson titled 'tilejson', viewer/xyz hardcoded."""
+    q = "expression=a&sel=time=2026-07-01T17%3A54%3A17"
+    base = (
+        "https://api.example.com/raster/collections/sentinel-1-grd-rtc-staging/items/s1-rtc-31TCG"
+    )
+    return {
+        "id": "s1-rtc-31TCG-20260701t175417",
+        "properties": {"renders": {"rgb": {"title": "VV, VH, VV/VH composite"}}},
+        "links": [
+            *_nav_links(),
+            {"rel": "store", "title": "Zarr Store", "href": "https://x/z"},
+            {
+                "rel": "tilejson",
+                "type": "application/json",
+                "title": "tilejson",
+                "href": f"{base}/WebMercatorQuad/tilejson.json?{q}",
+            },
+            {
+                "rel": "xyz",
+                "type": "image/png",
+                "title": "Sentinel-1 GRD RGB composite",
+                "href": f"{base}/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png?{q}",
+            },
+            {
+                "rel": "viewer",
+                "type": "text/html",
+                "title": "Sentinel-1 GRD RGB composite",
+                "href": f"{base}/WebMercatorQuad/map.html?{q}",
+            },
+            {"rel": "via", "type": "text/html", "title": "EOPF Explorer", "href": "https://x/e"},
+            {
+                "rel": "related",
+                "type": "application/json",
+                "title": "Parent tile datacube",
+                "href": "https://x/pt",
+            },
+        ],
+        "assets": {},
+    }
+
+
+def _canonical_cube_item() -> dict:
+    """A cube item already in the canonical form register_v1 emits — align must no-op on it."""
+    return {
+        "id": "s1-rtc-31TCG",
+        "properties": {"renders": {"rgb": {"title": "VV, VH, VV/VH composite"}}},
+        "links": [
+            *_nav_links(),
+            {"rel": "store", "title": "Zarr Store", "href": "https://x/z"},
+            {"rel": "viewer", "title": "VV, VH, VV/VH composite", "href": "https://x/v"},
+            {"rel": "tilejson", "title": "TileJSON for s1-rtc-31TCG", "href": "https://x/t"},
+            {"rel": "xyz", "title": "VV, VH, VV/VH composite", "href": "https://x/xyz"},
+            {"rel": "via", "title": "EOPF Explorer", "href": "https://x/e"},
+            {"rel": "related", "title": "Acquisition A", "href": "https://x/a1"},
+            {"rel": "related", "title": "Acquisition B", "href": "https://x/a2"},
+        ],
+        "assets": {},
+    }
+
+
+class TestAlignVisualizationLinks:
+    def test_retitles_viewer_tilejson_xyz(self):
+        result = align_visualization_links(_old_acq_item())
+        assert result is not None
+        by_rel = {lk["rel"]: lk for lk in result["links"]}
+        assert by_rel["viewer"]["title"] == "VV, VH, VV/VH composite"
+        assert by_rel["xyz"]["title"] == "VV, VH, VV/VH composite"
+        assert by_rel["tilejson"]["title"] == "TileJSON for s1-rtc-31TCG-20260701t175417"
+
+    def test_reorders_non_nav_to_canonical(self):
+        result = align_visualization_links(_old_acq_item())
+        assert result is not None
+        rels = [lk["rel"] for lk in result["links"]]
+        non_nav = [r for r in rels if r not in {"collection", "parent", "root", "self"}]
+        assert non_nav == ["store", "viewer", "tilejson", "xyz", "via", "related"]
+
+    def test_preserves_related_order_and_count(self):
+        item = _old_acq_item()
+        item["links"].append({"rel": "related", "title": "Second related", "href": "https://x/pt2"})
+        result = align_visualization_links(item)
+        assert result is not None
+        related = [lk for lk in result["links"] if lk["rel"] == "related"]
+        assert [lk["title"] for lk in related] == ["Parent tile datacube", "Second related"]
+
+    def test_noop_on_canonical_cube_item(self):
+        assert align_visualization_links(_canonical_cube_item()) is None
+
+    def test_skips_item_without_renders(self):
+        item = {"id": "s2", "properties": {}, "links": _nav_links(), "assets": {}}
+        assert align_visualization_links(item) is None
+
+    def test_retitles_even_when_xyz_absent(self):
+        item = _old_acq_item()
+        item["links"] = [lk for lk in item["links"] if lk["rel"] != "xyz"]
+        result = align_visualization_links(item)
+        assert result is not None
+        by_rel = {lk["rel"]: lk for lk in result["links"]}
+        assert by_rel["tilejson"]["title"] == "TileJSON for s1-rtc-31TCG-20260701t175417"
+        assert by_rel["viewer"]["title"] == "VV, VH, VV/VH composite"
+
+    def test_render_title_fallback_when_untitled(self):
+        item = _old_acq_item()
+        del item["properties"]["renders"]["rgb"]["title"]
+        result = align_visualization_links(item)
+        assert result is not None
+        by_rel = {lk["rel"]: lk for lk in result["links"]}
+        assert by_rel["viewer"]["title"] == "Visualization for s1-rtc-31TCG-20260701t175417"
+
+    def test_does_not_mutate_input(self):
+        item = _old_acq_item()
+        before = [lk["rel"] for lk in item["links"]]
+        align_visualization_links(item)
+        assert [lk["rel"] for lk in item["links"]] == before
+
+    def test_idempotent(self):
+        result1 = align_visualization_links(_old_acq_item())
+        assert result1 is not None
+        assert align_visualization_links(result1) is None
+
+    def test_composes_with_add_xyz_link(self):
+        # Full backfill path: add xyz (item without one) then align → canonical form.
+        item = _old_acq_item()
+        item["links"] = [lk for lk in item["links"] if lk["rel"] != "xyz"]
+        composed = compose_migrations([add_xyz_link, align_visualization_links])
+        result = composed(item)
+        assert result is not None
+        rels = [
+            lk["rel"]
+            for lk in result["links"]
+            if lk["rel"] not in {"collection", "parent", "root", "self"}
+        ]
+        assert rels == ["store", "viewer", "tilejson", "xyz", "via", "related"]
+        by_rel = {lk["rel"]: lk for lk in result["links"]}
+        assert by_rel["xyz"]["title"] == "VV, VH, VV/VH composite"
+
+
+_FILTER_TITLE = "Per-acquisition items (filter by tile grid:code)"
+
+
+def _acq_item_no_filter() -> dict:
+    """An aligned acquisition item carrying only the single parent related link (no filter link)."""
+    stac = "https://api.example.com/stac"
+    acq_coll = "sentinel-1-grd-rtc-acquisitions-staging"
+    return {
+        "id": "s1-rtc-31TCG-20260701t175417",
+        "collection": acq_coll,
+        "properties": {"renders": {"rgb": {"title": "VV, VH, VV/VH composite"}}},
+        "links": [
+            {
+                "rel": "self",
+                "href": f"{stac}/collections/{acq_coll}/items/s1-rtc-31TCG-20260701t175417",
+            },
+            {"rel": "store", "title": "Zarr Store", "href": "https://x/z"},
+            {"rel": "viewer", "title": "VV, VH, VV/VH composite", "href": "https://x/v"},
+            {"rel": "tilejson", "title": "TileJSON for s1-rtc-...", "href": "https://x/t"},
+            {"rel": "xyz", "title": "VV, VH, VV/VH composite", "href": "https://x/xyz"},
+            {"rel": "via", "title": "EOPF Explorer", "href": "https://x/e"},
+            {
+                "rel": "related",
+                "type": "application/json",
+                "href": f"{stac}/collections/sentinel-1-grd-rtc-staging/items/s1-rtc-31TCG",
+                "title": "Parent tile datacube",
+            },
+        ],
+        "assets": {},
+    }
+
+
+class TestAddAcquisitionsFilterLink:
+    def test_adds_filter_link_after_parent(self):
+        result = add_acquisitions_filter_link(_acq_item_no_filter())
+        assert result is not None
+        related = [lk for lk in result["links"] if lk["rel"] == "related"]
+        assert [lk["title"] for lk in related] == ["Parent tile datacube", _FILTER_TITLE]
+
+    def test_filter_href_targets_the_acquisitions_collection(self):
+        result = add_acquisitions_filter_link(_acq_item_no_filter())
+        assert result is not None
+        filt = next(lk for lk in result["links"] if lk.get("title") == _FILTER_TITLE)
+        assert (
+            filt["href"]
+            == "https://api.example.com/stac/collections/sentinel-1-grd-rtc-acquisitions-staging"
+        )
+        assert filt["rel"] == "related"
+        assert filt["type"] == "application/json"
+
+    def test_now_two_related_links_triggers_grouping(self):
+        result = add_acquisitions_filter_link(_acq_item_no_filter())
+        assert result is not None
+        assert sum(1 for lk in result["links"] if lk["rel"] == "related") == 2
+
+    def test_idempotent(self):
+        result1 = add_acquisitions_filter_link(_acq_item_no_filter())
+        assert result1 is not None
+        assert add_acquisitions_filter_link(result1) is None
+
+    def test_skips_non_acquisition_item(self):
+        # No "Parent tile datacube" related link (e.g. a cube or S2 item) → not an acq item → skip.
+        item = _canonical_cube_item()
+        assert add_acquisitions_filter_link(item) is None
+
+    def test_does_not_mutate_input(self):
+        item = _acq_item_no_filter()
+        before = len(item["links"])
+        add_acquisitions_filter_link(item)
+        assert len(item["links"]) == before
+
+    def test_gate_titles_match_registration_source_of_truth(self):
+        # The migration gates on these titles; if register_* renames them the migration would
+        # silently skip every item. Bind them to the shared constants (drift guard).
+        from _migrate_catalog.migrations import add_acquisitions_filter_link as mod
+        from stac_link_titles import ACQUISITIONS_FILTER_TITLE, PARENT_DATACUBE_TITLE
+
+        assert mod._PARENT_TITLE == PARENT_DATACUBE_TITLE
+        assert mod._FILTER_TITLE == ACQUISITIONS_FILTER_TITLE
+
+
 def _make_mock_search(items_dicts: list, total: int | None = None) -> MagicMock:
     """Build a mock pystac_client search that yields one page with the given items."""
     mock_items = []
@@ -187,6 +528,9 @@ def _make_mock_search(items_dicts: list, total: int | None = None) -> MagicMock:
     mock_search = MagicMock()
     mock_search.matched.return_value = total
     mock_search.pages.return_value = [mock_page] if mock_items else []
+    # run_migration consumes raw dicts (robust to items pystac can't model); clone/fetch still
+    # use .pages()/.items.
+    mock_search.items_as_dicts.return_value = list(items_dicts)
     return mock_search
 
 
@@ -264,6 +608,107 @@ class TestSTACMigrationRunner:
         assert result.items_modified == 1
         assert result.items_skipped == 1
         runner._update_item.assert_called_once()
+
+    def test_ids_are_passed_to_search(self, item_clean):
+        # Canary path: run_migration(ids=[...]) restricts the search to those item ids so the
+        # single-tile run uses the exact same code path/recovery/history as the full run.
+        runner = self._make_runner()
+        mock_search = _make_mock_search([item_clean], total=1)
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = mock_search
+            runner.run_migration(
+                "test-col", fix_zarr_media_type, "fix_zarr_media_type", ids=["item-a", "item-b"]
+            )
+
+        mock_client.open.return_value.search.assert_called_once_with(
+            collections=["test-col"], ids=["item-a", "item-b"], max_items=None, limit=100
+        )
+
+    def test_no_ids_omits_ids_filter(self, item_clean):
+        # Without ids the full-collection search must not pass an ids filter (backcompat).
+        runner = self._make_runner()
+        mock_search = _make_mock_search([item_clean], total=1)
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = mock_search
+            runner.run_migration("test-col", fix_zarr_media_type, "fix_zarr_media_type")
+
+        mock_client.open.return_value.search.assert_called_once_with(
+            collections=["test-col"], max_items=None, limit=100
+        )
+
+    def test_post_body_normalized_so_datacube_items_dont_400(self):
+        # Datacube items have null datetime, which the STAC GET/search view omits from
+        # properties — but the transaction POST requires the key. run_migration must normalize
+        # the POST body (via pystac) so it re-materializes properties.datetime.
+        runner = self._make_runner()  # _update_item is a MagicMock
+        item = {
+            "type": "Feature",
+            "stac_version": "1.0.0",
+            "id": "s1-rtc-31TCG",
+            "geometry": {"type": "Polygon", "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 0]]]},
+            "bbox": [0, 0, 1, 1],
+            "properties": {  # note: NO "datetime" key (null-datetime datacube), only start/end
+                "start_datetime": "2026-06-01T00:00:00Z",
+                "end_datetime": "2026-07-01T00:00:00Z",
+            },
+            "links": [
+                {
+                    "rel": "tilejson",
+                    "type": "application/json",
+                    "href": "https://x/WebMercatorQuad/tilejson.json?expression=a",
+                }
+            ],
+            "assets": {},
+            "collection": "sentinel-1-grd-rtc-staging",
+        }
+        mock_search = MagicMock()
+        mock_search.matched.return_value = 1
+        mock_search.items_as_dicts.return_value = [item]
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = mock_search
+            runner.run_migration("test-col", add_xyz_link, "add_xyz_link")
+
+        runner._update_item.assert_called_once()
+        _, _, body = runner._update_item.call_args[0]
+        assert "datetime" in body["properties"]  # key present (None) for the transaction API
+        # xyz stays immediately after tilejson through normalization
+        rels = [lk["rel"] for lk in body["links"]]
+        assert rels.index("xyz") == rels.index("tilejson") + 1
+
+    def test_unmodelable_item_failed_without_delete(self):
+        # A live item can carry an asset with no href (e.g. s1-rtc-30TWQ) that pystac's
+        # Item.from_dict rejects. It is READ fine (raw dicts, so it can't abort the run) but it
+        # cannot be turned into a transaction-valid POST body — so it must be reported failed and
+        # NEVER deleted. A delete-then-failed-POST would lose the item entirely.
+        runner = self._make_runner()  # _update_item (delete + post) is a MagicMock
+        hrefless = {
+            "id": "s1-rtc-30TWQ",
+            "assets": {"vv": {"roles": ["data"]}},  # no href — pystac would raise KeyError
+            "links": [
+                {
+                    "rel": "tilejson",
+                    "type": "application/json",
+                    "href": "https://x/WebMercatorQuad/tilejson.json?expression=a",
+                }
+            ],
+        }
+        mock_search = MagicMock()
+        mock_search.matched.return_value = 1
+        mock_search.items_as_dicts.return_value = [hrefless]
+        # Prove the runner does NOT touch the pystac-parsing path.
+        mock_search.pages.side_effect = KeyError("href")
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = mock_search
+            result = runner.run_migration("test-col", add_xyz_link, "add_xyz_link")
+
+        assert result.items_processed == 1
+        assert result.items_modified == 0
+        assert result.items_failed == 1
+        runner._update_item.assert_not_called()  # never delete an item we can't re-POST
 
     def test_clone_collection_copies_metadata_and_items(self):
         runner = STACMigrationRunner("https://api.example.com/stac")
