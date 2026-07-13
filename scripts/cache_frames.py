@@ -205,9 +205,13 @@ def pull_frame(s3: Any, bucket: str, prefix: str, prod_id: str, data_raw: str | 
             if matched is None and cand_key == acq:
                 matched = cand
             else:
-                log.warning("cache tar for %s carried an unexpected product %s; ignoring it", acq, cand.name)
+                log.warning(
+                    "cache tar for %s carried an unexpected product %s; ignoring it", acq, cand.name
+                )
         if matched is None:
-            raise RuntimeError(f"cache tar for {acq} did not yield a matching product with manifest.safe")
+            raise RuntimeError(
+                f"cache tar for {acq} did not yield a matching product with manifest.safe"
+            )
         final = target_root / matched.name
         if final.exists():
             shutil.rmtree(final)
@@ -232,10 +236,7 @@ def pull_frames(
         validate_prod_id(pid)  # fail fast on the whole batch
     results: dict[str, str] = {}
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
-        futs = {
-            ex.submit(pull_frame, s3, bucket, prefix, pid, data_raw): pid
-            for pid in prod_ids
-        }
+        futs = {ex.submit(pull_frame, s3, bucket, prefix, pid, data_raw): pid for pid in prod_ids}
         for fut in as_completed(futs):
             pid = futs[fut]
             try:
@@ -315,7 +316,9 @@ def populate_frames(
     if errors:
         # good frames are still cached; the run fails loud on any integrity error so a
         # silent partial upload can't masquerade as success.
-        raise RuntimeError(f"cache populate failed for {len(errors)} frame(s): " + "; ".join(errors))
+        raise RuntimeError(
+            f"cache populate failed for {len(errors)} frame(s): " + "; ".join(errors)
+        )
     return results
 
 
@@ -323,7 +326,7 @@ def discover_downloaded_frames(data_raw: str | Path) -> list[str]:
     """List prod_ids that have a valid extracted SAFE on disk (the populate input:
     everything in data_raw, whether cache-pulled or freshly CDSE-downloaded). The
     caller decides what to skip; populate_frame skips already-cached frames."""
-    out = []
+    out: list[str] = []
     root = Path(data_raw)
     if not root.is_dir():
         return out
@@ -361,7 +364,7 @@ def list_cached_frames(s3: Any, bucket: str, prefix: str) -> list[str]:
             key = obj["Key"]
             if not key.startswith(pfx) or not key.endswith(".tar"):
                 continue
-            pid = key[len(pfx):-len(".tar")]
+            pid = key[len(pfx) : -len(".tar")]
             try:
                 out.append(validate_prod_id(pid))
             except ValueError:
@@ -452,25 +455,42 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--frames", help="comma/space-separated product ids")
     parser.add_argument("--frames-file", help="file with one product id per line")
     parser.add_argument("--max-workers", type=int, default=DEFAULT_MAX_WORKERS)
-    parser.add_argument("--overwrite", action="store_true", help="(populate) re-upload cached frames")
-    parser.add_argument("--keep-days", type=int, default=DEFAULT_KEEP_DAYS,
-                        help="(evict) keep frames acquired within this many days")
-    parser.add_argument("--today", help="(evict) override 'today' as YYYY-MM-DD (testing/repeatable runs)")
-    parser.add_argument("--dry-run", action="store_true", help="(evict) list stale frames without deleting")
+    parser.add_argument(
+        "--overwrite", action="store_true", help="(populate) re-upload cached frames"
+    )
+    parser.add_argument(
+        "--keep-days",
+        type=int,
+        default=DEFAULT_KEEP_DAYS,
+        help="(evict) keep frames acquired within this many days",
+    )
+    parser.add_argument(
+        "--today", help="(evict) override 'today' as YYYY-MM-DD (testing/repeatable runs)"
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", help="(evict) list stale frames without deleting"
+    )
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s", stream=sys.stderr)
+    logging.basicConfig(
+        level=logging.INFO, format="%(levelname)s %(name)s: %(message)s", stream=sys.stderr
+    )
     args = build_parser().parse_args(argv)
     s3 = make_s3_client(args.endpoint)
 
     if args.op == "evict":
         today = date.fromisoformat(args.today) if args.today else None
         res = evict_stale(s3, args.bucket, args.prefix, args.keep_days, today, args.dry_run)
-        log.info("frame cache evict (keep %dd, cutoff %s): %d stale, %d kept%s",
-                 args.keep_days, res["cutoff"], len(res["stale"]), res["kept"],
-                 " — dry-run, nothing deleted" if args.dry_run else f", {len(res['removed'])} removed")
+        log.info(
+            "frame cache evict (keep %dd, cutoff %s): %d stale, %d kept%s",
+            args.keep_days,
+            res["cutoff"],
+            len(res["stale"]),
+            res["kept"],
+            " — dry-run, nothing deleted" if args.dry_run else f", {len(res['removed'])} removed",
+        )
         for pid in res["stale"]:  # stdout = exactly what is (or would be) removed
             print(pid)
         return 0
@@ -484,19 +504,34 @@ def main(argv: list[str] | None = None) -> int:
         misses = sorted(pid for pid, st in results.items() if st == "miss")
         hit = sum(v == "hit" for v in results.values())
         present = sum(v == "present" for v in results.values())
-        log.info("frame cache pull: %d available (%d hits, %d already present), %d misses",
-                 hit + present, hit, present, len(misses))
+        log.info(
+            "frame cache pull: %d available (%d hits, %d already present), %d misses",
+            hit + present,
+            hit,
+            present,
+            len(misses),
+        )
         # misses to stdout so the template/operator can see what CDSE must fetch
         for pid in misses:
             print(pid)
         return 0
 
     # populate: upload everything on disk not already cached
-    frames = _read_frames(args) if (args.frames or args.frames_file) else discover_downloaded_frames(args.data_raw)
-    results = populate_frames(s3, args.bucket, args.prefix, frames, args.data_raw, args.max_workers, args.overwrite)
+    frames = (
+        _read_frames(args)
+        if (args.frames or args.frames_file)
+        else discover_downloaded_frames(args.data_raw)
+    )
+    results = populate_frames(
+        s3, args.bucket, args.prefix, frames, args.data_raw, args.max_workers, args.overwrite
+    )
     up = sum(v == "uploaded" for v in results.values())
-    log.info("frame cache populate: %d uploaded, %d already cached, %d absent",
-             up, sum(v == "cached" for v in results.values()), sum(v == "absent" for v in results.values()))
+    log.info(
+        "frame cache populate: %d uploaded, %d already cached, %d absent",
+        up,
+        sum(v == "cached" for v in results.values()),
+        sum(v == "absent" for v in results.values()),
+    )
     return 0
 
 

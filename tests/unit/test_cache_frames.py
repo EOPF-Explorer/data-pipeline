@@ -364,7 +364,9 @@ class TestDiscover:
         _make_safe(tmp_path, VALID_ID)
         _make_safe(tmp_path, VALID_ID_2)
         (tmp_path / "not-a-frame").mkdir()  # ignored
-        (tmp_path / VALID_ID).joinpath("incomplete.SAFE").mkdir()  # no manifest -> ignored elsewhere
+        (tmp_path / VALID_ID).joinpath(
+            "incomplete.SAFE"
+        ).mkdir()  # no manifest -> ignored elsewhere
         found = cf.discover_downloaded_frames(tmp_path)
         assert set(found) == {VALID_ID, VALID_ID_2}
 
@@ -460,8 +462,8 @@ class TestListCachedFrames:
     def test_lists_tar_keys_only(self, tmp_path):
         s3 = FakeS3()
         _seed_cache(s3, "fc", VALID_ID, VALID_ID_2)
-        s3.store["fc/not-a-tar.txt"] = b"x"          # ignored (not .tar)
-        s3.store["fc/garbage.tar"] = b"x"            # ignored (invalid id)
+        s3.store["fc/not-a-tar.txt"] = b"x"  # ignored (not .tar)
+        s3.store["fc/garbage.tar"] = b"x"  # ignored (invalid id)
         # cache objects are keyed by acquisition (the tar name), so list returns those.
         assert sorted(cf.list_cached_frames(s3, "b", "fc")) == sorted(
             [cf.acquisition_key(VALID_ID), cf.acquisition_key(VALID_ID_2)]
@@ -472,10 +474,14 @@ class TestListCachedFrames:
             def list_objects_v2(self, Bucket, Prefix="", ContinuationToken=None):
                 keys = sorted(k for k in self.store if k.startswith(Prefix))
                 start = int(ContinuationToken or 0)
-                page = keys[start:start + 1]
+                page = keys[start : start + 1]
                 more = start + 1 < len(keys)
-                return {"Contents": [{"Key": k} for k in page],
-                        "IsTruncated": more, "NextContinuationToken": str(start + 1)}
+                return {
+                    "Contents": [{"Key": k} for k in page],
+                    "IsTruncated": more,
+                    "NextContinuationToken": str(start + 1),
+                }
+
         s3 = PagedS3()
         _seed_cache(s3, "fc", VALID_ID, VALID_ID_2, S1D_ID)
         assert sorted(cf.list_cached_frames(s3, "b", "fc")) == sorted(
@@ -497,8 +503,8 @@ class TestEvictStale:
         assert res["stale"] == sorted([cf.acquisition_key(VALID_ID), cf.acquisition_key(S1D_ID)])
         assert res["removed"] == sorted([cf.acquisition_key(VALID_ID), cf.acquisition_key(S1D_ID)])
         assert res["kept"] == 1
-        assert cf.frame_key("fc", VALID_ID) not in s3.store      # actually deleted
-        assert cf.frame_key("fc", VALID_ID_2) in s3.store        # in-window retained
+        assert cf.frame_key("fc", VALID_ID) not in s3.store  # actually deleted
+        assert cf.frame_key("fc", VALID_ID_2) in s3.store  # in-window retained
 
     def test_dry_run_deletes_nothing(self):
         s3 = self._seeded()
@@ -506,7 +512,7 @@ class TestEvictStale:
         res = cf.evict_stale(s3, "b", "fc", keep_days=10, today=date(2024, 1, 20), dry_run=True)
         assert res["stale"] == sorted([cf.acquisition_key(VALID_ID), cf.acquisition_key(S1D_ID)])
         assert res["removed"] == []
-        assert s3.store == before                            # nothing deleted
+        assert s3.store == before  # nothing deleted
 
     def test_keeps_everything_within_window(self):
         s3 = self._seeded()
@@ -534,16 +540,30 @@ class TestEvictCLI:
         s3 = FakeS3()
         _seed_cache(s3, "fc", VALID_ID, VALID_ID_2)
         import unittest.mock as mock
+
         with mock.patch.object(cf, "make_s3_client", return_value=s3):
-            rc = cf.main(["evict", "--bucket", "b", "--prefix", "fc",
-                          "--keep-days", "10", "--today", "2024-01-20", "--dry-run"])
+            rc = cf.main(
+                [
+                    "evict",
+                    "--bucket",
+                    "b",
+                    "--prefix",
+                    "fc",
+                    "--keep-days",
+                    "10",
+                    "--today",
+                    "2024-01-20",
+                    "--dry-run",
+                ]
+            )
         assert rc == 0
         out = capsys.readouterr().out
-        assert cf.acquisition_key(VALID_ID) in out          # stale (2024-01-01) printed
-        assert cf.acquisition_key(VALID_ID_2) not in out    # in-window not printed
+        assert cf.acquisition_key(VALID_ID) in out  # stale (2024-01-01) printed
+        assert cf.acquisition_key(VALID_ID_2) not in out  # in-window not printed
 
     def test_pull_still_requires_data_raw(self):
         s3 = FakeS3()
         import unittest.mock as mock
+
         with mock.patch.object(cf, "make_s3_client", return_value=s3), pytest.raises(SystemExit):
             cf.main(["pull", "--bucket", "b", "--frames", VALID_ID])

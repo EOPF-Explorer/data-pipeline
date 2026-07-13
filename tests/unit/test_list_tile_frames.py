@@ -41,8 +41,9 @@ def test_lists_frames_over_tile_bbox_for_platform() -> None:
         _item("S1A_IW_GRDH_1SDV_20240101T060000_20240101T060025_0522A1_01_ABCD"),
         _item("S1A_IW_GRDH_1SDV_20240101T060025_20240101T060050_0522A1_01_EF01"),
     ]
-    with patch(f"{_MOD}.tile_bbox", return_value=_BBOX), patch(
-        f"{_MOD}.Client.open", return_value=_patched_client(items)
+    with (
+        patch(f"{_MOD}.tile_bbox", return_value=_BBOX),
+        patch(f"{_MOD}.Client.open", return_value=_patched_client(items)),
     ):
         frames = list_tile_frames(
             "https://cdse/stac", "31TCH", "descending", "2024-01-01", "2024-01-02", "S1A"
@@ -55,8 +56,9 @@ def test_lists_frames_over_tile_bbox_for_platform() -> None:
 
 def test_scopes_search_to_collection_bbox_window_and_orbit() -> None:
     client = _patched_client([])
-    with patch(f"{_MOD}.tile_bbox", return_value=_BBOX), patch(
-        f"{_MOD}.Client.open", return_value=client
+    with (
+        patch(f"{_MOD}.tile_bbox", return_value=_BBOX),
+        patch(f"{_MOD}.Client.open", return_value=client),
     ):
         list_tile_frames(
             "https://cdse/stac", "31TCH", "descending", "2024-01-01", "2024-01-02", "S1A"
@@ -74,8 +76,9 @@ def test_drops_other_platform_frames() -> None:
         _item("S1A_IW_GRDH_1SDV_20240101T060000_20240101T060025_0522A1_01_ABCD"),
         _item("S1D_IW_GRDH_1SDV_20240101T060000_20240101T060025_0522A1_01_DEAD"),
     ]
-    with patch(f"{_MOD}.tile_bbox", return_value=_BBOX), patch(
-        f"{_MOD}.Client.open", return_value=_patched_client(items)
+    with (
+        patch(f"{_MOD}.tile_bbox", return_value=_BBOX),
+        patch(f"{_MOD}.Client.open", return_value=_patched_client(items)),
     ):
         frames = list_tile_frames(
             "https://cdse/stac", "31TCH", "descending", "2024-01-01", "2024-01-02", "S1A"
@@ -87,8 +90,9 @@ def test_dedups_repeated_ids_preserving_order() -> None:
     dup = "S1A_IW_GRDH_1SDV_20240101T060000_20240101T060025_0522A1_01_ABCD"
     other = "S1A_IW_GRDH_1SDV_20240101T060025_20240101T060050_0522A1_01_EF01"
     items = [_item(dup), _item(other), _item(dup)]
-    with patch(f"{_MOD}.tile_bbox", return_value=_BBOX), patch(
-        f"{_MOD}.Client.open", return_value=_patched_client(items)
+    with (
+        patch(f"{_MOD}.tile_bbox", return_value=_BBOX),
+        patch(f"{_MOD}.Client.open", return_value=_patched_client(items)),
     ):
         frames = list_tile_frames(
             "https://cdse/stac", "31TCH", "descending", "2024-01-01", "2024-01-02", "S1A"
@@ -97,12 +101,11 @@ def test_dedups_repeated_ids_preserving_order() -> None:
 
 
 def test_invalid_tile_id_raises() -> None:
-    with patch(
-        f"{_MOD}.tile_bbox", side_effect=ValueError("invalid MGRS tile id: 'ZZ'")
-    ), pytest.raises(ValueError, match="invalid MGRS tile id"):
-        list_tile_frames(
-            "https://cdse/stac", "ZZ", "descending", "2024-01-01", "2024-01-02", "S1A"
-        )
+    with (
+        patch(f"{_MOD}.tile_bbox", side_effect=ValueError("invalid MGRS tile id: 'ZZ'")),
+        pytest.raises(ValueError, match="invalid MGRS tile id"),
+    ):
+        list_tile_frames("https://cdse/stac", "ZZ", "descending", "2024-01-01", "2024-01-02", "S1A")
 
 
 def test_main_prints_ids_one_per_line(capsys: pytest.CaptureFixture[str]) -> None:
@@ -111,14 +114,20 @@ def test_main_prints_ids_one_per_line(capsys: pytest.CaptureFixture[str]) -> Non
         _item("S1A_IW_GRDH_1SDV_20240101T060025_20240101T060050_0522A1_01_EF01"),
     ]
     argv = [
-        "--tile-id", "31TCH",
-        "--orbit-direction", "descending",
-        "--date-start", "2024-01-01",
-        "--date-end", "2024-01-02",
-        "--platform", "S1A",
+        "--tile-id",
+        "31TCH",
+        "--orbit-direction",
+        "descending",
+        "--date-start",
+        "2024-01-01",
+        "--date-end",
+        "2024-01-02",
+        "--platform",
+        "S1A",
     ]
-    with patch(f"{_MOD}.tile_bbox", return_value=_BBOX), patch(
-        f"{_MOD}.Client.open", return_value=_patched_client(items)
+    with (
+        patch(f"{_MOD}.tile_bbox", return_value=_BBOX),
+        patch(f"{_MOD}.Client.open", return_value=_patched_client(items)),
     ):
         rc = main(argv)
     assert rc == 0

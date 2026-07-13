@@ -80,9 +80,7 @@ class TestRewritePlatformPostfilter:
     FIXTURE = (
         "class _FM:\n"
         "    def _search_products(self, platform_list, products):\n"
-        "        SearchResult = list\n"
-        + patch_mod._PLATFORM_POSTFILTER_OLD
-        + "\n"
+        "        SearchResult = list\n" + patch_mod._PLATFORM_POSTFILTER_OLD + "\n"
         "        return products\n"
     )
 
@@ -125,9 +123,7 @@ class TestPlatformPostfilterRuntime:
                 self.properties = props
 
         # Build products; an id of None simulates an unparseable identifier.
-        products = [
-            _FakeProd() if _id is None else _FakeProd(id=_id) for _id in ids
-        ]
+        products = [_FakeProd() if _id is None else _FakeProd(id=_id) for _id in ids]
         ns = {
             "SearchResult": list,
             "platform_list": platform_list,

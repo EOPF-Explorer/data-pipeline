@@ -138,9 +138,7 @@ def test_authenticated_write_succeeds(writer_env):
     session.delete(f"{PROXY_URL}/collections/{COLLECTION_ID}", timeout=30)
     r_coll = session.post(f"{PROXY_URL}/collections", json=COLLECTION, timeout=30)
     assert r_coll.status_code in (200, 201), r_coll.text
-    r_item = session.post(
-        f"{PROXY_URL}/collections/{COLLECTION_ID}/items", json=ITEM, timeout=30
-    )
+    r_item = session.post(f"{PROXY_URL}/collections/{COLLECTION_ID}/items", json=ITEM, timeout=30)
     assert r_item.status_code in (200, 201), r_item.text
 
     r_get = httpx.get(f"{PROXY_URL}/collections/{COLLECTION_ID}/items/int-item", timeout=30)

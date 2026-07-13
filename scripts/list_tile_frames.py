@@ -95,10 +95,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     log.info(
         "tile %s / %s / %s..%s / %s: %d frame(s)",
-        args.tile_id, args.orbit_direction, args.date_start, args.date_end, args.platform,
+        args.tile_id,
+        args.orbit_direction,
+        args.date_start,
+        args.date_end,
+        args.platform,
         len(frames),
     )
-    for pid in frames:  # stdout = the frame id list (pipe into cache_frames.py pull --frames-file -)
+    for (
+        pid
+    ) in frames:  # stdout = the frame id list (pipe into cache_frames.py pull --frames-file -)
         print(pid)
     return 0
 
