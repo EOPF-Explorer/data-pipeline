@@ -1,0 +1,20 @@
+{
+  "type": "Feature",
+  "stac_version": "1.0.0",
+  "id": "S2_wrong_bucket",
+  "collection": "sentinel-2-l2a-staging",
+  "properties": {
+    "datetime": "2025-01-01T00:00:00Z",
+    "expires": "2025-07-01T00:00:00Z"
+  },
+  "assets": {
+    "reflectance": {
+      "href": "https://s3.example.com/some-other-bucket/S2_wrong_bucket/data.zarr",
+      "alternate": {
+        "s3": {
+          "href": "s3://some-other-bucket/S2_wrong_bucket/data.zarr/"
+        }
+      }
+    }
+  }
+}

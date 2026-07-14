@@ -1038,3 +1038,329 @@ class TestHistoryTracking:
         record_run(history_file, migration_result)
 
         assert not was_migration_run(history_file, "fix_url_encoding", "sentinel-2-l2a")
+
+
+# === stamp_expires (coordination#183, Task 4) ===
+
+from datetime import UTC, datetime, timedelta  # noqa: E402
+
+from _migrate_catalog.migrations import MIGRATIONS  # noqa: E402
+from _migrate_catalog.migrations.stamp_expires import (  # noqa: E402
+    SKIP_HISTOGRAM,
+    classify_and_stamp,
+    reset_histogram,
+    stamp_expires,
+)
+from s3_item_cleanup import (  # noqa: E402
+    DEFAULT_RETENTION_DAYS,
+    TIMESTAMPS_EXTENSION,
+    format_expires,
+    load_exclude_ids,
+    parse_stac_timestamp,
+)
+
+
+def _stampable_item(
+    item_id: str = "S2_pipeline",
+    created: str = "2025-01-01T00:00:00Z",
+    datetime_str: str = "2024-12-31T00:00:00Z",
+    expires: str | None = None,
+) -> dict:
+    props: dict = {"datetime": datetime_str, "created": created}
+    if expires is not None:
+        props["expires"] = expires
+    return {
+        "type": "Feature",
+        "id": item_id,
+        "collection": "sentinel-2-l2a-staging",
+        "properties": props,
+        "stac_extensions": [],
+        "assets": {},
+    }
+
+
+def _parse(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
+
+
+class TestClassifyAndStamp:
+    def test_stamps_expires_at_datetime_plus_retention(self) -> None:
+        # Retention is measured from acquisition (datetime), not created.
+        item = _stampable_item(created="2026-05-05T00:00:00Z", datetime_str="2025-12-31T00:00:00Z")
+        result, reason = classify_and_stamp(
+            item, retention_days=183, exclude_ids=set(), min_datetime=None
+        )
+        assert reason == "stamped"
+        assert result is not None
+        delta = _parse(result["properties"]["expires"]) - _parse("2025-12-31T00:00:00Z")
+        assert delta == timedelta(days=183)
+
+    def test_stamped_item_gets_timestamps_extension_once(self) -> None:
+        item = _stampable_item()
+        result, _ = classify_and_stamp(
+            item, retention_days=183, exclude_ids=set(), min_datetime=None
+        )
+        assert result is not None
+        assert result["stac_extensions"].count(TIMESTAMPS_EXTENSION) == 1
+
+    def test_expires_is_utc_z_formatted(self) -> None:
+        item = _stampable_item()
+        result, _ = classify_and_stamp(
+            item, retention_days=183, exclude_ids=set(), min_datetime=None
+        )
+        assert result is not None
+        assert result["properties"]["expires"].endswith("Z")
+
+    def test_already_stamped_item_is_skipped(self) -> None:
+        item = _stampable_item(expires="2025-07-01T00:00:00Z")
+        result, reason = classify_and_stamp(
+            item, retention_days=183, exclude_ids=set(), min_datetime=None
+        )
+        assert result is None
+        assert reason == "already_stamped"
+
+    def test_excluded_item_is_skipped(self) -> None:
+        item = _stampable_item(item_id="S2_demo")
+        result, reason = classify_and_stamp(
+            item,
+            retention_days=183,
+            exclude_ids={"S2_demo"},
+            min_datetime=None,
+        )
+        assert result is None
+        assert reason == "excluded"
+
+    def test_item_without_datetime_is_skipped(self) -> None:
+        item = _stampable_item()
+        del item["properties"]["datetime"]
+        result, reason = classify_and_stamp(
+            item, retention_days=183, exclude_ids=set(), min_datetime=None
+        )
+        assert result is None
+        assert reason == "no_datetime"
+
+    def test_item_acquired_before_floor_is_skipped(self) -> None:
+        # A 2021 demo scene is skipped (never stamped => never deleted) when the
+        # floor is in the pipeline era.
+        item = _stampable_item(datetime_str="2021-05-01T00:00:00Z")
+        result, reason = classify_and_stamp(
+            item,
+            retention_days=183,
+            exclude_ids=set(),
+            min_datetime=_parse("2025-11-01T00:00:00Z"),
+        )
+        assert result is None
+        assert reason == "before_floor"
+
+    def test_item_acquired_on_or_after_floor_is_stamped(self) -> None:
+        # The floor is inclusive of its own instant: an item exactly at the floor
+        # is stamped, not skipped.
+        item = _stampable_item(datetime_str="2025-11-01T00:00:00Z")
+        result, reason = classify_and_stamp(
+            item,
+            retention_days=183,
+            exclude_ids=set(),
+            min_datetime=_parse("2025-11-01T00:00:00Z"),
+        )
+        assert reason == "stamped"
+        assert result is not None
+
+    def test_excluded_wins_over_floor_eligible(self) -> None:
+        # The crown-jewel contract: a demo acquired AFTER the floor (so it would
+        # otherwise be stamped) is protected by the exclude list, not the floor.
+        # This is the real T33TVF / T36UXA / T27VWL (2026) demo case.
+        item = _stampable_item(item_id="demo_after_floor", datetime_str="2026-02-25T00:00:00Z")
+        result, reason = classify_and_stamp(
+            item,
+            retention_days=183,
+            exclude_ids={"demo_after_floor"},
+            min_datetime=_parse("2025-11-01T00:00:00Z"),
+        )
+        assert result is None
+        assert reason == "excluded"
+
+    def test_same_after_floor_item_is_stamped_without_exclusion(self) -> None:
+        # Documents the danger the exclude list guards against: the identical
+        # after-floor demo, if NOT excluded, is stamped and becomes deletable.
+        item = _stampable_item(item_id="demo_after_floor", datetime_str="2026-02-25T00:00:00Z")
+        result, reason = classify_and_stamp(
+            item,
+            retention_days=183,
+            exclude_ids=set(),
+            min_datetime=_parse("2025-11-01T00:00:00Z"),
+        )
+        assert reason == "stamped"
+        assert result is not None
+
+    def test_does_not_mutate_input_item(self) -> None:
+        item = _stampable_item()
+        classify_and_stamp(item, retention_days=183, exclude_ids=set(), min_datetime=None)
+        assert "expires" not in item["properties"]
+
+
+class TestStampExpiresMigration:
+    def test_registered_in_migrations(self) -> None:
+        assert "stamp_expires" in MIGRATIONS
+
+    def test_default_retention_is_the_shared_constant(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("EXPIRES_EXCLUDE_FILE", raising=False)
+        monkeypatch.delenv("EXPIRES_MIN_DATETIME", raising=False)
+        item = _stampable_item()  # datetime default 2024-12-31
+        result = stamp_expires(item)
+        assert result is not None
+        delta = _parse(result["properties"]["expires"]) - _parse("2024-12-31T00:00:00Z")
+        assert delta == timedelta(days=DEFAULT_RETENTION_DAYS)
+
+    def test_min_datetime_floor_skips_old_acquisitions(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("EXPIRES_EXCLUDE_FILE", raising=False)
+        monkeypatch.setenv("EXPIRES_MIN_DATETIME", "2025-11-01")  # bare date form
+        reset_histogram()
+        stamp_expires(_stampable_item(item_id="old", datetime_str="2021-09-17T00:00:00Z"))
+        stamp_expires(_stampable_item(item_id="new", datetime_str="2026-02-01T00:00:00Z"))
+        assert SKIP_HISTOGRAM["before_floor"] == 1
+        assert SKIP_HISTOGRAM["stamped"] == 1
+
+    def test_histogram_counts_outcomes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("EXPIRES_EXCLUDE_FILE", raising=False)
+        monkeypatch.delenv("EXPIRES_MIN_DATETIME", raising=False)
+        reset_histogram()
+        stamp_expires(_stampable_item(item_id="a"))
+        stamp_expires(_stampable_item(item_id="b", expires="2025-07-01T00:00:00Z"))
+        assert SKIP_HISTOGRAM["stamped"] == 1
+        assert SKIP_HISTOGRAM["already_stamped"] == 1
+
+
+def test_stamp_expires_uses_shared_format_helper() -> None:
+    """The backfill must use the shared expires helpers, not private copies
+    (review finding 4 — one load-bearing timestamp format)."""
+    from _migrate_catalog.migrations import stamp_expires as se
+
+    assert se.format_expires is format_expires
+    assert se.parse_stac_timestamp is parse_stac_timestamp
+    assert se.load_exclude_ids is load_exclude_ids
+
+
+# === Histogram surfacing + reconciliation (review finding: histogram invisible) ===
+
+
+def _result(
+    *, processed: int, modified: int, skipped: int, failed: int = 0, dry_run: bool = False
+) -> MigrationResult:
+    return MigrationResult(
+        migration_name="stamp_expires",
+        collection_id="c",
+        started_at="",
+        completed_at="",
+        items_processed=processed,
+        items_modified=modified,
+        items_skipped=skipped,
+        items_failed=failed,
+        dry_run=dry_run,
+        errors=[],
+    )
+
+
+class TestHistogramReporting:
+    def test_registry_entry_exposes_fn_reporter_and_reset(self) -> None:
+        m = MIGRATIONS["stamp_expires"]
+        assert m.fn is stamp_expires
+        assert m.reporter is not None
+        assert m.reset is reset_histogram
+
+    def test_report_lists_reason_counts(self) -> None:
+        from _migrate_catalog.migrations.stamp_expires import report
+
+        reset_histogram()
+        SKIP_HISTOGRAM["stamped"] = 2
+        SKIP_HISTOGRAM["excluded"] = 1
+        text = report(_result(processed=3, modified=2, skipped=1))
+        assert "stamped" in text
+        assert "excluded" in text
+        assert "WARNING" not in text  # reconciles
+
+    def test_report_warns_when_histogram_does_not_reconcile(self) -> None:
+        from _migrate_catalog.migrations.stamp_expires import report
+
+        reset_histogram()
+        SKIP_HISTOGRAM["stamped"] = 5  # classified 5 stampable...
+        text = report(_result(processed=2, modified=2, skipped=0))  # ...but run saw 2
+        assert "WARNING" in text
+
+    def test_reset_clears_counts_between_runs(self) -> None:
+        SKIP_HISTOGRAM["stamped"] = 9
+        reset_histogram()
+        assert sum(SKIP_HISTOGRAM.values()) == 0
+
+    def test_report_warns_when_exclude_id_matched_nothing(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # The exclude list is the crown-jewel demo protection, so a listed id that
+        # matches no item (typo / stale reconverted id) must fail loud.
+        from _migrate_catalog.migrations.stamp_expires import report
+
+        exclude_file = tmp_path / "exclude.txt"
+        exclude_file.write_text("real_demo\nTYPO_demo_xyz\n")
+        monkeypatch.setenv("EXPIRES_EXCLUDE_FILE", str(exclude_file))
+        monkeypatch.delenv("EXPIRES_MIN_DATETIME", raising=False)
+        reset_histogram()
+        stamp_expires(_stampable_item(item_id="real_demo"))  # matches one listed id
+        stamp_expires(_stampable_item(item_id="pipeline"))  # a normal item
+        text = report(_result(processed=2, modified=1, skipped=1))
+        assert "matched no item" in text
+        assert "TYPO_demo_xyz" in text
+        assert "real_demo" not in text  # the matched id is not flagged
+
+    def test_report_quiet_when_all_exclude_ids_match(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from _migrate_catalog.migrations.stamp_expires import report
+
+        exclude_file = tmp_path / "exclude.txt"
+        exclude_file.write_text("real_demo\n")
+        monkeypatch.setenv("EXPIRES_EXCLUDE_FILE", str(exclude_file))
+        monkeypatch.delenv("EXPIRES_MIN_DATETIME", raising=False)
+        reset_histogram()
+        stamp_expires(_stampable_item(item_id="real_demo"))
+        text = report(_result(processed=1, modified=0, skipped=1))
+        assert "matched no item" not in text
+
+
+class TestRunCommandSurfacesHistogram:
+    def test_run_resets_then_prints_histogram(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import importlib
+
+        from click.testing import CliRunner
+
+        # The package shadows its `cli` submodule with the group function, so
+        # resolve the real module object from sys.modules to patch it.
+        climod = importlib.import_module("_migrate_catalog.cli")
+
+        monkeypatch.delenv("EXPIRES_EXCLUDE_FILE", raising=False)
+        monkeypatch.delenv("EXPIRES_MIN_DATETIME", raising=False)
+        SKIP_HISTOGRAM.clear()
+        SKIP_HISTOGRAM["stamped"] = 99  # stale — must be cleared before the run
+
+        seen_at_start = {}
+
+        def fake_run(collection_id, fn, name, dry_run, page_size, ids=None):  # noqa: ANN001
+            seen_at_start["total"] = sum(SKIP_HISTOGRAM.values())  # proves reset ran first
+            fn(_stampable_item(item_id="a"))
+            fn(_stampable_item(item_id="b", expires="2025-07-01T00:00:00Z"))
+            return _result(processed=2, modified=1, skipped=1, dry_run=True)
+
+        runner_inst = MagicMock()
+        runner_inst.run_migration.side_effect = fake_run
+        monkeypatch.setattr(climod, "STACMigrationRunner", lambda *a, **k: runner_inst)
+
+        res = CliRunner().invoke(
+            climod.cli, ["run", "coll", "--migration", "stamp_expires", "--dry-run"]
+        )
+
+        assert res.exit_code == 0, res.output
+        assert seen_at_start["total"] == 0  # histogram was reset before processing
+        assert "stamped" in res.output
+        assert "already_stamped" in res.output

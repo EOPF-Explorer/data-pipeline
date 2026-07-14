@@ -276,11 +276,20 @@ uv run operator-tools/submit_test_workflow_wh_list.py
 
 **Configuration:** Edit the `products` list and `payload` fields inside the script.
 
-### 6. `submit_storage_tier_workflows.py` - Batch Storage Tier Change via Argo
+### 6. `scripts/submit_storage_tier_workflows.py` - Batch Storage Tier Change via Argo
 
-Queries STAC in 24h windows over a date range and submits one `batch-change-storage-tier` webhook payload per window, triggering the `eopf-storage-tier-batch-job` WorkflowTemplate via Argo Events. Each workflow fans out over all items in that window in parallel (up to `--parallelism` pods at a time). This is the preferred approach for large date ranges — one Argo Workflow per day keeps job history clean and avoids submitting hundreds of individual workflows.
+> Lives in `scripts/` (not `operator-tools/`) so it ships in the pipeline image and the recurring tier-down CronWorkflow can run it in-cluster. Operators still invoke it the same way.
 
-**Use case:** Change the S3 storage class (e.g., to `STANDARD_IA`) for thousands of items over a multi-month date range.
+Selects STAC items — by an explicit date window **or** by age — that are **not already at the target tier**, and submits one `batch-change-storage-tier` webhook payload per sub-window/batch, triggering the `eopf-storage-tier-batch-job` WorkflowTemplate via Argo Events. Each workflow fans out over the items in that payload in parallel.
+
+Two selection modes (mutually exclusive):
+
+- **Explicit window** (`--start-date`/`--end-date`) — for one-off backfills over a fixed range, split into `--window-hours` sub-windows.
+- **Age band** (`--min-age-days` [`--max-age-days`]) — for the recurring cron. `--min-age-days 90` alone selects `created < today−90d` (single-sided); adding `--max-age-days 93` bounds it to the age band `created ∈ [today−93d, today−90d]`. Run daily with `--min-age-days 90 --max-age-days 93 --window-hours 72` so each run covers a rolling 72h band and a missed day is still picked up by the 48h overlap.
+
+In both modes the **already-at-target tier filter** (asset-level `storage:refs`) excludes items already converted, so re-runs and window overlaps don't re-submit them.
+
+**Use case:** Change the S3 storage class (e.g., to `STANDARD`) for items crossing an age threshold, recurringly, or drain a bulk backlog over a multi-month range.
 
 **Prerequisites:**
 
@@ -292,7 +301,7 @@ Queries STAC in 24h windows over a date range and submits one `batch-change-stor
 
 ```bash
 # Dry run — logs what would be submitted without sending any requests
-python operator-tools/submit_storage_tier_workflows.py \
+python scripts/submit_storage_tier_workflows.py \
     --start-date 2024-01-01 \
     --end-date 2024-06-01 \
     --collection sentinel-2-l2a-staging \
@@ -300,7 +309,7 @@ python operator-tools/submit_storage_tier_workflows.py \
     --dry-run
 
 # Live run (port-forward must be active)
-python operator-tools/submit_storage_tier_workflows.py \
+python scripts/submit_storage_tier_workflows.py \
     --start-date 2024-01-01 \
     --end-date 2024-06-01 \
     --collection sentinel-2-l2a-staging \
@@ -310,7 +319,7 @@ python operator-tools/submit_storage_tier_workflows.py \
 # Registered-window backlog — window on when items were *registered*
 # (properties.created) rather than sensed, to drain a bulk-conversion backlog
 # to STANDARD. Uses a CQL2 filter instead of the datetime= range.
-python operator-tools/submit_storage_tier_workflows.py \
+python scripts/submit_storage_tier_workflows.py \
     --date-field created \
     --start-date 2025-11-01 \
     --end-date 2026-04-08 \
@@ -324,20 +333,24 @@ python operator-tools/submit_storage_tier_workflows.py \
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--start-date` | required | Start of date range (`YYYY-MM-DD`) |
-| `--end-date` | required | End of date range (`YYYY-MM-DD`) |
+| `--start-date` | — | Start of explicit date range (`YYYY-MM-DD`); use with `--end-date` |
+| `--end-date` | — | End of explicit date range (`YYYY-MM-DD`); use with `--start-date` |
+| `--min-age-days` | — | Age-based selection: items older than N days by `--date-field`. Single-sided unless `--max-age-days` given. Mutually exclusive with `--start-date/--end-date` |
+| `--max-age-days` | — | Upper age bound (requires `--min-age-days`): the age band `[min, max]` days, i.e. `created ∈ [today−max, today−min]` |
+| `--window-hours` | `24` | Sub-window size a bounded range is split into (one payload each) |
+| `--max-batch-size` | none | Max item IDs per payload; larger selections split across payloads |
 | `--collection` | required | STAC collection ID |
-| `--date-field` | `datetime` | Item date to window on: sensing `datetime`, registration `created`, or last-modified `updated`. Non-default fields use a CQL2 `between` filter |
+| `--date-field` | mode-dependent | Item date: `datetime`, `created`, or `updated`. Defaults to `created` with `--min-age-days`, else `datetime`. Non-`datetime` uses a CQL2 filter |
 | `--storage-class` | `STANDARD` | Target S3 storage class |
 | `--stac-api-url` | prod API URL | STAC API endpoint to query |
 | `--s3-endpoint` | OVH Cloud | S3 endpoint passed to Argo workflows |
 | `--pipeline-image-version` | `v1.6.1` | Docker image tag for Argo jobs |
-| `--process-all-assets` | false | Process all assets (not just reflectance) |
+| `--process-all-assets` | false | Process all assets (required for the recurring tier-down's idempotency) |
 | `--webhook-url` | `localhost:12000/samples` | Webhook endpoint |
-| `--delay` | `1.0` | Seconds between window submissions |
+| `--delay` | `1.0` | Seconds between payload submissions |
 | `--dry-run` | false | Log payloads without sending |
 
-**Payload format** (one per 24h window):
+**Payload format** (one per sub-window/batch):
 ```json
 {
   "action": "batch-change-storage-tier",
@@ -433,7 +446,7 @@ uv run python manage_collections.py clean test-coll --clean-s3 -y
 | `manage_collections.py` | Collection lifecycle management | `uv run python manage_collections.py create/delete` |
 | `submit_test_workflow_wh.py` | Testing pipeline with one known item | edit script then `uv run submit_test_workflow_wh.py` |
 | `submit_test_workflow_wh_list.py` | Reprocessing a small known fixed set | edit products list then `uv run submit_test_workflow_wh_list.py` |
-| `submit_storage_tier_workflows.py` | Changing storage tier for a large date range (one Argo batch workflow per 24h window) | `uv run python submit_storage_tier_workflows.py --start-date ... --dry-run` |
+| `scripts/submit_storage_tier_workflows.py` | Changing storage tier by date range or age band (recurring tier-down cron + one-off backfills) | `python scripts/submit_storage_tier_workflows.py --min-age-days 90 --max-age-days 93 --window-hours 72 --dry-run` |
 
 ### Benefits of This Workflow
 

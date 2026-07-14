@@ -1,5 +1,41 @@
 # Changelog
 
+## 1.12.0 (2026-07-14)
+
+## What's Changed
+* feat(demo): protect Fontainebleau wildfire scenes (T31UDP) by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/336
+* feat(query-stac): add --max-cloud-cover filter to discover by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/335
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.11.1...v1.12.0
+
+## 1.11.1 (2026-07-14)
+
+## What's Changed
+* fix(cleanup): datetime-based expiry + exclude-list-first demo protection by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/333
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.11.0...v1.11.1
+
+## 1.11.0 (2026-07-14)
+
+## What's Changed
+* build(deps): bump the minor-and-patch group across 1 directory with 8 updates by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/277
+* build(deps): consolidate Dependabot updates + group security PRs by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/286
+* build(deps): bump the minor-and-patch group with 4 updates by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/289
+* build(deps): update zarr[cast-value-rs] requirement from >=3.2.0 to >=3.2.1 by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/290
+* feat(stac): eodash layerExclusive + style link for S2 L2A (#206) by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/278
+* feat: add storage tier change events script by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/118
+* feat(storage-tier): recurring tier-down selection (--min-age-days + tier-aware) by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/331
+* feat: expiry-driven S2 retention cleanup (data-pipeline side) by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/329
+* build(deps): bump the all group across 1 directory with 10 updates by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/332
+* build(deps): bump the minor-and-patch group across 1 directory with 9 updates by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/328
+* build(deps): bump uv from 0.11.21 to 0.11.26 in /docker in the all group across 1 directory by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/323
+* build(deps): bump msgpack from 1.1.2 to 1.2.1 in the security group across 1 directory by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/299
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.10.0...v1.11.0
+
 ## 1.10.0 (2026-06-12)
 
 ## What's Changed

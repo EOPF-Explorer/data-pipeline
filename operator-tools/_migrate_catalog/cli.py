@@ -1,3 +1,4 @@
+import logging
 import sys
 from pathlib import Path
 from typing import Any
@@ -27,9 +28,12 @@ _DEFAULT_HISTORY_FILE = Path(__file__).parent.parent / ".migration_history.json"
     type=click.Path(),
     help="Migration history JSON file",
 )
+@click.option("--verbose", "-v", is_flag=True, help="Log per-item migration detail (INFO)")
 @click.pass_context
-def cli(ctx: click.Context, api_url: str | None, history_file: str | None) -> None:
+def cli(ctx: click.Context, api_url: str | None, history_file: str | None, verbose: bool) -> None:
     """STAC Catalogue Migration Tool for EOPF Explorer."""
+    if verbose:
+        logging.basicConfig(level=logging.INFO, format="%(message)s")
     ctx.ensure_object(dict)
     ctx.obj["api_url"] = api_url or _DEFAULT_API_URL
     ctx.obj["history_file"] = Path(history_file) if history_file else _DEFAULT_HISTORY_FILE
@@ -74,12 +78,15 @@ def run(
     history_file: Path = ctx.obj["history_file"]
 
     if len(migration_names) == 1:
+        selected = MIGRATIONS[migration_names[0]]
         migration_name = migration_names[0]
-        migration_fn: MigrationFn = MIGRATIONS[migration_name][0]
-        description = MIGRATIONS[migration_name][1]
+        migration_fn: MigrationFn = selected.fn
+        description = selected.description
     else:
+        # Composed runs have no single reporter/reset.
+        selected = None
         migration_name = "+".join(migration_names)
-        migration_fn = compose_migrations([MIGRATIONS[n][0] for n in migration_names])
+        migration_fn = compose_migrations([MIGRATIONS[n].fn for n in migration_names])
         description = "Composed: " + ", ".join(migration_names)
 
     if not dry_run and was_migration_run(history_file, migration_name, collection_id):
@@ -98,6 +105,9 @@ def run(
         if not click.confirm("Proceed?", default=False):
             click.echo("Aborted.")
             return
+
+    if selected is not None and selected.reset is not None:
+        selected.reset()  # clear any accumulated per-run state before this run
 
     runner = STACMigrationRunner(api_url, recovery_dir=history_file.parent)
     result = runner.run_migration(
@@ -119,6 +129,8 @@ def run(
         click.echo(f"  Items failed:                 {result.items_failed}", err=True)
         for err in result.errors[:5]:
             click.echo(f"    - {err['item_id']}: {err['error']}", err=True)
+    if selected is not None and selected.reporter is not None:
+        click.echo(selected.reporter(result))
     click.echo("=" * 50)
 
     if not dry_run:
@@ -168,8 +180,8 @@ def clone(
 def list_migrations() -> None:
     """List available migrations."""
     click.echo("Available migrations:")
-    for name, (_, description) in MIGRATIONS.items():
-        click.echo(f"  {name:<25} {description}")
+    for name, m in MIGRATIONS.items():
+        click.echo(f"  {name:<25} {m.description}")
 
 
 @cli.command()
@@ -227,10 +239,10 @@ def verify(
 
     if len(migration_names) == 1:
         migration_name = migration_names[0]
-        migration_fn: MigrationFn = MIGRATIONS[migration_name][0]
+        migration_fn: MigrationFn = MIGRATIONS[migration_name].fn
     else:
         migration_name = "+".join(migration_names)
-        migration_fn = compose_migrations([MIGRATIONS[n][0] for n in migration_names])
+        migration_fn = compose_migrations([MIGRATIONS[n].fn for n in migration_names])
 
     click.echo(f"Verifying '{migration_name}' on '{collection_id}'...")
     runner = STACMigrationRunner(api_url)

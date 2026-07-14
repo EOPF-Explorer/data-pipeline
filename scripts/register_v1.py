@@ -8,6 +8,7 @@ import logging
 import os
 import sys
 import urllib.parse
+from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 
 import httpx
@@ -16,6 +17,13 @@ import zarr
 from pystac import Asset, Item, Link
 from pystac.extensions.projection import ProjectionExtension
 from pystac_client import Client
+from s3_item_cleanup import (
+    DEFAULT_RETENTION_DAYS,
+    TIMESTAMPS_EXTENSION,
+    env_int,
+    format_expires,
+    load_exclude_ids,
+)
 from storage_tier_utils import extract_region_from_endpoint, get_s3_storage_class
 
 # Configure logging (set LOG_LEVEL=DEBUG for verbose output)
@@ -476,6 +484,50 @@ def add_derived_from_link(item: Item, source_url: str) -> None:
     logger.debug(f"Added derived_from link: {source_url}")
 
 
+def resolve_retention_days() -> int:
+    """Retention window (days) from EXPIRES_RETENTION_DAYS, default 183.
+
+    ``0`` disables expiry stamping (for manual/demo registrations). An unset or
+    empty value falls back to the default. See coordination#183.
+    """
+    return env_int("EXPIRES_RETENTION_DAYS", DEFAULT_RETENTION_DAYS)
+
+
+def resolve_exclude_ids() -> set[str]:
+    """Demo denylist from ``EXPIRES_EXCLUDE_FILE`` (coordination#183).
+
+    This is the *same* list the cleanup honors, so demo protection is defined
+    once and can't drift between register-time and cleanup-time. An id in this
+    list is never stamped with ``expires`` here, and never deleted by the
+    cleanup — so re-registering or reconverting a demo scene keeps it
+    structurally undeletable. Unset ⇒ empty set.
+    """
+    return load_exclude_ids(os.getenv("EXPIRES_EXCLUDE_FILE"))
+
+
+def add_expires(item: Item, retention_days: int, exclude_ids: set[str] | None = None) -> None:
+    """Stamp ``properties.expires`` = now + retention_days and the timestamps
+    extension so the cleanup cron can select expired items (coordination#183).
+
+    No ``expires`` is stamped (leaving the item structurally undeletable) when
+    either the item is in ``exclude_ids`` (the demo denylist) or
+    ``retention_days <= 0``. The exclude check is what makes reconverting a demo
+    scene safe — otherwise every re-register would re-arm it for deletion.
+    """
+    if exclude_ids and item.id in exclude_ids:
+        return
+    if retention_days <= 0:
+        return
+
+    expires = datetime.now(UTC) + timedelta(days=retention_days)
+    item.properties["expires"] = format_expires(expires)
+
+    if not hasattr(item, "stac_extensions"):
+        item.stac_extensions = []
+    if TIMESTAMPS_EXTENSION not in item.stac_extensions:
+        item.stac_extensions.append(TIMESTAMPS_EXTENSION)
+
+
 def fix_zarr_asset_media_types(item: Item) -> None:
     """Fix media types for zarr assets and remove non-zarr source assets.
 
@@ -881,6 +933,17 @@ def run_registration(
 
     # 12. Add derived_from link to source item
     add_derived_from_link(item, source_url)
+
+    # 12.5 Stamp expiry for retention-driven cleanup (coordination#183).
+    # Demo/exclude-listed items are left without expires (structurally
+    # undeletable), using the same denylist the cleanup honors.
+    retention_days = resolve_retention_days()
+    exclude_ids = resolve_exclude_ids()
+    add_expires(item, retention_days, exclude_ids)
+    if retention_days > 0 and item.id not in exclude_ids:
+        logger.info(f"   ⏳ Stamped expires = now + {retention_days}d")
+    else:
+        logger.info("   🛡️  No expires (demo/exclude-listed or retention=0) — undeletable")
 
     # 13. Register to STAC API
     client = stac_auth.open_client(stac_api_url)

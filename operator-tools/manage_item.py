@@ -27,6 +27,15 @@ if str(scripts_dir) not in sys.path:
     sys.path.insert(0, str(scripts_dir))
 
 import stac_auth  # noqa: E402
+
+# S3-deletion helpers now live in scripts/ (baked into the pipeline image) so
+# the cleanup cron can share them (coordination#183). Re-imported here so this
+# module and manage_collections.py keep importing them from manage_item.
+from s3_item_cleanup import (  # noqa: E402
+    count_s3_objects_for_item,
+    delete_s3_objects_for_item,
+    extract_s3_urls_from_item,
+)
 from storage_tier_utils import StorageTierInfo, get_s3_storage_info  # noqa: E402
 
 # === Helper Functions for Storage Tier Sync ===
@@ -388,200 +397,6 @@ class STACItemManager:
             "total_assets": total_assets,
             "total_objects": total_objects,
         }
-
-
-# === S3 Helper Functions ===
-
-
-def extract_s3_urls_from_item(item_dict: dict) -> set[str]:
-    """Extract all S3 URLs from a STAC item's assets.
-
-    Tries multiple locations in order:
-    1. alternate.s3.href (preferred, new format)
-    2. main href if it's an s3:// URL
-    """
-    s3_urls = set()
-
-    for _asset_key, asset in item_dict.get("assets", {}).items():
-        # Skip thumbnails
-        if "thumbnail" in asset.get("roles", []):
-            continue
-
-        # Try alternate.s3.href first (preferred location)
-        alternate = asset.get("alternate", {})
-        if isinstance(alternate, dict):
-            s3_info = alternate.get("s3", {})
-            if isinstance(s3_info, dict):
-                href = s3_info.get("href", "")
-                if href.startswith("s3://"):
-                    s3_urls.add(href)
-                    continue
-
-        # Fallback: check if main href is an S3 URL
-        href = asset.get("href", "")
-        if href.startswith("s3://"):
-            s3_urls.add(href)
-
-    return s3_urls
-
-
-def delete_s3_objects_for_item(
-    s3_client: Any,
-    s3_urls: set[str],
-) -> tuple[int, int]:
-    """Delete all S3 objects referenced by a STAC item's assets.
-
-    Handles both individual files and prefixes (directories/Zarr stores).
-
-    Args:
-        s3_client: Boto3 S3 client
-        s3_urls: Set of S3 URLs from the item's assets
-
-    Returns:
-        Tuple of (deleted_count, failed_count)
-    """
-    deleted = 0
-    failed = 0
-
-    # Group URLs by bucket for efficiency
-    urls_by_bucket: dict[str, list[str]] = {}
-    for url in s3_urls:
-        parsed = urlparse(url)
-        bucket = parsed.netloc
-        if bucket not in urls_by_bucket:
-            urls_by_bucket[bucket] = []
-        urls_by_bucket[bucket].append(url)
-
-    import click
-
-    # First, gather all keys to delete for progress bar
-    all_keys = []
-    for bucket, urls in urls_by_bucket.items():
-        prefixes_to_delete = set()
-        individual_keys = set()
-        for url in urls:
-            parsed = urlparse(url)
-            key = parsed.path.lstrip("/")
-            if ".zarr/" in key:
-                zarr_root = key.split(".zarr/")[0] + ".zarr/"
-                prefixes_to_delete.add(zarr_root)
-            elif key.endswith("/"):
-                prefixes_to_delete.add(key)
-            else:
-                individual_keys.add(key)
-        # Collect all keys under prefixes
-        for prefix in prefixes_to_delete:
-            try:
-                paginator = s3_client.get_paginator("list_objects_v2")
-                for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-                    objects = page.get("Contents", [])
-                    all_keys.extend([(bucket, obj["Key"]) for obj in objects])
-            except ClientError:
-                pass
-        # Add individual files
-        for key in individual_keys:
-            all_keys.append((bucket, key))
-
-    # Now, delete with progress bar
-    # Group all_keys by bucket for batch deletion
-    from collections import defaultdict
-
-    bucket_to_keys = defaultdict(list)
-    for bucket, key in all_keys:
-        bucket_to_keys[bucket].append(key)
-
-    total = len(all_keys)
-    BATCH_SIZE = 200
-    with click.progressbar(
-        length=total, label="Deleting S3 objects", show_pos=True, show_percent=True
-    ) as bar:
-        for bucket, keys in bucket_to_keys.items():
-            for i in range(0, len(keys), BATCH_SIZE):
-                batch = keys[i : i + BATCH_SIZE]
-                if not batch:
-                    continue
-                try:
-                    resp = s3_client.delete_objects(
-                        Bucket=bucket, Delete={"Objects": [{"Key": k} for k in batch]}
-                    )
-                    deleted += len(resp.get("Deleted", []))
-                    for err in resp.get("Errors", []):
-                        if err.get("Code") == "NoSuchKey":
-                            deleted += 1
-                        else:
-                            failed += 1
-                except ClientError:
-                    failed += len(batch)
-                bar.update(len(batch))
-
-    return deleted, failed
-
-
-def count_s3_objects_for_item(
-    s3_client: Any,
-    s3_urls: set[str],
-) -> int:
-    """Count how many S3 objects exist for a STAC item's assets.
-
-    Handles both individual files and prefixes (directories/Zarr stores).
-
-    Args:
-        s3_client: Boto3 S3 client
-        s3_urls: Set of S3 URLs from the item's assets
-
-    Returns:
-        Total count of S3 objects
-    """
-    count = 0
-
-    # Group URLs by bucket for efficiency
-    urls_by_bucket: dict[str, list[str]] = {}
-    for url in s3_urls:
-        parsed = urlparse(url)
-        bucket = parsed.netloc
-        if bucket not in urls_by_bucket:
-            urls_by_bucket[bucket] = []
-        urls_by_bucket[bucket].append(url)
-
-    for bucket, urls in urls_by_bucket.items():
-        # Determine if we need to handle prefixes
-        prefixes_to_check = set()
-        individual_keys = set()
-
-        for url in urls:
-            parsed = urlparse(url)
-            key = parsed.path.lstrip("/")
-
-            # Check if this is a prefix (directory or Zarr store)
-            if ".zarr/" in key:
-                # Extract the Zarr root prefix
-                zarr_root = key.split(".zarr/")[0] + ".zarr/"
-                prefixes_to_check.add(zarr_root)
-            elif key.endswith("/"):
-                # It's a directory prefix
-                prefixes_to_check.add(key)
-            else:
-                # It's an individual file
-                individual_keys.add(key)
-
-        # Count objects under prefixes
-        for prefix in prefixes_to_check:
-            try:
-                paginator = s3_client.get_paginator("list_objects_v2")
-                for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
-                    count += len(page.get("Contents", []))
-            except ClientError:
-                pass
-
-        # Count individual files
-        for key in individual_keys:
-            try:
-                s3_client.head_object(Bucket=bucket, Key=key)
-                count += 1
-            except ClientError:
-                pass
-
-    return count
 
 
 # === CLI Commands ===

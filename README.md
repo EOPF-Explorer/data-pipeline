@@ -158,7 +158,7 @@ kubectl get wf -n devseed-staging --watch
 
 **V1 Pipeline (3 steps):**
 1. **Convert** - S2-optimized conversion with enhanced performance
-2. **Register** - Enhanced registration with alternate extension and consolidated assets
+2. **Register** - Enhanced registration with alternate extension and consolidated assets. Stamps `expires = now + EXPIRES_RETENTION_DAYS` (default 183 days) via the timestamps extension for retention cleanup; set `EXPIRES_RETENTION_DAYS=0` for manual/demo registrations so they are never auto-deleted. See [scripts/README_cleanup_expired_items.md](scripts/README_cleanup_expired_items.md).
 3. **Change Storage Tier** - Optimize storage costs by moving data to appropriate S3 storage class (default: `EXPRESS_ONEZONE`)
 
 **Runtime:** ~15-20 minutes per item
