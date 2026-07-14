@@ -45,6 +45,19 @@ def _require_https(url: str, name: str) -> None:
         sys.exit(f"Error: {name} must be an HTTPS URL, got: {url!r}")
 
 
+def _optional_float(value: str) -> float | None:
+    """argparse type for a float flag that may arrive blank.
+
+    The recent-data-processor uses a single shared WorkflowTemplate, so a cron that wants
+    no cloud-cover filter (e.g. a SAR/non-optical collection) cannot omit the arg — it can
+    only pass an empty value. Treat empty/whitespace as ``None`` (filter disabled) so that
+    reuse path works cleanly; otherwise parse as a float.
+    """
+    if value.strip() == "":
+        return None
+    return float(value)
+
+
 def _validate_bbox(bbox: object) -> None:
     """Raise SystemExit if bbox is not a list of exactly 4 floats."""
     if not isinstance(bbox, list) or len(bbox) != 4:
@@ -86,12 +99,15 @@ def discover(args: argparse.Namespace) -> None:
     WINDOW_HOURS = args.window_hours
     AOI_BBOX = args.aoi_bbox
     MAX_ACQUISITION_AGE_DAYS = args.max_acquisition_age_days
+    MAX_CLOUD_COVER = args.max_cloud_cover
 
     _require_https(SOURCE_STAC_API_URL, "SOURCE_STAC_API_URL")
     _require_https(TARGET_STAC_API_URL, "TARGET_STAC_API_URL")
     _validate_bbox(AOI_BBOX)
     if MAX_ACQUISITION_AGE_DAYS is not None and MAX_ACQUISITION_AGE_DAYS <= 0:
         sys.exit(f"Error: --max-acquisition-age-days must be > 0, got: {MAX_ACQUISITION_AGE_DAYS}")
+    if MAX_CLOUD_COVER is not None and not 0 < MAX_CLOUD_COVER <= 100:
+        sys.exit(f"Error: --max-cloud-cover must be in (0, 100], got: {MAX_CLOUD_COVER}")
 
     # Parse scheduled end time and calculate start time
     end_time = datetime.fromisoformat(SCHEDULED_END_TIME.replace("Z", "+00:00"))
@@ -124,6 +140,8 @@ def discover(args: argparse.Namespace) -> None:
             f"Acquisition floor: {min_acquisition_dt.isoformat().replace('+00:00', 'Z')} "
             f"(max age {MAX_ACQUISITION_AGE_DAYS} days)"
         )
+    if MAX_CLOUD_COVER is not None:
+        logger.info(f"Cloud-cover filter: eo:cloud_cover < {MAX_CLOUD_COVER}")
 
     # Connect to source STAC catalog
     source_catalog = Client.open(SOURCE_STAC_API_URL)
@@ -133,12 +151,26 @@ def discover(args: argparse.Namespace) -> None:
 
     # Search for items by updated time (for harvesting use case)
     # Query items that were updated within the time window, not by acquisition date
+    updated_filter: dict[str, object] = {
+        "op": "between",
+        "args": [{"property": "updated"}, start_time_str, end_time_str],
+    }
+    # Optionally narrow to low-cloud optical scenes server-side, so clouded items are trimmed
+    # before pagination and never cost a per-item dedup call. CQL2 three-valued logic drops
+    # items whose eo:cloud_cover is absent/null (harmless for S2 L2A, which always has it);
+    # unset ⇒ predicate omitted ⇒ nothing dropped (the SAR/non-optical reuse path).
+    filter_expr: dict[str, object] = updated_filter
+    if MAX_CLOUD_COVER is not None:
+        filter_expr = {
+            "op": "and",
+            "args": [
+                updated_filter,
+                {"op": "<", "args": [{"property": "eo:cloud_cover"}, MAX_CLOUD_COVER]},
+            ],
+        }
     search_kwargs: dict[str, object] = {
         "collections": [SOURCE_COLLECTION],
-        "filter": {
-            "op": "between",
-            "args": [{"property": "updated"}, start_time_str, end_time_str],
-        },
+        "filter": filter_expr,
         "filter_lang": "cql2-json",
         "bbox": AOI_BBOX,
         "limit": 100,  # Items per page for efficient pagination
@@ -274,6 +306,13 @@ def main() -> None:
         default=None,
         help="Real-time filter: keep only items whose acquisition datetime is within the last "
         "N days of the scheduled window end. Omit for no acquisition filter (default).",
+    )
+    d.add_argument(
+        "--max-cloud-cover",
+        type=_optional_float,
+        default=None,
+        help="Optical filter: keep only items with eo:cloud_cover strictly below this "
+        "percentage (0-100]. Omit or pass blank for no cloud-cover filter (default).",
     )
     d.set_defaults(func=discover)
 

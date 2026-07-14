@@ -14,6 +14,9 @@ from pystac import Item, Link
 SOURCE_COLLECTION = "test"
 TARGET_COLLECTION = "test-staging"
 
+# Sentinel so run_script can distinguish "don't pass --max-cloud-cover" from "pass it blank".
+_UNSET = object()
+
 
 def create_stac_item(
     item_id: str,
@@ -132,6 +135,7 @@ def run_script(
     raise_error_on_target: bool = False,
     batch_size: int = 200,
     max_acquisition_age_days: int | None = None,
+    max_cloud_cover: object = _UNSET,
 ) -> dict:
     """Helper to run `discover` mode with test data and read back the manifest files.
 
@@ -174,6 +178,10 @@ def run_script(
     ]
     if max_acquisition_age_days is not None:
         argv += ["--max-acquisition-age-days", str(max_acquisition_age_days)]
+    # _UNSET ⇒ omit the flag entirely; any other value (including "") is passed through so
+    # the blank-disables-filter path is exercisable.
+    if max_cloud_cover is not _UNSET:
+        argv += ["--max-cloud-cover", str(max_cloud_cover)]
     with (
         patch("scripts.query_stac.Client.open", side_effect=mock_client_open),
         patch("sys.argv", argv),
@@ -621,3 +629,49 @@ class TestAcquisitionFilter:
         for bad in (0, -5):
             with pytest.raises(SystemExit):
                 run_script(source, [], max_acquisition_age_days=bad)
+
+
+class TestCloudCoverFilter:
+    """`--max-cloud-cover` adds a server-side CQL2 `eo:cloud_cover < N` predicate."""
+
+    def test_filter_unset_stays_bare_between(self):
+        """Without the flag the filter is the original bare `between` on `updated`."""
+        result = run_script([], [])
+
+        filter_param = result["source_client"].searches[0]["filter"]
+        assert filter_param["op"] == "between"
+        assert filter_param["args"][0] == {"property": "updated"}
+
+    def test_filter_set_wraps_updated_and_cloud_cover_in_and(self):
+        """With the flag the filter is `and(updated between …, eo:cloud_cover < N)`."""
+        result = run_script([], [], max_cloud_cover=90)
+
+        filter_param = result["source_client"].searches[0]["filter"]
+        assert filter_param["op"] == "and"
+        assert len(filter_param["args"]) == 2
+
+        between_clause, cloud_clause = filter_param["args"]
+        # Original updated-window predicate is preserved unchanged as the first arg.
+        assert between_clause["op"] == "between"
+        assert between_clause["args"][0] == {"property": "updated"}
+        # Second arg is the strict-below cloud-cover predicate.
+        assert cloud_clause == {"op": "<", "args": [{"property": "eo:cloud_cover"}, 90.0]}
+
+    def test_filter_lang_still_cql2_json_when_set(self):
+        """Adding the predicate must not change the declared filter language."""
+        result = run_script([], [], max_cloud_cover=50)
+
+        assert result["source_client"].searches[0]["filter_lang"] == "cql2-json"
+
+    def test_blank_value_disables_filter(self):
+        """A blank param (SAR/non-optical reuse path) parses to no cloud-cover predicate."""
+        result = run_script([], [], max_cloud_cover="")
+
+        filter_param = result["source_client"].searches[0]["filter"]
+        assert filter_param["op"] == "between"  # bare between, no `and` wrapper
+
+    def test_out_of_range_values_are_rejected(self):
+        """Values outside (0, 100] exit rather than building a filter that keeps nothing/all."""
+        for bad in (0, -5, 150):
+            with pytest.raises(SystemExit):
+                run_script([], [], max_cloud_cover=bad)
