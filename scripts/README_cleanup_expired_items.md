@@ -17,14 +17,40 @@ There are two ways it lands on an item:
    - **`EXPIRES_RETENTION_DAYS=0` disables stamping** for a whole run.
    - **`EXPIRES_EXCLUDE_FILE` protects specific ids.** `register_v1` reads the
      **same demo denylist** the cleanup honors, and never stamps `expires` on an
-     id in it. So re-registering or **reconverting** a demo scene keeps it with
-     **no `expires`** (structurally undeletable) — the one list is the single
-     source of truth for demo protection at both register-time and cleanup-time,
-     and there's no window where an upsert re-arms a demo scene.
+     id in it. So re-registering or **reconverting** a listed demo scene keeps it
+     with **no `expires`** (structurally undeletable). See *Demo-scene protection*
+     below.
 2. **Backfill** — the `stamp_expires` migration stamps existing items
    (`expires = datetime + retention`, keyed off acquisition age; items acquired
    before its `EXPIRES_MIN_DATETIME` floor are left unstamped). See
    [operator-tools/README_MIGRATIONS.md](../operator-tools/README_MIGRATIONS.md).
+
+## Demo-scene protection (do demo items get an `expires`?)
+
+**No — when they are (re)registered through the demo-reconversion path they get
+no `expires` at all.** One list, `scripts/demo_exclude_ids.txt`, is the single
+source of truth, honored at both ends:
+
+- **register-time** — `register_v1.add_expires` skips stamping for any id in the
+  file, so a reconverted demo scene is registered with no `expires`.
+- **cleanup-time** — `cleanup_expired_items.py` skips the same ids even if one
+  somehow carries an `expires` (belt-and-suspenders).
+
+**Protection is not automatic — three conditions must all hold at registration:**
+
+1. **Image `>= v1.12.0`** — the release that ships the `register_v1` exclude-list
+   logic *and* the baked-in `/app/scripts/demo_exclude_ids.txt`.
+2. **`EXPIRES_EXCLUDE_FILE` is set** to that path. In the Argo pipeline this is
+   the `expires_exclude_file` parameter on `eopf-explorer-convert-v1-s2`
+   (platform-deploy) — **empty by default**, set to
+   `/app/scripts/demo_exclude_ids.txt` for demo reconversions.
+3. **The id is in the file.**
+
+⚠️ **Caveat:** an item registered with `EXPIRES_EXCLUDE_FILE` unset (the default,
+e.g. the regular recent-data pipeline) **does** get `expires = now + retention`.
+That is fine in practice — demo scenes are reconverted manually with the param
+set, and the regular pipeline only ingests recent acquisition dates, never the
+old demo dates — and the cleanup-time skip is the backstop regardless.
 
 ## Safety model
 
