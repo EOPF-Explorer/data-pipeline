@@ -1,0 +1,32 @@
+# Demo-scene protection list — the single source of truth for demo protection.
+# Point EXPIRES_EXCLUDE_FILE at this file (baked into the image at
+# /app/scripts/demo_exclude_ids.txt). It is honored in BOTH places:
+#   - register_v1.py  -> never stamps `expires` on these ids (no expires = undeletable)
+#   - cleanup_expired_items.py -> never deletes these ids (skipped even if expired)
+# so reconverting/re-registering a demo scene can never re-arm it for deletion.
+#
+# Source of truth for "what is a demo": EOPF-Explorer/narratives + the OpenLayers
+# geozarr.html example. Ids are ESA product ids => stable across reconversion.
+# Verified against the live catalog 2026-07-14. Blank lines / '#' comments ignored.
+
+# --- Lava Flow (La Palma), tile T28RBS, prod ---
+S2B_MSIL2A_20210925T120319_N0500_R023_T28RBS_20230109T005655
+S2A_MSIL2A_20210930T120331_N0500_R023_T28RBS_20230109T180123
+S2A_MSIL2A_20211010T120331_N0500_R023_T28RBS_20230106T001906
+S2B_MSIL2A_20211015T120329_N0500_R023_T28RBS_20230104T221431
+S2A_MSIL2A_20211030T120331_N0500_R023_T28RBS_20230105T031900
+S2B_MSIL2A_20220103T120319_N0510_R023_T28RBS_20240423T015628
+
+# --- NDCI, tile T32TQR, prod ---
+S2C_MSIL2A_20250512T100611_N0511_R022_T32TQR_20250512T173114
+
+# --- NDVI, tile T31TDH, prod — ABSENT today (referenced in ndvi.md; convert-fresh TBD) ---
+S2B_MSIL2A_20250804T103629_N0511_R008_T31TDH_20250804T130722
+S2A_MSIL2A_20250831T103701_N0511_R008_T31TDH_20250831T145420
+
+# --- NDVI hero, tile T33TVF, prod + staging ---
+S2B_MSIL2A_20260225T095029_N0512_R079_T33TVF_20260225T141422
+
+# --- OpenLayers geozarr.html example (read as raw .zarr), prod ---
+S2C_MSIL2A_20260120T084301_N0511_R064_T36UXA_20260120T122910
+S2B_MSIL2A_20260120T125339_N0511_R138_T27VWL_20260120T131151

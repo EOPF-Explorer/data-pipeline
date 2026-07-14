@@ -14,13 +14,13 @@ There are two ways it lands on an item:
 1. **At registration** — `register_v1.py` stamps `expires = now + EXPIRES_RETENTION_DAYS`.
    - `EXPIRES_RETENTION_DAYS` defaults to **183** (6 months), shared from
      `s3_item_cleanup.DEFAULT_RETENTION_DAYS`.
-   - **`EXPIRES_RETENTION_DAYS=0` disables stamping.** Run manual/demo
-     registrations (e.g. the 2021 showcase scenes) with `=0` so they get **no**
-     `expires` and are therefore structurally undeletable by this script.
-   - ⚠️ Stamping is unconditional on upsert — re-registering an item resets its
-     clock, and re-registering a protected demo item *with* a non-zero retention
-     would give it an expiry. The runtime `--exclude-file` denylist is the
-     backstop.
+   - **`EXPIRES_RETENTION_DAYS=0` disables stamping** for a whole run.
+   - **`EXPIRES_EXCLUDE_FILE` protects specific ids.** `register_v1` reads the
+     **same demo denylist** the cleanup honors, and never stamps `expires` on an
+     id in it. So re-registering or **reconverting** a demo scene keeps it with
+     **no `expires`** (structurally undeletable) — the one list is the single
+     source of truth for demo protection at both register-time and cleanup-time,
+     and there's no window where an upsert re-arms a demo scene.
 2. **Backfill** — the `stamp_expires` migration stamps existing items
    (`expires = datetime + retention`, keyed off acquisition age; items acquired
    before its `EXPIRES_MIN_DATETIME` floor are left unstamped). See
