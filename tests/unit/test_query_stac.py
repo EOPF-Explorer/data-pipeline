@@ -675,3 +675,22 @@ class TestCloudCoverFilter:
         for bad in (0, -5, 150):
             with pytest.raises(SystemExit):
                 run_script([], [], max_cloud_cover=bad)
+
+    def test_upper_boundary_is_inclusive(self):
+        """100 is accepted (<= 100) and builds a strict `< 100` predicate."""
+        result = run_script([], [], max_cloud_cover=100)
+
+        filter_param = result["source_client"].searches[0]["filter"]
+        assert filter_param["op"] == "and"
+        assert filter_param["args"][1] == {
+            "op": "<",
+            "args": [{"property": "eo:cloud_cover"}, 100.0],
+        }
+
+    def test_cloud_and_acquisition_filters_coexist(self):
+        """Prod runs both: `filter` gets the AND(cloud) and the `datetime` floor still applies."""
+        result = run_script([], [], max_cloud_cover=90, max_acquisition_age_days=7)
+
+        search = result["source_client"].searches[0]
+        assert search["filter"]["op"] == "and"  # cloud predicate present
+        assert "datetime" in search["kwargs"]  # acquisition narrowing not clobbered

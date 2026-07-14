@@ -312,7 +312,7 @@ def main() -> None:
         type=_optional_float,
         default=None,
         help="Optical filter: keep only items with eo:cloud_cover strictly below this "
-        "percentage (0-100]. Omit or pass blank for no cloud-cover filter (default).",
+        "percentage, in (0, 100]. Omit or pass blank for no cloud-cover filter (default).",
     )
     d.set_defaults(func=discover)
 
