@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.12.0 (2026-07-14)
+
+## What's Changed
+* feat(demo): protect Fontainebleau wildfire scenes (T31UDP) by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/336
+* feat(query-stac): add --max-cloud-cover filter to discover by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/335
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.11.1...v1.12.0
+
 ## 1.11.1 (2026-07-14)
 
 ## What's Changed
