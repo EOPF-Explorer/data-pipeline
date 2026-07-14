@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.11.1 (2026-07-14)
+
+## What's Changed
+* fix(cleanup): datetime-based expiry + exclude-list-first demo protection by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/333
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.11.0...v1.11.1
+
 ## 1.11.0 (2026-07-14)
 
 ## What's Changed
