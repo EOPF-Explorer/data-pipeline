@@ -13,7 +13,7 @@ is shown when the API supports `numberMatched`.
 |---|---|
 | `fix_url_encoding` | Replace `+` with `%20` in asset/link href query strings (RFC 3986 compliance) |
 | `fix_zarr_media_type` | Fix zarr media types (`vnd+zarr` → `vnd.zarr`, `version=2` → `version=3`, add missing `version=3`) and remove `zipped_product` asset |
-| `stamp_expires` | Backfill `properties.expires = created + retention` (timestamps ext); skips already-stamped, excluded, and (optionally) large `created − datetime` gaps. See [stamp_expires](#stamp_expires-backfill-retention-expiry) below |
+| `stamp_expires` | Backfill `properties.expires = datetime (acquisition) + retention` (timestamps ext); skips already-stamped, excluded, and items acquired before the floor. See [stamp_expires](#stamp_expires-backfill-retention-expiry) below |
 
 ## `stamp_expires` (backfill retention expiry)
 
@@ -22,40 +22,55 @@ them ([coordination#183](https://github.com/EOPF-Explorer/coordination/issues/18
 New items are stamped at registration; this migration covers the pre-existing
 catalogue. Companion doc: [scripts/README_cleanup_expired_items.md](../scripts/README_cleanup_expired_items.md).
 
-**Rule**: `expires = created + retention` (default 183 days, from
+**Rule**: `expires = datetime + retention` (default 183 days, from
 `s3_item_cleanup.DEFAULT_RETENTION_DAYS`), plus the timestamps extension URL.
-Strict by design — items older than the window become immediately past-expiry,
-so the first cleanup runs drain a backlog (bounded by the cron's `--max-items`).
+Retention is measured from **acquisition** (`properties.datetime`), not
+`created`. `created` records when an item was *converted/registered*, and the
+catalogue holds multiple bulk-conversion cohorts — items acquired the same week
+can carry `created` dates months apart, and a re-conversion resets `created`, so
+a `created`-based expiry is unstable and disconnected from data age. Acquisition
+`datetime` is stable across re-conversions. Strict by design — items older than
+the window become immediately past-expiry, so the first cleanup runs drain a
+backlog (bounded by the cron's `--max-items`).
 
 **Configuration (environment):**
 
 | Env | Default | Effect |
 |---|---|---|
-| `EXPIRES_RETENTION_DAYS` | `183` | Retention window added to `created` |
+| `EXPIRES_RETENTION_DAYS` | `183` | Retention window added to `datetime` |
+| `EXPIRES_MIN_DATETIME` | (unset) | Floor: skip items acquired before this (`before_floor`). RFC3339 timestamp or bare `YYYY-MM-DD` (→ midnight UTC). Inclusive of its own instant. |
 | `EXPIRES_EXCLUDE_FILE` | (unset) | Newline-delimited item-ID denylist, never stamped (`#` comments ok) |
-| `EXPIRES_DEMO_GAP_DAYS` | (unset) | If set, skip items whose `created − datetime` gap exceeds this many days (`demo_gap`) |
 
-**Demo-data protection is layered:**
+**Demo-data protection is layered — the exclude file is the real protection:**
 
-- **Primary — the exclude file.** Enumerate demo item IDs (e.g. the 2021 scenes)
-  in `EXPIRES_EXCLUDE_FILE`. They are never stamped, so they carry no `expires`
-  and are structurally undeletable.
-- **Secondary — the gap heuristic (disabled by default).** A large
-  `created − datetime` gap *can* indicate manually-ingested demo data — but
-  bulk catalogue-conversion campaigns also produce large gaps, so a naive
-  threshold would leave exactly the oldest, most-bloating data unstamped
-  forever. **Do not assume a threshold.** Run a dry-run first, read the outcome
-  histogram (logged per item + tallied), then either enumerate demo items in the
-  exclude file (preferred) or set `EXPIRES_DEMO_GAP_DAYS` from the data.
+- **Primary — the exclude file (`EXPIRES_EXCLUDE_FILE`).** Point it at
+  `scripts/demo_exclude_ids.txt` (the same canonical list `register_v1` and the
+  cleanup honor). Demo scenes are **scattered across 2021→2026 and interleaved
+  with pipeline data** — several are acquired *after* any pipeline-era floor — so
+  enumerating their IDs is the only complete protection. Excluded IDs are never
+  stamped, carry no `expires`, and are structurally undeletable; the check runs
+  *before* the floor, so an excluded ID is safe regardless of its acquisition
+  date. **A floor-only run (exclude file unset) will stamp — and later delete —
+  any demo acquired after the floor.** After a run, check the report for the
+  `exclude-file id(s) matched no item` warning: it means a listed ID is a typo or
+  a stale/reconverted id and is protecting nothing.
+- **Secondary — the acquisition floor (`EXPIRES_MIN_DATETIME`).** A single date
+  floor (e.g. `2025-11-01`) skips every item acquired before it (`before_floor`),
+  never stamping them. Its job is to **bound the first cleanup's blast radius**
+  and coarsely cover the pre-pipeline tail — not to protect demos. Run a dry-run
+  first and read the outcome histogram (`stamped` vs `before_floor`, logged +
+  tallied) to confirm the split.
 
-**⚠️ Pre-run check (open question): does `properties.created` survive the
-DELETE-then-POST round-trip?** The framework deletes and re-POSTs each item;
-pgstac may re-stamp `created` server-side. Before a real backfill, migrate one
-staging item and confirm `created` is unchanged — the whole rule depends on it.
-If it is re-stamped, preserve the original `created` in the POST body.
+Note: because the rule keys off `properties.datetime` (a mandatory core STAC
+field, not a server-managed audit timestamp), it does not depend on `created`
+surviving the framework's DELETE-then-POST round-trip.
 
 ```bash
 # Dry-run: review the skip-reason / stamped histogram in the logs first.
+# EXPIRES_EXCLUDE_FILE protects the demo scenes (mandatory — several are acquired
+# after the floor); EXPIRES_MIN_DATETIME bounds the backlog / blast radius.
+EXPIRES_EXCLUDE_FILE=scripts/demo_exclude_ids.txt \
+EXPIRES_MIN_DATETIME=2025-11-01 \
 uv run operator-tools/migrate_catalog.py run --migration stamp_expires \
   sentinel-2-l2a-staging --dry-run
 

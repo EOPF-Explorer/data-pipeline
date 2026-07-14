@@ -17,6 +17,7 @@ sys.path.insert(0, str(scripts_dir))
 from register_v1 import (  # noqa: E402
     TIMESTAMPS_EXTENSION,
     add_expires,
+    resolve_exclude_ids,
     resolve_retention_days,
     upsert_item,
 )
@@ -181,6 +182,33 @@ class TestAddExpires:
         add_expires(item, -5)
         assert "expires" not in item.properties
         assert TIMESTAMPS_EXTENSION not in item.stac_extensions
+
+    def test_excluded_item_is_not_stamped(self) -> None:
+        # A demo scene in the denylist stays structurally undeletable even when
+        # re-registered with a positive retention (the reconversion case).
+        item = _real_item(item_id="S2_demo")
+        add_expires(item, 183, exclude_ids={"S2_demo"})
+        assert "expires" not in item.properties
+        assert TIMESTAMPS_EXTENSION not in item.stac_extensions
+
+    def test_non_excluded_item_is_still_stamped(self) -> None:
+        item = _real_item(item_id="S2_pipeline")
+        add_expires(item, 183, exclude_ids={"S2_demo"})
+        assert "expires" in item.properties
+
+
+class TestResolveExcludeIds:
+    """resolve_exclude_ids reads the demo denylist from EXPIRES_EXCLUDE_FILE."""
+
+    def test_unset_returns_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("EXPIRES_EXCLUDE_FILE", raising=False)
+        assert resolve_exclude_ids() == set()
+
+    def test_reads_ids_from_file(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        f = tmp_path / "demo.txt"
+        f.write_text("# demo\nS2_demo_a\nS2_demo_b\n")
+        monkeypatch.setenv("EXPIRES_EXCLUDE_FILE", str(f))
+        assert resolve_exclude_ids() == {"S2_demo_a", "S2_demo_b"}
 
 
 class TestResolveRetentionDays:

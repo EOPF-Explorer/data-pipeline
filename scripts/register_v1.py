@@ -21,6 +21,7 @@ from s3_item_cleanup import (
     TIMESTAMPS_EXTENSION,
     env_int,
     format_expires,
+    load_exclude_ids,
 )
 from storage_tier_utils import extract_region_from_endpoint, get_s3_storage_class
 
@@ -357,13 +358,29 @@ def resolve_retention_days() -> int:
     return env_int("EXPIRES_RETENTION_DAYS", DEFAULT_RETENTION_DAYS)
 
 
-def add_expires(item: Item, retention_days: int) -> None:
+def resolve_exclude_ids() -> set[str]:
+    """Demo denylist from ``EXPIRES_EXCLUDE_FILE`` (coordination#183).
+
+    This is the *same* list the cleanup honors, so demo protection is defined
+    once and can't drift between register-time and cleanup-time. An id in this
+    list is never stamped with ``expires`` here, and never deleted by the
+    cleanup — so re-registering or reconverting a demo scene keeps it
+    structurally undeletable. Unset ⇒ empty set.
+    """
+    return load_exclude_ids(os.getenv("EXPIRES_EXCLUDE_FILE"))
+
+
+def add_expires(item: Item, retention_days: int, exclude_ids: set[str] | None = None) -> None:
     """Stamp ``properties.expires`` = now + retention_days and the timestamps
     extension so the cleanup cron can select expired items (coordination#183).
 
-    ``retention_days <= 0`` is a no-op — items with no ``expires`` are
-    structurally undeletable, which is how manual/demo data is protected.
+    No ``expires`` is stamped (leaving the item structurally undeletable) when
+    either the item is in ``exclude_ids`` (the demo denylist) or
+    ``retention_days <= 0``. The exclude check is what makes reconverting a demo
+    scene safe — otherwise every re-register would re-arm it for deletion.
     """
+    if exclude_ids and item.id in exclude_ids:
+        return
     if retention_days <= 0:
         return
 
@@ -782,11 +799,16 @@ def run_registration(
     # 12. Add derived_from link to source item
     add_derived_from_link(item, source_url)
 
-    # 12.5 Stamp expiry for retention-driven cleanup (coordination#183)
+    # 12.5 Stamp expiry for retention-driven cleanup (coordination#183).
+    # Demo/exclude-listed items are left without expires (structurally
+    # undeletable), using the same denylist the cleanup honors.
     retention_days = resolve_retention_days()
-    add_expires(item, retention_days)
-    if retention_days > 0:
+    exclude_ids = resolve_exclude_ids()
+    add_expires(item, retention_days, exclude_ids)
+    if retention_days > 0 and item.id not in exclude_ids:
         logger.info(f"   ⏳ Stamped expires = now + {retention_days}d")
+    else:
+        logger.info("   🛡️  No expires (demo/exclude-listed or retention=0) — undeletable")
 
     # 13. Register to STAC API
     client = Client.open(stac_api_url)
