@@ -1,6 +1,7 @@
 import copy
 import json
 import logging
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,13 @@ from pystac_client import Client
 from _migrate_catalog.types import MigrationFn, MigrationResult
 
 logger = logging.getLogger(__name__)
+
+# Per-request timeout (seconds) for the search-pagination client. Without it,
+# pystac_client's session has no timeout and a stalled socket hangs the whole run
+# indefinitely (observed: 4.5h wall / 26s CPU against the prod STAC API). With a
+# timeout, a stuck read raises and StacApiIO's default max_retries=5 reconnects.
+# Override via STAC_HTTP_TIMEOUT.
+_SEARCH_TIMEOUT = float(os.getenv("STAC_HTTP_TIMEOUT", "60"))
 
 
 def compose_migrations(fns: list[MigrationFn]) -> MigrationFn:
@@ -77,7 +85,7 @@ class STACMigrationRunner:
             errors=[],
         )
 
-        catalog = Client.open(self.api_url)
+        catalog = Client.open(self.api_url, timeout=_SEARCH_TIMEOUT)
         search = catalog.search(collections=[collection_id], max_items=None, limit=page_size)
 
         total = search.matched()
@@ -115,7 +123,7 @@ class STACMigrationRunner:
 
     def _fetch_existing_ids(self, collection_id: str, page_size: int) -> set[str]:
         """Return the set of item IDs already present in collection_id."""
-        catalog = Client.open(self.api_url)
+        catalog = Client.open(self.api_url, timeout=_SEARCH_TIMEOUT)
         search = catalog.search(
             collections=[collection_id],
             max_items=None,
@@ -150,7 +158,7 @@ class STACMigrationRunner:
             existing_ids = self._fetch_existing_ids(target_id, page_size)
             click.echo(f"Found {len(existing_ids)} items already in '{target_id}', skipping them.")
 
-        catalog = Client.open(self.api_url)
+        catalog = Client.open(self.api_url, timeout=_SEARCH_TIMEOUT)
         search = catalog.search(collections=[source_id], max_items=None, limit=page_size)
 
         total = search.matched()
