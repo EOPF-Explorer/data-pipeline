@@ -71,3 +71,7 @@ pipeline_utils.py
 
 # Migration recovery files
 operator-tools/.migration_recovery_*.jsonl
+operator-tools/.migration_history.json
+
+# Local planning/spec docs (not part of the deliverable)
+claude-docs/

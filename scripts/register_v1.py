@@ -8,6 +8,7 @@ import logging
 import os
 import sys
 import urllib.parse
+from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 
 import httpx
@@ -15,6 +16,12 @@ import zarr
 from pystac import Asset, Item, Link
 from pystac.extensions.projection import ProjectionExtension
 from pystac_client import Client
+from s3_item_cleanup import (
+    DEFAULT_RETENTION_DAYS,
+    TIMESTAMPS_EXTENSION,
+    env_int,
+    format_expires,
+)
 from storage_tier_utils import extract_region_from_endpoint, get_s3_storage_class
 
 # Configure logging (set LOG_LEVEL=DEBUG for verbose output)
@@ -339,6 +346,34 @@ def add_derived_from_link(item: Item, source_url: str) -> None:
         )
     )
     logger.debug(f"Added derived_from link: {source_url}")
+
+
+def resolve_retention_days() -> int:
+    """Retention window (days) from EXPIRES_RETENTION_DAYS, default 183.
+
+    ``0`` disables expiry stamping (for manual/demo registrations). An unset or
+    empty value falls back to the default. See coordination#183.
+    """
+    return env_int("EXPIRES_RETENTION_DAYS", DEFAULT_RETENTION_DAYS)
+
+
+def add_expires(item: Item, retention_days: int) -> None:
+    """Stamp ``properties.expires`` = now + retention_days and the timestamps
+    extension so the cleanup cron can select expired items (coordination#183).
+
+    ``retention_days <= 0`` is a no-op — items with no ``expires`` are
+    structurally undeletable, which is how manual/demo data is protected.
+    """
+    if retention_days <= 0:
+        return
+
+    expires = datetime.now(UTC) + timedelta(days=retention_days)
+    item.properties["expires"] = format_expires(expires)
+
+    if not hasattr(item, "stac_extensions"):
+        item.stac_extensions = []
+    if TIMESTAMPS_EXTENSION not in item.stac_extensions:
+        item.stac_extensions.append(TIMESTAMPS_EXTENSION)
 
 
 def fix_zarr_asset_media_types(item: Item) -> None:
@@ -746,6 +781,12 @@ def run_registration(
 
     # 12. Add derived_from link to source item
     add_derived_from_link(item, source_url)
+
+    # 12.5 Stamp expiry for retention-driven cleanup (coordination#183)
+    retention_days = resolve_retention_days()
+    add_expires(item, retention_days)
+    if retention_days > 0:
+        logger.info(f"   ⏳ Stamped expires = now + {retention_days}d")
 
     # 13. Register to STAC API
     client = Client.open(stac_api_url)
