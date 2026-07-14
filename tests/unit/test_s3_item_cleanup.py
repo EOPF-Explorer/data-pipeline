@@ -3,7 +3,7 @@
 These cover the shared S3-deletion helpers extracted from
 operator-tools/manage_item.py (coordination#183, Task 1):
 - URL extraction from STAC item assets
-- Zarr-prefix expansion + 200-key batch deletion
+- Zarr-prefix expansion + 1000-key batch deletion
 - NoSuchKey-as-deleted tolerance
 - object counting for validation
 
@@ -113,8 +113,8 @@ def test_delete_expands_zarr_prefix_and_deletes_listed_objects() -> None:
     )
 
 
-def test_delete_batches_in_chunks_of_200() -> None:
-    keys = [f"item/data.zarr/chunk/{i}" for i in range(250)]
+def test_delete_batches_in_chunks_of_1000() -> None:
+    keys = [f"item/data.zarr/chunk/{i}" for i in range(1200)]
     client = MagicMock()
     client.get_paginator.return_value = _paginator_returning(keys)
     client.delete_objects.return_value = {"Deleted": [], "Errors": []}
@@ -124,7 +124,7 @@ def test_delete_batches_in_chunks_of_200() -> None:
     batch_sizes = [
         len(kwargs["Delete"]["Objects"]) for _, kwargs in client.delete_objects.call_args_list
     ]
-    assert batch_sizes == [200, 50]
+    assert batch_sizes == [1000, 200]  # S3's max keys per delete_objects call
 
 
 def test_delete_counts_nosuchkey_as_deleted() -> None:

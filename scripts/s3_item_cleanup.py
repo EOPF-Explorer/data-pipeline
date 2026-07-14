@@ -40,8 +40,9 @@ TIMESTAMPS_EXTENSION = "https://stac-extensions.github.io/timestamps/v1.1.0/sche
 # — do not introduce a second one (coordination#183, verified live 2026-07-10).
 EXPIRES_TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
-# S3 delete_objects accepts at most 1000 keys per call; we stay well under.
-BATCH_SIZE = 200
+# S3 delete_objects accepts at most 1000 keys per call — use the full limit to
+# minimise round-trips (a ~1200-object item goes from 6 delete calls to 2).
+BATCH_SIZE = 1000
 
 
 def format_expires(dt: datetime) -> str:
@@ -109,6 +110,27 @@ def extract_s3_urls_from_item(item_dict: dict) -> set[str]:
     return s3_urls
 
 
+def _partition_by_bucket(s3_urls: set[str]) -> dict[str, tuple[set[str], set[str]]]:
+    """Group S3 URLs into ``{bucket: (prefixes, individual_keys)}``.
+
+    A ``.zarr/`` URL collapses to its store root, a trailing-slash URL is a
+    directory prefix (both listed to enumerate objects), and anything else is a
+    single object key.
+    """
+    result: dict[str, tuple[set[str], set[str]]] = defaultdict(lambda: (set(), set()))
+    for url in s3_urls:
+        parsed = urlparse(url)
+        prefixes, keys = result[parsed.netloc]
+        key = parsed.path.lstrip("/")
+        if ".zarr/" in key:
+            prefixes.add(key.split(".zarr/")[0] + ".zarr/")
+        elif key.endswith("/"):
+            prefixes.add(key)
+        else:
+            keys.add(key)
+    return result
+
+
 def _collect_keys_by_bucket(
     s3_client: Any,
     s3_urls: set[str],
@@ -118,26 +140,9 @@ def _collect_keys_by_bucket(
     Zarr stores and directory prefixes are expanded via list_objects_v2;
     individual files are kept as-is.
     """
-    urls_by_bucket: dict[str, list[str]] = defaultdict(list)
-    for url in s3_urls:
-        parsed = urlparse(url)
-        urls_by_bucket[parsed.netloc].append(url)
-
     keys_by_bucket: dict[str, list[str]] = defaultdict(list)
-    for bucket, urls in urls_by_bucket.items():
-        prefixes_to_delete = set()
-        individual_keys = set()
-        for url in urls:
-            key = urlparse(url).path.lstrip("/")
-            if ".zarr/" in key:
-                zarr_root = key.split(".zarr/")[0] + ".zarr/"
-                prefixes_to_delete.add(zarr_root)
-            elif key.endswith("/"):
-                prefixes_to_delete.add(key)
-            else:
-                individual_keys.add(key)
-
-        for prefix in prefixes_to_delete:
+    for bucket, (prefixes, individual_keys) in _partition_by_bucket(s3_urls).items():
+        for prefix in prefixes:
             # Fail closed: an unlistable prefix means we cannot know its object
             # set. Silently treating it as empty would let the caller "validate
             # 0 remaining" and delete the STAC item while the data lives on
@@ -214,35 +219,9 @@ def count_s3_objects_for_item(
         Total count of S3 objects
     """
     count = 0
-
-    # Group URLs by bucket for efficiency
-    urls_by_bucket: dict[str, list[str]] = defaultdict(list)
-    for url in s3_urls:
-        parsed = urlparse(url)
-        urls_by_bucket[parsed.netloc].append(url)
-
-    for bucket, urls in urls_by_bucket.items():
-        # Determine if we need to handle prefixes
-        prefixes_to_check = set()
-        individual_keys = set()
-
-        for url in urls:
-            key = urlparse(url).path.lstrip("/")
-
-            # Check if this is a prefix (directory or Zarr store)
-            if ".zarr/" in key:
-                # Extract the Zarr root prefix
-                zarr_root = key.split(".zarr/")[0] + ".zarr/"
-                prefixes_to_check.add(zarr_root)
-            elif key.endswith("/"):
-                # It's a directory prefix
-                prefixes_to_check.add(key)
-            else:
-                # It's an individual file
-                individual_keys.add(key)
-
+    for bucket, (prefixes, individual_keys) in _partition_by_bucket(s3_urls).items():
         # Count objects under prefixes
-        for prefix in prefixes_to_check:
+        for prefix in prefixes:
             # Fail closed (see _collect_keys_by_bucket): an unlistable prefix must
             # not be silently counted as 0 — that defeats the validate-0 gate the
             # caller relies on before deleting the STAC item. Let it propagate.
@@ -252,15 +231,21 @@ def count_s3_objects_for_item(
 
         # Count individual files
         for key in individual_keys:
-            try:
-                s3_client.head_object(Bucket=bucket, Key=key)
+            if _object_exists(s3_client, bucket, key):
                 count += 1
-            except ClientError as exc:
-                # A genuinely-absent key (404) legitimately counts as 0; any other
-                # error is unverifiable state and must propagate (fail closed).
-                code = exc.response.get("Error", {}).get("Code", "")
-                if code not in ("404", "NoSuchKey", "NotFound"):
-                    raise
-                logger.debug("head_object 404 for s3://%s/%s — not counted", bucket, key)
 
     return count
+
+
+def _object_exists(s3_client: Any, bucket: str, key: str) -> bool:
+    """True if the single object exists. A 404 is a definitive 'no'; any other
+    ClientError is unverifiable state and propagates (fail closed)."""
+    try:
+        s3_client.head_object(Bucket=bucket, Key=key)
+        return True
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code not in ("404", "NoSuchKey", "NotFound"):
+            raise
+        logger.debug("head_object 404 for s3://%s/%s — absent", bucket, key)
+        return False
