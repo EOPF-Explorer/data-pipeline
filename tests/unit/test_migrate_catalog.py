@@ -720,6 +720,33 @@ class TestClassifyAndStamp:
         assert reason == "stamped"
         assert result is not None
 
+    def test_excluded_wins_over_floor_eligible(self) -> None:
+        # The crown-jewel contract: a demo acquired AFTER the floor (so it would
+        # otherwise be stamped) is protected by the exclude list, not the floor.
+        # This is the real T33TVF / T36UXA / T27VWL (2026) demo case.
+        item = _stampable_item(item_id="demo_after_floor", datetime_str="2026-02-25T00:00:00Z")
+        result, reason = classify_and_stamp(
+            item,
+            retention_days=183,
+            exclude_ids={"demo_after_floor"},
+            min_datetime=_parse("2025-11-01T00:00:00Z"),
+        )
+        assert result is None
+        assert reason == "excluded"
+
+    def test_same_after_floor_item_is_stamped_without_exclusion(self) -> None:
+        # Documents the danger the exclude list guards against: the identical
+        # after-floor demo, if NOT excluded, is stamped and becomes deletable.
+        item = _stampable_item(item_id="demo_after_floor", datetime_str="2026-02-25T00:00:00Z")
+        result, reason = classify_and_stamp(
+            item,
+            retention_days=183,
+            exclude_ids=set(),
+            min_datetime=_parse("2025-11-01T00:00:00Z"),
+        )
+        assert reason == "stamped"
+        assert result is not None
+
     def test_does_not_mutate_input_item(self) -> None:
         item = _stampable_item()
         classify_and_stamp(item, retention_days=183, exclude_ids=set(), min_datetime=None)
@@ -822,6 +849,39 @@ class TestHistogramReporting:
         SKIP_HISTOGRAM["stamped"] = 9
         reset_histogram()
         assert sum(SKIP_HISTOGRAM.values()) == 0
+
+    def test_report_warns_when_exclude_id_matched_nothing(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        # The exclude list is the crown-jewel demo protection, so a listed id that
+        # matches no item (typo / stale reconverted id) must fail loud.
+        from _migrate_catalog.migrations.stamp_expires import report
+
+        exclude_file = tmp_path / "exclude.txt"
+        exclude_file.write_text("real_demo\nTYPO_demo_xyz\n")
+        monkeypatch.setenv("EXPIRES_EXCLUDE_FILE", str(exclude_file))
+        monkeypatch.delenv("EXPIRES_MIN_DATETIME", raising=False)
+        reset_histogram()
+        stamp_expires(_stampable_item(item_id="real_demo"))  # matches one listed id
+        stamp_expires(_stampable_item(item_id="pipeline"))  # a normal item
+        text = report(_result(processed=2, modified=1, skipped=1))
+        assert "matched no item" in text
+        assert "TYPO_demo_xyz" in text
+        assert "real_demo" not in text  # the matched id is not flagged
+
+    def test_report_quiet_when_all_exclude_ids_match(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from _migrate_catalog.migrations.stamp_expires import report
+
+        exclude_file = tmp_path / "exclude.txt"
+        exclude_file.write_text("real_demo\n")
+        monkeypatch.setenv("EXPIRES_EXCLUDE_FILE", str(exclude_file))
+        monkeypatch.delenv("EXPIRES_MIN_DATETIME", raising=False)
+        reset_histogram()
+        stamp_expires(_stampable_item(item_id="real_demo"))
+        text = report(_result(processed=1, modified=0, skipped=1))
+        assert "matched no item" not in text
 
 
 class TestRunCommandSurfacesHistogram:

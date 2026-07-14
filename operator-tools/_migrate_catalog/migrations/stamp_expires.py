@@ -14,15 +14,24 @@ carry ``created`` dates months apart, and a re-conversion resets it), so a
 retention window are then immediately past-expiry, the first cleanup runs drain
 a backlog (bounded by the cron's ``--max-items``).
 
-Demo-data protection is layered:
-- **Primary (floor)**: env ``EXPIRES_MIN_DATETIME`` (an RFC3339 timestamp, or a
-  bare ``YYYY-MM-DD`` date). Items acquired **before** the floor are skipped
-  (``before_floor``) and never stamped — and an item with no ``expires`` is
-  structurally undeletable. The curated demo scenes are all older than the
-  pipeline era, so a single date floor protects them without enumerating IDs.
-- **Secondary (exclude list)**: env ``EXPIRES_EXCLUDE_FILE``, a newline-delimited
-  item-ID denylist, for any individual item to protect regardless of its
-  acquisition date (e.g. a demo scene inside the retained window).
+Demo-data protection is layered — **the exclude list is the real protection**:
+
+- **Primary — the exclude list** (env ``EXPIRES_EXCLUDE_FILE``, the same
+  ``scripts/demo_exclude_ids.txt`` that ``register_v1`` and the cleanup honor).
+  Demo scenes are scattered across 2021→2026 and interleaved with pipeline data
+  — several are acquired *after* any pipeline-era floor — so enumerating their
+  ids is the only complete protection. Excluded ids are never stamped, carry no
+  ``expires``, and are structurally undeletable. This check runs *before* the
+  floor, so an excluded id is protected regardless of its acquisition date.
+- **Secondary — the acquisition floor** (env ``EXPIRES_MIN_DATETIME``, an RFC3339
+  timestamp or a bare ``YYYY-MM-DD`` date). Items acquired **before** the floor
+  are skipped (``before_floor``) and never stamped. Its job is to bound the first
+  cleanup's blast radius and coarsely cover the pre-pipeline tail — it does
+  **not** protect a demo acquired on or after it; those must be in the exclude
+  list.
+
+A stale or mistyped exclude id would silently protect nothing, so ``report()``
+warns when a configured exclude id matched zero items during a run.
 
 Every outcome is tallied in ``SKIP_HISTOGRAM`` and logged, so a dry-run doubles
 as the histogram the team reviews (``stamped`` vs ``before_floor`` etc.) before
@@ -68,9 +77,18 @@ logger = logging.getLogger(__name__)
 # are the histogram the team reviews. Reset with reset_histogram().
 SKIP_HISTOGRAM: Counter[str] = Counter()
 
+# The configured exclude ids and the subset actually seen in the catalogue this
+# run. The exclude list is the crown-jewel demo protection, so an id that matches
+# nothing (typo, or a scene renamed/reconverted to a new id) would silently
+# protect nothing. report() warns on the difference. Reset with the histogram.
+_EXCLUDE_IDS: set[str] = set()
+_MATCHED_EXCLUDE_IDS: set[str] = set()
+
 
 def reset_histogram() -> None:
     SKIP_HISTOGRAM.clear()
+    _EXCLUDE_IDS.clear()
+    _MATCHED_EXCLUDE_IDS.clear()
 
 
 def report(result: MigrationResult) -> str:
@@ -97,6 +115,14 @@ def report(result: MigrationResult) -> str:
             f"(processed={result.items_processed}, modified={result.items_modified}, "
             f"skipped={result.items_skipped}, failed={result.items_failed})"
         )
+
+    unmatched = _EXCLUDE_IDS - _MATCHED_EXCLUDE_IDS
+    if unmatched:
+        lines.append(
+            f"  WARNING: {len(unmatched)} exclude-file id(s) matched no item "
+            f"(typo, or stale/reconverted id?) — verify demo protection: "
+            f"{', '.join(sorted(unmatched))}"
+        )
     return "\n".join(lines)
 
 
@@ -119,6 +145,9 @@ def classify_and_stamp(
     if item.get("id") in exclude_ids:
         return None, "excluded"
 
+    # ``datetime`` is a mandatory STAC core field and S2 L2A always populates it.
+    # A range-only item (``datetime=null`` with start/end_datetime) would skip
+    # here and never expire — a cost leak, not a safety risk. None exist in S2.
     acquired = props.get("datetime")
     if not acquired:
         return None, "no_datetime"
@@ -140,8 +169,11 @@ def _parse_floor(value: str) -> datetime:
     """Parse ``EXPIRES_MIN_DATETIME``. Accepts a full RFC3339 timestamp or a
     bare ``YYYY-MM-DD`` date (normalised to midnight UTC so a naive local-time
     interpretation can't shift the floor by the machine's offset)."""
-    if "T" not in value:
+    # A bare date has no time separator; RFC3339 allows lower- or upper-case "T".
+    if "T" not in value.upper():
         value = f"{value}T00:00:00Z"
+    # Annotate to launder the Any from the runtime-only s3_item_cleanup import
+    # (mypy can't resolve it statically) into a concrete datetime.
     floor: datetime = parse_stac_timestamp(value)
     return floor
 
@@ -165,6 +197,13 @@ def stamp_expires(item: dict[str, Any]) -> dict[str, Any] | None:
     """Stamp ``expires`` on one item. Config from the environment
     (EXPIRES_RETENTION_DAYS, EXPIRES_EXCLUDE_FILE, EXPIRES_MIN_DATETIME)."""
     retention_days, exclude_ids, min_datetime = _resolve_config()
+    # Track which exclude ids are actually present so report() can flag any that
+    # matched nothing. Record on id-presence (not on the "excluded" outcome) so an
+    # excluded item that is already stamped still counts as matched.
+    _EXCLUDE_IDS.update(exclude_ids)
+    item_id = item.get("id")
+    if item_id in exclude_ids:
+        _MATCHED_EXCLUDE_IDS.add(item_id)
     result, reason = classify_and_stamp(
         item,
         retention_days=retention_days,
@@ -173,5 +212,5 @@ def stamp_expires(item: dict[str, Any]) -> dict[str, Any] | None:
     )
     SKIP_HISTOGRAM[reason] += 1
     if reason != "stamped":
-        logger.info("stamp_expires skip: id=%s reason=%s", item.get("id"), reason)
+        logger.info("stamp_expires skip: id=%s reason=%s", item_id, reason)
     return result

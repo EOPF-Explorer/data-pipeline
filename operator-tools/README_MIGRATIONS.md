@@ -41,25 +41,35 @@ backlog (bounded by the cron's `--max-items`).
 | `EXPIRES_MIN_DATETIME` | (unset) | Floor: skip items acquired before this (`before_floor`). RFC3339 timestamp or bare `YYYY-MM-DD` (→ midnight UTC). Inclusive of its own instant. |
 | `EXPIRES_EXCLUDE_FILE` | (unset) | Newline-delimited item-ID denylist, never stamped (`#` comments ok) |
 
-**Demo-data protection is layered:**
+**Demo-data protection is layered — the exclude file is the real protection:**
 
-- **Primary — the acquisition floor (`EXPIRES_MIN_DATETIME`).** The curated demo
-  scenes are all older than the pipeline era, so a single date floor (e.g.
-  `2025-11-01`) skips every pre-pipeline item. Skipped items are never stamped,
-  carry no `expires`, and are therefore structurally undeletable — no ID
-  enumeration required. Run a dry-run first and read the outcome histogram
-  (`stamped` vs `before_floor`, logged + tallied) to confirm the split.
-- **Secondary — the exclude file (`EXPIRES_EXCLUDE_FILE`).** For any individual
-  item to protect regardless of its acquisition date — e.g. a demo scene that
-  falls *inside* the retained window. Enumerated IDs are never stamped.
+- **Primary — the exclude file (`EXPIRES_EXCLUDE_FILE`).** Point it at
+  `scripts/demo_exclude_ids.txt` (the same canonical list `register_v1` and the
+  cleanup honor). Demo scenes are **scattered across 2021→2026 and interleaved
+  with pipeline data** — several are acquired *after* any pipeline-era floor — so
+  enumerating their IDs is the only complete protection. Excluded IDs are never
+  stamped, carry no `expires`, and are structurally undeletable; the check runs
+  *before* the floor, so an excluded ID is safe regardless of its acquisition
+  date. **A floor-only run (exclude file unset) will stamp — and later delete —
+  any demo acquired after the floor.** After a run, check the report for the
+  `exclude-file id(s) matched no item` warning: it means a listed ID is a typo or
+  a stale/reconverted id and is protecting nothing.
+- **Secondary — the acquisition floor (`EXPIRES_MIN_DATETIME`).** A single date
+  floor (e.g. `2025-11-01`) skips every item acquired before it (`before_floor`),
+  never stamping them. Its job is to **bound the first cleanup's blast radius**
+  and coarsely cover the pre-pipeline tail — not to protect demos. Run a dry-run
+  first and read the outcome histogram (`stamped` vs `before_floor`, logged +
+  tallied) to confirm the split.
 
-Note: because the rule now keys off `properties.datetime` (a mandatory core STAC
+Note: because the rule keys off `properties.datetime` (a mandatory core STAC
 field, not a server-managed audit timestamp), it does not depend on `created`
 surviving the framework's DELETE-then-POST round-trip.
 
 ```bash
 # Dry-run: review the skip-reason / stamped histogram in the logs first.
-# EXPIRES_MIN_DATETIME floors out the pre-pipeline (demo) scenes.
+# EXPIRES_EXCLUDE_FILE protects the demo scenes (mandatory — several are acquired
+# after the floor); EXPIRES_MIN_DATETIME bounds the backlog / blast radius.
+EXPIRES_EXCLUDE_FILE=scripts/demo_exclude_ids.txt \
 EXPIRES_MIN_DATETIME=2025-11-01 \
 uv run operator-tools/migrate_catalog.py run --migration stamp_expires \
   sentinel-2-l2a-staging --dry-run
