@@ -22,7 +22,8 @@ There are two ways it lands on an item:
      would give it an expiry. The runtime `--exclude-file` denylist is the
      backstop.
 2. **Backfill** — the `stamp_expires` migration stamps existing items
-   (`expires = created + retention`). See
+   (`expires = datetime + retention`, keyed off acquisition age; items acquired
+   before its `EXPIRES_MIN_DATETIME` floor are left unstamped). See
    [operator-tools/README_MIGRATIONS.md](../operator-tools/README_MIGRATIONS.md).
 
 ## Safety model

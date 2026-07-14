@@ -639,20 +639,21 @@ def _parse(value: str) -> datetime:
 
 
 class TestClassifyAndStamp:
-    def test_stamps_expires_at_created_plus_retention(self) -> None:
-        item = _stampable_item()
+    def test_stamps_expires_at_datetime_plus_retention(self) -> None:
+        # Retention is measured from acquisition (datetime), not created.
+        item = _stampable_item(created="2026-05-05T00:00:00Z", datetime_str="2025-12-31T00:00:00Z")
         result, reason = classify_and_stamp(
-            item, retention_days=183, exclude_ids=set(), gap_threshold_days=None
+            item, retention_days=183, exclude_ids=set(), min_datetime=None
         )
         assert reason == "stamped"
         assert result is not None
-        delta = _parse(result["properties"]["expires"]) - _parse("2025-01-01T00:00:00Z")
+        delta = _parse(result["properties"]["expires"]) - _parse("2025-12-31T00:00:00Z")
         assert delta == timedelta(days=183)
 
     def test_stamped_item_gets_timestamps_extension_once(self) -> None:
         item = _stampable_item()
         result, _ = classify_and_stamp(
-            item, retention_days=183, exclude_ids=set(), gap_threshold_days=None
+            item, retention_days=183, exclude_ids=set(), min_datetime=None
         )
         assert result is not None
         assert result["stac_extensions"].count(TIMESTAMPS_EXTENSION) == 1
@@ -660,7 +661,7 @@ class TestClassifyAndStamp:
     def test_expires_is_utc_z_formatted(self) -> None:
         item = _stampable_item()
         result, _ = classify_and_stamp(
-            item, retention_days=183, exclude_ids=set(), gap_threshold_days=None
+            item, retention_days=183, exclude_ids=set(), min_datetime=None
         )
         assert result is not None
         assert result["properties"]["expires"].endswith("Z")
@@ -668,7 +669,7 @@ class TestClassifyAndStamp:
     def test_already_stamped_item_is_skipped(self) -> None:
         item = _stampable_item(expires="2025-07-01T00:00:00Z")
         result, reason = classify_and_stamp(
-            item, retention_days=183, exclude_ids=set(), gap_threshold_days=None
+            item, retention_days=183, exclude_ids=set(), min_datetime=None
         )
         assert result is None
         assert reason == "already_stamped"
@@ -679,41 +680,49 @@ class TestClassifyAndStamp:
             item,
             retention_days=183,
             exclude_ids={"S2_demo"},
-            gap_threshold_days=None,
+            min_datetime=None,
         )
         assert result is None
         assert reason == "excluded"
 
-    def test_item_without_created_is_skipped(self) -> None:
+    def test_item_without_datetime_is_skipped(self) -> None:
         item = _stampable_item()
-        del item["properties"]["created"]
+        del item["properties"]["datetime"]
         result, reason = classify_and_stamp(
-            item, retention_days=183, exclude_ids=set(), gap_threshold_days=None
+            item, retention_days=183, exclude_ids=set(), min_datetime=None
         )
         assert result is None
-        assert reason == "no_created"
+        assert reason == "no_datetime"
 
-    def test_large_created_datetime_gap_flags_demo_when_threshold_set(self) -> None:
-        # A 2021 scene converted in 2025 has a multi-year created-datetime gap.
-        item = _stampable_item(created="2025-01-01T00:00:00Z", datetime_str="2021-05-01T00:00:00Z")
+    def test_item_acquired_before_floor_is_skipped(self) -> None:
+        # A 2021 demo scene is skipped (never stamped => never deleted) when the
+        # floor is in the pipeline era.
+        item = _stampable_item(datetime_str="2021-05-01T00:00:00Z")
         result, reason = classify_and_stamp(
-            item, retention_days=183, exclude_ids=set(), gap_threshold_days=30
+            item,
+            retention_days=183,
+            exclude_ids=set(),
+            min_datetime=_parse("2025-11-01T00:00:00Z"),
         )
         assert result is None
-        assert reason == "demo_gap"
+        assert reason == "before_floor"
 
-    def test_large_gap_is_stamped_when_threshold_disabled(self) -> None:
-        # Default (threshold=None) is strict: big gaps are stamped, not skipped.
-        item = _stampable_item(created="2025-01-01T00:00:00Z", datetime_str="2021-05-01T00:00:00Z")
+    def test_item_acquired_on_or_after_floor_is_stamped(self) -> None:
+        # The floor is inclusive of its own instant: an item exactly at the floor
+        # is stamped, not skipped.
+        item = _stampable_item(datetime_str="2025-11-01T00:00:00Z")
         result, reason = classify_and_stamp(
-            item, retention_days=183, exclude_ids=set(), gap_threshold_days=None
+            item,
+            retention_days=183,
+            exclude_ids=set(),
+            min_datetime=_parse("2025-11-01T00:00:00Z"),
         )
         assert reason == "stamped"
         assert result is not None
 
     def test_does_not_mutate_input_item(self) -> None:
         item = _stampable_item()
-        classify_and_stamp(item, retention_days=183, exclude_ids=set(), gap_threshold_days=None)
+        classify_and_stamp(item, retention_days=183, exclude_ids=set(), min_datetime=None)
         assert "expires" not in item["properties"]
 
 
@@ -725,16 +734,27 @@ class TestStampExpiresMigration:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.delenv("EXPIRES_EXCLUDE_FILE", raising=False)
-        monkeypatch.delenv("EXPIRES_DEMO_GAP_DAYS", raising=False)
-        item = _stampable_item()
+        monkeypatch.delenv("EXPIRES_MIN_DATETIME", raising=False)
+        item = _stampable_item()  # datetime default 2024-12-31
         result = stamp_expires(item)
         assert result is not None
-        delta = _parse(result["properties"]["expires"]) - _parse("2025-01-01T00:00:00Z")
+        delta = _parse(result["properties"]["expires"]) - _parse("2024-12-31T00:00:00Z")
         assert delta == timedelta(days=DEFAULT_RETENTION_DAYS)
+
+    def test_min_datetime_floor_skips_old_acquisitions(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("EXPIRES_EXCLUDE_FILE", raising=False)
+        monkeypatch.setenv("EXPIRES_MIN_DATETIME", "2025-11-01")  # bare date form
+        reset_histogram()
+        stamp_expires(_stampable_item(item_id="old", datetime_str="2021-09-17T00:00:00Z"))
+        stamp_expires(_stampable_item(item_id="new", datetime_str="2026-02-01T00:00:00Z"))
+        assert SKIP_HISTOGRAM["before_floor"] == 1
+        assert SKIP_HISTOGRAM["stamped"] == 1
 
     def test_histogram_counts_outcomes(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("EXPIRES_EXCLUDE_FILE", raising=False)
-        monkeypatch.delenv("EXPIRES_DEMO_GAP_DAYS", raising=False)
+        monkeypatch.delenv("EXPIRES_MIN_DATETIME", raising=False)
         reset_histogram()
         stamp_expires(_stampable_item(item_id="a"))
         stamp_expires(_stampable_item(item_id="b", expires="2025-07-01T00:00:00Z"))
@@ -815,7 +835,7 @@ class TestRunCommandSurfacesHistogram:
         climod = importlib.import_module("_migrate_catalog.cli")
 
         monkeypatch.delenv("EXPIRES_EXCLUDE_FILE", raising=False)
-        monkeypatch.delenv("EXPIRES_DEMO_GAP_DAYS", raising=False)
+        monkeypatch.delenv("EXPIRES_MIN_DATETIME", raising=False)
         SKIP_HISTOGRAM.clear()
         SKIP_HISTOGRAM["stamped"] = 99  # stale — must be cleared before the run
 
