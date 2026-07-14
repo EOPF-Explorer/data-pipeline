@@ -110,3 +110,14 @@ argo submit --from cronwf/eopf-explorer-cronwf-historical-cleanup \
 
 Real deletion in production also requires the tier→STANDARD backlog (Plan 1) to
 be complete and documented stakeholder approval on coordination#183.
+
+### Throughput
+
+Deletion is bound by S3's per-object delete rate — measured ~75 objects/sec on
+OVH (2026-07-14), roughly `13 s` for a ~1000-object item, single-pod and
+sequential by design (one coherent audit log). Batch size (`delete_objects`
+sends 1000 keys/call) doesn't move this; it's server-side. If a large backlog is
+ever too slow to drain this way, deletes parallelise ~2× at 4 concurrent workers
+(same measurement) — deliberately not implemented, to keep the delete path
+simple and auditable. Revisit only if the backlog drain becomes a real pain
+point.
