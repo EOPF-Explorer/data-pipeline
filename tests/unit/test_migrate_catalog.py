@@ -610,8 +610,8 @@ from s3_item_cleanup import (  # noqa: E402
     DEFAULT_RETENTION_DAYS,
     TIMESTAMPS_EXTENSION,
     format_expires,
-    load_exclude_ids,
     parse_stac_timestamp,
+    resolve_exclude_ids,
 )
 
 
@@ -796,7 +796,7 @@ def test_stamp_expires_uses_shared_format_helper() -> None:
 
     assert se.format_expires is format_expires
     assert se.parse_stac_timestamp is parse_stac_timestamp
-    assert se.load_exclude_ids is load_exclude_ids
+    assert se.resolve_exclude_ids is resolve_exclude_ids
 
 
 # === Histogram surfacing + reconciliation (review finding: histogram invisible) ===
