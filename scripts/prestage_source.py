@@ -58,6 +58,7 @@ import boto3
 import botocore.handlers
 from botocore import UNSIGNED
 from botocore.config import Config
+from botocore.exceptions import ClientError
 from source_url_utils import derive_item_id, resolve_zarr_url
 
 logging.basicConfig(
@@ -211,6 +212,33 @@ def _passthrough(args: argparse.Namespace, reason: str) -> int:
     return 0
 
 
+def _assert_staged_readable(client: Any, bucket: str, key: str) -> None:
+    """Prove the staged copy can be GET, not merely counted.
+
+    Staging is verified by listing the destination, which only exercises ListObjectsV2.
+    Convert reads the copy with GetObject, using this same identity (the AWS_* env from
+    geozarr-s3-credentials — the same credentials that write the converted output, since
+    source and destination share one endpoint and one account).
+
+    That identity now reads as well as writes. If it is ever scoped down to
+    write-without-read on this prefix, the copy succeeds, the object count matches, this
+    step reports success, and the failure surfaces minutes later inside convert as an
+    opaque zarr/blosc read error that looks like a conversion bug. One GET here turns
+    that into an accurate message at the step that is actually misconfigured.
+    """
+    try:
+        client.get_object(Bucket=bucket, Key=key)["Body"].read(1)
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "?")
+        raise ValueError(
+            f"Staged the copy but cannot read it back ({code} on s3://{bucket}/{key}). "
+            f"Convert reads the staged copy with these same credentials "
+            f"(AWS_ACCESS_KEY_ID, geozarr-s3-credentials), so it would fail too — but as "
+            f"an opaque read error that looks like a conversion bug. This identity needs "
+            f"GetObject on the staged prefix, not just PutObject/ListBucket."
+        ) from exc
+
+
 def run_prestage(args: argparse.Namespace) -> int:
     """Copy the source Zarr to the output bucket and report the staged s3:// URL."""
     if args.mode == "passthrough":
@@ -283,7 +311,8 @@ def run_prestage(args: argparse.Namespace) -> int:
         copied_bytes / elapsed / 1e6 if elapsed else 0,
     )
 
-    # Never report a stage as usable without proving it matches the source.
+    # Never report a stage as usable without proving it matches the source AND that the
+    # thing downstream actually does can be done to it.
     staged_objects = _list_objects(dest_client, args.dest_bucket, dest_root)
     staged_bytes = sum(size for size, _ in staged_objects.values())
     if len(staged_objects) != len(source_objects) or staged_bytes != source_bytes:
@@ -296,6 +325,8 @@ def run_prestage(args: argparse.Namespace) -> int:
         )
         return 2
     logger.info("Verified %d objects, %d bytes", len(staged_objects), staged_bytes)
+
+    _assert_staged_readable(dest_client, args.dest_bucket, sorted(staged_objects)[0])
 
     _write_outputs(args.output_dir, staged_url(args.dest_bucket, args.dest_prefix, item_id), True)
     return 0

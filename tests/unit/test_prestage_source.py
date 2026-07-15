@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from botocore.exceptions import ClientError
 
 scripts_dir = Path(__file__).parent.parent.parent / "scripts"
 sys.path.insert(0, str(scripts_dir))
@@ -389,6 +390,42 @@ def test_verification_mismatch_exits_2_and_writes_no_outputs(tmp_path, clients, 
 
     assert rc == 2
     assert not (tmp_path / "convert_source_url").exists()
+
+
+def test_stage_proves_the_staged_copy_is_readable_back(tmp_path, clients):
+    """Counting objects proves LIST; convert needs GET. Only a real read proves a stage."""
+    _, dest = clients
+    rc = prestage_source.main(_argv(tmp_path))
+
+    assert rc == 0
+    assert dest.gets, "verified a stage without ever reading one staged object back"
+
+
+def test_write_only_identity_fails_in_prestage_not_later_in_convert(
+    tmp_path, clients, monkeypatch, caplog
+):
+    """The geozarr-s3-credentials identity now READS the staged copy as well as writing
+    the output. If it is ever scoped to write-without-read on this prefix, the copy and
+    the object count both still succeed and only convert breaks — as an opaque failure
+    that reads like a conversion bug. Prestage must be the thing that fails, and say why.
+    """
+    _, dest = clients
+
+    def _denied(Bucket, Key):  # noqa: N803 — can PUT and LIST, cannot GET
+        raise ClientError(
+            {"Error": {"Code": "AccessDenied", "Message": "Access Denied"}}, "GetObject"
+        )
+
+    monkeypatch.setattr(dest, "get_object", _denied)
+
+    rc = prestage_source.main(_argv(tmp_path))
+
+    assert rc == 1, "a permission failure is permanent — it must not be retried like a flake"
+    assert not (tmp_path / "convert_source_url").exists(), "must not hand convert an unreadable url"
+    # The message has to point at the credential, not at the data.
+    text = caplog.text.lower()
+    assert "read" in text
+    assert "credential" in text or "aws_access_key_id" in text
 
 
 def test_verification_catches_byte_total_mismatch(tmp_path, clients, monkeypatch):
