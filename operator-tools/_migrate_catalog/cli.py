@@ -62,6 +62,17 @@ def cli(ctx: click.Context, api_url: str | None, history_file: str | None, verbo
         "start moderate (~8) and watch read latency."
     ),
 )
+@click.option(
+    "--max-consecutive-failures",
+    default=25,
+    show_default=True,
+    type=click.IntRange(0, None),
+    help=(
+        "Stop the run after this many writes fail back-to-back (0 disables). A write "
+        "is DELETE-then-POST, so wholesale write failures would empty the collection; "
+        "this bounds the damage. Recover via the run's .migration_recovery_*.jsonl."
+    ),
+)
 @click.pass_context
 def run(
     ctx: click.Context,
@@ -71,6 +82,7 @@ def run(
     yes: bool,
     page_size: int,
     concurrency: int,
+    max_consecutive_failures: int,
 ) -> None:
     """Run one or more migrations on a collection."""
     for name in migration_names:
@@ -120,6 +132,7 @@ def run(
         dry_run=dry_run,
         page_size=page_size,
         concurrency=concurrency,
+        max_consecutive_failures=max_consecutive_failures,
     )
 
     click.echo()
@@ -139,6 +152,21 @@ def run(
     if not dry_run:
         record_run(history_file, result)
         click.echo(f"Run recorded to {history_file}")
+
+    if result.aborted:
+        # A DELETE that succeeded before a failing POST leaves the item out of the
+        # catalogue, where a re-run cannot find it again — so point at the recovery
+        # file rather than just suggesting another run.
+        click.echo(
+            f"\nABORTED: stopped after {max_consecutive_failures} consecutive write "
+            f"failures — the API was rejecting writes, so the run did not finish.\n"
+            f"Items are DELETE-then-POST: any item whose POST failed is no longer in "
+            f"the catalogue and a re-run will NOT see it. Before re-running, restore "
+            f"them from this run's .migration_recovery_*.jsonl (the failed ids are in "
+            f"{history_file}).",
+            err=True,
+        )
+        sys.exit(1)
 
 
 @cli.command()

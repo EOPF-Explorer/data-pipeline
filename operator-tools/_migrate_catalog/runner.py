@@ -5,7 +5,6 @@ import os
 import threading
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -131,6 +130,7 @@ class STACMigrationRunner:
         dry_run: bool = False,
         page_size: int = 100,
         concurrency: int = 1,
+        max_consecutive_failures: int = 25,
     ) -> MigrationResult:
         """Apply migration_fn to every item in collection_id.
 
@@ -147,9 +147,17 @@ class STACMigrationRunner:
         concurrency=1 (the default) bypasses the pool entirely and is the exact
         sequential path used before this existed, so no other migration silently
         gains write load against prod pgSTAC.
+
+        max_consecutive_failures stops a run whose writes are failing wholesale
+        (see the circuit breaker below); 0 disables it and restores run-to-completion.
+        Sets `result.aborted`.
         """
         if concurrency < 1:
             raise ValueError(f"concurrency must be >= 1, got {concurrency}")
+        if max_consecutive_failures < 0:
+            raise ValueError(
+                f"max_consecutive_failures must be >= 0, got {max_consecutive_failures}"
+            )
 
         started_at = datetime.now(UTC).isoformat()
         result = MigrationResult(
@@ -180,46 +188,70 @@ class STACMigrationRunner:
             )
 
         pool = ThreadPoolExecutor(max_workers=concurrency) if concurrency > 1 else None
-        with (
-            click.progressbar(length=total, show_pos=True, show_percent=True) as bar,
-            pool or nullcontext(),
-        ):
-            for page in search.pages():
-                pending: list[tuple[str, str, dict[str, Any]]] = []
+        consecutive_failures = 0
+        try:
+            with click.progressbar(length=total, show_pos=True, show_percent=True) as bar:
+                for page in search.pages():
+                    pending: list[tuple[str, str, dict[str, Any]]] = []
 
-                # Classify the page on this thread; queue the writes it earned.
-                for item_dict in (item.to_dict() for item in page.items):
-                    item_id = item_dict.get("id", "unknown")
-                    result.items_processed += 1
-                    try:
-                        modified = migration_fn(item_dict)
-                    except Exception as e:
-                        result.items_failed += 1
-                        result.errors.append({"item_id": item_id, "error": str(e)})
-                        bar.update(1)
-                        continue
-                    if modified is None:
-                        result.items_skipped += 1
-                        bar.update(1)
-                    elif dry_run:
-                        result.items_modified += 1
-                        bar.update(1)
-                    else:
-                        pending.append((collection_id, item_id, modified))
+                    # Classify the page on this thread; queue the writes it earned.
+                    for item_dict in (item.to_dict() for item in page.items):
+                        item_id = item_dict.get("id", "unknown")
+                        result.items_processed += 1
+                        try:
+                            modified = migration_fn(item_dict)
+                        except Exception as e:
+                            result.items_failed += 1
+                            result.errors.append({"item_id": item_id, "error": str(e)})
+                            bar.update(1)
+                            continue
+                        if modified is None:
+                            result.items_skipped += 1
+                            bar.update(1)
+                        elif dry_run:
+                            result.items_modified += 1
+                            bar.update(1)
+                        else:
+                            pending.append((collection_id, item_id, modified))
 
-                # Then run this page's writes and tally them back here.
-                writes: Iterator[tuple[str, str | None]] = (
-                    pool.map(self._safe_update, pending)
-                    if pool is not None
-                    else map(self._safe_update, pending)
-                )
-                for item_id, error in writes:
-                    if error is None:
-                        result.items_modified += 1
-                    else:
-                        result.items_failed += 1
-                        result.errors.append({"item_id": item_id, "error": error})
-                    bar.update(1)
+                    # Then run this page's writes and tally them back here.
+                    writes: Iterator[tuple[str, str | None]] = (
+                        pool.map(self._safe_update, pending)
+                        if pool is not None
+                        else map(self._safe_update, pending)
+                    )
+                    for item_id, error in writes:
+                        if error is None:
+                            result.items_modified += 1
+                            consecutive_failures = 0
+                        else:
+                            result.items_failed += 1
+                            consecutive_failures += 1
+                            result.errors.append({"item_id": item_id, "error": error})
+                        bar.update(1)
+
+                    # Circuit breaker, checked once per page. A write is DELETE-then-POST,
+                    # so a POST that fails after its DELETE landed removes the item from
+                    # the catalogue, and a re-run cannot heal it (search no longer returns
+                    # it) — only the recovery file can. If the API starts refusing writes
+                    # wholesale, running to completion would empty the collection. Stop
+                    # instead, bounding the loss to roughly one page past the trip point.
+                    if (
+                        max_consecutive_failures
+                        and consecutive_failures >= max_consecutive_failures
+                    ):
+                        result.aborted = True
+                        break
+        finally:
+            if pool is not None:
+                # cancel_futures: on Ctrl-C, drop writes still queued rather than
+                # pushing a page's worth into prod after the operator asked to stop.
+                # Without this the behaviour is not deterministic: it depends on
+                # whether the interrupt lands inside pool.map's generator (which
+                # cancels) or outside it (which drains).
+                # wait: let in-flight writes finish their DELETE+POST, so a stop
+                # leaves no item torn between the two.
+                pool.shutdown(wait=True, cancel_futures=True)
 
         result.completed_at = datetime.now(UTC).isoformat()
         return result

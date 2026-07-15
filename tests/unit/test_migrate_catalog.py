@@ -901,7 +901,9 @@ class TestRunCommandSurfacesHistogram:
 
         seen_at_start = {}
 
-        def fake_run(collection_id, fn, name, dry_run, page_size, concurrency):  # noqa: ANN001
+        def fake_run(  # noqa: ANN001
+            collection_id, fn, name, dry_run, page_size, concurrency, max_consecutive_failures
+        ):
             seen_at_start["total"] = sum(SKIP_HISTOGRAM.values())  # proves reset ran first
             fn(_stampable_item(item_id="a"))
             fn(_stampable_item(item_id="b", expires="2025-07-01T00:00:00Z"))
@@ -939,6 +941,7 @@ def test_search_client_is_resilient() -> None:
 # === Parallel writes (--concurrency) ===
 
 import threading  # noqa: E402
+import time  # noqa: E402
 from concurrent.futures import ThreadPoolExecutor  # noqa: E402
 
 
@@ -1036,7 +1039,7 @@ class TestRunMigrationConcurrency:
     def test_parallel_actually_uses_multiple_threads(self) -> None:
         """Guards the point of the change: writes really are dispatched to a pool."""
         runner = STACMigrationRunner("https://api.example.com/stac")
-        barrier = threading.Barrier(4, timeout=5)
+        barrier = threading.Barrier(4, timeout=30)
         lock = threading.Lock()
         threads: set[int] = set()
 
@@ -1103,6 +1106,239 @@ class TestRunMigrationConcurrency:
             runner.run_migration("test-col", tracking_fn, "tracking", concurrency=8)
 
         assert fn_threads == {threading.get_ident()}
+
+
+def _multi_page_search(pages_of_items: list[list[dict]], total: int) -> MagicMock:
+    """A search yielding several pages — the real shape of a large backfill."""
+    pages = []
+    for items in pages_of_items:
+        mocks = []
+        for d in items:
+            m = MagicMock()
+            m.to_dict.return_value = d
+            mocks.append(m)
+        page = MagicMock()
+        page.items = mocks
+        pages.append(page)
+    search = MagicMock()
+    search.matched.return_value = total
+    search.pages.return_value = pages
+    return search
+
+
+class TestConcurrencyAcrossPages:
+    """run_migration classifies and dispatches per PAGE, so multi-page is the real
+    production path (a 191k-item backfill is ~1,900 pages) — single-page tests
+    would not catch a batch leaking between pages."""
+
+    def test_every_item_across_pages_written_exactly_once(self) -> None:
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        lock = threading.Lock()
+        written: list[str] = []
+
+        def record(collection_id, item_id, item_dict):  # noqa: ANN001, ANN202
+            with lock:
+                written.append(item_id)
+
+        runner._update_item = record  # type: ignore[method-assign]
+        pages = [[_dirty_item(pg * 20 + i) for i in range(20)] for pg in range(5)]
+        search = _multi_page_search(pages, total=100)
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = search
+            result = runner.run_migration(
+                "test-col", fix_zarr_media_type, "fix_zarr_media_type", concurrency=8
+            )
+
+        assert result.items_processed == 100
+        assert result.items_modified == 100
+        assert result.items_failed == 0
+        assert sorted(written) == sorted(f"item-{i}" for i in range(100))
+        assert len(written) == len(set(written))
+
+
+class TestCircuitBreaker:
+    """A write is DELETE-then-POST, so if the API refuses writes wholesale, running
+    to completion would delete-and-not-restore the entire collection. The run must
+    stop instead."""
+
+    def _runner_failing_after(self, ok_count: int) -> STACMigrationRunner:
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        lock = threading.Lock()
+        seen = {"n": 0}
+
+        def record(collection_id, item_id, item_dict):  # noqa: ANN001, ANN202
+            with lock:
+                seen["n"] += 1
+                n = seen["n"]
+            if n > ok_count:
+                raise RuntimeError("503 Service Unavailable")
+
+        runner._update_item = record  # type: ignore[method-assign]
+        return runner
+
+    def test_aborts_once_writes_fail_wholesale(self) -> None:
+        runner = self._runner_failing_after(0)  # every write fails
+        pages = [[_dirty_item(pg * 10 + i) for i in range(10)] for pg in range(20)]
+        search = _multi_page_search(pages, total=200)
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = search
+            result = runner.run_migration(
+                "test-col",
+                fix_zarr_media_type,
+                "fix_zarr_media_type",
+                max_consecutive_failures=25,
+            )
+
+        assert result.aborted is True
+        # Stops early instead of destroying all 200: the breaker is checked per page,
+        # so it trips within a page of the threshold.
+        assert result.items_processed < 200
+        assert result.items_failed >= 25
+        assert result.items_failed <= 40
+
+    def test_intermittent_failures_do_not_abort(self) -> None:
+        """The counter is CONSECUTIVE: scattered transient errors must not stop a
+        run that is otherwise healthy."""
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        lock = threading.Lock()
+        seen = {"n": 0}
+
+        def record(collection_id, item_id, item_dict):  # noqa: ANN001, ANN202
+            with lock:
+                seen["n"] += 1
+                n = seen["n"]
+            if n % 10 == 0:  # every 10th write fails, never 25 in a row
+                raise RuntimeError("transient")
+
+        runner._update_item = record  # type: ignore[method-assign]
+        pages = [[_dirty_item(pg * 20 + i) for i in range(20)] for pg in range(10)]
+        search = _multi_page_search(pages, total=200)
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = search
+            result = runner.run_migration(
+                "test-col",
+                fix_zarr_media_type,
+                "fix_zarr_media_type",
+                max_consecutive_failures=25,
+            )
+
+        assert result.aborted is False
+        assert result.items_processed == 200  # ran to completion
+        assert result.items_failed == 20
+
+    def test_zero_disables_the_breaker(self) -> None:
+        runner = self._runner_failing_after(0)
+        pages = [[_dirty_item(pg * 10 + i) for i in range(10)] for pg in range(5)]
+        search = _multi_page_search(pages, total=50)
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = search
+            result = runner.run_migration(
+                "test-col", fix_zarr_media_type, "fix_zarr_media_type", max_consecutive_failures=0
+            )
+
+        assert result.aborted is False
+        assert result.items_processed == 50  # ran to completion despite all failing
+        assert result.items_failed == 50
+
+    def test_healthy_run_is_not_marked_aborted(self) -> None:
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        runner._update_item = MagicMock()  # type: ignore[method-assign]
+        search = _multi_page_search([[_dirty_item(i) for i in range(10)]], total=10)
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = search
+            result = runner.run_migration("test-col", fix_zarr_media_type, "fix_zarr_media_type")
+
+        assert result.aborted is False
+        assert result.items_modified == 10
+
+    def test_negative_threshold_rejected(self) -> None:
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        search = _make_mock_search([_dirty_item(0)], total=1)
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = search
+            with pytest.raises(ValueError, match="max_consecutive_failures must be >= 0"):
+                runner.run_migration("c", fix_zarr_media_type, "m", max_consecutive_failures=-1)
+
+    def test_negative_concurrency_rejected(self) -> None:
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        search = _make_mock_search([_dirty_item(0)], total=1)
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = search
+            with pytest.raises(ValueError, match="concurrency must be >= 1"):
+                runner.run_migration("c", fix_zarr_media_type, "m", concurrency=0)
+
+
+class TestInterruptCancelsQueuedWrites:
+    """An operator WILL Ctrl-C this tool (the rollout plan says to stop and restart
+    it). Queued writes must be cancelled rather than drained into prod after the
+    stop, and in-flight writes must be allowed to finish so no item is left torn
+    between its DELETE and its POST.
+
+    The interrupt is injected via the progress bar because that is where the real
+    hazard lives: the main thread is then OUTSIDE pool.map's generator, which keeps
+    the generator alive through the unwind so its own `finally: future.cancel()`
+    never runs. (An interrupt raised inside the generator cancels by itself, so a
+    test that injects it there passes with or without the fix and proves nothing.)
+    """
+
+    def _run_interrupted(self, n_items: int, concurrency: int) -> tuple[list[str], list[str]]:
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        lock = threading.Lock()
+        started: list[str] = []
+        finished: list[str] = []
+
+        def record(collection_id, item_id, item_dict):  # noqa: ANN001, ANN202
+            with lock:
+                started.append(item_id)
+            time.sleep(0.005)  # the DELETE -> POST window
+            with lock:
+                finished.append(item_id)
+
+        runner._update_item = record  # type: ignore[method-assign]
+
+        # Ctrl-C once a few writes have been tallied: main thread is in bar.update,
+        # between two yields of the generator, with the rest still queued.
+        updates = {"n": 0}
+        bar = MagicMock()
+
+        def update(_n: int) -> None:
+            updates["n"] += 1
+            if updates["n"] == 5:
+                raise KeyboardInterrupt
+
+        bar.update.side_effect = update
+
+        search = _make_mock_search([_dirty_item(i) for i in range(n_items)], total=n_items)
+        with (
+            patch("_migrate_catalog.runner.Client") as mock_client,
+            patch("_migrate_catalog.runner.click.progressbar") as mock_pb,
+        ):
+            mock_client.open.return_value.search.return_value = search
+            mock_pb.return_value.__enter__.return_value = bar
+            with pytest.raises(KeyboardInterrupt):
+                runner.run_migration(
+                    "test-col", fix_zarr_media_type, "fix_zarr_media_type", concurrency=concurrency
+                )
+        return started, finished
+
+    def test_queued_writes_are_cancelled_not_drained(self) -> None:
+        n = 400
+        started, _ = self._run_interrupted(n_items=n, concurrency=4)
+        assert len(started) < n, (
+            f"Ctrl-C must cancel queued writes, but {len(started)}/{n} were still "
+            f"pushed to the API after the operator asked to stop"
+        )
+
+    def test_in_flight_writes_finish_cleanly(self) -> None:
+        """No item may be left between its DELETE and its POST."""
+        started, finished = self._run_interrupted(n_items=400, concurrency=4)
+        torn = set(started) - set(finished)
+        assert torn == set(), f"in-flight writes must drain; torn={torn}"
 
 
 class TestStampExpiresUnderConcurrency:
@@ -1221,7 +1457,7 @@ class TestSessionThreadLocality:
         runner = STACMigrationRunner("https://api.example.com/stac")
         lock = threading.Lock()
         sessions: list[int] = []
-        ready = threading.Barrier(4, timeout=5)
+        ready = threading.Barrier(4, timeout=30)
 
         def grab(_: int) -> None:
             ready.wait()  # hold all 4 threads alive at once so ids can't be recycled

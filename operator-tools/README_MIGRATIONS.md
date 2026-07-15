@@ -165,6 +165,15 @@ The default is `1`, the exact sequential path, so no migration gains write load 
 titiler**: sequential was accidentally a rate limit. Start moderate (~8), watch STAC read
 latency for the first few thousand items, and lower it if latency climbs.
 
+Sequential was also accidentally a *slow blast radius*. Because a write is DELETE-then-POST, an
+API that starts refusing writes would delete-and-not-restore every item it touches, and going
+faster means losing more before anyone notices. `--max-consecutive-failures` (default 25) stops
+the run instead, bounding the loss to roughly one page; the run exits non-zero and points at the
+recovery file. Set it to `0` to restore run-to-completion.
+
+Interrupting with `Ctrl-C` is safe: queued writes are cancelled and in-flight ones finish their
+DELETE+POST.
+
 ## Recovery Files
 
 Each non-dry-run migration writes a `.migration_recovery_<timestamp>.jsonl` file alongside
@@ -172,9 +181,22 @@ Each non-dry-run migration writes a `.migration_recovery_<timestamp>.jsonl` file
 the API. If a run is interrupted after some DELETEs but before the corresponding POSTs complete,
 use this file to re-POST the affected items manually.
 
-With `--concurrency N`, up to **N** items can be mid-`DELETE`/`POST` when a run is killed, so
-check the **last N lines** of the recovery file, not just the last one: `GET` each item and
-re-`POST` the ones that come back `404`.
+**Why this file is the only way back.** A write is `DELETE`-then-`POST`, so an item whose POST
+never landed is gone from the collection — and re-running the migration will *not* heal it,
+because `/search` no longer returns it. Nothing else records its content.
+
+**Recovering.** Two cases:
+
+- *Reported failures* (the run finished or aborted): the failed item ids are recorded in
+  `.migration_history.json` under this run's `errors` (the console prints only the first 5).
+  `GET` each of those ids and re-`POST` the matching recovery line for any that 404.
+- *Hard kill* (`SIGKILL`, power loss): the run recorded nothing, so ids are unknown. `GET`
+  **every** id in this run's recovery file and re-`POST` the ones that 404. Do not assume the
+  affected items are at the tail — a recovery line is written *before* its DELETE, so a slow
+  write's line can sit arbitrarily far from the end while faster workers append past it.
+
+A normal `Ctrl-C` needs no recovery: queued writes are cancelled and in-flight ones are allowed
+to finish their DELETE+POST, so no item is left torn between the two.
 
 ## CLI Reference
 
@@ -193,6 +215,7 @@ Commands:
     --yes / -y                             Skip confirmation prompt
     --page-size INT   (default: 100)       Items fetched per API page
     --concurrency INT (default: 1)         Parallel workers for the per-item writes
+    --max-consecutive-failures INT (25)    Stop after N back-to-back write failures (0=off)
   verify COLLECTION_ID                     Check if migration is fully applied
     --migration TEXT  (repeatable)         Migration(s) to verify
     --page-size INT   (default: 100)       Items fetched per API page
