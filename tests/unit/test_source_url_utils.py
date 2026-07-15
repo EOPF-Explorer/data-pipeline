@@ -15,7 +15,6 @@ scripts_dir = Path(__file__).parent.parent.parent / "scripts"
 sys.path.insert(0, str(scripts_dir))
 
 import source_url_utils  # noqa: E402
-from source_url_utils import derive_item_id, is_stac_item_url  # noqa: E402
 
 ITEM_ID = "S2B_MSIL2A_20260713T104619_N0512_R051_T31UDP_20260713T131840"
 
@@ -37,15 +36,15 @@ ITEM_ID = "S2B_MSIL2A_20260713T104619_N0512_R051_T31UDP_20260713T131840"
     ],
 )
 def test_derive_item_id(source_url, expected):
-    assert derive_item_id(source_url) == expected
+    assert source_url_utils.derive_item_id(source_url) == expected
 
 
 def test_derive_item_id_round_trips_through_the_staged_url():
     """The invariant prestage/convert/register all rely on."""
     stac_url = f"https://stac.example.com/collections/sentinel-2-l2a/items/{ITEM_ID}"
-    staged = f"s3://bucket/source-cache/{derive_item_id(stac_url)}"
+    staged = f"s3://bucket/source-cache/{source_url_utils.derive_item_id(stac_url)}"
 
-    assert derive_item_id(staged) == derive_item_id(stac_url)
+    assert source_url_utils.derive_item_id(staged) == source_url_utils.derive_item_id(stac_url)
 
 
 @pytest.mark.parametrize(
@@ -58,7 +57,7 @@ def test_derive_item_id_round_trips_through_the_staged_url():
     ],
 )
 def test_is_stac_item_url(source_url, expected):
-    assert is_stac_item_url(source_url) is expected
+    assert source_url_utils.is_stac_item_url(source_url) is expected
 
 
 def test_resolve_zarr_url_returns_direct_zarr_untouched(monkeypatch):

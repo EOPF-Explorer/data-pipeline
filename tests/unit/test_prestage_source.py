@@ -289,7 +289,7 @@ def test_rerun_recopies_key_whose_bytes_differ(tmp_path, clients):
 def test_empty_source_listing_exits_3(tmp_path, monkeypatch):
     monkeypatch.setattr(prestage_source, "resolve_zarr_url", lambda url: EODC_HREF)
     monkeypatch.setattr(prestage_source, "_source_client", lambda endpoint: FakeS3())
-    monkeypatch.setattr(prestage_source, "_dest_client", lambda: FakeS3())
+    monkeypatch.setattr(prestage_source, "_dest_client", FakeS3)
 
     assert prestage_source.main(_argv(tmp_path)) == 3
 
