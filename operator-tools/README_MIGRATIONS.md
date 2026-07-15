@@ -147,8 +147,8 @@ uv run operator-tools/manage_collections.py delete sentinel-2-l2a-staging-backup
 
 ## Concurrency (large backfills)
 
-A migration's per-item write is a `DELETE`+`POST` round-trip, so a sequential run is
-latency-bound (~5–6k items/hour against prod). `--concurrency N` dispatches those writes to a
+A migration's per-item write is a single `PUT` round-trip, so a sequential run is
+latency-bound (~412 ms/item against prod). `--concurrency N` dispatches those writes to a
 thread pool. Measured against the real API on a throwaway 1000-item collection: **6.25× at 8
 workers** (344s → 55s). Applied to the ~5–6k items/hour prod baseline, a ~170k-item backfill drops
 from ~31h to roughly ~5h. Quote the ratio, not the absolute rate — a small collection writes
@@ -167,11 +167,12 @@ The default is `1`, the exact sequential path, so no migration gains write load 
 titiler**: sequential was accidentally a rate limit. Start moderate (~8), watch STAC read
 latency for the first few thousand items, and lower it if latency climbs.
 
-Sequential was also accidentally a *slow blast radius*. Because a write is DELETE-then-POST, an
-API that starts refusing writes would delete-and-not-restore every item it touches, and going
-faster means losing more before anyone notices. `--max-consecutive-failures` (default 25) stops
-the run instead, bounding the loss to roughly one page; the run exits non-zero and points at the
-recovery file. Set it to `0` to restore run-to-completion.
+Sequential was also accidentally a *slow blast radius*: an API that starts refusing writes fails
+every item it touches, and going faster means more failures before anyone notices.
+`--max-consecutive-failures` (default 25) stops the run instead, bounding it to roughly one page;
+the run exits non-zero. Set it to `0` to restore run-to-completion. (Writes are now atomic PUTs,
+so a refused write leaves the item intact — this bounds wasted effort and load, no longer data
+loss.)
 
 Interrupting with `Ctrl-C` is safe: queued writes are cancelled and in-flight ones finish their
 DELETE+POST. Note the run's tally is lost with the stack, so nothing is written to
@@ -190,8 +191,7 @@ uv run operator-tools/migrate_catalog.py run sentinel-2-l2a \
   --migration stamp_expires --yes --concurrency 8 --max-writes 10000
 ```
 
-**Do not bound a run by killing it.** A write is DELETE-then-POST, so a kill mid-write leaves the
-item deleted and not restored — recoverable only from the recovery file. Signals are also an
+**Do not bound a run by killing it.** Signals are an
 unreliable stop: a process backgrounded with `&` from a non-interactive shell inherits
 `SIGINT=SIG_IGN`, so CPython never installs its handler and `kill -INT` does nothing. That
 combination once took a "bounded" 10,000-item run to 20,613 writes and tore 3 items on the way
@@ -204,9 +204,11 @@ Each non-dry-run migration writes a `.migration_recovery_<timestamp>.jsonl` file
 the API. If a run is interrupted after some DELETEs but before the corresponding POSTs complete,
 use this file to re-POST the affected items manually.
 
-**Why this file is the only way back.** A write is `DELETE`-then-`POST`, so an item whose POST
-never landed is gone from the collection — and re-running the migration will *not* heal it,
-because `/search` no longer returns it. Nothing else records its content.
+**Note:** since writes became a single atomic `PUT`, an interrupted run can no longer leave an
+item deleted-but-not-restored — a PUT either replaces the item or leaves it untouched. This file
+is now a record of what was written, not the only way back. (It holds the *post*-update content,
+so it documents rather than undoes.) The recovery notes below apply to runs made before that
+change, and to any tool still using DELETE-then-POST.
 
 **Recovering.** Two cases:
 

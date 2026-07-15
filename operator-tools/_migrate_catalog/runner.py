@@ -94,14 +94,32 @@ class STACMigrationRunner:
         return session
 
     def _update_item(self, collection_id: str, item_id: str, item_dict: dict[str, Any]) -> None:
-        """Delete then POST (pgSTAC doesn't support PUT). Logs item to recovery file before delete."""
+        """Replace one item with a single atomic PUT.
+
+        This used to DELETE then POST, on the belief that "pgSTAC doesn't support
+        PUT" — introduced 2026-03 with no recorded rationale and repeated at five
+        sites. It is false: the API advertises the OGC Features transaction
+        extension and PUT works. Verified live against prod on a throwaway
+        collection: PUT's stored result is equivalent to DELETE+POST's on the same
+        input, it 404s rather than creating a missing item, it is correct under 8
+        concurrent workers, and it is 1.94x faster (412 vs 800 ms/item — one round
+        trip instead of two).
+
+        Speed is the lesser point. DELETE-then-POST left a window in which the item
+        existed nowhere: a timeout, crash or kill between the two destroyed it for
+        good, because a re-run cannot heal what /search no longer returns — only the
+        recovery file could. Both halves of that were observed live (a kill tore 3
+        items; write timeouts run ~1 per 10k). A PUT either replaces the item or
+        leaves it untouched, so a torn item is impossible rather than merely rare.
+
+        The recovery file is kept as a record of what was written. Note it holds the
+        POST-update content, so it documents rather than undoes.
+        """
         if self._recovery_file is not None:
             with self._recovery_lock, open(self._recovery_file, "a") as f:
                 f.write(json.dumps(item_dict) + "\n")
-        session = self._session()
-        session.delete(f"{self.api_url}/collections/{collection_id}/items/{item_id}", timeout=30)
-        resp = session.post(
-            f"{self.api_url}/collections/{collection_id}/items",
+        resp = self._session().put(
+            f"{self.api_url}/collections/{collection_id}/items/{item_id}",
             json=item_dict,
             timeout=30,
         )

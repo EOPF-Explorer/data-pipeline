@@ -428,30 +428,101 @@ class TestCloneResume:
         assert mock_post.call_count == 3
 
 
-class TestRecoveryFile:
-    def test_recovery_file_written_before_delete(self, tmp_path, item_with_wrong_media_type):
-        runner = STACMigrationRunner("https://api.example.com/stac", recovery_dir=tmp_path)
+class TestAtomicUpdate:
+    """The write must be ONE atomic call.
 
-        recovery_existed_before_delete = []
+    The tool used to DELETE then POST, on the belief that pgSTAC had no PUT. That
+    left a window in which the item existed nowhere: a timeout, crash or kill
+    between the two deleted the item for good, and a re-run could not heal it
+    because /search no longer returns it. Only the recovery file could.
 
-        def delete_side_effect(*args, **kwargs):
-            files = list(tmp_path.glob(".migration_recovery_*.jsonl"))
-            recovery_existed_before_delete.append(bool(files))
-            return MagicMock()
+    The API in fact advertises the OGC Features transaction extension and exposes
+    PUT on the item path. PUT either replaces the item or leaves it untouched, so
+    a torn item is not merely unlikely — it is impossible. These tests exist to
+    stop anyone reintroducing the window.
+    """
 
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
+    def _runner_with_mock_session(self, **kw):  # noqa: ANN202
+        runner = STACMigrationRunner("https://api.example.com/stac", **kw)
+        session = MagicMock()
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        session.put.return_value = resp
+        runner._session = MagicMock(return_value=session)  # type: ignore[method-assign]
+        return runner, session
+
+    def test_update_is_a_single_put_and_never_deletes(self, item_with_wrong_media_type) -> None:
+        runner, session = self._runner_with_mock_session()
+
+        runner._update_item("test-col", "item-1", item_with_wrong_media_type)
+
+        session.put.assert_called_once()
+        session.delete.assert_not_called()  # the window must not exist
+        session.post.assert_not_called()
+        url = session.put.call_args[0][0]
+        assert url == "https://api.example.com/stac/collections/test-col/items/item-1"
+        assert session.put.call_args.kwargs["json"] == item_with_wrong_media_type
+
+    def test_a_failing_put_is_tallied_as_failed_not_modified(self) -> None:
+        """A failed PUT leaves the item intact — but it must still reach items_failed.
+
+        Driven through run_migration rather than asserting _update_item raises: the
+        tallying is the actual contract, and a test that only checks the raise would
+        pass even if run_migration swallowed it.
+        """
+        import requests
+
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        session = MagicMock()
+        resp = MagicMock()
+        resp.raise_for_status.side_effect = requests.HTTPError("500 boom")
+        session.put.return_value = resp
+        runner._session = MagicMock(return_value=session)  # type: ignore[method-assign]
+
+        search = _make_mock_search([_dirty_item(0)], total=1)
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = search
+            result = runner.run_migration("test-col", fix_zarr_media_type, "m")
+
+        assert result.items_failed == 1
+        assert result.items_modified == 0
+        assert "500 boom" in result.errors[0]["error"]
+
+    def test_put_goes_through_the_thread_local_session(self) -> None:
+        """The write must use the per-thread Session (a shared one is not guaranteed
+        thread-safe). Patching the real session object rather than _session keeps
+        that wiring covered."""
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
 
         with (
-            patch.object(runner.session, "delete", side_effect=delete_side_effect),
-            patch.object(runner.session, "post", return_value=mock_resp),
+            patch.object(runner.session, "put", return_value=resp) as mock_put,
+            patch.object(runner.session, "delete") as mock_delete,
         ):
-            runner._update_item("test-col", "item-1", item_with_wrong_media_type)
+            runner._update_item("test-col", "item-1", {"id": "item-1"})
 
-        assert recovery_existed_before_delete == [
-            True
-        ], "Recovery file must exist before delete is called"
+        # __init__ seeds the constructing thread's local with self.session, so a
+        # main-thread write must land on it.
+        mock_put.assert_called_once()
+        mock_delete.assert_not_called()
 
+    def test_recovery_line_written_before_the_put(self, tmp_path, item_with_wrong_media_type):
+        """Still written first — it is now an audit/undo record rather than the only
+        way back, but it must describe a write before that write is attempted."""
+        runner, session = self._runner_with_mock_session(recovery_dir=tmp_path)
+        existed_before_put = []
+
+        def put_side_effect(*args, **kwargs):  # noqa: ANN202
+            existed_before_put.append(bool(list(tmp_path.glob(".migration_recovery_*.jsonl"))))
+            r = MagicMock()
+            r.raise_for_status = MagicMock()
+            return r
+
+        session.put.side_effect = put_side_effect
+        runner._update_item("test-col", "item-1", item_with_wrong_media_type)
+
+        assert existed_before_put == [True]
         files = list(tmp_path.glob(".migration_recovery_*.jsonl"))
         assert len(files) == 1
         with open(files[0]) as f:
@@ -459,33 +530,17 @@ class TestRecoveryFile:
         assert saved["id"] == item_with_wrong_media_type["id"]
 
     def test_no_recovery_file_without_recovery_dir(self, item_with_wrong_media_type):
-        runner = STACMigrationRunner("https://api.example.com/stac")
-
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-
-        with (
-            patch.object(runner.session, "delete", return_value=MagicMock()),
-            patch.object(runner.session, "post", return_value=mock_resp),
-        ):
-            runner._update_item("test-col", "item-1", item_with_wrong_media_type)
-
+        runner, _ = self._runner_with_mock_session()
+        runner._update_item("test-col", "item-1", item_with_wrong_media_type)
         assert runner._recovery_file is None
 
     def test_multiple_updates_append_to_same_recovery_file(
         self, tmp_path, item_with_wrong_media_type, item_clean
     ):
-        runner = STACMigrationRunner("https://api.example.com/stac", recovery_dir=tmp_path)
+        runner, _ = self._runner_with_mock_session(recovery_dir=tmp_path)
 
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-
-        with (
-            patch.object(runner.session, "delete", return_value=MagicMock()),
-            patch.object(runner.session, "post", return_value=mock_resp),
-        ):
-            runner._update_item("test-col", "item-1", item_with_wrong_media_type)
-            runner._update_item("test-col", "item-2", item_clean)
+        runner._update_item("test-col", "item-1", item_with_wrong_media_type)
+        runner._update_item("test-col", "item-2", item_clean)
 
         files = list(tmp_path.glob(".migration_recovery_*.jsonl"))
         assert len(files) == 1
