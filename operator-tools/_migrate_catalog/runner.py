@@ -9,17 +9,37 @@ from typing import Any
 import click
 import requests
 from pystac_client import Client
+from pystac_client.stac_api_io import StacApiIO
+from urllib3.util.retry import Retry
 
 from _migrate_catalog.types import MigrationFn, MigrationResult
 
 logger = logging.getLogger(__name__)
 
-# Per-request timeout (seconds) for the search-pagination client. Without it,
-# pystac_client's session has no timeout and a stalled socket hangs the whole run
-# indefinitely (observed: 4.5h wall / 26s CPU against the prod STAC API). With a
-# timeout, a stuck read raises and StacApiIO's default max_retries=5 reconnects.
-# Override via STAC_HTTP_TIMEOUT.
+# Resilience for the search-pagination client on long backfills. Two failures
+# seen live against the prod STAC API:
+#   - no timeout -> a stalled socket hangs the whole run forever (4.5h wall /
+#     26s CPU, never past "Found N items").
+#   - weak default retries -> a transient ConnectionReset mid-pagination aborts
+#     the entire run (crashed at ~20% of a 23k-item staging backfill).
+# _resilient_stac_io gives the pagination client a per-request timeout plus
+# urllib3 retries with exponential backoff on connection errors and 5xx, for GET
+# and the POST /search pagination. urllib3 cannot always retry a reset mid-body,
+# so this is best-effort; the migration is idempotent (skips already-stamped),
+# so anything that still slips through is recovered by simply re-running.
+# Override the timeout via STAC_HTTP_TIMEOUT.
 _SEARCH_TIMEOUT = float(os.getenv("STAC_HTTP_TIMEOUT", "60"))
+
+
+def _resilient_stac_io() -> StacApiIO:
+    retry = Retry(
+        total=8,
+        backoff_factor=1.0,
+        status_forcelist=(429, 502, 503, 504),
+        allowed_methods=frozenset({"GET", "POST"}),
+        raise_on_status=False,
+    )
+    return StacApiIO(timeout=_SEARCH_TIMEOUT, max_retries=retry)
 
 
 def compose_migrations(fns: list[MigrationFn]) -> MigrationFn:
@@ -85,7 +105,7 @@ class STACMigrationRunner:
             errors=[],
         )
 
-        catalog = Client.open(self.api_url, timeout=_SEARCH_TIMEOUT)
+        catalog = Client.open(self.api_url, stac_io=_resilient_stac_io())
         search = catalog.search(collections=[collection_id], max_items=None, limit=page_size)
 
         total = search.matched()
@@ -123,7 +143,7 @@ class STACMigrationRunner:
 
     def _fetch_existing_ids(self, collection_id: str, page_size: int) -> set[str]:
         """Return the set of item IDs already present in collection_id."""
-        catalog = Client.open(self.api_url, timeout=_SEARCH_TIMEOUT)
+        catalog = Client.open(self.api_url, stac_io=_resilient_stac_io())
         search = catalog.search(
             collections=[collection_id],
             max_items=None,
@@ -158,7 +178,7 @@ class STACMigrationRunner:
             existing_ids = self._fetch_existing_ids(target_id, page_size)
             click.echo(f"Found {len(existing_ids)} items already in '{target_id}', skipping them.")
 
-        catalog = Client.open(self.api_url, timeout=_SEARCH_TIMEOUT)
+        catalog = Client.open(self.api_url, stac_io=_resilient_stac_io())
         search = catalog.search(collections=[source_id], max_items=None, limit=page_size)
 
         total = search.matched()

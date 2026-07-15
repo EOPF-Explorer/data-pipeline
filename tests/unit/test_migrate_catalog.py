@@ -919,3 +919,18 @@ class TestRunCommandSurfacesHistogram:
         assert seen_at_start["total"] == 0  # histogram was reset before processing
         assert "stamped" in res.output
         assert "already_stamped" in res.output
+
+
+def test_search_client_is_resilient() -> None:
+    """The pagination client must carry a timeout AND retry-with-backoff so a
+    stalled socket or a transient reset can't kill a long backfill (runner
+    defects seen live: a 4.5h hang, then a ConnectionReset abort at ~20%). The
+    migration's idempotent re-run is the final backstop."""
+    from _migrate_catalog.runner import _SEARCH_TIMEOUT, _resilient_stac_io
+
+    io = _resilient_stac_io()
+    assert io.timeout == _SEARCH_TIMEOUT
+    retry = io.session.get_adapter("https://example.com").max_retries
+    assert retry.total and retry.total >= 5
+    assert retry.backoff_factor and retry.backoff_factor > 0
+    assert "POST" in retry.allowed_methods  # /search pagination uses POST
