@@ -919,6 +919,69 @@ class TestHistogramReporting:
         assert "TYPO_demo_xyz" in text
         assert "real_demo" not in text  # the matched id is not flagged
 
+    def test_partial_run_does_not_cry_wolf_about_unmatched_exclude_ids(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A run that stopped early only scanned part of the collection, so an
+        exclude id it never reached is NOT evidence of broken demo protection.
+
+        This is the crown-jewel alarm, and --max-writes makes partial scans the
+        normal workflow (~17 chunks for the prod backfill). Firing it every time
+        would train operators to ignore the one warning that must never be ignored.
+        Measured live: a bounded prod run reached 2 of 12 demo ids and warned about
+        the other 10, all of which were simply beyond where it stopped.
+        """
+        from _migrate_catalog.migrations.stamp_expires import report
+
+        exclude_file = tmp_path / "exclude.txt"
+        exclude_file.write_text("seen_demo\nnot_yet_reached_demo\n")
+        monkeypatch.setenv("EXPIRES_EXCLUDE_FILE", str(exclude_file))
+        monkeypatch.delenv("EXPIRES_MIN_DATETIME", raising=False)
+        reset_histogram()
+        stamp_expires(_stampable_item(item_id="seen_demo"))  # only this one scanned
+
+        bounded = _result(processed=1, modified=0, skipped=1)
+        bounded.reached_max_writes = True
+        text = report(bounded)
+        assert "matched no item" not in text, "a partial scan must not raise the alarm"
+        assert "not_yet_reached_demo" in text  # still surfaced, as information
+        assert "stopped early" in text.lower()
+
+    def test_aborted_run_also_does_not_cry_wolf(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from _migrate_catalog.migrations.stamp_expires import report
+
+        exclude_file = tmp_path / "exclude.txt"
+        exclude_file.write_text("seen_demo\nnot_yet_reached_demo\n")
+        monkeypatch.setenv("EXPIRES_EXCLUDE_FILE", str(exclude_file))
+        monkeypatch.delenv("EXPIRES_MIN_DATETIME", raising=False)
+        reset_histogram()
+        stamp_expires(_stampable_item(item_id="seen_demo"))
+
+        aborted = _result(processed=1, modified=0, skipped=1)
+        aborted.aborted = True
+        assert "matched no item" not in report(aborted)
+
+    def test_complete_run_still_raises_the_alarm(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The suppression must be narrow: on a run that scanned everything, an
+        unmatched id IS a stale/typo'd id protecting nothing, and must fail loud."""
+        from _migrate_catalog.migrations.stamp_expires import report
+
+        exclude_file = tmp_path / "exclude.txt"
+        exclude_file.write_text("real_demo\nTYPO_demo_xyz\n")
+        monkeypatch.setenv("EXPIRES_EXCLUDE_FILE", str(exclude_file))
+        monkeypatch.delenv("EXPIRES_MIN_DATETIME", raising=False)
+        reset_histogram()
+        stamp_expires(_stampable_item(item_id="real_demo"))
+
+        complete = _result(processed=1, modified=0, skipped=1)  # neither flag set
+        text = report(complete)
+        assert "matched no item" in text
+        assert "TYPO_demo_xyz" in text
+
     def test_report_quiet_when_all_exclude_ids_match(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
