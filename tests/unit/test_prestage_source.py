@@ -428,11 +428,35 @@ def test_write_only_identity_fails_in_prestage_not_later_in_convert(
     assert "credential" in text or "aws_access_key_id" in text
 
 
-def _deny_listing(fake, monkeypatch):
+def _deny_listing(fake, monkeypatch, code="AccessDenied"):
     def _boom(operation):
-        raise ClientError({"Error": {"Code": "AccessDenied", "Message": "Denied"}}, "ListObjectsV2")
+        raise ClientError({"Error": {"Code": code, "Message": code}}, "ListObjectsV2")
 
     monkeypatch.setattr(fake, "get_paginator", _boom)
+
+
+@pytest.mark.parametrize("code", ["SlowDown", "ServiceUnavailable", "RequestTimeout"])
+def test_a_throttled_listing_is_retryable_and_does_not_blame_permissions(
+    tmp_path, clients, monkeypatch, caplog, code
+):
+    """Not every S3 error is a permission error.
+
+    16 copy threads against EODC is a known throttling risk (the spec says to lower
+    --copy-workers if it bites). Treating SlowDown as a permission fault would tell the
+    operator to fix IAM, and exit 1 is the one code the template's retry expression
+    skips — so a transient throttle would permanently fail a workflow that a 30s backoff
+    would have fixed.
+    """
+    _, dest = clients
+    _deny_listing(dest, monkeypatch, code=code)
+
+    rc = prestage_source.main(_argv(tmp_path))
+
+    assert rc == prestage_source.EXIT_TRANSIENT_S3, "a throttle must stay retryable"
+    assert rc != 1, "exit 1 is skipped by the template retry — a throttle must not land there"
+    text = caplog.text.lower()
+    assert "geozarr-s3-credentials" not in text, "must not blame permissions for a throttle"
+    assert code.lower() in text
 
 
 def test_dest_listing_denied_names_the_credential(tmp_path, clients, monkeypatch, caplog):

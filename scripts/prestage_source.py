@@ -30,6 +30,17 @@ Modes:
   feature flag being off).
 - ``cleanup``: delete one staged copy after a successful register.
 
+Exit codes are a contract with the Argo template, whose retry expression skips 1 and 3
+and retries the rest — so classifying a fault wrongly either burns backoff on something
+hopeless or permanently fails something a retry would fix:
+- 0: staged (or passed through) and proven usable.
+- 1: permanent config/permission fault (bad URL, identity lacks an action). Not retried.
+- 2: verification mismatch. Retried — the copy skips keys already present with matching
+  size+ETag, so a retry re-copies only what is missing.
+- 3: the source prefix listed empty. Not retried.
+- 4: transient S3 fault (throttling, 5xx). Retried with backoff; 16 copy threads against
+  EODC can draw a SlowDown, and that is fixed by waiting, not by editing a policy.
+
 Safety model (this deletes S3 objects, so the guards are explicit):
 - Only hosts on ``--copyable-hosts`` are copied. Anything else passes through: the
   nginx-s3-gateway serves GETs but answers ListObjectsV2 with an HTML index, so
@@ -175,6 +186,32 @@ def _dest_client() -> Any:
     )
 
 
+# Exit code for an S3 failure that a retry can plausibly fix. The Argo template's retry
+# expression skips exit 1 and 3 (permanent faults) and retries everything else, so a
+# transient error must NOT be reported as 1 — 16 copy threads against EODC can draw a
+# SlowDown, and that is fixed by backing off, not by editing an IAM policy.
+EXIT_TRANSIENT_S3 = 4
+
+# Codes meaning "this identity is not allowed to do this". No amount of retrying helps,
+# and only these deserve the identity hints below. Everything else (SlowDown, 5xx,
+# RequestTimeout) is transient: boto3 has already exhausted its own fast retries, but the
+# template's backoff is minutes, which is a different proposition.
+PERMISSION_CODES = frozenset(
+    {
+        "AccessDenied",
+        "AllAccessDisabled",
+        "AccountProblem",
+        "InvalidAccessKeyId",
+        "SignatureDoesNotMatch",
+        "UnauthorizedAccess",
+    }
+)
+
+
+def _s3_code(exc: ClientError) -> str:
+    return str(exc.response.get("Error", {}).get("Code", "?"))
+
+
 # Which identity a failure belongs to. A denial on the source and a denial on the
 # destination need completely different fixes, so they must never share a message.
 SOURCE_HINT = (
@@ -201,8 +238,12 @@ def _list_objects(client: Any, bucket: str, prefix: str, *, hint: str) -> dict[s
             for obj in page.get("Contents", []):
                 objects[obj["Key"]] = (obj["Size"], obj["ETag"].strip('"'))
     except ClientError as exc:
-        code = exc.response.get("Error", {}).get("Code", "?")
-        raise ValueError(f"Cannot list s3://{bucket}/{prefix} ({code}). {hint}") from exc
+        code = _s3_code(exc)
+        if code in PERMISSION_CODES:
+            raise ValueError(f"Cannot list s3://{bucket}/{prefix} ({code}). {hint}") from exc
+        # Not a permission fault — do not attach an identity hint that would send the
+        # reader to fix the wrong thing. main() classifies it as retryable.
+        raise
     return objects
 
 
@@ -249,9 +290,17 @@ def _assert_staged_readable(client: Any, bucket: str, key: str) -> None:
     that into an accurate message at the step that is actually misconfigured.
     """
     try:
-        client.get_object(Bucket=bucket, Key=key)["Body"].read(1)
+        body = client.get_object(Bucket=bucket, Key=key)["Body"]
+        try:
+            body.read(1)
+        finally:
+            # Abandoning a partially-read StreamingBody leaves the connection out of the
+            # pool; we only ever want the first byte.
+            body.close()
     except ClientError as exc:
-        code = exc.response.get("Error", {}).get("Code", "?")
+        code = _s3_code(exc)
+        if code not in PERMISSION_CODES:
+            raise  # transient — main() reports it as retryable, without an identity hint
         raise ValueError(
             f"Staged the copy but cannot read it back ({code} on s3://{bucket}/{key}). "
             f"Convert reads the staged copy with these same credentials "
@@ -412,9 +461,22 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         return run_cleanup(args) if args.mode == "cleanup" else run_prestage(args)
-    except (ValueError, ClientError) as exc:
+    except ValueError as exc:
+        # Configuration/permission faults, already carrying an actionable message.
         logger.error("%s", exc)
         return 1
+    except ClientError as exc:
+        code = _s3_code(exc)
+        if code in PERMISSION_CODES:
+            logger.error("S3 permission error (%s): %s", code, exc)
+            return 1
+        logger.error(
+            "Transient S3 error (%s) — exiting %d so the workflow retries with backoff: %s",
+            code,
+            EXIT_TRANSIENT_S3,
+            exc,
+        )
+        return EXIT_TRANSIENT_S3
 
 
 if __name__ == "__main__":
