@@ -2,6 +2,10 @@ import copy
 import json
 import logging
 import os
+import threading
+from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -63,25 +67,61 @@ class STACMigrationRunner:
         self.api_url = api_url.rstrip("/")
         self.session = requests.Session()
         self.session.headers.update({"Content-Type": "application/json"})
+        # requests.Session is not guaranteed thread-safe, so each thread that
+        # writes gets its own (see _session). The constructing thread keeps
+        # `self.session` — the sequential paths (clone_collection, and
+        # run_migration at the default concurrency=1) then behave exactly as
+        # they did before parallel writes existed.
+        self._local = threading.local()
+        self._local.session = self.session
+        # Serialises the recovery-file append. A buffered O_APPEND write appears to
+        # be atomic in practice, but that is a platform property, not a guarantee
+        # (it can split on short writes, and does not hold on every filesystem).
+        # This file is the only way back from a kill mid-DELETE-POST, so it does
+        # not rest on that; the lock costs nothing next to the HTTP round-trip.
+        self._recovery_lock = threading.Lock()
         self._recovery_file: Path | None = None
         if recovery_dir is not None:
             timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
             self._recovery_file = recovery_dir / f".migration_recovery_{timestamp}.jsonl"
 
+    def _session(self) -> requests.Session:
+        """Return the calling thread's Session, creating it on first use."""
+        session: requests.Session | None = getattr(self._local, "session", None)
+        if session is None:
+            session = requests.Session()
+            session.headers.update({"Content-Type": "application/json"})
+            self._local.session = session
+        return session
+
     def _update_item(self, collection_id: str, item_id: str, item_dict: dict[str, Any]) -> None:
         """Delete then POST (pgSTAC doesn't support PUT). Logs item to recovery file before delete."""
         if self._recovery_file is not None:
-            with open(self._recovery_file, "a") as f:
+            with self._recovery_lock, open(self._recovery_file, "a") as f:
                 f.write(json.dumps(item_dict) + "\n")
-        self.session.delete(
-            f"{self.api_url}/collections/{collection_id}/items/{item_id}", timeout=30
-        )
-        resp = self.session.post(
+        session = self._session()
+        session.delete(f"{self.api_url}/collections/{collection_id}/items/{item_id}", timeout=30)
+        resp = session.post(
             f"{self.api_url}/collections/{collection_id}/items",
             json=item_dict,
             timeout=30,
         )
         resp.raise_for_status()
+
+    def _safe_update(self, task: tuple[str, str, dict[str, Any]]) -> tuple[str, str | None]:
+        """Run one write, converting failure into a value.
+
+        The ONLY thing dispatched to the worker pool: it does the network I/O and
+        touches no migration state, so the caller can tally outcomes single-threaded.
+        Returns (item_id, None) on success or (item_id, error_message) on failure —
+        one item's failure must never abort the rest of the batch.
+        """
+        collection_id, item_id, item_dict = task
+        try:
+            self._update_item(collection_id, item_id, item_dict)
+            return item_id, None
+        except Exception as e:
+            return item_id, str(e)
 
     def run_migration(
         self,
@@ -90,7 +130,27 @@ class STACMigrationRunner:
         migration_name: str,
         dry_run: bool = False,
         page_size: int = 100,
+        concurrency: int = 1,
     ) -> MigrationResult:
+        """Apply migration_fn to every item in collection_id.
+
+        The per-item DELETE+POST is a network round-trip, so a sequential run is
+        latency-bound (~5-6k items/hour against prod). `concurrency` > 1 dispatches
+        those writes to a thread pool — the work is I/O-bound, so threads scale it.
+
+        Only the WRITES are parallelized. `migration_fn` keeps non-thread-safe
+        module state (stamp_expires' outcome histogram and exclude-id sets, whose
+        `+=` is not atomic) and its reporter reconciles that histogram against these
+        counters, so it runs on the calling thread and the tally stays lock-free.
+        Writes are bounded to one page at a time, capping in-flight requests.
+
+        concurrency=1 (the default) bypasses the pool entirely and is the exact
+        sequential path used before this existed, so no other migration silently
+        gains write load against prod pgSTAC.
+        """
+        if concurrency < 1:
+            raise ValueError(f"concurrency must be >= 1, got {concurrency}")
+
         started_at = datetime.now(UTC).isoformat()
         result = MigrationResult(
             migration_name=migration_name,
@@ -119,23 +179,46 @@ class STACMigrationRunner:
                 f"Processing items from '{collection_id}'{' (dry run)' if dry_run else ''}..."
             )
 
-        with click.progressbar(length=total, show_pos=True, show_percent=True) as bar:
+        pool = ThreadPoolExecutor(max_workers=concurrency) if concurrency > 1 else None
+        with (
+            click.progressbar(length=total, show_pos=True, show_percent=True) as bar,
+            pool or nullcontext(),
+        ):
             for page in search.pages():
+                pending: list[tuple[str, str, dict[str, Any]]] = []
+
+                # Classify the page on this thread; queue the writes it earned.
                 for item_dict in (item.to_dict() for item in page.items):
                     item_id = item_dict.get("id", "unknown")
                     result.items_processed += 1
                     try:
                         modified = migration_fn(item_dict)
-                        if modified is None:
-                            result.items_skipped += 1
-                        elif dry_run:
-                            result.items_modified += 1
-                        else:
-                            self._update_item(collection_id, item_id, modified)
-                            result.items_modified += 1
                     except Exception as e:
                         result.items_failed += 1
                         result.errors.append({"item_id": item_id, "error": str(e)})
+                        bar.update(1)
+                        continue
+                    if modified is None:
+                        result.items_skipped += 1
+                        bar.update(1)
+                    elif dry_run:
+                        result.items_modified += 1
+                        bar.update(1)
+                    else:
+                        pending.append((collection_id, item_id, modified))
+
+                # Then run this page's writes and tally them back here.
+                writes: Iterator[tuple[str, str | None]] = (
+                    pool.map(self._safe_update, pending)
+                    if pool is not None
+                    else map(self._safe_update, pending)
+                )
+                for item_id, error in writes:
+                    if error is None:
+                        result.items_modified += 1
+                    else:
+                        result.items_failed += 1
+                        result.errors.append({"item_id": item_id, "error": error})
                     bar.update(1)
 
         result.completed_at = datetime.now(UTC).isoformat()

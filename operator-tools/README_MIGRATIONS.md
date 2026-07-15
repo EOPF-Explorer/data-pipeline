@@ -145,12 +145,36 @@ uv run operator-tools/manage_collections.py clean sentinel-2-l2a-staging-backup-
 uv run operator-tools/manage_collections.py delete sentinel-2-l2a-staging-backup-20260312 --yes
 ```
 
+## Concurrency (large backfills)
+
+A migration's per-item write is a `DELETE`+`POST` round-trip, so a sequential run is
+latency-bound (~5–6k items/hour against prod). `--concurrency N` dispatches those writes to a
+thread pool, which scales this I/O-bound work almost linearly (~8 workers ≈ 8× faster; a ~191k
+item backfill drops from ~30h to ~2–3h).
+
+```bash
+uv run operator-tools/migrate_catalog.py run sentinel-2-l2a \
+  --migration stamp_expires --yes --concurrency 8
+```
+
+Only the writes are parallelized — the migration function itself still runs on one thread, so
+per-migration state (such as `stamp_expires`'s outcome histogram) stays correct.
+
+The default is `1`, the exact sequential path, so no migration gains write load unless asked.
+**`--concurrency N` multiplies write load on a prod database that also serves STAC Browser and
+titiler**: sequential was accidentally a rate limit. Start moderate (~8), watch STAC read
+latency for the first few thousand items, and lower it if latency climbs.
+
 ## Recovery Files
 
 Each non-dry-run migration writes a `.migration_recovery_<timestamp>.jsonl` file alongside
 `.migration_history.json`. Each line is the migrated version of an item that was submitted to
 the API. If a run is interrupted after some DELETEs but before the corresponding POSTs complete,
 use this file to re-POST the affected items manually.
+
+With `--concurrency N`, up to **N** items can be mid-`DELETE`/`POST` when a run is killed, so
+check the **last N lines** of the recovery file, not just the last one: `GET` each item and
+re-`POST` the ones that come back `404`.
 
 ## CLI Reference
 
@@ -168,6 +192,7 @@ Commands:
     --dry-run                              Preview changes without updating
     --yes / -y                             Skip confirmation prompt
     --page-size INT   (default: 100)       Items fetched per API page
+    --concurrency INT (default: 1)         Parallel workers for the per-item writes
   verify COLLECTION_ID                     Check if migration is fully applied
     --migration TEXT  (repeatable)         Migration(s) to verify
     --page-size INT   (default: 100)       Items fetched per API page

@@ -901,7 +901,7 @@ class TestRunCommandSurfacesHistogram:
 
         seen_at_start = {}
 
-        def fake_run(collection_id, fn, name, dry_run, page_size):  # noqa: ANN001
+        def fake_run(collection_id, fn, name, dry_run, page_size, concurrency):  # noqa: ANN001
             seen_at_start["total"] = sum(SKIP_HISTOGRAM.values())  # proves reset ran first
             fn(_stampable_item(item_id="a"))
             fn(_stampable_item(item_id="b", expires="2025-07-01T00:00:00Z"))
@@ -934,3 +934,349 @@ def test_search_client_is_resilient() -> None:
     assert retry.total and retry.total >= 5
     assert retry.backoff_factor and retry.backoff_factor > 0
     assert "POST" in retry.allowed_methods  # /search pagination uses POST
+
+
+# === Parallel writes (--concurrency) ===
+
+import threading  # noqa: E402
+from concurrent.futures import ThreadPoolExecutor  # noqa: E402
+
+
+def _dirty_item(i: int) -> dict:
+    """An item fix_zarr_media_type will modify (so it reaches the write path)."""
+    return {
+        "id": f"item-{i}",
+        "assets": {"data": {"href": "https://ex.com/d.zarr", "type": "application/vnd+zarr"}},
+        "links": [],
+    }
+
+
+def _clean_item(i: int) -> dict:
+    """An item fix_zarr_media_type leaves alone (so it counts as a skip)."""
+    return {
+        "id": f"clean-{i}",
+        "assets": {
+            "data": {"href": "https://ex.com/d.zarr", "type": "application/vnd.zarr; version=3"}
+        },
+        "links": [],
+    }
+
+
+class TestRunMigrationConcurrency:
+    def _runner_recording_writes(self) -> tuple[STACMigrationRunner, list, list]:
+        """Runner whose _update_item records (item_id, thread) instead of doing I/O."""
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        lock = threading.Lock()
+        written: list[str] = []
+        write_threads: list[int] = []
+
+        def record(collection_id, item_id, item_dict):  # noqa: ANN001, ANN202
+            with lock:
+                written.append(item_id)
+                write_threads.append(threading.get_ident())
+
+        runner._update_item = record  # type: ignore[method-assign]
+        return runner, written, write_threads
+
+    def _run(self, runner, items, concurrency, dry_run=False):  # noqa: ANN001, ANN202
+        mock_search = _make_mock_search(items, total=len(items))
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = mock_search
+            return runner.run_migration(
+                "test-col",
+                fix_zarr_media_type,
+                "fix_zarr_media_type",
+                dry_run=dry_run,
+                concurrency=concurrency,
+            )
+
+    def test_default_concurrency_is_sequential_and_unchanged(self) -> None:
+        """Default (1) must behave exactly like today's sequential path: all writes
+        happen on the calling thread, and the tally is unchanged."""
+        runner, written, write_threads = self._runner_recording_writes()
+        items = [_dirty_item(i) for i in range(5)] + [_clean_item(i) for i in range(3)]
+
+        result = self._run(runner, items, concurrency=1)
+
+        assert result.items_processed == 8
+        assert result.items_modified == 5
+        assert result.items_skipped == 3
+        assert result.items_failed == 0
+        assert sorted(written) == sorted(f"item-{i}" for i in range(5))
+        assert set(write_threads) == {threading.get_ident()}, "concurrency=1 must not offload I/O"
+
+    def test_parallel_tally_matches_sequential(self) -> None:
+        """concurrency=4 must produce the same counters as concurrency=1."""
+        items = [_dirty_item(i) for i in range(20)] + [_clean_item(i) for i in range(10)]
+
+        seq_runner, seq_written, _ = self._runner_recording_writes()
+        par_runner, par_written, _ = self._runner_recording_writes()
+
+        seq = self._run(seq_runner, items, concurrency=1)
+        par = self._run(par_runner, items, concurrency=4)
+
+        assert (par.items_processed, par.items_modified, par.items_skipped, par.items_failed) == (
+            seq.items_processed,
+            seq.items_modified,
+            seq.items_skipped,
+            seq.items_failed,
+        )
+        assert sorted(par_written) == sorted(seq_written)
+
+    def test_parallel_writes_every_item_exactly_once(self) -> None:
+        runner, written, _ = self._runner_recording_writes()
+        items = [_dirty_item(i) for i in range(50)]
+
+        result = self._run(runner, items, concurrency=8)
+
+        assert result.items_modified == 50
+        assert sorted(written) == sorted(f"item-{i}" for i in range(50))
+        assert len(written) == len(set(written)), "no item may be written twice"
+
+    def test_parallel_actually_uses_multiple_threads(self) -> None:
+        """Guards the point of the change: writes really are dispatched to a pool."""
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        barrier = threading.Barrier(4, timeout=5)
+        lock = threading.Lock()
+        threads: set[int] = set()
+
+        def record(collection_id, item_id, item_dict):  # noqa: ANN001, ANN202
+            barrier.wait()  # times out unless >=4 writes run concurrently
+            with lock:
+                threads.add(threading.get_ident())
+
+        runner._update_item = record  # type: ignore[method-assign]
+        result = self._run(runner, [_dirty_item(i) for i in range(8)], concurrency=4)
+
+        assert result.items_modified == 8
+        assert len(threads) >= 4
+
+    def test_dry_run_never_writes_even_with_concurrency(self) -> None:
+        runner, written, _ = self._runner_recording_writes()
+        items = [_dirty_item(i) for i in range(10)]
+
+        result = self._run(runner, items, concurrency=4, dry_run=True)
+
+        assert result.items_modified == 10
+        assert written == [], "dry run must not reach the write path"
+
+    def test_one_failing_write_does_not_abort_the_batch(self) -> None:
+        """A single write raising must be isolated: it lands in items_failed +
+        errors, and every other item still gets written."""
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        lock = threading.Lock()
+        written: list[str] = []
+
+        def record(collection_id, item_id, item_dict):  # noqa: ANN001, ANN202
+            if item_id == "item-3":
+                raise RuntimeError("API error")
+            with lock:
+                written.append(item_id)
+
+        runner._update_item = record  # type: ignore[method-assign]
+        result = self._run(runner, [_dirty_item(i) for i in range(10)], concurrency=4)
+
+        assert result.items_failed == 1
+        assert result.items_modified == 9
+        assert len(result.errors) == 1
+        assert result.errors[0]["item_id"] == "item-3"
+        assert "API error" in result.errors[0]["error"]
+        assert "item-3" not in written
+        assert len(written) == 9
+
+    def test_migration_fn_runs_only_on_the_calling_thread(self) -> None:
+        """The core design invariant: migration_fn holds non-thread-safe module
+        state (stamp_expires' histogram / exclude sets), so only the WRITES are
+        parallelized — classification stays on the main thread."""
+        runner, _, _ = self._runner_recording_writes()
+        lock = threading.Lock()
+        fn_threads: set[int] = set()
+
+        def tracking_fn(item):  # noqa: ANN001, ANN202
+            with lock:
+                fn_threads.add(threading.get_ident())
+            return fix_zarr_media_type(item)
+
+        mock_search = _make_mock_search([_dirty_item(i) for i in range(30)], total=30)
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = mock_search
+            runner.run_migration("test-col", tracking_fn, "tracking", concurrency=8)
+
+        assert fn_threads == {threading.get_ident()}
+
+
+class TestStampExpiresUnderConcurrency:
+    def test_histogram_reconciles_under_concurrency(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """End-to-end proof that the real stamp_expires migration keeps a correct
+        histogram at concurrency > 1 — i.e. report() does not warn."""
+        from _migrate_catalog.migrations.stamp_expires import report
+
+        # Pin an explicit exclude file: unset, resolve_exclude_ids() falls back to
+        # the baked demo denylist, whose ids match nothing here and would trip the
+        # unrelated "matched no item" warning.
+        exclude_file = tmp_path / "exclude.txt"
+        exclude_file.write_text("demo_keep\n")
+        monkeypatch.setenv("EXPIRES_EXCLUDE_FILE", str(exclude_file))
+        monkeypatch.delenv("EXPIRES_MIN_DATETIME", raising=False)
+        reset_histogram()
+
+        items = [_stampable_item(item_id=f"s-{i}") for i in range(20)]
+        items += [
+            _stampable_item(item_id=f"done-{i}", expires="2025-07-01T00:00:00Z") for i in range(10)
+        ]
+        items += [_stampable_item(item_id="demo_keep")]
+
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        runner._update_item = MagicMock()  # type: ignore[method-assign]
+        mock_search = _make_mock_search(items, total=len(items))
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = mock_search
+            result = runner.run_migration("test-col", stamp_expires, "stamp_expires", concurrency=4)
+
+        assert result.items_modified == 20
+        assert result.items_skipped == 11  # 10 already_stamped + 1 excluded
+        assert SKIP_HISTOGRAM["stamped"] == 20
+        assert SKIP_HISTOGRAM["already_stamped"] == 10
+        assert SKIP_HISTOGRAM["excluded"] == 1
+
+        text = report(result)
+        assert "does not reconcile" not in text
+        assert "matched no item" not in text
+        assert "WARNING" not in text
+
+
+class TestRecoveryFileThreadSafety:
+    def _mock_out_http(self, runner: STACMigrationRunner) -> None:
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_session = MagicMock()
+        mock_session.post.return_value = mock_resp
+        runner._session = MagicMock(return_value=mock_session)  # type: ignore[method-assign]
+
+    def test_concurrent_appends_yield_intact_json_lines(self, tmp_path: Path) -> None:
+        """Contract: concurrent writes leave one intact, parseable JSON line per
+        item — the restore path reads this file line by line.
+
+        Note this is a regression guard, not proof that the lock works: a buffered
+        O_APPEND write of this size turns out to be atomic anyway (verified by
+        removing the lock — this still passed). It fails if a future change breaks
+        line integrity some other way, e.g. by sharing one open handle across
+        threads. test_recovery_append_happens_under_the_lock covers the lock itself.
+        """
+        runner = STACMigrationRunner("https://api.example.com/stac", recovery_dir=tmp_path)
+        self._mock_out_http(runner)
+
+        n = 40
+        items = [
+            {"id": f"item-{i}", "properties": {"pad": "x" * 60_000}, "assets": {}} for i in range(n)
+        ]
+
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            list(ex.map(lambda it: runner._update_item("test-col", it["id"], it), items))
+
+        files = list(tmp_path.glob(".migration_recovery_*.jsonl"))
+        assert len(files) == 1
+        lines = files[0].read_text().strip().splitlines()
+        assert len(lines) == n
+        ids = {json.loads(line)["id"] for line in lines}  # raises if any line interleaved
+        assert ids == {f"item-{i}" for i in range(n)}
+
+    def test_recovery_append_happens_under_the_lock(self, tmp_path: Path) -> None:
+        """The append must happen *inside* _recovery_lock, so line integrity does
+        not depend on the platform's append-atomicity behaviour."""
+        runner = STACMigrationRunner("https://api.example.com/stac", recovery_dir=tmp_path)
+        self._mock_out_http(runner)
+        assert runner._recovery_file is not None
+        recovery_file = runner._recovery_file
+
+        def size() -> int:
+            return recovery_file.stat().st_size if recovery_file.exists() else 0
+
+        sizes: dict[str, int] = {}
+        inner = threading.Lock()
+
+        class RecordingLock:
+            def __enter__(self) -> None:
+                inner.acquire()
+                sizes["at_acquire"] = size()
+
+            def __exit__(self, *exc: object) -> None:
+                sizes["at_release"] = size()
+                inner.release()
+
+        runner._recovery_lock = RecordingLock()  # type: ignore[assignment]
+        runner._update_item("test-col", "item-1", {"id": "item-1", "pad": "x" * 1000})
+
+        assert sizes, "the recovery append never acquired the lock"
+        assert sizes["at_acquire"] == 0
+        assert sizes["at_release"] > 0, "the append must land inside the lock, not after it"
+
+
+class TestSessionThreadLocality:
+    def test_each_thread_gets_its_own_session(self) -> None:
+        """requests.Session is not guaranteed thread-safe, so pooled writes must
+        not share one."""
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        lock = threading.Lock()
+        sessions: list[int] = []
+        ready = threading.Barrier(4, timeout=5)
+
+        def grab(_: int) -> None:
+            ready.wait()  # hold all 4 threads alive at once so ids can't be recycled
+            session = runner._session()
+            with lock:
+                sessions.append(id(session))
+            ready.wait()
+
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            list(ex.map(grab, range(4)))
+
+        assert len(set(sessions)) == 4, "each worker thread needs a distinct Session"
+
+    def test_same_thread_reuses_its_session(self) -> None:
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        assert runner._session() is runner._session()
+
+    def test_session_carries_json_content_type(self) -> None:
+        runner = STACMigrationRunner("https://api.example.com/stac")
+
+        def header() -> str:
+            return runner._session().headers["Content-Type"]
+
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            worker_header = ex.submit(header).result()
+
+        assert header() == "application/json"
+        assert worker_header == "application/json"
+
+
+class TestConcurrencyCliOption:
+    def _invoke(self, monkeypatch: pytest.MonkeyPatch, args: list[str]):  # noqa: ANN202
+        import importlib
+
+        from click.testing import CliRunner
+
+        climod = importlib.import_module("_migrate_catalog.cli")
+        runner_inst = MagicMock()
+        runner_inst.run_migration.return_value = _result(processed=0, modified=0, skipped=0)
+        monkeypatch.setattr(climod, "STACMigrationRunner", lambda *a, **k: runner_inst)
+        res = CliRunner().invoke(climod.cli, args)
+        return res, runner_inst
+
+    def test_concurrency_flag_is_forwarded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        res, runner_inst = self._invoke(
+            monkeypatch,
+            ["run", "coll", "--migration", "fix_url_encoding", "--dry-run", "--concurrency", "8"],
+        )
+        assert res.exit_code == 0, res.output
+        assert runner_inst.run_migration.call_args.kwargs["concurrency"] == 8
+
+    def test_concurrency_defaults_to_one(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Default 1 keeps every other migration on today's sequential path."""
+        res, runner_inst = self._invoke(
+            monkeypatch, ["run", "coll", "--migration", "fix_url_encoding", "--dry-run"]
+        )
+        assert res.exit_code == 0, res.output
+        assert runner_inst.run_migration.call_args.kwargs["concurrency"] == 1

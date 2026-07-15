@@ -51,6 +51,17 @@ def cli(ctx: click.Context, api_url: str | None, history_file: str | None, verbo
 @click.option("--dry-run", is_flag=True, help="Show changes without updating")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
 @click.option("--page-size", default=100, show_default=True, help="Items per page when fetching")
+@click.option(
+    "--concurrency",
+    default=1,
+    show_default=True,
+    type=click.IntRange(1, 64),
+    help=(
+        "Parallel workers for the per-item writes (I/O-bound). Default 1 is the "
+        "sequential path. Raising this multiplies write load on the STAC API — "
+        "start moderate (~8) and watch read latency."
+    ),
+)
 @click.pass_context
 def run(
     ctx: click.Context,
@@ -59,6 +70,7 @@ def run(
     dry_run: bool,
     yes: bool,
     page_size: int,
+    concurrency: int,
 ) -> None:
     """Run one or more migrations on a collection."""
     for name in migration_names:
@@ -102,7 +114,12 @@ def run(
 
     runner = STACMigrationRunner(api_url, recovery_dir=history_file.parent)
     result = runner.run_migration(
-        collection_id, migration_fn, migration_name, dry_run=dry_run, page_size=page_size
+        collection_id,
+        migration_fn,
+        migration_name,
+        dry_run=dry_run,
+        page_size=page_size,
+        concurrency=concurrency,
     )
 
     click.echo()
