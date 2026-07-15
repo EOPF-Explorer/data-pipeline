@@ -37,7 +37,7 @@ def _run_with_mocks(mock_client, convert_side_effect=None):
         patch.object(convert_v1_s2, "get_storage_options", return_value={}),
         patch.object(convert_v1_s2, "convert_s2_optimized", mock_convert),
         patch("fsspec.filesystem", return_value=mock_fs),
-        patch.object(convert_v1_s2.xr, "open_datatree", return_value=MagicMock()),
+        patch.object(convert_v1_s2, "open_source_datatree", return_value=MagicMock()),
         contextlib.suppress(Exception),  # callers that inject side_effect check close() separately
     ):
         run_conversion(**_BASE_ARGS)
@@ -85,7 +85,7 @@ def test_no_client_created_when_dask_disabled():
         patch.object(convert_v1_s2, "get_storage_options", return_value={}),
         patch.object(convert_v1_s2, "convert_s2_optimized"),
         patch("fsspec.filesystem", return_value=mock_fs),
-        patch.object(convert_v1_s2.xr, "open_datatree", return_value=MagicMock()),
+        patch.object(convert_v1_s2, "open_source_datatree", return_value=MagicMock()),
     ):
         run_conversion(**args)
 
