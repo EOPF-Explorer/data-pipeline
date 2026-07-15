@@ -14,7 +14,9 @@ help:  ## Show this help message
 
 setup:  ## Install dependencies and pre-commit hooks
 	@echo "📦 Installing dependencies..."
-	uv sync --all-groups
+	# --locked matches CI: fail on a stale uv.lock instead of silently
+	# regenerating it and leaving a dirty tree. Run `uv lock` to refresh.
+	uv sync --locked --all-groups
 	@echo "🔧 Installing pre-commit hooks..."
 	uv run pre-commit install
 
