@@ -1,5 +1,10 @@
 """Unit tests for prestage_source.py — S3 mapping, allowlist, copy/verify, cleanup guards.
 
+"S3" here means object storage. Where the *mission* Sentinel-3 is meant, it is spelled
+out — the Sentinel-3 cases exist because prestage is mission-agnostic and must stay
+that way: ids, buckets and hrefs below are copied from live sentinel-3-olci-l1-efr
+items, and staging one through the same code path is what proves the claim.
+
 No network: the S3 clients are replaced with an in-memory fake so the copy,
 skip-if-identical, verification and cleanup logic are exercised for real.
 """
@@ -29,6 +34,18 @@ EODC_KEY = "13/products/cpm_v270/S2B_MSIL2A_20260713T104619_N0512_R051_T31UDP_20
 ITEM_ID = "S2B_MSIL2A_20260713T104619_N0512_R051_T31UDP_20260713T131840"
 STAC_ITEM_URL = f"https://stac.example.com/collections/sentinel-2-l2a/items/{ITEM_ID}"
 GATEWAY_HREF = f"https://s3.explorer.eopf.copernicus.eu/bucket/cpm-manual/{ITEM_ID}.zarr"
+
+# Sentinel-3 (the mission): a live OLCI L1 EFR product. Same host, same Ceph
+# tenant:container shape, different tenant container and a very different id.
+S3_OLCI_ITEM_ID = (
+    "S3A_OL_1_EFR____20260714T222153_20260714T222243_20260715T003629_0050_141_329_1080_PS1_O_NR_004"
+)
+S3_OLCI_BUCKET = "e05ab01a9d56408d82ac32d69a5aae2a:202607-s03olcefr-eu"
+S3_OLCI_KEY = f"14/products/cpm_v270/{S3_OLCI_ITEM_ID}.zarr"
+S3_OLCI_HREF = f"https://objects.eodc.eu:443/{S3_OLCI_BUCKET}/{S3_OLCI_KEY}"
+S3_OLCI_STAC_ITEM_URL = (
+    f"https://stac.core.eopf.eodc.eu/collections/sentinel-3-olci-l1-efr/items/{S3_OLCI_ITEM_ID}"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +158,15 @@ def test_parse_href_maps_colon_bucket_and_strips_default_port():
     assert loc.key == EODC_KEY
 
 
+def test_parse_href_maps_a_sentinel3_product():
+    """Same Ceph shape, different tenant container — no mission-specific parsing."""
+    loc = prestage_source.parse_https_s3_href(S3_OLCI_HREF)
+
+    assert loc.endpoint == "https://objects.eodc.eu"
+    assert loc.bucket == S3_OLCI_BUCKET
+    assert loc.key == S3_OLCI_KEY
+
+
 def test_parse_href_without_explicit_port():
     loc = prestage_source.parse_https_s3_href(EODC_HREF.replace(":443", ""))
 
@@ -244,6 +270,59 @@ def test_copy_stages_every_object_and_reports_staged_s3_url(tmp_path, clients):
         f"s3://esa-zarr-sentinel-explorer-fra/source-cache/{ITEM_ID}",
         "true",
     )
+
+
+def test_copy_stages_a_sentinel3_product_through_the_same_path(tmp_path, monkeypatch):
+    """Prestage is mission-agnostic: a Sentinel-3 OLCI product stages with no S2 in sight.
+
+    Guards the reuse claim in the module docstring — Sentinel-3 needs a template, not a
+    code change. Uses the live OLCI key layout (measurement groups, not S2's r10m/aot).
+    """
+    olci_keys = {
+        ".zattrs": b"{}",
+        "measurements/oa01_radiance/0.0": b"olci-band-1-chunk",
+        "measurements/oa21_radiance/0.0": b"olci-band-21-chunk",
+        "conditions/geometry/sza/0.0": b"sun-zenith-chunk",
+    }
+    source = FakeS3({(S3_OLCI_BUCKET, f"{S3_OLCI_KEY}/{k}"): v for k, v in olci_keys.items()})
+    dest = FakeS3()
+    monkeypatch.setattr(prestage_source, "_source_client", lambda endpoint: source)
+    monkeypatch.setattr(prestage_source, "_dest_client", lambda: dest)
+    monkeypatch.setattr(prestage_source, "resolve_zarr_url", lambda url: S3_OLCI_HREF)
+
+    rc = prestage_source.main(_argv(tmp_path, **{"--source-url": S3_OLCI_STAC_ITEM_URL}))
+
+    assert rc == 0
+    assert {key for (_b, key) in dest.objects} == {
+        f"source-cache/{S3_OLCI_ITEM_ID}/{key}" for key in olci_keys
+    }
+    # The staged URL carries the Sentinel-3 id, so convert's output path and register's
+    # geozarr URL agree with it exactly as they do for S2.
+    assert _outputs(tmp_path) == (
+        f"s3://esa-zarr-sentinel-explorer-fra/source-cache/{S3_OLCI_ITEM_ID}",
+        "true",
+    )
+
+
+def test_cleanup_deletes_a_sentinel3_staged_copy(tmp_path, monkeypatch):
+    """The delete guards key off item_id alone, so they hold for any mission."""
+    bucket = "esa-zarr-sentinel-explorer-fra"
+    dest = FakeS3(
+        {
+            (bucket, f"source-cache/{S3_OLCI_ITEM_ID}/zarr.json"): b"{}",
+            (bucket, f"source-cache/{S3_OLCI_ITEM_ID}/measurements/oa01_radiance/0.0"): b"chunk",
+            # A different mission staged alongside it must survive.
+            (bucket, f"source-cache/{ITEM_ID}/zarr.json"): b"{}",
+        }
+    )
+    monkeypatch.setattr(prestage_source, "_dest_client", lambda: dest)
+
+    rc = prestage_source.main(
+        _argv(tmp_path, **{"--source-url": S3_OLCI_STAC_ITEM_URL, "--mode": "cleanup"})
+    )
+
+    assert rc == 0
+    assert {key for (_b, key) in dest.objects} == {f"source-cache/{ITEM_ID}/zarr.json"}
 
 
 def test_copy_preserves_bytes(tmp_path, clients):

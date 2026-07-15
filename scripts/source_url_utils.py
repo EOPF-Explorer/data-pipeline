@@ -5,6 +5,14 @@ Extracted from ``convert_v1_s2.py`` so ``prestage_source.py`` can apply the *sam
 rules without importing the conversion stack (xarray/dask/eopf_geozarr) into a
 1-CPU copy pod.
 
+These rules are mission-agnostic: they read the URL, never the product. Sentinel-2 is
+the first caller, but Sentinel-3 items resolve identically (checked against live
+``sentinel-3-olci-l1-efr`` / ``-slstr-l1-rbt`` / ``-slstr-l2-frp`` items — same
+``product`` asset, same ``<host>/<tenant:container>/<date>/products/<cpm>/<id>.zarr``
+layout), so a Sentinel-3 pipeline reuses this module as-is. Do not add mission
+branching here; if a mission ever needs different rules, that is a new resolver, not
+an ``if``.
+
 Load-bearing invariant (data-pipeline#182 / #339): the staged key prestage writes,
 the output path convert builds, and the geozarr URL register publishes must all
 agree on one ``item_id``. They agree because all three derive it here, from the

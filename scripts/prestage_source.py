@@ -1,13 +1,23 @@
 #!/usr/bin/env python3
-"""Pre-stage a Sentinel-2 source Zarr from EODC to the OVH output bucket.
+"""Pre-stage a source Zarr from EODC to the OVH output bucket.
 
-Conversion used to read the source over HTTPS through fsspec ``simplecache`` for the
-whole 9+ minute convert. That is fragile under load and — since cpm_v270 gave
-``quality/atmosphere/aot``/``wvp`` a single 10980x10980 chunk — deterministically
-broken: dask splits that one Zarr chunk into ~9 concurrent reads of the *same* object
-key, and ``WholeFileCacheFileSystem._cat_file`` downloads a cache miss straight to its
-final filename with no temp+rename, so a second reader gets a truncated file and blosc
-dies with ``error during blosc decompression: -1`` (data-pipeline#339).
+Mission-agnostic by construction: this copies whatever Zarr store a ``source_url``
+resolves to, without knowing or caring which mission produced it. Sentinel-2 is the
+first caller; Sentinel-3 (OLCI/SLSTR) needs no change here — its products sit in the
+same Ceph tenant buckets on the same host and its STAC items resolve through the same
+rules (verified against live ``sentinel-3-olci-l1-efr`` / ``-slstr-l1-rbt`` items; see
+``source_url_utils`` for the shared rules). Everything environment-specific is a CLI
+argument, so a new mission is a template change, not a code change.
+
+Sentinel-2 is what forced this, but the failure is not S2-specific — any mission read
+through fsspec ``simplecache`` has the same exposure. Conversion used to read the
+source over HTTPS through ``simplecache`` for the whole 9+ minute convert. That is
+fragile under load and — since cpm_v270 gave ``quality/atmosphere/aot``/``wvp`` a
+single 10980x10980 chunk — deterministically broken: dask splits that one Zarr chunk
+into ~9 concurrent reads of the *same* object key, and
+``WholeFileCacheFileSystem._cat_file`` downloads a cache miss straight to its final
+filename with no temp+rename, so a second reader gets a truncated file and blosc dies
+with ``error during blosc decompression: -1`` (data-pipeline#339).
 
 Copying the source to the output bucket first lets convert read it back over the
 native ``s3://`` path, which uses s3fs and no simplecache at all — killing both the
