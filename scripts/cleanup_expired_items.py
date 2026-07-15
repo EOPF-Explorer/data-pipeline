@@ -39,8 +39,8 @@ from s3_item_cleanup import (
     delete_s3_objects_for_item,
     extract_s3_urls_from_item,
     format_expires,
-    load_exclude_ids,
     parse_stac_timestamp,
+    resolve_exclude_ids,
 )
 
 logging.basicConfig(
@@ -249,7 +249,7 @@ def _s3_client(s3_endpoint: str | None) -> Any:
 def run_cleanup(args: argparse.Namespace) -> int:
     """Discover and process expired items; emit JSONL; return exit code."""
     now = _now()
-    exclude_ids = load_exclude_ids(args.exclude_file)
+    exclude_ids = resolve_exclude_ids(args.exclude_file)
     dry_run = not args.execute
 
     client = Client.open(args.stac_api_url)
@@ -364,8 +364,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--exclude-file",
-        default=os.getenv("EXPIRES_EXCLUDE_FILE"),
-        help="Newline-delimited item-ID denylist (always skipped)",
+        default=None,
+        help=(
+            "Newline-delimited item-ID denylist (always skipped). Overrides "
+            "$EXPIRES_EXCLUDE_FILE; if neither is set, the baked demo denylist "
+            "is used by default."
+        ),
     )
     parser.add_argument(
         "--execute",

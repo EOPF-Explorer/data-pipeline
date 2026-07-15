@@ -67,8 +67,8 @@ from s3_item_cleanup import (  # noqa: E402
     TIMESTAMPS_EXTENSION,
     env_int,
     format_expires,
-    load_exclude_ids,
     parse_stac_timestamp,
+    resolve_exclude_ids,
 )
 
 logger = logging.getLogger(__name__)
@@ -180,7 +180,7 @@ def _parse_floor(value: str) -> datetime:
 
 def _resolve_config() -> tuple[int, set[str], datetime | None]:
     retention_days = env_int("EXPIRES_RETENTION_DAYS", DEFAULT_RETENTION_DAYS)
-    exclude_ids = load_exclude_ids(os.getenv("EXPIRES_EXCLUDE_FILE"))
+    exclude_ids = resolve_exclude_ids()
     floor_env = os.getenv("EXPIRES_MIN_DATETIME")
     min_datetime = _parse_floor(floor_env) if floor_env else None
     return retention_days, exclude_ids, min_datetime

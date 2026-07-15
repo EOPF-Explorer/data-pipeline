@@ -18,6 +18,7 @@ import logging
 import os
 from collections import defaultdict
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -76,6 +77,29 @@ def load_exclude_ids(path: str | None) -> set[str]:
             if stripped and not stripped.startswith("#"):
                 ids.add(stripped)
     return ids
+
+
+# The demo denylist baked into the pipeline image next to this module
+# (``docker/Dockerfile`` copies ``scripts/`` to ``/app/scripts/``). Used as the
+# default so demo protection is ON even when ``EXPIRES_EXCLUDE_FILE`` is unset.
+BAKED_EXCLUDE_FILE = Path(__file__).resolve().parent / "demo_exclude_ids.txt"
+
+
+def resolve_exclude_ids(explicit_path: str | None = None) -> set[str]:
+    """Resolve the demo denylist, in order of precedence:
+    ``explicit_path`` → ``$EXPIRES_EXCLUDE_FILE`` → the baked
+    ``demo_exclude_ids.txt``.
+
+    The baked fallback makes demo protection *unconditional*: register, cleanup
+    and the backfill all skip demo ids by default, not only when a workflow
+    remembers to set the env var. A registration/reconversion that forgets
+    ``EXPIRES_EXCLUDE_FILE`` can no longer stamp ``expires`` on a demo scene
+    (coordination#183). Set ``EXPIRES_EXCLUDE_FILE`` to override/extend the list.
+    """
+    path = explicit_path or os.getenv("EXPIRES_EXCLUDE_FILE")
+    if not path and BAKED_EXCLUDE_FILE.exists():
+        path = str(BAKED_EXCLUDE_FILE)
+    return load_exclude_ids(path)
 
 
 def extract_s3_urls_from_item(item_dict: dict) -> set[str]:

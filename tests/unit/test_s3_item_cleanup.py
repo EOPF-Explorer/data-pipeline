@@ -16,6 +16,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 from s3_item_cleanup import (
+    BAKED_EXCLUDE_FILE,
     DEFAULT_RETENTION_DAYS,
     EXPIRES_TS_FORMAT,
     count_s3_objects_for_item,
@@ -25,6 +26,7 @@ from s3_item_cleanup import (
     format_expires,
     load_exclude_ids,
     parse_stac_timestamp,
+    resolve_exclude_ids,
 )
 
 BUCKET = "esa-zarr-sentinel-explorer-fra"
@@ -234,6 +236,38 @@ class TestLoadExcludeIds:
         f = tmp_path / "exclude.txt"
         f.write_text("item-a\n# a comment\n\nitem-b\n")
         assert load_exclude_ids(str(f)) == {"item-a", "item-b"}
+
+
+class TestResolveExcludeIds:
+    """resolve_exclude_ids makes demo protection unconditional: with nothing
+    configured it falls back to the baked demo denylist, so a workflow that
+    forgets EXPIRES_EXCLUDE_FILE cannot leave demo scenes unprotected
+    (coordination#183). Precedence: explicit path > env > baked file."""
+
+    def test_baked_file_ships_with_the_image(self) -> None:
+        # The fallback is only real protection if the file is actually present.
+        assert BAKED_EXCLUDE_FILE.exists()
+        assert load_exclude_ids(str(BAKED_EXCLUDE_FILE))  # non-empty
+
+    def test_unset_falls_back_to_baked(self, monkeypatch: object) -> None:
+        monkeypatch.delenv("EXPIRES_EXCLUDE_FILE", raising=False)  # type: ignore[attr-defined]
+        assert resolve_exclude_ids() == load_exclude_ids(str(BAKED_EXCLUDE_FILE))
+
+    def test_env_overrides_baked(self, monkeypatch: object, tmp_path: Path) -> None:
+        f = tmp_path / "env.txt"
+        f.write_text("env-a\nenv-b\n")
+        monkeypatch.setenv("EXPIRES_EXCLUDE_FILE", str(f))  # type: ignore[attr-defined]
+        assert resolve_exclude_ids() == {"env-a", "env-b"}
+
+    def test_explicit_path_overrides_env_and_baked(
+        self, monkeypatch: object, tmp_path: Path
+    ) -> None:
+        env_f = tmp_path / "env.txt"
+        env_f.write_text("env-a\n")
+        monkeypatch.setenv("EXPIRES_EXCLUDE_FILE", str(env_f))  # type: ignore[attr-defined]
+        explicit = tmp_path / "explicit.txt"
+        explicit.write_text("explicit-a\nexplicit-b\n")
+        assert resolve_exclude_ids(str(explicit)) == {"explicit-a", "explicit-b"}
 
 
 def test_consumers_share_one_format_helper() -> None:

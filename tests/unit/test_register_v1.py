@@ -198,13 +198,22 @@ class TestAddExpires:
 
 
 class TestResolveExcludeIds:
-    """resolve_exclude_ids reads the demo denylist from EXPIRES_EXCLUDE_FILE."""
+    """resolve_exclude_ids reads the demo denylist; when the env is unset it
+    falls back to the baked file so demo protection is never accidentally off."""
 
-    def test_unset_returns_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_unset_falls_back_to_baked_demo_file(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A forgotten EXPIRES_EXCLUDE_FILE must NOT unprotect demo scenes — the
+        # baked /app/scripts/demo_exclude_ids.txt is used by default (coordination#183).
+        from s3_item_cleanup import BAKED_EXCLUDE_FILE, load_exclude_ids
+
         monkeypatch.delenv("EXPIRES_EXCLUDE_FILE", raising=False)
-        assert resolve_exclude_ids() == set()
+        ids = resolve_exclude_ids()
+        assert ids  # the baked file ships real demo ids
+        assert ids == load_exclude_ids(str(BAKED_EXCLUDE_FILE))
 
-    def test_reads_ids_from_file(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def test_env_overrides_baked(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         f = tmp_path / "demo.txt"
         f.write_text("# demo\nS2_demo_a\nS2_demo_b\n")
         monkeypatch.setenv("EXPIRES_EXCLUDE_FILE", str(f))
