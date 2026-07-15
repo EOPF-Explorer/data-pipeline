@@ -17,10 +17,16 @@ This is the T7 gate of ``claude-docs/plans/prestage_source_s3_plan.md``, made re
 
 Usage
 -----
-    uv run python scripts/verify_prestage_e2e.py <stac-item-url> [--image sha-204ac6e]
+    uv run python scripts/verify_prestage_e2e.py <stac-item-url> --image <tag>
 
-Defaults to the data-pipeline#344 PR image so this can run before v1.13.0 exists; pass a
-released tag once it does. Needs the ``argo`` CLI and a kube context on the namespace.
+``--image`` is required on purpose. Before v1.13.0 the only image with these scripts is
+the #344 PR build, whose tag is the PR's *merge* commit — which changes on every push to
+the branch. A default would go stale silently and the gate would then pass against an old
+image, "proving" code that never ran: exactly the green-but-meaningless result this exists
+to catch. Get the current tag from the PR (``gh pr view 344 --json potentialMergeCommit``)
+or pass a release tag once one exists.
+
+Needs the ``argo`` CLI and a kube context on the namespace.
 """
 
 from __future__ import annotations
@@ -48,7 +54,6 @@ EMPTY = "empty"
 MISMATCH = "mismatch"
 
 CACHE_MARKER = "/source-cache/"
-DEFAULT_IMAGE = "sha-204ac6e"
 
 
 def item_id_for(source_url: str) -> str:
@@ -208,7 +213,12 @@ def verify(wf: dict, item_id: str, collection: str, stac_api: str, s3: Any, c: C
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Prove one scene really staged and converted.")
     parser.add_argument("source_url", help="STAC item URL")
-    parser.add_argument("--image", default=DEFAULT_IMAGE)
+    parser.add_argument(
+        "--image",
+        required=True,
+        help="Image tag to test. No default: the pre-release tag is #344's merge sha, "
+        "which moves on every push, and a stale default would pass against old code.",
+    )
     parser.add_argument("--namespace", default=os.getenv("NAMESPACE", "devseed-staging"))
     parser.add_argument("--template", default="eopf-explorer-convert-v1-s2")
     parser.add_argument("--collection", default="sentinel-2-l2a-staging")
