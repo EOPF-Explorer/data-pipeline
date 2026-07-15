@@ -131,6 +131,7 @@ class STACMigrationRunner:
         page_size: int = 100,
         concurrency: int = 1,
         max_consecutive_failures: int = 25,
+        max_writes: int | None = None,
     ) -> MigrationResult:
         """Apply migration_fn to every item in collection_id.
 
@@ -151,6 +152,15 @@ class STACMigrationRunner:
         max_consecutive_failures stops a run whose writes are failing wholesale
         (see the circuit breaker below); 0 disables it and restores run-to-completion.
         Sets `result.aborted`.
+
+        max_writes bounds a run to N modified items and then stops cleanly, setting
+        `result.reached_max_writes`. Use it for a bounded first run instead of
+        killing the process: the unit of work is a non-atomic DELETE-then-POST, so
+        a kill can leave items deleted-but-not-restored, and a signal-based stop is
+        unreliable anyway (a process backgrounded from a non-interactive shell
+        inherits SIGINT=SIG_IGN, and CPython then never installs its handler). The
+        budget is checked *before* migration_fn runs, so an item that is not written
+        is never counted as processed and the histogram still reconciles.
         """
         if concurrency < 1:
             raise ValueError(f"concurrency must be >= 1, got {concurrency}")
@@ -158,6 +168,8 @@ class STACMigrationRunner:
             raise ValueError(
                 f"max_consecutive_failures must be >= 0, got {max_consecutive_failures}"
             )
+        if max_writes is not None and max_writes < 1:
+            raise ValueError(f"max_writes must be >= 1 or None, got {max_writes}")
 
         started_at = datetime.now(UTC).isoformat()
         result = MigrationResult(
@@ -189,6 +201,7 @@ class STACMigrationRunner:
 
         pool = ThreadPoolExecutor(max_workers=concurrency) if concurrency > 1 else None
         consecutive_failures = 0
+        budget_used = 0  # items modified (or, in a dry run, that would be)
         try:
             with click.progressbar(length=total, show_pos=True, show_percent=True) as bar:
                 for page in search.pages():
@@ -196,6 +209,14 @@ class STACMigrationRunner:
 
                     # Classify the page on this thread; queue the writes it earned.
                     for item_dict in (item.to_dict() for item in page.items):
+                        # Check the budget BEFORE classifying. Trimming the batch
+                        # afterwards would leave items counted as processed but never
+                        # written, so neither the tally nor stamp_expires' histogram
+                        # would reconcile.
+                        if max_writes is not None and budget_used >= max_writes:
+                            result.reached_max_writes = True
+                            break
+
                         item_id = item_dict.get("id", "unknown")
                         result.items_processed += 1
                         try:
@@ -206,13 +227,15 @@ class STACMigrationRunner:
                             bar.update(1)
                             continue
                         if modified is None:
-                            result.items_skipped += 1
+                            result.items_skipped += 1  # skips are free: no budget spent
                             bar.update(1)
                         elif dry_run:
                             result.items_modified += 1
+                            budget_used += 1
                             bar.update(1)
                         else:
                             pending.append((collection_id, item_id, modified))
+                            budget_used += 1
 
                     # Then run this page's writes and tally them back here.
                     writes: Iterator[tuple[str, str | None]] = (
@@ -241,6 +264,11 @@ class STACMigrationRunner:
                         and consecutive_failures >= max_consecutive_failures
                     ):
                         result.aborted = True
+                        break
+
+                    # Budget spent: stop between pages, cleanly. No signal, no kill,
+                    # so no item can be left torn between its DELETE and its POST.
+                    if result.reached_max_writes:
                         break
         finally:
             if pool is not None:

@@ -172,7 +172,27 @@ the run instead, bounding the loss to roughly one page; the run exits non-zero a
 recovery file. Set it to `0` to restore run-to-completion.
 
 Interrupting with `Ctrl-C` is safe: queued writes are cancelled and in-flight ones finish their
-DELETE+POST.
+DELETE+POST. Note the run's tally is lost with the stack, so nothing is written to
+`.migration_history.json` — the migration is idempotent, so just re-run to continue.
+
+### Bounded first run — use `--max-writes`, never a kill
+
+For a bounded first run ("stamp a few thousand, watch the rate and read latency"), use
+`--max-writes N`. It stops cleanly at an item boundary once N items have been modified, then
+reports and records the run normally. Skipped items don't consume the budget, which matters
+because the head of a collection is typically already migrated.
+
+```bash
+uv run operator-tools/migrate_catalog.py run sentinel-2-l2a \
+  --migration stamp_expires --yes --concurrency 8 --max-writes 10000
+```
+
+**Do not bound a run by killing it.** A write is DELETE-then-POST, so a kill mid-write leaves the
+item deleted and not restored — recoverable only from the recovery file. Signals are also an
+unreliable stop: a process backgrounded with `&` from a non-interactive shell inherits
+`SIGINT=SIG_IGN`, so CPython never installs its handler and `kill -INT` does nothing. That
+combination once took a "bounded" 10,000-item run to 20,613 writes and tore 3 items on the way
+out. `--max-writes` needs no signal and cannot tear an item.
 
 ## Recovery Files
 
@@ -216,6 +236,7 @@ Commands:
     --page-size INT   (default: 100)       Items fetched per API page
     --concurrency INT (default: 1)         Parallel workers for the per-item writes
     --max-consecutive-failures INT (25)    Stop after N back-to-back write failures (0=off)
+    --max-writes INT                       Stop cleanly after modifying N items
   verify COLLECTION_ID                     Check if migration is fully applied
     --migration TEXT  (repeatable)         Migration(s) to verify
     --page-size INT   (default: 100)       Items fetched per API page

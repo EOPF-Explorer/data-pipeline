@@ -902,7 +902,14 @@ class TestRunCommandSurfacesHistogram:
         seen_at_start = {}
 
         def fake_run(  # noqa: ANN001
-            collection_id, fn, name, dry_run, page_size, concurrency, max_consecutive_failures
+            collection_id,
+            fn,
+            name,
+            dry_run,
+            page_size,
+            concurrency,
+            max_consecutive_failures,
+            max_writes,
         ):
             seen_at_start["total"] = sum(SKIP_HISTOGRAM.values())  # proves reset ran first
             fn(_stampable_item(item_id="a"))
@@ -1271,6 +1278,170 @@ class TestCircuitBreaker:
             mock_client.open.return_value.search.return_value = search
             with pytest.raises(ValueError, match="concurrency must be >= 1"):
                 runner.run_migration("c", fix_zarr_media_type, "m", concurrency=0)
+
+
+class TestMaxWrites:
+    """A bounded run must be expressible IN the tool.
+
+    Bounding it from outside (watch a file, send a signal) is how a prod run once
+    blew past its 10k limit to 20,613 writes: a process backgrounded from a
+    non-interactive shell inherits SIGINT=SIG_IGN, so CPython never installs its
+    handler and `kill -INT` is a silent no-op. Killing it then tore 3 items between
+    their DELETE and their POST. `--max-writes` stops at an item boundary with no
+    signal and no kill, so nothing can be left torn.
+    """
+
+    def _runner_recording(self) -> tuple[STACMigrationRunner, list]:
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        lock = threading.Lock()
+        written: list[str] = []
+
+        def record(collection_id, item_id, item_dict):  # noqa: ANN001, ANN202
+            with lock:
+                written.append(item_id)
+
+        runner._update_item = record  # type: ignore[method-assign]
+        return runner, written
+
+    def test_stops_at_exactly_max_writes(self) -> None:
+        runner, written = self._runner_recording()
+        # 10 pages x 20 stampable items = 200 candidates, budget 25.
+        pages = [[_dirty_item(pg * 20 + i) for i in range(20)] for pg in range(10)]
+        search = _multi_page_search(pages, total=200)
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = search
+            result = runner.run_migration(
+                "test-col",
+                fix_zarr_media_type,
+                "fix_zarr_media_type",
+                concurrency=8,
+                max_writes=25,
+            )
+
+        assert len(written) == 25, f"must write EXACTLY 25, wrote {len(written)}"
+        assert result.items_modified == 25
+        assert result.reached_max_writes is True
+
+    def test_counters_stay_consistent_when_bounded(self) -> None:
+        """The budget is checked BEFORE migration_fn runs, so an item that is never
+        written is never counted as processed — otherwise the tally (and
+        stamp_expires' histogram) would not reconcile."""
+        runner, _ = self._runner_recording()
+        pages = [[_dirty_item(pg * 20 + i) for i in range(20)] for pg in range(10)]
+        search = _multi_page_search(pages, total=200)
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = search
+            result = runner.run_migration(
+                "test-col", fix_zarr_media_type, "fix_zarr_media_type", max_writes=25
+            )
+
+        assert result.items_processed == result.items_modified + result.items_skipped + (
+            result.items_failed
+        )
+        assert result.items_processed == 25  # only the classified ones counted
+
+    def test_stamp_expires_histogram_reconciles_when_bounded(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The real proof: report() must not warn on a bounded run."""
+        from _migrate_catalog.migrations.stamp_expires import report
+
+        # Pin an empty exclude file: unset, resolve_exclude_ids() falls back to the
+        # baked demo list, whose ids match nothing here and would trip an unrelated
+        # "matched no item" warning.
+        exclude_file = tmp_path / "exclude.txt"
+        exclude_file.write_text("")
+        monkeypatch.setenv("EXPIRES_EXCLUDE_FILE", str(exclude_file))
+        monkeypatch.delenv("EXPIRES_MIN_DATETIME", raising=False)
+        reset_histogram()
+
+        runner, _ = self._runner_recording()
+        pages = [[_stampable_item(item_id=f"s-{pg}-{i}") for i in range(20)] for pg in range(10)]
+        search = _multi_page_search(pages, total=200)
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = search
+            result = runner.run_migration(
+                "test-col", stamp_expires, "stamp_expires", concurrency=4, max_writes=30
+            )
+
+        assert result.items_modified == 30
+        assert SKIP_HISTOGRAM["stamped"] == 30
+        text = report(result)
+        assert "does not reconcile" not in text
+        assert "WARNING" not in text
+
+    def test_none_means_unbounded(self) -> None:
+        runner, written = self._runner_recording()
+        pages = [[_dirty_item(pg * 20 + i) for i in range(20)] for pg in range(5)]
+        search = _multi_page_search(pages, total=100)
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = search
+            result = runner.run_migration(
+                "test-col", fix_zarr_media_type, "fix_zarr_media_type", max_writes=None
+            )
+
+        assert len(written) == 100
+        assert result.reached_max_writes is False
+
+    def test_budget_larger_than_collection_is_not_flagged(self) -> None:
+        runner, written = self._runner_recording()
+        search = _multi_page_search([[_dirty_item(i) for i in range(10)]], total=10)
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = search
+            result = runner.run_migration(
+                "test-col", fix_zarr_media_type, "fix_zarr_media_type", max_writes=999
+            )
+
+        assert len(written) == 10
+        assert result.reached_max_writes is False  # finished naturally, not bounded
+
+    def test_skips_do_not_consume_budget(self) -> None:
+        """The prod head is ~21k already-stamped items. A budget must be spent on
+        real writes, not burned by skips, or a bounded run does nothing."""
+        runner, written = self._runner_recording()
+        page = [_clean_item(i) for i in range(50)] + [_dirty_item(i) for i in range(20)]
+        search = _multi_page_search([page], total=70)
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = search
+            result = runner.run_migration(
+                "test-col", fix_zarr_media_type, "fix_zarr_media_type", max_writes=5
+            )
+
+        assert len(written) == 5
+        assert result.items_skipped == 50  # all skips seen, none consumed budget
+
+    def test_dry_run_bound_counts_would_be_writes(self) -> None:
+        runner, written = self._runner_recording()
+        pages = [[_dirty_item(pg * 20 + i) for i in range(20)] for pg in range(10)]
+        search = _multi_page_search(pages, total=200)
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = search
+            result = runner.run_migration(
+                "test-col",
+                fix_zarr_media_type,
+                "fix_zarr_media_type",
+                dry_run=True,
+                max_writes=15,
+            )
+
+        assert result.items_modified == 15
+        assert written == []
+        assert result.reached_max_writes is True
+
+    def test_negative_max_writes_rejected(self) -> None:
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        search = _make_mock_search([_dirty_item(0)], total=1)
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = search
+            with pytest.raises(ValueError, match="max_writes must be >= 1"):
+                runner.run_migration("c", fix_zarr_media_type, "m", max_writes=0)
 
 
 class TestInterruptCancelsQueuedWrites:

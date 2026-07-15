@@ -21,6 +21,9 @@ class MigrationResult:
     # True when the run stopped early on consecutive write failures rather than
     # reaching the end of the collection — the counters are a partial tally.
     aborted: bool = False
+    # True when the run stopped because --max-writes was reached. Unlike `aborted`
+    # this is a success: the operator asked for a bounded run and got exactly that.
+    reached_max_writes: bool = False
 
 
 def apply_item_transform(

@@ -73,6 +73,16 @@ def cli(ctx: click.Context, api_url: str | None, history_file: str | None, verbo
         "this bounds the damage. Recover via the run's .migration_recovery_*.jsonl."
     ),
 )
+@click.option(
+    "--max-writes",
+    default=None,
+    type=click.IntRange(1, None),
+    help=(
+        "Stop cleanly after modifying N items (a bounded first run). Use this "
+        "instead of killing the process: a write is DELETE-then-POST, so a kill can "
+        "leave items deleted-but-not-restored. Skipped items don't consume the budget."
+    ),
+)
 @click.pass_context
 def run(
     ctx: click.Context,
@@ -83,6 +93,7 @@ def run(
     page_size: int,
     concurrency: int,
     max_consecutive_failures: int,
+    max_writes: int | None,
 ) -> None:
     """Run one or more migrations on a collection."""
     for name in migration_names:
@@ -125,15 +136,37 @@ def run(
         selected.reset()  # clear any accumulated per-run state before this run
 
     runner = STACMigrationRunner(api_url, recovery_dir=history_file.parent)
-    result = runner.run_migration(
-        collection_id,
-        migration_fn,
-        migration_name,
-        dry_run=dry_run,
-        page_size=page_size,
-        concurrency=concurrency,
-        max_consecutive_failures=max_consecutive_failures,
-    )
+    try:
+        result = runner.run_migration(
+            collection_id,
+            migration_fn,
+            migration_name,
+            dry_run=dry_run,
+            page_size=page_size,
+            concurrency=concurrency,
+            max_consecutive_failures=max_consecutive_failures,
+            max_writes=max_writes,
+        )
+    except KeyboardInterrupt:
+        # Queued writes were cancelled and in-flight ones finished their DELETE+POST,
+        # so nothing is torn — but the tally is lost with the stack, so say what to do
+        # rather than dump a traceback. --max-writes is the supported way to bound.
+        click.echo("\nInterrupted.", err=True)
+        click.echo(
+            "Queued writes were cancelled; in-flight writes completed, so no item "
+            "should be left between its DELETE and POST.",
+            err=True,
+        )
+        click.echo(
+            f"This run's tally was NOT recorded to {history_file}. The migration is "
+            "idempotent — re-run to continue where it left off.",
+            err=True,
+        )
+        click.echo(
+            "To stop at a set point instead of interrupting, use --max-writes N.",
+            err=True,
+        )
+        sys.exit(130)  # 128 + SIGINT
 
     click.echo()
     click.echo("=" * 50)
@@ -145,6 +178,8 @@ def run(
         click.echo(f"  Items failed:                 {result.items_failed}", err=True)
         for err in result.errors[:5]:
             click.echo(f"    - {err['item_id']}: {err['error']}", err=True)
+    if result.reached_max_writes:
+        click.echo(f"  Stopped early: --max-writes {max_writes} reached (bounded run)")
     if selected is not None and selected.reporter is not None:
         click.echo(selected.reporter(result))
     click.echo("=" * 50)
