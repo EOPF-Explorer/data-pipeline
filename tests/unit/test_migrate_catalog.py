@@ -1400,6 +1400,95 @@ class TestMaxWrites:
         assert len(written) == 10
         assert result.reached_max_writes is False  # finished naturally, not bounded
 
+    def test_budget_exactly_equal_to_writable_size_is_not_flagged(self) -> None:
+        """Budget == what the collection needs: the run finished, it wasn't cut
+        short, so reached_max_writes stays False (same as budget > collection)."""
+        runner, written = self._runner_recording()
+        search = _multi_page_search([[_dirty_item(i) for i in range(10)]], total=10)
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = search
+            result = runner.run_migration(
+                "test-col", fix_zarr_media_type, "fix_zarr_media_type", max_writes=10
+            )
+
+        assert len(written) == 10
+        assert result.reached_max_writes is False
+
+    def test_failed_writes_consume_budget(self) -> None:
+        """max_writes bounds ATTEMPTS, not successes — a failed write may already
+        have landed its DELETE, so it has spent real blast radius. Counting only
+        successes would keep retrying past N on exactly the failing run you most
+        want bounded."""
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        lock = threading.Lock()
+        attempts: list[str] = []
+
+        def record(collection_id, item_id, item_dict):  # noqa: ANN001, ANN202
+            with lock:
+                attempts.append(item_id)
+                n = len(attempts)
+            if n % 2 == 0:
+                raise RuntimeError("503")
+
+        runner._update_item = record  # type: ignore[method-assign]
+        pages = [[_dirty_item(pg * 20 + i) for i in range(20)] for pg in range(10)]
+        search = _multi_page_search(pages, total=200)
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = search
+            result = runner.run_migration(
+                "test-col",
+                fix_zarr_media_type,
+                "fix_zarr_media_type",
+                max_writes=10,
+                max_consecutive_failures=0,
+            )
+
+        assert len(attempts) == 10, "budget bounds attempts, not successes"
+        assert result.items_modified + result.items_failed == 10
+        assert result.items_failed > 0
+        assert result.items_modified < 10  # fewer modified than the budget, by design
+
+    def test_stops_fetching_pages_once_budget_is_spent(self) -> None:
+        """The page-level break must stop PAGINATION too, not just the writes.
+
+        Without it the item-level check still yields exactly N writes, so the tally
+        looks right — but the run keeps fetching every remaining page. At prod scale
+        (191k items, page_size 100, budget 10k) that is ~1,810 pointless POST /search
+        round-trips against the API whose latency the bounded run exists to watch,
+        while the tool appears hung.
+        """
+        runner, written = self._runner_recording()
+        pages = [[_dirty_item(pg * 20 + i) for i in range(20)] for pg in range(50)]
+        fetched: list[int] = []
+
+        def page_gen():  # noqa: ANN202
+            for i, p in enumerate(pages):
+                fetched.append(i)
+                mocks = []
+                for d in p:
+                    m = MagicMock()
+                    m.to_dict.return_value = d
+                    mocks.append(m)
+                page = MagicMock()
+                page.items = mocks
+                yield page
+
+        search = MagicMock()
+        search.matched.return_value = 1000
+        search.pages.side_effect = lambda: page_gen()
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = search
+            runner.run_migration(
+                "test-col", fix_zarr_media_type, "fix_zarr_media_type", max_writes=25
+            )
+
+        assert len(written) == 25
+        # 25 writes needs pages 1-2 (20 + 5); page 2 also trips the flag.
+        assert len(fetched) <= 3, f"kept paginating after the budget: {len(fetched)} pages fetched"
+
     def test_skips_do_not_consume_budget(self) -> None:
         """The prod head is ~21k already-stamped items. A budget must be spent on
         real writes, not burned by skips, or a bounded run does nothing."""
@@ -1687,3 +1776,109 @@ class TestConcurrencyCliOption:
         )
         assert res.exit_code == 0, res.output
         assert runner_inst.run_migration.call_args.kwargs["concurrency"] == 1
+
+    def test_max_writes_flag_is_forwarded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """THE test for the incident. A bound the CLI parses, advertises in --help,
+        and then quietly drops is worse than no bound at all: the operator believes
+        the run is capped at 10k and it runs to 191k. Pin the wire, not just the
+        mechanism."""
+        res, runner_inst = self._invoke(
+            monkeypatch,
+            [
+                "run",
+                "coll",
+                "--migration",
+                "fix_url_encoding",
+                "--dry-run",
+                "--max-writes",
+                "10000",
+            ],
+        )
+        assert res.exit_code == 0, res.output
+        assert runner_inst.run_migration.call_args.kwargs["max_writes"] == 10000
+
+    def test_max_writes_defaults_to_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        res, runner_inst = self._invoke(
+            monkeypatch, ["run", "coll", "--migration", "fix_url_encoding", "--dry-run"]
+        )
+        assert res.exit_code == 0, res.output
+        assert runner_inst.run_migration.call_args.kwargs["max_writes"] is None
+
+    def test_max_consecutive_failures_flag_is_forwarded(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        res, runner_inst = self._invoke(
+            monkeypatch,
+            [
+                "run",
+                "coll",
+                "--migration",
+                "fix_url_encoding",
+                "--dry-run",
+                "--max-consecutive-failures",
+                "3",
+            ],
+        )
+        assert res.exit_code == 0, res.output
+        assert runner_inst.run_migration.call_args.kwargs["max_consecutive_failures"] == 3
+
+    def test_max_writes_rejects_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        res, _ = self._invoke(
+            monkeypatch,
+            ["run", "coll", "--migration", "fix_url_encoding", "--dry-run", "--max-writes", "0"],
+        )
+        assert res.exit_code != 0  # click.IntRange(1, None) rejects it
+
+
+class TestCliStopPaths:
+    def _climod(self):  # noqa: ANN202
+        import importlib
+
+        return importlib.import_module("_migrate_catalog.cli")
+
+    def test_keyboard_interrupt_exits_130_and_points_at_max_writes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An operator's wrapper keys on the exit code, and the operator needs to be
+        told the tally is gone and that --max-writes is the supported bound."""
+        from click.testing import CliRunner
+
+        climod = self._climod()
+        runner_inst = MagicMock()
+        runner_inst.run_migration.side_effect = KeyboardInterrupt
+        monkeypatch.setattr(climod, "STACMigrationRunner", lambda *a, **k: runner_inst)
+
+        res = CliRunner().invoke(
+            climod.cli, ["run", "coll", "--migration", "fix_url_encoding", "--yes"]
+        )
+
+        assert res.exit_code == 130, f"expected 128+SIGINT, got {res.exit_code}"
+        assert "--max-writes" in res.output
+        assert "idempotent" in res.output
+
+    def test_bounded_run_is_not_labelled_a_success_when_it_also_aborted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """aborted + reached_max_writes can both be set (budget spent on the same
+        page the breaker trips). "(bounded run)" must not appear over a run that the
+        API was rejecting wholesale — that reads as "went to plan"."""
+        from click.testing import CliRunner
+
+        climod = self._climod()
+        runner_inst = MagicMock()
+        result = _result(processed=25, modified=0, skipped=0, failed=25)
+        result.aborted = True
+        result.reached_max_writes = True
+        runner_inst.run_migration.return_value = result
+        monkeypatch.setattr(climod, "STACMigrationRunner", lambda *a, **k: runner_inst)
+        monkeypatch.setattr(climod, "record_run", lambda *a, **k: None)
+        monkeypatch.setattr(climod, "was_migration_run", lambda *a, **k: False)
+
+        res = CliRunner().invoke(
+            climod.cli,
+            ["run", "coll", "--migration", "fix_url_encoding", "--yes", "--max-writes", "25"],
+        )
+
+        assert res.exit_code == 1  # the abort dominates
+        assert "ABORTED" in res.output
+        assert "bounded run" not in res.output, "an aborted run must not read as a success"

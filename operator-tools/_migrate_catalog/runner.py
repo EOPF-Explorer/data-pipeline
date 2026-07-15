@@ -153,8 +153,12 @@ class STACMigrationRunner:
         (see the circuit breaker below); 0 disables it and restores run-to-completion.
         Sets `result.aborted`.
 
-        max_writes bounds a run to N modified items and then stops cleanly, setting
-        `result.reached_max_writes`. Use it for a bounded first run instead of
+        max_writes bounds a run to N *attempted* writes and then stops cleanly,
+        setting `result.reached_max_writes`. A failed write still counts against the
+        budget: its DELETE may already have landed, so it has spent real blast
+        radius, and counting only successes would keep retrying past N on exactly
+        the failing run you most want bounded. Skips are free (the head of a
+        collection is typically already migrated). Use it for a bounded run rather than
         killing the process: the unit of work is a non-atomic DELETE-then-POST, so
         a kill can leave items deleted-but-not-restored, and a signal-based stop is
         unreliable anyway (a process backgrounded from a non-interactive shell

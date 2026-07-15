@@ -149,8 +149,10 @@ uv run operator-tools/manage_collections.py delete sentinel-2-l2a-staging-backup
 
 A migration's per-item write is a `DELETE`+`POST` round-trip, so a sequential run is
 latency-bound (~5–6k items/hour against prod). `--concurrency N` dispatches those writes to a
-thread pool, which scales this I/O-bound work almost linearly (~8 workers ≈ 8× faster; a ~191k
-item backfill drops from ~30h to ~2–3h).
+thread pool. Measured against the real API on a throwaway 1000-item collection: **6.25× at 8
+workers** (344s → 55s). Applied to the ~5–6k items/hour prod baseline, a ~170k-item backfill drops
+from ~31h to roughly ~5h. Quote the ratio, not the absolute rate — a small collection writes
+faster than a 191k-row one.
 
 ```bash
 uv run operator-tools/migrate_catalog.py run sentinel-2-l2a \
@@ -178,9 +180,10 @@ DELETE+POST. Note the run's tally is lost with the stack, so nothing is written 
 ### Bounded first run — use `--max-writes`, never a kill
 
 For a bounded first run ("stamp a few thousand, watch the rate and read latency"), use
-`--max-writes N`. It stops cleanly at an item boundary once N items have been modified, then
-reports and records the run normally. Skipped items don't consume the budget, which matters
-because the head of a collection is typically already migrated.
+`--max-writes N`. It stops cleanly at an item boundary once N writes have been *attempted*, then
+reports and records the run normally. Failed writes count against N (their DELETE may already
+have landed, so they spent real blast radius); skipped items do not, which matters because the
+head of a collection is typically already migrated.
 
 ```bash
 uv run operator-tools/migrate_catalog.py run sentinel-2-l2a \
@@ -236,7 +239,7 @@ Commands:
     --page-size INT   (default: 100)       Items fetched per API page
     --concurrency INT (default: 1)         Parallel workers for the per-item writes
     --max-consecutive-failures INT (25)    Stop after N back-to-back write failures (0=off)
-    --max-writes INT                       Stop cleanly after modifying N items
+    --max-writes INT                       Stop cleanly after attempting N writes
   verify COLLECTION_ID                     Check if migration is fully applied
     --migration TEXT  (repeatable)         Migration(s) to verify
     --page-size INT   (default: 100)       Items fetched per API page

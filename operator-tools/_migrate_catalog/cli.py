@@ -78,9 +78,10 @@ def cli(ctx: click.Context, api_url: str | None, history_file: str | None, verbo
     default=None,
     type=click.IntRange(1, None),
     help=(
-        "Stop cleanly after modifying N items (a bounded first run). Use this "
-        "instead of killing the process: a write is DELETE-then-POST, so a kill can "
-        "leave items deleted-but-not-restored. Skipped items don't consume the budget."
+        "Stop cleanly after ATTEMPTING N writes (a bounded first run). Failed writes "
+        "count against N — their DELETE may already have landed. Skipped items do not. "
+        "Use this instead of killing the process: a write is DELETE-then-POST, so a "
+        "kill can leave items deleted-but-not-restored."
     ),
 )
 @click.pass_context
@@ -149,8 +150,10 @@ def run(
         )
     except KeyboardInterrupt:
         # Queued writes were cancelled and in-flight ones finished their DELETE+POST,
-        # so nothing is torn — but the tally is lost with the stack, so say what to do
-        # rather than dump a traceback. --max-writes is the supported way to bound.
+        # so nothing is torn — but the tally is lost with the stack. Click would
+        # otherwise turn this into a bare "Aborted!" (exit 1), which says nothing
+        # about what was written or what to do next, and is indistinguishable from a
+        # declined confirmation prompt. --max-writes is the supported way to bound.
         click.echo("\nInterrupted.", err=True)
         click.echo(
             "Queued writes were cancelled; in-flight writes completed, so no item "
@@ -178,7 +181,9 @@ def run(
         click.echo(f"  Items failed:                 {result.items_failed}", err=True)
         for err in result.errors[:5]:
             click.echo(f"    - {err['item_id']}: {err['error']}", err=True)
-    if result.reached_max_writes:
+    # Both flags can be set (the budget runs out on the same page the breaker trips).
+    # An abort is the more serious outcome, so don't also label it a tidy bounded run.
+    if result.reached_max_writes and not result.aborted:
         click.echo(f"  Stopped early: --max-writes {max_writes} reached (bounded run)")
     if selected is not None and selected.reporter is not None:
         click.echo(selected.reporter(result))
