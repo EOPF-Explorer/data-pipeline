@@ -42,6 +42,7 @@ RUN adduser -D -h /home/appuser -s /bin/sh appuser
 WORKDIR /app
 
 COPY scripts/ /app/scripts/
+COPY operator-tools/ /app/operator-tools/
 # Remove test helpers (no purpose in production) and set ownership in one layer
 RUN find /app/scripts -name 'test_*.py' -delete \
     && chown -R appuser:appuser /app
