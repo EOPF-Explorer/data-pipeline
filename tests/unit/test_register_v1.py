@@ -201,9 +201,7 @@ class TestResolveExcludeIds:
     """resolve_exclude_ids reads the demo denylist; when the env is unset it
     falls back to the baked file so demo protection is never accidentally off."""
 
-    def test_unset_falls_back_to_baked_demo_file(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_unset_falls_back_to_baked_demo_file(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # A forgotten EXPIRES_EXCLUDE_FILE must NOT unprotect demo scenes — the
         # baked /app/scripts/demo_exclude_ids.txt is used by default (coordination#183).
         from s3_item_cleanup import BAKED_EXCLUDE_FILE, load_exclude_ids

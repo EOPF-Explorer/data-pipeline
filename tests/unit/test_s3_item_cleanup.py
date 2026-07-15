@@ -11,10 +11,13 @@ boto3 is fully mocked — no network, no AWS.
 """
 
 import importlib.util
+import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+import s3_item_cleanup as sic
 from s3_item_cleanup import (
     BAKED_EXCLUDE_FILE,
     DEFAULT_RETENTION_DAYS,
@@ -244,30 +247,45 @@ class TestResolveExcludeIds:
     forgets EXPIRES_EXCLUDE_FILE cannot leave demo scenes unprotected
     (coordination#183). Precedence: explicit path > env > baked file."""
 
-    def test_baked_file_ships_with_the_image(self) -> None:
-        # The fallback is only real protection if the file is actually present.
+    def test_baked_file_is_present_and_non_empty(self) -> None:
+        # The fallback is only real protection if the file is actually there. This
+        # guards the source tree; `docker/Dockerfile`'s `COPY scripts/ /app/scripts/`
+        # is what carries it into the image (.dockerignore excludes *.md, not *.txt).
         assert BAKED_EXCLUDE_FILE.exists()
         assert load_exclude_ids(str(BAKED_EXCLUDE_FILE))  # non-empty
 
-    def test_unset_falls_back_to_baked(self, monkeypatch: object) -> None:
-        monkeypatch.delenv("EXPIRES_EXCLUDE_FILE", raising=False)  # type: ignore[attr-defined]
+    def test_unset_falls_back_to_baked(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("EXPIRES_EXCLUDE_FILE", raising=False)
         assert resolve_exclude_ids() == load_exclude_ids(str(BAKED_EXCLUDE_FILE))
 
-    def test_env_overrides_baked(self, monkeypatch: object, tmp_path: Path) -> None:
+    def test_env_overrides_baked(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         f = tmp_path / "env.txt"
         f.write_text("env-a\nenv-b\n")
-        monkeypatch.setenv("EXPIRES_EXCLUDE_FILE", str(f))  # type: ignore[attr-defined]
+        monkeypatch.setenv("EXPIRES_EXCLUDE_FILE", str(f))
         assert resolve_exclude_ids() == {"env-a", "env-b"}
 
     def test_explicit_path_overrides_env_and_baked(
-        self, monkeypatch: object, tmp_path: Path
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         env_f = tmp_path / "env.txt"
         env_f.write_text("env-a\n")
-        monkeypatch.setenv("EXPIRES_EXCLUDE_FILE", str(env_f))  # type: ignore[attr-defined]
+        monkeypatch.setenv("EXPIRES_EXCLUDE_FILE", str(env_f))
         explicit = tmp_path / "explicit.txt"
         explicit.write_text("explicit-a\nexplicit-b\n")
         assert resolve_exclude_ids(str(explicit)) == {"explicit-a", "explicit-b"}
+
+    def test_missing_baked_file_warns_instead_of_silently_unprotecting(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        # Losing the baked list reverts to the opt-in behaviour this function removes.
+        # That must never happen quietly — an operator has to be able to see it.
+        monkeypatch.delenv("EXPIRES_EXCLUDE_FILE", raising=False)
+        monkeypatch.setattr(sic, "BAKED_EXCLUDE_FILE", tmp_path / "absent.txt")
+
+        with caplog.at_level(logging.WARNING, logger=sic.__name__):
+            assert resolve_exclude_ids() == set()
+
+        assert "Demo protection is OFF" in caplog.text
 
 
 def test_consumers_share_one_format_helper() -> None:

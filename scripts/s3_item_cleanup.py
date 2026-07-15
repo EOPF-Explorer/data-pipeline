@@ -97,8 +97,19 @@ def resolve_exclude_ids(explicit_path: str | None = None) -> set[str]:
     (coordination#183). Set ``EXPIRES_EXCLUDE_FILE`` to override/extend the list.
     """
     path = explicit_path or os.getenv("EXPIRES_EXCLUDE_FILE")
-    if not path and BAKED_EXCLUDE_FILE.exists():
-        path = str(BAKED_EXCLUDE_FILE)
+    if not path:
+        if BAKED_EXCLUDE_FILE.exists():
+            path = str(BAKED_EXCLUDE_FILE)
+        else:
+            # Never fail open *silently*: with nothing configured and no baked list
+            # we are back to the opt-in behaviour this function exists to remove,
+            # so say so loudly rather than quietly returning "no demos protected".
+            logger.warning(
+                "Demo protection is OFF: no explicit path, no $EXPIRES_EXCLUDE_FILE, "
+                "and the baked denylist is missing at %s. Demo scenes may be stamped "
+                "with `expires` and later deleted (coordination#183).",
+                BAKED_EXCLUDE_FILE,
+            )
     return load_exclude_ids(path)
 
 
