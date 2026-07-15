@@ -428,6 +428,71 @@ def test_write_only_identity_fails_in_prestage_not_later_in_convert(
     assert "credential" in text or "aws_access_key_id" in text
 
 
+def _deny_listing(fake, monkeypatch):
+    def _boom(operation):
+        raise ClientError({"Error": {"Code": "AccessDenied", "Message": "Denied"}}, "ListObjectsV2")
+
+    monkeypatch.setattr(fake, "get_paginator", _boom)
+
+
+def test_dest_listing_denied_names_the_credential(tmp_path, clients, monkeypatch, caplog):
+    """Losing ListBucket must not surface as a bare traceback."""
+    _, dest = clients
+    _deny_listing(dest, monkeypatch)
+
+    rc = prestage_source.main(_argv(tmp_path))
+
+    assert rc == 1
+    text = caplog.text.lower()
+    assert "traceback" not in text
+    assert "geozarr-s3-credentials" in text
+    assert not (tmp_path / "convert_source_url").exists()
+
+
+def test_source_listing_denied_points_at_eodc_access(tmp_path, clients, monkeypatch, caplog):
+    """A source denial is a different fix from a dest denial — say which."""
+    source, _ = clients
+    _deny_listing(source, monkeypatch)
+
+    rc = prestage_source.main(_argv(tmp_path))
+
+    assert rc == 1
+    text = caplog.text.lower()
+    assert "eodc" in text
+    assert "anonymous" in text
+    assert (
+        "geozarr-s3-credentials" not in text
+    ), "must not blame the OVH identity for an EODC denial"
+
+
+def test_an_unexpected_s3_error_is_reported_not_raised(tmp_path, clients, monkeypatch, caplog):
+    """Any other S3 failure (here: PutObject denied) still exits cleanly."""
+    _, dest = clients
+
+    def _denied_put(Bucket, Key, Body):  # noqa: N803
+        raise ClientError({"Error": {"Code": "AccessDenied", "Message": "Denied"}}, "PutObject")
+
+    monkeypatch.setattr(dest, "put_object", _denied_put)
+
+    rc = prestage_source.main(_argv(tmp_path))
+
+    assert rc == 1
+    assert "accessdenied" in caplog.text.lower()
+    assert not (tmp_path / "convert_source_url").exists()
+
+
+def test_cleanup_listing_denied_is_reported_cleanly(tmp_path, monkeypatch, caplog):
+    """cleanup runs with continueOn.failed, so its message is the only diagnostic."""
+    dest = FakeS3()
+    monkeypatch.setattr(prestage_source, "_dest_client", lambda: dest)
+    _deny_listing(dest, monkeypatch)
+
+    rc = prestage_source.main(_argv(tmp_path, **{"--mode": "cleanup"}))
+
+    assert rc == 1
+    assert "traceback" not in caplog.text.lower()
+
+
 def test_verification_catches_byte_total_mismatch(tmp_path, clients, monkeypatch):
     """Equal object counts but unequal bytes is still a bad stage."""
     source, dest = clients

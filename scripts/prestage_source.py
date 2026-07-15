@@ -175,12 +175,34 @@ def _dest_client() -> Any:
     )
 
 
-def _list_objects(client: Any, bucket: str, prefix: str) -> dict[str, ObjectMeta]:
-    """List ``prefix`` as ``{key: (size, etag)}``."""
+# Which identity a failure belongs to. A denial on the source and a denial on the
+# destination need completely different fixes, so they must never share a message.
+SOURCE_HINT = (
+    "This reads EODC, which normally allows anonymous access to the product buckets. "
+    "If EODC_ACCESS_KEY_ID is set (eodc-s3-credentials), the key may be wrong or expired "
+    "— unsetting it falls back to anonymous."
+)
+DEST_HINT = (
+    "This is the AWS_* identity (geozarr-s3-credentials). It needs ListBucket, PutObject "
+    "and GetObject on the staged prefix — convert reads the staged copy with these same "
+    "credentials, so a gap here breaks convert too, as an opaque read error."
+)
+
+
+def _list_objects(client: Any, bucket: str, prefix: str, *, hint: str) -> dict[str, ObjectMeta]:
+    """List ``prefix`` as ``{key: (size, etag)}``.
+
+    `hint` names the identity this listing uses, so a permission failure reports the
+    thing that needs fixing instead of an unattributed traceback.
+    """
     objects: dict[str, ObjectMeta] = {}
-    for page in client.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
-        for obj in page.get("Contents", []):
-            objects[obj["Key"]] = (obj["Size"], obj["ETag"].strip('"'))
+    try:
+        for page in client.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=prefix):
+            for obj in page.get("Contents", []):
+                objects[obj["Key"]] = (obj["Size"], obj["ETag"].strip('"'))
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "?")
+        raise ValueError(f"Cannot list s3://{bucket}/{prefix} ({code}). {hint}") from exc
     return objects
 
 
@@ -259,7 +281,7 @@ def run_prestage(args: argparse.Namespace) -> int:
     source_client = _source_client(source.endpoint)
     dest_client = _dest_client()
 
-    source_objects = _list_objects(source_client, source.bucket, source_prefix)
+    source_objects = _list_objects(source_client, source.bucket, source_prefix, hint=SOURCE_HINT)
     if not source_objects:
         logger.error("No objects under s3://%s/%s — nothing to stage", source.bucket, source_prefix)
         return 3
@@ -272,7 +294,7 @@ def run_prestage(args: argparse.Namespace) -> int:
         dest_root,
     )
 
-    already_staged = _list_objects(dest_client, args.dest_bucket, dest_root)
+    already_staged = _list_objects(dest_client, args.dest_bucket, dest_root, hint=DEST_HINT)
     pending = {
         key: dest_root + key.removeprefix(source_prefix)
         for key, meta in source_objects.items()
@@ -313,7 +335,7 @@ def run_prestage(args: argparse.Namespace) -> int:
 
     # Never report a stage as usable without proving it matches the source AND that the
     # thing downstream actually does can be done to it.
-    staged_objects = _list_objects(dest_client, args.dest_bucket, dest_root)
+    staged_objects = _list_objects(dest_client, args.dest_bucket, dest_root, hint=DEST_HINT)
     staged_bytes = sum(size for size, _ in staged_objects.values())
     if len(staged_objects) != len(source_objects) or staged_bytes != source_bytes:
         logger.error(
@@ -336,7 +358,7 @@ def run_cleanup(args: argparse.Namespace) -> int:
     """Delete one staged copy. Runs after register, so leftovers are cheap, not fatal."""
     prefix = staged_prefix(args.dest_prefix, derive_item_id(args.source_url))
     dest_client = _dest_client()
-    keys = sorted(_list_objects(dest_client, args.dest_bucket, prefix))
+    keys = sorted(_list_objects(dest_client, args.dest_bucket, prefix, hint=DEST_HINT))
     if not keys:
         logger.info("Nothing staged under s3://%s/%s — already clean", args.dest_bucket, prefix)
         return 0
@@ -390,7 +412,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         return run_cleanup(args) if args.mode == "cleanup" else run_prestage(args)
-    except ValueError as exc:
+    except (ValueError, ClientError) as exc:
         logger.error("%s", exc)
         return 1
 
