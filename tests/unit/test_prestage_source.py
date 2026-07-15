@@ -134,9 +134,17 @@ def _argv(tmp_path: Path, **overrides: str) -> list[str]:
         "--source-url": STAC_ITEM_URL,
         "--dest-bucket": "esa-zarr-sentinel-explorer-fra",
         "--output-dir": str(tmp_path),
+        # In-cluster this arrives as POD_NAMESPACE via the downward API, not as a flag.
+        "--namespace": "devseed-staging",
         **overrides,
     }
     return [item for pair in args.items() for item in pair]
+
+
+def _argv_without_namespace(tmp_path: Path, **overrides: str) -> list[str]:
+    argv = _argv(tmp_path, **overrides)
+    i = argv.index("--namespace")
+    return argv[:i] + argv[i + 2 :]
 
 
 def _outputs(tmp_path: Path) -> tuple[str, str]:
@@ -190,27 +198,57 @@ def test_parse_href_keeps_non_default_port():
 # ---------------------------------------------------------------------------
 
 
+NS = "devseed-staging"
+
+
 def test_staged_prefix_has_no_zarr_suffix():
     """Convert re-derives item_id from the staged URL, so the staged segment must
     equal item_id exactly — a .zarr suffix here would produce item.zarr.zarr output."""
-    assert prestage_source.staged_prefix("source-cache", ITEM_ID) == f"source-cache/{ITEM_ID}/"
+    assert prestage_source.staged_prefix("source-cache", NS, ITEM_ID) == (
+        f"source-cache/{NS}/{ITEM_ID}/"
+    )
 
 
 def test_staged_url_is_native_s3():
-    url = prestage_source.staged_url("my-bucket", "source-cache", ITEM_ID)
+    url = prestage_source.staged_url("my-bucket", "source-cache", NS, ITEM_ID)
 
-    assert url == f"s3://my-bucket/source-cache/{ITEM_ID}"
+    assert url == f"s3://my-bucket/source-cache/{NS}/{ITEM_ID}"
+
+
+def test_namespaces_never_share_a_staged_key():
+    """devseed and devseed-staging share this bucket AND s3_output_prefix. Converted
+    output only escapes collision because its path carries the collection; the staged key
+    has no such discriminator and item_id is identical across namespaces. Without this
+    segment, one namespace's cleanup deletes the other's copy mid-convert.
+    """
+    staging = prestage_source.staged_prefix("source-cache", "devseed-staging", ITEM_ID)
+    prod = prestage_source.staged_prefix("source-cache", "devseed", ITEM_ID)
+
+    assert staging != prod
+    assert not staging.startswith(prod), "prod's prefix must not cover staging's keys"
+    # One lifecycle rule on source-cache/ must still reach both.
+    assert staging.startswith("source-cache/") and prod.startswith("source-cache/")
+
+
+@pytest.mark.parametrize("namespace", ["", "/", "   "])
+def test_staged_prefix_refuses_an_empty_namespace_segment(namespace):
+    """The namespace comes from the downward API. If it is ever missing, failing is the
+    only safe move — falling back to an unscoped prefix would silently reintroduce the
+    cross-namespace collision, which is exactly the bug this segment exists to prevent.
+    """
+    with pytest.raises(ValueError, match="namespace"):
+        prestage_source.staged_prefix("source-cache", namespace, ITEM_ID)
 
 
 @pytest.mark.parametrize("item_id", ["", "/", "   "])
 def test_staged_prefix_refuses_empty_item_segment(item_id):
     with pytest.raises(ValueError, match="item"):
-        prestage_source.staged_prefix("source-cache", item_id)
+        prestage_source.staged_prefix("source-cache", NS, item_id)
 
 
 def test_staged_prefix_refuses_empty_dest_prefix():
     with pytest.raises(ValueError, match="dest_prefix"):
-        prestage_source.staged_prefix("", ITEM_ID)
+        prestage_source.staged_prefix("", NS, ITEM_ID)
 
 
 # ---------------------------------------------------------------------------
@@ -266,9 +304,9 @@ def test_copy_stages_every_object_and_reports_staged_s3_url(tmp_path, clients):
 
     assert rc == 0
     staged_keys = {key for (_b, key) in dest.objects}
-    assert staged_keys == {f"source-cache/{ITEM_ID}/{key}" for key in SOURCE_KEYS}
+    assert staged_keys == {f"source-cache/{NS}/{ITEM_ID}/{key}" for key in SOURCE_KEYS}
     assert _outputs(tmp_path) == (
-        f"s3://esa-zarr-sentinel-explorer-fra/source-cache/{ITEM_ID}",
+        f"s3://esa-zarr-sentinel-explorer-fra/source-cache/{NS}/{ITEM_ID}",
         "true",
     )
 
@@ -295,12 +333,12 @@ def test_copy_stages_a_sentinel3_product_through_the_same_path(tmp_path, monkeyp
 
     assert rc == 0
     assert {key for (_b, key) in dest.objects} == {
-        f"source-cache/{S3_OLCI_ITEM_ID}/{key}" for key in olci_keys
+        f"source-cache/{NS}/{S3_OLCI_ITEM_ID}/{key}" for key in olci_keys
     }
     # The staged URL carries the Sentinel-3 id, so convert's output path and register's
     # geozarr URL agree with it exactly as they do for S2.
     assert _outputs(tmp_path) == (
-        f"s3://esa-zarr-sentinel-explorer-fra/source-cache/{S3_OLCI_ITEM_ID}",
+        f"s3://esa-zarr-sentinel-explorer-fra/source-cache/{NS}/{S3_OLCI_ITEM_ID}",
         "true",
     )
 
@@ -310,10 +348,13 @@ def test_cleanup_deletes_a_sentinel3_staged_copy(tmp_path, monkeypatch):
     bucket = "esa-zarr-sentinel-explorer-fra"
     dest = FakeS3(
         {
-            (bucket, f"source-cache/{S3_OLCI_ITEM_ID}/zarr.json"): b"{}",
-            (bucket, f"source-cache/{S3_OLCI_ITEM_ID}/measurements/oa01_radiance/0.0"): b"chunk",
+            (bucket, f"source-cache/{NS}/{S3_OLCI_ITEM_ID}/zarr.json"): b"{}",
+            (
+                bucket,
+                f"source-cache/{NS}/{S3_OLCI_ITEM_ID}/measurements/oa01_radiance/0.0",
+            ): b"chunk",
             # A different mission staged alongside it must survive.
-            (bucket, f"source-cache/{ITEM_ID}/zarr.json"): b"{}",
+            (bucket, f"source-cache/{NS}/{ITEM_ID}/zarr.json"): b"{}",
         }
     )
     monkeypatch.setattr(prestage_source, "_dest_client", lambda: dest)
@@ -323,7 +364,7 @@ def test_cleanup_deletes_a_sentinel3_staged_copy(tmp_path, monkeypatch):
     )
 
     assert rc == 0
-    assert {key for (_b, key) in dest.objects} == {f"source-cache/{ITEM_ID}/zarr.json"}
+    assert {key for (_b, key) in dest.objects} == {f"source-cache/{NS}/{ITEM_ID}/zarr.json"}
 
 
 def test_copy_preserves_bytes(tmp_path, clients):
@@ -333,7 +374,7 @@ def test_copy_preserves_bytes(tmp_path, clients):
 
     chunk = "quality/atmosphere/r10m/aot/0.0"
     assert (
-        dest.objects[("esa-zarr-sentinel-explorer-fra", f"source-cache/{ITEM_ID}/{chunk}")]
+        dest.objects[("esa-zarr-sentinel-explorer-fra", f"source-cache/{NS}/{ITEM_ID}/{chunk}")]
         == (source.objects[(EODC_BUCKET, f"{EODC_KEY}/{chunk}")])
     )
 
@@ -356,7 +397,7 @@ def test_rerun_recopies_key_whose_bytes_differ(tmp_path, clients):
     """A truncated/partial staged object must not be mistaken for a good one."""
     source, dest = clients
     assert prestage_source.main(_argv(tmp_path)) == 0
-    chunk = f"source-cache/{ITEM_ID}/quality/atmosphere/r10m/aot/0.0"
+    chunk = f"source-cache/{NS}/{ITEM_ID}/quality/atmosphere/r10m/aot/0.0"
     dest.objects[("esa-zarr-sentinel-explorer-fra", chunk)] = b"truncated"
     dest.puts.clear()
 
@@ -426,6 +467,45 @@ def test_write_only_identity_fails_in_prestage_not_later_in_convert(
     text = caplog.text.lower()
     assert "read" in text
     assert "credential" in text or "aws_access_key_id" in text
+
+
+def test_namespace_comes_from_the_downward_api_env(tmp_path, clients, monkeypatch):
+    """The discriminator must come from where the pod RUNS, not from a string someone
+    typed into a template. The prod template is a near-copy of staging's, so a hand-set
+    prefix would be copy-pasted forward and silently re-share the prefix; a namespace
+    read from the pod cannot be copied wrong."""
+    monkeypatch.setenv("POD_NAMESPACE", "devseed")
+    _, dest = clients
+
+    rc = prestage_source.main(_argv_without_namespace(tmp_path))
+
+    assert rc == 0
+    url, _ = _outputs(tmp_path)
+    assert url == f"s3://esa-zarr-sentinel-explorer-fra/source-cache/devseed/{ITEM_ID}"
+    assert all(k.startswith(f"source-cache/devseed/{ITEM_ID}/") for k in dest.puts)
+
+
+def test_copy_refuses_to_run_without_a_namespace(tmp_path, clients, monkeypatch, caplog):
+    """No namespace, no staging. Falling back to an unscoped prefix would restore the
+    collision invisibly — the one outcome worse than failing."""
+    monkeypatch.delenv("POD_NAMESPACE", raising=False)
+
+    rc = prestage_source.main(_argv_without_namespace(tmp_path))
+
+    assert rc == 1
+    assert "namespace" in caplog.text.lower()
+    assert not (tmp_path / "convert_source_url").exists()
+
+
+def test_passthrough_needs_no_namespace(tmp_path, monkeypatch):
+    """Passthrough stages nothing, so it has no key to scope — it must not start
+    demanding a namespace that the prod default (flag off) has no reason to set."""
+    monkeypatch.delenv("POD_NAMESPACE", raising=False)
+
+    rc = prestage_source.main(_argv_without_namespace(tmp_path, **{"--mode": "passthrough"}))
+
+    assert rc == 0
+    assert _outputs(tmp_path) == (STAC_ITEM_URL, "false")
 
 
 def _deny_listing(fake, monkeypatch, code="AccessDenied"):
@@ -539,8 +619,8 @@ def test_cleanup_deletes_only_the_staged_item_prefix(tmp_path, monkeypatch):
     bucket = "esa-zarr-sentinel-explorer-fra"
     dest = FakeS3(
         {
-            (bucket, f"source-cache/{ITEM_ID}/zarr.json"): b"{}",
-            (bucket, f"source-cache/{ITEM_ID}/b02/c/0/0"): b"chunk",
+            (bucket, f"source-cache/{NS}/{ITEM_ID}/zarr.json"): b"{}",
+            (bucket, f"source-cache/{NS}/{ITEM_ID}/b02/c/0/0"): b"chunk",
             (bucket, "source-cache/OTHER_ITEM/zarr.json"): b"{}",
             (bucket, "tests-output/sentinel-2-l2a/live-item.zarr/zarr.json"): b"{}",
         }
@@ -551,8 +631,8 @@ def test_cleanup_deletes_only_the_staged_item_prefix(tmp_path, monkeypatch):
 
     assert rc == 0
     assert sorted(dest.deleted) == [
-        f"source-cache/{ITEM_ID}/b02/c/0/0",
-        f"source-cache/{ITEM_ID}/zarr.json",
+        f"source-cache/{NS}/{ITEM_ID}/b02/c/0/0",
+        f"source-cache/{NS}/{ITEM_ID}/zarr.json",
     ]
     assert (bucket, "source-cache/OTHER_ITEM/zarr.json") in dest.objects
     assert (bucket, "tests-output/sentinel-2-l2a/live-item.zarr/zarr.json") in dest.objects

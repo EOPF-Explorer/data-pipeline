@@ -47,9 +47,12 @@ Safety model (this deletes S3 objects, so the guards are explicit):
   gateway-hosted sources (``cpm-manual/``) must keep their existing direct path.
 - EODC is strictly read-only. Never attempt a write against the source endpoint.
 - A stage is not complete until dest object count *and* byte total match the source.
-- ``cleanup`` only ever deletes ``<dest_prefix>/<item_id>/``, and refuses to build
-  that prefix from an empty dest_prefix or an empty item segment — a bucket- or
-  prefix-wide delete must be unreachable, not merely unlikely.
+- ``cleanup`` only ever deletes ``<dest_prefix>/<namespace>/<item_id>/``, and refuses to
+  build that prefix from an empty dest_prefix, namespace or item segment — a bucket-,
+  namespace- or prefix-wide delete must be unreachable, not merely unlikely.
+- The namespace segment comes from POD_NAMESPACE (downward API), not a parameter, so two
+  namespaces sharing this bucket cannot share a staged key however the template is
+  copied. See ``staged_prefix``.
 """
 
 from __future__ import annotations
@@ -124,24 +127,44 @@ def parse_https_s3_href(href: str) -> S3Href:
     return S3Href(endpoint=f"https://{parsed.hostname}{port}", bucket=bucket, key=key.rstrip("/"))
 
 
-def staged_prefix(dest_prefix: str, item_id: str) -> str:
-    """Build the staged-copy key prefix ``<dest_prefix>/<item_id>/``.
+def staged_prefix(dest_prefix: str, namespace: str, item_id: str) -> str:
+    """Build the staged-copy key prefix ``<dest_prefix>/<namespace>/<item_id>/``.
 
-    This is the only place a staged prefix is constructed, so it is also the place
-    that refuses to build one wide enough to delete more than a single item.
+    This is the only place a staged prefix is constructed, so it is also the place that
+    refuses to build one wide enough to delete more than a single item — or one that a
+    different namespace could share.
+
+    The namespace segment is load-bearing. devseed and devseed-staging share both this
+    bucket and s3_output_prefix; converted output escapes collision only because its path
+    carries the collection (``.../{collection}/{item_id}.zarr``), while a staged key has
+    no such discriminator and item_id is identical across namespaces. Without the
+    segment, one namespace's cleanup deletes the other's staged copy out from under a
+    running convert — and both crons see the same recent products, so that is routine
+    rather than unlucky.
+
+    It is deliberately not a template parameter someone types: the prod convert template
+    is a near-copy of staging's, so a hand-set value gets copy-pasted forward and
+    silently re-shares the prefix. It comes from the pod's own namespace (downward API),
+    which cannot be copied wrong.
     """
     base = dest_prefix.strip("/").strip()
+    ns = namespace.strip("/").strip()
     item = item_id.strip("/").strip()
     if not base:
         raise ValueError("dest_prefix must not be empty — refusing to address a whole bucket")
+    if not ns:
+        raise ValueError(
+            "empty namespace segment — refusing to build a staged prefix that another "
+            "namespace could share (set POD_NAMESPACE via the downward API, or --namespace)"
+        )
     if not item:
-        raise ValueError(f"empty item segment — refusing to address all of {base!r}")
-    return f"{base}/{item}/"
+        raise ValueError(f"empty item segment — refusing to address all of {base}/{ns}")
+    return f"{base}/{ns}/{item}/"
 
 
-def staged_url(dest_bucket: str, dest_prefix: str, item_id: str) -> str:
+def staged_url(dest_bucket: str, dest_prefix: str, namespace: str, item_id: str) -> str:
     """Native ``s3://`` URL of the staged copy — convert reads this, not https."""
-    return f"s3://{dest_bucket}/{staged_prefix(dest_prefix, item_id).rstrip('/')}"
+    return f"s3://{dest_bucket}/{staged_prefix(dest_prefix, namespace, item_id).rstrip('/')}"
 
 
 def _source_client(endpoint: str) -> Any:
@@ -324,7 +347,7 @@ def run_prestage(args: argparse.Namespace) -> int:
 
     source = parse_https_s3_href(zarr_url)
     item_id = derive_item_id(args.source_url)
-    dest_root = staged_prefix(args.dest_prefix, item_id)
+    dest_root = staged_prefix(args.dest_prefix, args.namespace, item_id)
     source_prefix = source.key + "/"
 
     source_client = _source_client(source.endpoint)
@@ -399,13 +422,17 @@ def run_prestage(args: argparse.Namespace) -> int:
 
     _assert_staged_readable(dest_client, args.dest_bucket, sorted(staged_objects)[0])
 
-    _write_outputs(args.output_dir, staged_url(args.dest_bucket, args.dest_prefix, item_id), True)
+    _write_outputs(
+        args.output_dir,
+        staged_url(args.dest_bucket, args.dest_prefix, args.namespace, item_id),
+        True,
+    )
     return 0
 
 
 def run_cleanup(args: argparse.Namespace) -> int:
     """Delete one staged copy. Runs after register, so leftovers are cheap, not fatal."""
-    prefix = staged_prefix(args.dest_prefix, derive_item_id(args.source_url))
+    prefix = staged_prefix(args.dest_prefix, args.namespace, derive_item_id(args.source_url))
     dest_client = _dest_client()
     keys = sorted(_list_objects(dest_client, args.dest_bucket, prefix, hint=DEST_HINT))
     if not keys:
@@ -451,6 +478,13 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=DEFAULT_COPY_WORKERS,
         help=f"Parallel copy threads (default: {DEFAULT_COPY_WORKERS})",
+    )
+    parser.add_argument(
+        "--namespace",
+        default=os.getenv("POD_NAMESPACE", ""),
+        help="Namespace segment for the staged key. Defaults to POD_NAMESPACE, which the "
+        "Argo template sets from the pod's own namespace (downward API) so it cannot be "
+        "copy-pasted wrong between devseed and devseed-staging, which share this bucket.",
     )
     parser.add_argument(
         "--output-dir",
