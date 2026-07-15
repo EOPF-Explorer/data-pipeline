@@ -217,6 +217,9 @@ class STACMigrationRunner:
                         # afterwards would leave items counted as processed but never
                         # written, so neither the tally nor stamp_expires' histogram
                         # would reconcile.
+                        # The flag is only raised once a further item is *inspected*,
+                        # so a budget landing exactly on a page boundary costs one
+                        # extra page fetch (no extra writes). Harmless — not a bug.
                         if max_writes is not None and budget_used >= max_writes:
                             result.reached_max_writes = True
                             break

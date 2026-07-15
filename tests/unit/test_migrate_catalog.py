@@ -594,6 +594,56 @@ class TestHistoryTracking:
 
         assert not was_migration_run(history_file, "fix_url_encoding", "sentinel-2-l2a")
 
+    def test_was_migration_run_ignores_bounded_runs(self, tmp_path, migration_result):
+        """A --max-writes run applied PART of the migration, so the next chunk must
+        not be told it was 'already applied'.
+
+        Chunking a large backfill is the designed workflow (~170k items = ~17 runs).
+        The CLI's warning prompts 'Run again?' defaulting to No, so counting a
+        bounded run as applied would tell the operator the work is done and make the
+        safe-looking default abandon the rest of the backfill.
+        """
+        history_file = tmp_path / "history.json"
+        migration_result.reached_max_writes = True
+        record_run(history_file, migration_result)
+
+        assert not was_migration_run(history_file, "fix_zarr_media_type", "sentinel-2-l2a")
+
+    def test_was_migration_run_ignores_aborted_runs(self, tmp_path, migration_result):
+        """An aborted run stopped because writes were failing wholesale — that is the
+        run that most needs re-running, so it must not read as 'already applied'."""
+        history_file = tmp_path / "history.json"
+        migration_result.aborted = True
+        record_run(history_file, migration_result)
+
+        assert not was_migration_run(history_file, "fix_zarr_media_type", "sentinel-2-l2a")
+
+    def test_was_migration_run_true_once_a_run_completes(self, tmp_path, migration_result):
+        """A bounded run followed by a completed one: the completed one counts."""
+        history_file = tmp_path / "history.json"
+        migration_result.reached_max_writes = True
+        record_run(history_file, migration_result)
+        migration_result.reached_max_writes = False  # the final, unbounded run
+        record_run(history_file, migration_result)
+
+        assert was_migration_run(history_file, "fix_zarr_media_type", "sentinel-2-l2a")
+
+    def test_was_migration_run_handles_history_predating_these_fields(
+        self, tmp_path, migration_result
+    ):
+        """Entries written before aborted/reached_max_writes existed have neither
+        key; they were full runs, so they must still count as applied."""
+        import json as _json
+
+        history_file = tmp_path / "history.json"
+        record_run(history_file, migration_result)
+        data = _json.loads(history_file.read_text())
+        data["runs"][0].pop("aborted", None)
+        data["runs"][0].pop("reached_max_writes", None)
+        history_file.write_text(_json.dumps(data))
+
+        assert was_migration_run(history_file, "fix_zarr_media_type", "sentinel-2-l2a")
+
 
 # === stamp_expires (coordination#183, Task 4) ===
 
