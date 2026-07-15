@@ -279,9 +279,9 @@ class TestResolveExcludeIds:
         # Losing the baked list reverts to the opt-in behaviour this function removes.
         # That must never happen quietly — an operator has to be able to see it.
         monkeypatch.delenv("EXPIRES_EXCLUDE_FILE", raising=False)
-        monkeypatch.setattr(sic, "BAKED_EXCLUDE_FILE", tmp_path / "absent.txt")
+        monkeypatch.setattr("s3_item_cleanup.BAKED_EXCLUDE_FILE", tmp_path / "absent.txt")
 
-        with caplog.at_level(logging.WARNING, logger=sic.__name__):
+        with caplog.at_level(logging.WARNING, logger="s3_item_cleanup"):
             assert resolve_exclude_ids() == set()
 
         assert "Demo protection is OFF" in caplog.text
