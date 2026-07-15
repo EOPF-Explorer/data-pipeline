@@ -37,7 +37,7 @@ dependencies = [
     # Pinned to data-model PR #220 head (concurrent-safe source caching + chunk-alignment,
     # fixes the fsspec simplecache race behind data-pipeline#339). Re-pin to a release tag
     # once #220 merges + a version is cut.
-    "eopf-geozarr @ git+https://github.com/EOPF-Explorer/data-model.git@da2f2c1177f9ff4373d0c647e559ae62cc642837",
+    "eopf-geozarr @ git+https://github.com/EOPF-Explorer/data-model.git@fbb104b9d681433b7fe5d98edfaf656793d50b25",
     "requests==2.34.2",
 ]
 
