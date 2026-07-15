@@ -1,0 +1,385 @@
+"""Unit tests for prestage_source.py — S3 mapping, allowlist, copy/verify, cleanup guards.
+
+No network: the S3 clients are replaced with an in-memory fake so the copy,
+skip-if-identical, verification and cleanup logic are exercised for real.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import io
+import sys
+from pathlib import Path
+
+import pytest
+
+scripts_dir = Path(__file__).parent.parent.parent / "scripts"
+sys.path.insert(0, str(scripts_dir))
+
+import prestage_source  # noqa: E402
+
+# EODC hrefs are Ceph RGW: path-style, explicit :443, and a bucket name that
+# literally contains a colon (tenant:container).
+EODC_HREF = (
+    "https://objects.eodc.eu:443/e05ab01a9d56408d82ac32d69a5aae2a:202607-s02msil2a-eu"
+    "/13/products/cpm_v270/S2B_MSIL2A_20260713T104619_N0512_R051_T31UDP_20260713T131840.zarr"
+)
+EODC_BUCKET = "e05ab01a9d56408d82ac32d69a5aae2a:202607-s02msil2a-eu"
+EODC_KEY = "13/products/cpm_v270/S2B_MSIL2A_20260713T104619_N0512_R051_T31UDP_20260713T131840.zarr"
+ITEM_ID = "S2B_MSIL2A_20260713T104619_N0512_R051_T31UDP_20260713T131840"
+STAC_ITEM_URL = f"https://stac.example.com/collections/sentinel-2-l2a/items/{ITEM_ID}"
+GATEWAY_HREF = f"https://s3.explorer.eopf.copernicus.eu/bucket/cpm-manual/{ITEM_ID}.zarr"
+
+
+# ---------------------------------------------------------------------------
+# In-memory S3 fake
+# ---------------------------------------------------------------------------
+
+
+def _etag(body: bytes) -> str:
+    return f'"{hashlib.md5(body, usedforsecurity=False).hexdigest()}"'
+
+
+class FakeS3:
+    """Minimal in-memory stand-in for the boto3 S3 client surface we use."""
+
+    def __init__(self, objects: dict[tuple[str, str], bytes] | None = None) -> None:
+        self.objects: dict[tuple[str, str], bytes] = dict(objects or {})
+        self.puts: list[str] = []
+        self.gets: list[str] = []
+        self.deleted: list[str] = []
+
+    def get_paginator(self, operation: str):
+        assert operation == "list_objects_v2"
+        return _FakePaginator(self)
+
+    def get_object(self, Bucket: str, Key: str):  # noqa: N803 (boto3 kwarg names)
+        self.gets.append(Key)
+        return {"Body": io.BytesIO(self.objects[(Bucket, Key)])}
+
+    def put_object(self, Bucket: str, Key: str, Body: bytes):  # noqa: N803
+        self.objects[(Bucket, Key)] = Body
+        self.puts.append(Key)
+        return {}
+
+    def delete_objects(self, Bucket: str, Delete: dict):  # noqa: N803
+        keys = [o["Key"] for o in Delete["Objects"]]
+        for key in keys:
+            self.objects.pop((Bucket, key), None)
+            self.deleted.append(key)
+        return {"Deleted": [{"Key": k} for k in keys]}
+
+
+class _FakePaginator:
+    def __init__(self, fake: FakeS3) -> None:
+        self.fake = fake
+
+    def paginate(self, Bucket: str, Prefix: str):  # noqa: N803
+        contents = [
+            {"Key": key, "Size": len(body), "ETag": _etag(body)}
+            for (bucket, key), body in sorted(self.fake.objects.items())
+            if bucket == Bucket and key.startswith(Prefix)
+        ]
+        # Two pages, to prove pagination is consumed rather than assumed single-page.
+        yield {"Contents": contents[:1]}
+        yield {"Contents": contents[1:]}
+
+
+# Key layout copied from a live listing of the Fontainebleau product (2026-07-15):
+# zarr v2, and `quality/atmosphere/r10m/aot/0.0` really is one 4.6 MB chunk — the
+# single-chunk array whose concurrent same-key reads trigger #339.
+SOURCE_KEYS = {
+    ".zattrs": b"{}",
+    "quality/atmosphere/r10m/aot/.zarray": b'{"chunks":[10980,10980]}',
+    "quality/atmosphere/r10m/aot/0.0": b"single-10980-squared-chunk",
+    "measurements/reflectance/r10m/b08/0.2": b"chunk-b08",
+}
+
+
+def _source_store() -> FakeS3:
+    """The source product as it actually lives under the EODC zarr root."""
+    return FakeS3({(EODC_BUCKET, f"{EODC_KEY}/{key}"): body for key, body in SOURCE_KEYS.items()})
+
+
+@pytest.fixture
+def clients(monkeypatch):
+    """Patch the client factories; return (source, dest) fakes."""
+    source, dest = _source_store(), FakeS3()
+    monkeypatch.setattr(prestage_source, "_source_client", lambda endpoint: source)
+    monkeypatch.setattr(prestage_source, "_dest_client", lambda: dest)
+    monkeypatch.setattr(prestage_source, "resolve_zarr_url", lambda url: EODC_HREF)
+    return source, dest
+
+
+def _argv(tmp_path: Path, **overrides: str) -> list[str]:
+    args = {
+        "--source-url": STAC_ITEM_URL,
+        "--dest-bucket": "esa-zarr-sentinel-explorer-fra",
+        "--output-dir": str(tmp_path),
+        **overrides,
+    }
+    return [item for pair in args.items() for item in pair]
+
+
+def _outputs(tmp_path: Path) -> tuple[str, str]:
+    return (
+        (tmp_path / "convert_source_url").read_text(),
+        (tmp_path / "staged").read_text(),
+    )
+
+
+# ---------------------------------------------------------------------------
+# href -> S3 mapping
+# ---------------------------------------------------------------------------
+
+
+def test_parse_href_maps_colon_bucket_and_strips_default_port():
+    loc = prestage_source.parse_https_s3_href(EODC_HREF)
+
+    assert loc.endpoint == "https://objects.eodc.eu"
+    assert loc.bucket == EODC_BUCKET
+    assert loc.key == EODC_KEY
+
+
+def test_parse_href_without_explicit_port():
+    loc = prestage_source.parse_https_s3_href(EODC_HREF.replace(":443", ""))
+
+    assert loc.endpoint == "https://objects.eodc.eu"
+    assert loc.bucket == EODC_BUCKET
+
+
+def test_parse_href_strips_trailing_slash():
+    assert prestage_source.parse_https_s3_href(EODC_HREF + "/").key == EODC_KEY
+
+
+def test_parse_href_keeps_non_default_port():
+    loc = prestage_source.parse_https_s3_href(EODC_HREF.replace(":443", ":8443"))
+
+    assert loc.endpoint == "https://objects.eodc.eu:8443"
+
+
+# ---------------------------------------------------------------------------
+# staged key naming + guards
+# ---------------------------------------------------------------------------
+
+
+def test_staged_prefix_has_no_zarr_suffix():
+    """Convert re-derives item_id from the staged URL, so the staged segment must
+    equal item_id exactly — a .zarr suffix here would produce item.zarr.zarr output."""
+    assert prestage_source.staged_prefix("source-cache", ITEM_ID) == f"source-cache/{ITEM_ID}/"
+
+
+def test_staged_url_is_native_s3():
+    url = prestage_source.staged_url("my-bucket", "source-cache", ITEM_ID)
+
+    assert url == f"s3://my-bucket/source-cache/{ITEM_ID}"
+
+
+@pytest.mark.parametrize("item_id", ["", "/", "   "])
+def test_staged_prefix_refuses_empty_item_segment(item_id):
+    with pytest.raises(ValueError, match="item"):
+        prestage_source.staged_prefix("source-cache", item_id)
+
+
+def test_staged_prefix_refuses_empty_dest_prefix():
+    with pytest.raises(ValueError, match="dest_prefix"):
+        prestage_source.staged_prefix("", ITEM_ID)
+
+
+# ---------------------------------------------------------------------------
+# passthrough
+# ---------------------------------------------------------------------------
+
+
+def test_passthrough_mode_echoes_source_url_without_network(tmp_path, monkeypatch):
+    """Flag off must reproduce today's behaviour exactly: convert gets the original
+    STAC item URL and nothing is contacted."""
+
+    def _boom(*_a, **_k):
+        raise AssertionError("passthrough must not touch the network")
+
+    monkeypatch.setattr(prestage_source, "_source_client", _boom)
+    monkeypatch.setattr(prestage_source, "_dest_client", _boom)
+    monkeypatch.setattr(prestage_source, "resolve_zarr_url", _boom)
+
+    rc = prestage_source.main(_argv(tmp_path, **{"--mode": "passthrough"}))
+
+    assert rc == 0
+    assert _outputs(tmp_path) == (STAC_ITEM_URL, "false")
+
+
+def test_non_allowlisted_host_falls_back_to_passthrough(tmp_path, monkeypatch):
+    """The nginx-s3-gateway answers ListObjectsV2 with an HTML index, so gateway-hosted
+    sources (cpm-manual/) must pass through untouched even with the flag on."""
+    dest = FakeS3()
+    monkeypatch.setattr(prestage_source, "resolve_zarr_url", lambda url: GATEWAY_HREF)
+    monkeypatch.setattr(prestage_source, "_dest_client", lambda: dest)
+    monkeypatch.setattr(
+        prestage_source,
+        "_source_client",
+        lambda endpoint: (_ for _ in ()).throw(AssertionError("must not copy")),
+    )
+
+    rc = prestage_source.main(_argv(tmp_path, **{"--source-url": GATEWAY_HREF}))
+
+    assert rc == 0
+    assert _outputs(tmp_path) == (GATEWAY_HREF, "false")
+    assert dest.puts == []
+
+
+# ---------------------------------------------------------------------------
+# copy + verify
+# ---------------------------------------------------------------------------
+
+
+def test_copy_stages_every_object_and_reports_staged_s3_url(tmp_path, clients):
+    source, dest = clients
+
+    rc = prestage_source.main(_argv(tmp_path))
+
+    assert rc == 0
+    staged_keys = {key for (_b, key) in dest.objects}
+    assert staged_keys == {f"source-cache/{ITEM_ID}/{key}" for key in SOURCE_KEYS}
+    assert _outputs(tmp_path) == (
+        f"s3://esa-zarr-sentinel-explorer-fra/source-cache/{ITEM_ID}",
+        "true",
+    )
+
+
+def test_copy_preserves_bytes(tmp_path, clients):
+    source, dest = clients
+
+    prestage_source.main(_argv(tmp_path))
+
+    chunk = "quality/atmosphere/r10m/aot/0.0"
+    assert (
+        dest.objects[("esa-zarr-sentinel-explorer-fra", f"source-cache/{ITEM_ID}/{chunk}")]
+        == (source.objects[(EODC_BUCKET, f"{EODC_KEY}/{chunk}")])
+    )
+
+
+def test_rerun_skips_keys_already_staged_identically(tmp_path, clients):
+    """Idempotent retry: a second run re-copies nothing and still exits 0."""
+    source, dest = clients
+    assert prestage_source.main(_argv(tmp_path)) == 0
+    dest.puts.clear()
+    source.gets.clear()
+
+    rc = prestage_source.main(_argv(tmp_path))
+
+    assert rc == 0
+    assert dest.puts == []
+    assert source.gets == []
+
+
+def test_rerun_recopies_key_whose_bytes_differ(tmp_path, clients):
+    """A truncated/partial staged object must not be mistaken for a good one."""
+    source, dest = clients
+    assert prestage_source.main(_argv(tmp_path)) == 0
+    chunk = f"source-cache/{ITEM_ID}/quality/atmosphere/r10m/aot/0.0"
+    dest.objects[("esa-zarr-sentinel-explorer-fra", chunk)] = b"truncated"
+    dest.puts.clear()
+
+    rc = prestage_source.main(_argv(tmp_path))
+
+    assert rc == 0
+    assert dest.puts == [chunk]
+
+
+def test_empty_source_listing_exits_3(tmp_path, monkeypatch):
+    monkeypatch.setattr(prestage_source, "resolve_zarr_url", lambda url: EODC_HREF)
+    monkeypatch.setattr(prestage_source, "_source_client", lambda endpoint: FakeS3())
+    monkeypatch.setattr(prestage_source, "_dest_client", lambda: FakeS3())
+
+    assert prestage_source.main(_argv(tmp_path)) == 3
+
+
+def test_verification_mismatch_exits_2_and_writes_no_outputs(tmp_path, clients, monkeypatch):
+    """Never declare a stage complete without proving source and dest agree."""
+    source, dest = clients
+    real_put = dest.put_object
+
+    def _lossy_put(Bucket, Key, Body):  # noqa: N803 — silently drops one object
+        if Key.endswith("aot/0.0"):
+            return {}
+        return real_put(Bucket=Bucket, Key=Key, Body=Body)
+
+    monkeypatch.setattr(dest, "put_object", _lossy_put)
+
+    rc = prestage_source.main(_argv(tmp_path))
+
+    assert rc == 2
+    assert not (tmp_path / "convert_source_url").exists()
+
+
+def test_verification_catches_byte_total_mismatch(tmp_path, clients, monkeypatch):
+    """Equal object counts but unequal bytes is still a bad stage."""
+    source, dest = clients
+    real_put = dest.put_object
+
+    def _truncating_put(Bucket, Key, Body):  # noqa: N803
+        return real_put(Bucket=Bucket, Key=Key, Body=Body[:1])
+
+    monkeypatch.setattr(dest, "put_object", _truncating_put)
+
+    assert prestage_source.main(_argv(tmp_path)) == 2
+
+
+# ---------------------------------------------------------------------------
+# cleanup
+# ---------------------------------------------------------------------------
+
+
+def test_cleanup_deletes_only_the_staged_item_prefix(tmp_path, monkeypatch):
+    bucket = "esa-zarr-sentinel-explorer-fra"
+    dest = FakeS3(
+        {
+            (bucket, f"source-cache/{ITEM_ID}/zarr.json"): b"{}",
+            (bucket, f"source-cache/{ITEM_ID}/b02/c/0/0"): b"chunk",
+            (bucket, "source-cache/OTHER_ITEM/zarr.json"): b"{}",
+            (bucket, "tests-output/sentinel-2-l2a/live-item.zarr/zarr.json"): b"{}",
+        }
+    )
+    monkeypatch.setattr(prestage_source, "_dest_client", lambda: dest)
+
+    rc = prestage_source.main(_argv(tmp_path, **{"--mode": "cleanup"}))
+
+    assert rc == 0
+    assert sorted(dest.deleted) == [
+        f"source-cache/{ITEM_ID}/b02/c/0/0",
+        f"source-cache/{ITEM_ID}/zarr.json",
+    ]
+    assert (bucket, "source-cache/OTHER_ITEM/zarr.json") in dest.objects
+    assert (bucket, "tests-output/sentinel-2-l2a/live-item.zarr/zarr.json") in dest.objects
+
+
+def test_cleanup_refuses_empty_item_segment(tmp_path, monkeypatch):
+    """A source_url with no basename must never widen into a prefix-wide delete."""
+    dest = FakeS3({("esa-zarr-sentinel-explorer-fra", "source-cache/x/zarr.json"): b"{}"})
+    monkeypatch.setattr(prestage_source, "_dest_client", lambda: dest)
+
+    rc = prestage_source.main(
+        _argv(tmp_path, **{"--mode": "cleanup", "--source-url": "https://stac.example.com/"})
+    )
+
+    assert rc == 1
+    assert dest.deleted == []
+
+
+def test_cleanup_refuses_empty_dest_prefix(tmp_path, monkeypatch):
+    dest = FakeS3({("esa-zarr-sentinel-explorer-fra", "source-cache/x/zarr.json"): b"{}"})
+    monkeypatch.setattr(prestage_source, "_dest_client", lambda: dest)
+
+    rc = prestage_source.main(_argv(tmp_path, **{"--mode": "cleanup", "--dest-prefix": ""}))
+
+    assert rc == 1
+    assert dest.deleted == []
+
+
+def test_cleanup_of_absent_prefix_is_a_no_op(tmp_path, monkeypatch):
+    """Cleanup runs with continueOn:failed after register; an already-gone stage is success."""
+    dest = FakeS3()
+    monkeypatch.setattr(prestage_source, "_dest_client", lambda: dest)
+
+    assert prestage_source.main(_argv(tmp_path, **{"--mode": "cleanup"})) == 0
+    assert dest.deleted == []
