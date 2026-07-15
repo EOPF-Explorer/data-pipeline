@@ -17,7 +17,6 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-import s3_item_cleanup as sic
 from s3_item_cleanup import (
     BAKED_EXCLUDE_FILE,
     DEFAULT_RETENTION_DAYS,
