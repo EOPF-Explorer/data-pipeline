@@ -3,9 +3,9 @@
 
 Extracted from ``operator-tools/manage_item.py`` (coordination#183) so both the
 operator CLIs and the ``scripts/``-hosted cleanup cron can share one
-recursive-delete implementation. ``scripts/`` is baked into the pipeline image
-(``docker/Dockerfile``) whereas ``operator-tools/`` is not, so this module must
-not depend on ``click`` — batch progress is emitted through ``logging``.
+recursive-delete implementation. This module must not depend on ``click``
+(unlike the operator CLIs) so the cleanup cron's minimal env stays lean —
+batch progress is emitted through ``logging`` instead.
 
 Behaviour preserved from the original:
 - assets are resolved to S3 URLs via ``alternate.s3.href`` then main ``href``
