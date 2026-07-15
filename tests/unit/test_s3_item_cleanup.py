@@ -235,6 +235,27 @@ class TestLoadExcludeIds:
         f.write_text("item-a\n# a comment\n\nitem-b\n")
         assert load_exclude_ids(str(f)) == {"item-a", "item-b"}
 
+    def test_file_read_is_cached_per_path(self, tmp_path: Path) -> None:
+        # The backfill resolves the denylist once per item over 100k+ items; the
+        # tiny file must not be re-read every time.
+        from s3_item_cleanup import _read_denylist
+
+        _read_denylist.cache_clear()
+        f = tmp_path / "exclude.txt"
+        f.write_text("item-a\nitem-b\n")
+        assert load_exclude_ids(str(f)) == {"item-a", "item-b"}
+        hits_before = _read_denylist.cache_info().hits
+        assert load_exclude_ids(str(f)) == {"item-a", "item-b"}  # second call
+        assert _read_denylist.cache_info().hits == hits_before + 1  # served from cache
+
+    def test_returned_set_is_an_independent_copy(self, tmp_path: Path) -> None:
+        # A caller mutating the result must never corrupt the shared cache.
+        f = tmp_path / "exclude.txt"
+        f.write_text("item-a\n")
+        first = load_exclude_ids(str(f))
+        first.add("mutated")
+        assert load_exclude_ids(str(f)) == {"item-a"}
+
 
 def test_consumers_share_one_format_helper() -> None:
     """Regression guard for the load-bearing format: register and cleanup must

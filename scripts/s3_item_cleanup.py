@@ -18,6 +18,7 @@ import logging
 import os
 from collections import defaultdict
 from datetime import UTC, datetime
+from functools import cache
 from typing import Any
 from urllib.parse import urlparse
 
@@ -63,19 +64,31 @@ def env_int(name: str, default: int) -> int:
     return int(value) if value else default
 
 
-def load_exclude_ids(path: str | None) -> set[str]:
-    """Read a newline-delimited item-ID denylist. Blank lines and ``#`` comments
-    are ignored. Shared by the cleanup script (``--exclude-file``) and the
-    backfill migration (``EXPIRES_EXCLUDE_FILE``) so the format cannot drift."""
-    if not path:
-        return set()
+@cache
+def _read_denylist(path: str) -> frozenset[str]:
+    """Parse a newline-delimited denylist file into an immutable set. Cached by
+    path: the file is static for a process's lifetime, but the backfill
+    migration resolves the denylist once *per item* over 100k+ items, so caching
+    the file I/O turns 100k+ reads of a tiny file into one."""
     ids: set[str] = set()
     with open(path, encoding="utf-8") as fh:
         for line in fh:
             stripped = line.strip()
             if stripped and not stripped.startswith("#"):
                 ids.add(stripped)
-    return ids
+    return frozenset(ids)
+
+
+def load_exclude_ids(path: str | None) -> set[str]:
+    """Read a newline-delimited item-ID denylist. Blank lines and ``#`` comments
+    are ignored. Shared by the cleanup script (``--exclude-file``) and the
+    backfill migration (``EXPIRES_EXCLUDE_FILE``) so the format cannot drift.
+
+    Returns a fresh mutable set each call; the underlying file read is cached
+    (see ``_read_denylist``)."""
+    if not path:
+        return set()
+    return set(_read_denylist(path))
 
 
 def extract_s3_urls_from_item(item_dict: dict) -> set[str]:
