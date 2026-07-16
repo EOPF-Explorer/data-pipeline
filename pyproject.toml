@@ -34,10 +34,11 @@ dependencies = [
     "tenacity==9.1.4",
     "morecantile==7.0.3",
     "cf-xarray==0.11.3",
-    # Pinned to data-model PR #220 head (concurrent-safe source caching + chunk-alignment,
-    # fixes the fsspec simplecache race behind data-pipeline#339). Re-pin to a release tag
-    # once #220 merges + a version is cut.
-    "eopf-geozarr @ git+https://github.com/EOPF-Explorer/data-model.git@fbb104b9d681433b7fe5d98edfaf656793d50b25",
+    # Pinned to data-model PR #220 head (concurrent-safe source caching, fixes the fsspec
+    # simplecache race behind data-pipeline#339). Chunk-alignment was split out to
+    # data-model#221, so quality/atmosphere aot/wvp ship unsharded until that lands.
+    # Re-pin to a release tag once #220 merges + a version is cut.
+    "eopf-geozarr @ git+https://github.com/EOPF-Explorer/data-model.git@83ab5f2019367aba16162a19c7e9e530997a09cc",
     "requests==2.34.2",
 ]
 
