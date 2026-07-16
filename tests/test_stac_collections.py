@@ -100,7 +100,8 @@ def test_baselayers_present_in_order(filename: str) -> None:
 def test_every_baselayer_has_attribution(filename: str) -> None:
     """The EOx/s2maps tiles must be attributed wherever they are shown (issue #270)."""
     for link in _xyz_links(filename):
-        assert link.get("attribution", "").strip(), f"{filename}: {link.get('id')} lacks attribution"
+        attribution = link.get("attribution", "")
+        assert attribution.strip(), f"{filename}: {link.get('id')} lacks attribution"
 
 
 @pytest.mark.parametrize("filename", EODASH_COLLECTIONS)
