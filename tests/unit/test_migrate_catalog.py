@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from _migrate_catalog.history import load_history, record_run, was_migration_run
 from _migrate_catalog.migrations.add_acquisitions_filter_link import add_acquisitions_filter_link
+from _migrate_catalog.migrations.add_eodash_rasterform import add_eodash_rasterform
 from _migrate_catalog.migrations.add_xyz_link import add_xyz_link
 from _migrate_catalog.migrations.align_visualization_links import align_visualization_links
 from _migrate_catalog.migrations.fix_url_encoding import fix_url_encoding
@@ -2515,3 +2516,83 @@ class TestCliStopPaths:
         assert res.exit_code == 1  # the abort dominates
         assert "ABORTED" in res.output
         assert "bounded run" not in res.output, "an aborted run must not read as a success"
+
+
+# --- add_eodash_rasterform (issue #348) --------------------------------------
+
+_ASC_FORM = (
+    "https://raw.githubusercontent.com/EOPF-Explorer/eodash-assets/"
+    "refs/heads/main/forms/s1-asc-bandsform.json"
+)
+_DESC_FORM = (
+    "https://raw.githubusercontent.com/EOPF-Explorer/eodash-assets/"
+    "refs/heads/main/forms/s1-desc-bandsform.json"
+)
+
+
+def _s1_item(orbit: str | None = "descending", form: str | None = None) -> dict:
+    props: dict = {"datetime": "2026-06-05T06:09:07Z"}
+    if orbit is not None:
+        props["sat:orbit_state"] = orbit
+    if form is not None:
+        props["eodash:rasterform"] = form
+    return {"id": "s1-rtc-31TCH-20260605t060907", "properties": props, "links": [], "assets": {}}
+
+
+class TestAddEodashRasterform:
+    def test_descending_item_gets_desc_form(self):
+        result = add_eodash_rasterform(_s1_item(orbit="descending"))
+        assert result is not None
+        assert result["properties"]["eodash:rasterform"] == _DESC_FORM
+
+    def test_ascending_item_gets_asc_form(self):
+        result = add_eodash_rasterform(_s1_item(orbit="ascending"))
+        assert result is not None
+        assert result["properties"]["eodash:rasterform"] == _ASC_FORM
+
+    def test_item_without_orbit_is_skipped(self):
+        """No orbit -> no single render target -> nothing correct to write."""
+        assert add_eodash_rasterform(_s1_item(orbit=None)) is None
+
+    def test_unknown_orbit_is_skipped(self):
+        assert add_eodash_rasterform(_s1_item(orbit="sideways")) is None
+
+    def test_already_correct_is_skipped(self):
+        """Idempotent: a second run must not rewrite (and re-PUT) every item."""
+        assert add_eodash_rasterform(_s1_item(orbit="descending", form=_DESC_FORM)) is None
+
+    def test_stale_form_is_corrected(self):
+        """The point of comparing by value: an item whose orbit flipped but whose form did not.
+
+        Key-presence idempotence would leave this item permanently wrong.
+        """
+        result = add_eodash_rasterform(_s1_item(orbit="descending", form=_ASC_FORM))
+        assert result is not None
+        assert result["properties"]["eodash:rasterform"] == _DESC_FORM
+
+    def test_s2_item_untouched(self):
+        """S2 items carry no sat:orbit_state, so the migration is S2-safe by construction."""
+        s2 = {
+            "id": "S2A_MSIL2A_x",
+            "properties": {"datetime": "2026-06-05T06:09:07Z", "eo:cloud_cover": 12},
+            "links": [],
+            "assets": {},
+        }
+        assert add_eodash_rasterform(s2) is None
+
+    def test_does_not_mutate_the_input(self):
+        """apply_item_transform deep-copies; the caller's dict must be untouched."""
+        item = _s1_item(orbit="descending")
+        add_eodash_rasterform(item)
+        assert "eodash:rasterform" not in item["properties"]
+
+    def test_form_urls_bind_to_the_shared_constants(self):
+        """Drift guard: the migration and the emitters must agree byte-for-byte.
+
+        They live in packages that cannot import each other at runtime, so the URLs are
+        asserted here against scripts/eodash_rasterform.py (mirrors the stac_link_titles guard).
+        """
+        from eodash_rasterform import RASTERFORM_BY_ORBIT
+
+        expected = {"ascending": _ASC_FORM, "descending": _DESC_FORM}
+        assert expected == RASTERFORM_BY_ORBIT

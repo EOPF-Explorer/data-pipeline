@@ -3,6 +3,7 @@
 # a migration — or merging two branches that each add one — cannot collide.
 from _migrate_catalog.migrations import (
     add_acquisitions_filter_link,  # noqa: F401
+    add_eodash_rasterform,  # noqa: F401
     add_xyz_link,  # noqa: F401
     align_visualization_links,  # noqa: F401
     fix_url_encoding,  # noqa: F401
