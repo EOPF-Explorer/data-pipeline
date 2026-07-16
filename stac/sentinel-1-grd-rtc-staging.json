@@ -7,6 +7,18 @@
       "href": "https://sentinel.esa.int/documents/247904/690755/Sentinel_Data_Legal_Notice",
       "type": "application/pdf",
       "title": "Legal notice on the use of Copernicus Sentinel Data and Service Information"
+    },
+    {
+      "rel": "related",
+      "href": "https://earth-info.nga.mil/index.php?dir=wgs84&action=wgs84#tab_egm2008",
+      "type": "text/html",
+      "title": "EGM2008 geoid model (NGA) — height reference used in orthorectification"
+    },
+    {
+      "rel": "related",
+      "href": "https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-1-grd-rtc-acquisitions-staging",
+      "type": "application/json",
+      "title": "Sentinel-1 GRD RTC — per-acquisition slices [V1 staging]"
     }
   ],
   "title": "Sentinel-1 GRD RTC [V1 staging]",
