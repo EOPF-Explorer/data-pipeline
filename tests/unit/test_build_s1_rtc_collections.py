@@ -113,3 +113,35 @@ def test_align_falls_back_to_base_spatial_when_no_live_items() -> None:
     c = b.align_collection(live, is_cube=True, extent=empty_extent)
     assert c["extent"]["spatial"] == {"bbox": [[-180, -90, 180, 90]]}  # base frame kept
     assert c["extent"]["temporal"] == empty_extent["temporal"]  # live temporal still used
+
+
+def test_align_preserves_eodash_and_reconciled_links() -> None:
+    """align_collection must not touch links (issue #348).
+
+    The whole template-as-superset design rests on this: the templates carry the eodash
+    baselayers, the pre-aggregation links, and the links that previously existed only on the
+    live collection. align_collection patches the *stale* fields (item_assets/extent/renders/
+    summaries/stac_extensions) — if it ever rewrote links, regenerating would silently drop all
+    of that and re-arm the clobber that `create --update` performs.
+    """
+    live = _live(is_cube=True)
+    live["links"] = [
+        {"rel": "license", "href": "https://legal", "type": "application/pdf"},
+        {"rel": "related", "href": "https://earth-info.nga.mil/", "type": "text/html"},
+        {
+            "rel": "xyz",
+            "href": "https://s2maps-tiles.eu/wmts/1.0.0/osm_3857/default/g/{z}/{y}/{x}.jpeg",
+            "type": "image/jpeg",
+            "id": "OSM",
+            "roles": ["baselayer", "invisible"],
+            "attribution": "{ OSM: ... }",
+        },
+        {
+            "rel": "pre-aggregation",
+            "href": "https://s3/x/daily.json",
+            "type": "application/json",
+            "aggregation:interval": "daily",
+        },
+    ]
+    out = b.align_collection(live, is_cube=True, extent=EXTENT)
+    assert out["links"] == live["links"]
