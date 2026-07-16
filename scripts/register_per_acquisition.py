@@ -190,7 +190,7 @@ def decorate_acquisition_item(
     # run's --orbit-direction: the flag is the run's orbit, the property is the item's, and the
     # builder is the authority for the latter.
     form = rasterform_for_orbit(d["properties"].get("sat:orbit_state"))
-    if form:
+    if form is not None:
         d["properties"]["eodash:rasterform"] = form
     return d
 

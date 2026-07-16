@@ -714,6 +714,41 @@ class TestSTACMigrationRunner:
         assert result.items_failed == 1
         runner._update_item.assert_not_called()  # never delete an item we can't re-POST
 
+    def test_dry_run_reports_unmodelable_items_exactly_like_a_real_run(self):
+        """A dry run is the go/no-go control before a live backfill — it has to predict it.
+
+        Building the PUT body only on the write path would make a dry run structurally unable
+        to report an unmodelable item: it would print "0 failed" even if every item were
+        unwritable, and an operator would read that as "safe to run".
+        """
+        runner = self._make_runner()
+        hrefless = {
+            "id": "s1-rtc-30TWQ",
+            "assets": {"vv": {"roles": ["data"]}},  # no href — pystac cannot model it
+            "links": [
+                {
+                    "rel": "tilejson",
+                    "type": "application/json",
+                    "href": "https://x/WebMercatorQuad/tilejson.json?expression=a",
+                }
+            ],
+        }
+
+        def _run(dry_run: bool):
+            search = MagicMock()
+            search.matched.return_value = 1
+            search.pages_as_dicts.return_value = [{"features": [json.loads(json.dumps(hrefless))]}]
+            with patch("_migrate_catalog.runner.Client") as mock_client:
+                mock_client.open.return_value.search.return_value = search
+                return runner.run_migration(
+                    "test-col", add_xyz_link, "add_xyz_link", dry_run=dry_run
+                )
+
+        dry, real = _run(dry_run=True), _run(dry_run=False)
+        assert (dry.items_modified, dry.items_failed) == (0, 1)
+        assert (dry.items_modified, dry.items_failed) == (real.items_modified, real.items_failed)
+        runner._update_item.assert_not_called()
+
     def test_clone_collection_copies_metadata_and_items(self):
         runner = STACMigrationRunner("https://api.example.com/stac")
         mock_search = _make_mock_search(
@@ -2381,6 +2416,24 @@ class TestSessionThreadLocality:
         assert header() == "application/json"
         assert worker_header == "application/json"
 
+    def test_every_session_carries_the_auth_hook(self) -> None:
+        """The one property whose loss is invisible, so the one that most needs pinning.
+
+        requests applies auth per-request off the *Session*, so a worker session built without
+        the hook writes unauthenticated. Nothing would fail: the API accepts unauthenticated
+        writes (GHSA-9vrc-w855-8hq3), so a whole backfill could run unauthenticated and report
+        success. Assert it on the constructing thread AND a worker.
+        """
+        import stac_auth  # importable via the sys.path bootstrap in runner.py
+
+        runner = STACMigrationRunner("https://api.example.com/stac")
+
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            worker_auth = ex.submit(lambda: runner._session().auth).result()
+
+        assert runner.session.auth is stac_auth.bearer_auth
+        assert worker_auth is stac_auth.bearer_auth
+
 
 class TestConcurrencyCliOption:
     def _invoke(self, monkeypatch: pytest.MonkeyPatch, args: list[str]):  # noqa: ANN202
@@ -2596,3 +2649,87 @@ class TestAddEodashRasterform:
 
         expected = {"ascending": _ASC_FORM, "descending": _DESC_FORM}
         assert expected == RASTERFORM_BY_ORBIT
+
+
+class TestTransactionBodyDoesNoNetworkIO:
+    """`to_dict()` RESOLVES an item's rel=root link, fetching the root catalogue per item.
+
+    That is ~0.4s and one HTTP request for every item, on the calling thread — so it also caps
+    throughput regardless of how many writer threads are configured (~11 min and 1590 redundant
+    fetches for an S1 backfill; hours for a six-figure one). `_transaction_body` drops the link
+    before parsing, which is safe because root/self/parent are API-managed: the register scripts
+    POST items without one and the API re-adds it on read.
+    """
+
+    def _api_item(self) -> dict:
+        """An item as the API returns it: null datetime + the API-managed navigation links."""
+        return {
+            "id": "s1-rtc-31TCH",
+            "type": "Feature",
+            "stac_version": "1.0.0",
+            "geometry": None,
+            "bbox": None,
+            "properties": {
+                "datetime": None,
+                "start_datetime": "2026-01-01T00:00:00Z",
+                "end_datetime": "2026-01-02T00:00:00Z",
+            },
+            "assets": {},
+            "collection": "test-col",
+            "links": [
+                {"rel": "root", "href": "https://api.example.com/stac/", "type": "application/json"},
+                {"rel": "self", "href": "https://api.example.com/stac/x", "type": "application/json"},
+                {"rel": "xyz", "href": "https://r/{z}/{x}/{y}.png", "type": "image/png"},
+            ],
+        }
+
+    def _reads_during(self, fn):  # noqa: ANN001, ANN202
+        import pystac as _pystac
+
+        reads: list[str] = []
+        real = _pystac.stac_io.DefaultStacIO.read_text
+
+        def spy(io_self, source, *a, **k):  # noqa: ANN001
+            reads.append(str(source))
+            return real(io_self, source, *a, **k)
+
+        with patch.object(_pystac.stac_io.DefaultStacIO, "read_text", spy):
+            out = fn()
+        return reads, out
+
+    def test_builds_the_body_without_any_network_io(self):
+        from _migrate_catalog.runner import _transaction_body
+
+        reads, body = self._reads_during(lambda: _transaction_body(self._api_item()))
+
+        assert reads == [], f"resolved a link over the network: {reads}"
+        assert body is not None
+        # still does its actual job: re-materialize the nullable-but-required datetime
+        assert "datetime" in body["properties"]
+        # and the item's real links survive
+        assert [lk["rel"] for lk in body["links"]] == ["self", "xyz"]
+
+    def test_root_link_is_dropped_because_the_api_owns_it(self):
+        from _migrate_catalog.runner import _transaction_body
+
+        body = _transaction_body(self._api_item())
+        assert body is not None
+        assert not [lk for lk in body["links"] if lk["rel"] == "root"]
+
+    def test_item_without_a_root_link_is_unaffected(self):
+        from _migrate_catalog.runner import _transaction_body
+
+        item = self._api_item()
+        item["links"] = [lk for lk in item["links"] if lk["rel"] != "root"]
+        reads, body = self._reads_during(lambda: _transaction_body(item))
+        assert reads == []
+        assert body is not None
+        assert [lk["rel"] for lk in body["links"]] == ["self", "xyz"]
+
+    def test_caller_dict_is_not_mutated(self):
+        """The strip must not reach back into the caller's item."""
+        from _migrate_catalog.runner import _transaction_body
+
+        item = self._api_item()
+        _transaction_body(item)
+        assert [lk["rel"] for lk in item["links"]] == ["root", "self", "xyz"]

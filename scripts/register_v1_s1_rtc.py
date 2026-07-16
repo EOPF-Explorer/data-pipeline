@@ -183,7 +183,7 @@ def register(
     # and (since the cube is re-upserted on every ingest) would silently drop the backfilled
     # one. Reading the property covers both paths and mirrors register_per_acquisition.
     form = rasterform_for_orbit(item.properties.get("sat:orbit_state"))
-    if form:
+    if form is not None:
         item.properties["eodash:rasterform"] = form
 
     # build_s1_rtc_stac_item returns s3:// hrefs; TiTiler needs https:// via the gateway

@@ -55,15 +55,26 @@ def _resilient_stac_io() -> StacApiIO:
 
 
 def _transaction_body(item_dict: dict[str, Any]) -> dict[str, Any] | None:
-    """A transaction-valid POST body for a raw STAC-API item dict, or ``None`` if one can't be built.
+    """A transaction-valid PUT body for a raw STAC-API item dict, or ``None`` if one can't be built.
 
     The GET/search representation omits nullable-but-required fields — notably
-    ``properties.datetime`` on datacube items (null datetime) — which the transaction POST
+    ``properties.datetime`` on datacube items (null datetime) — which the transaction API
     rejects with 400. pystac re-materializes them (and preserves link order). Returns ``None`` for
     items pystac can't model (e.g. an asset with no href): such an item can't be safely round-tripped
-    through the transaction API, so the caller must skip it WITHOUT deleting — a delete-then-failed
-    POST would lose the item.
+    through the transaction API, so the caller must skip it WITHOUT writing.
+
+    The ``rel=root`` link is dropped before parsing, which is what keeps this cheap. ``to_dict()``
+    RESOLVES that link, so with it present pystac fetches the root catalogue over HTTP *once per
+    item* — ~0.4s and one request each (~11 min and 1590 redundant fetches for an S1 backfill,
+    hours for a six-figure one), on the calling thread, which caps throughput no matter how many
+    writer threads are configured. Dropping it costs nothing: root/self/parent are API-managed
+    (`build_s1_rtc_collections._API_LINK_RELS` says the same), the register scripts POST items
+    without one, and the API re-adds it on read. pystac_client's own ``pages()`` sidesteps this a
+    different way, by passing ``root=self.client``.
     """
+    links = item_dict.get("links", [])
+    if any(link.get("rel") == "root" for link in links):
+        item_dict = {**item_dict, "links": [lk for lk in links if lk.get("rel") != "root"]}
     try:
         return pystac.Item.from_dict(item_dict).to_dict()
     except Exception:
@@ -186,7 +197,7 @@ class STACMigrationRunner:
     ) -> MigrationResult:
         """Apply migration_fn to every item in collection_id.
 
-        The per-item DELETE+POST is a network round-trip, so a sequential run is
+        The per-item PUT is a network round-trip, so a sequential run is
         latency-bound (~5-6k items/hour against prod). `concurrency` > 1 dispatches
         those writes to a thread pool — the work is I/O-bound, so threads scale it.
 
@@ -206,14 +217,13 @@ class STACMigrationRunner:
 
         max_writes bounds a run to N *attempted* writes and then stops cleanly,
         setting `result.reached_max_writes`. A failed write still counts against the
-        budget: its DELETE may already have landed, so it has spent real blast
-        radius, and counting only successes would keep retrying past N on exactly
-        the failing run you most want bounded. Skips are free (the head of a
-        collection is typically already migrated). Use it for a bounded run rather than
-        killing the process: the unit of work is a non-atomic DELETE-then-POST, so
-        a kill can leave items deleted-but-not-restored, and a signal-based stop is
-        unreliable anyway (a process backgrounded from a non-interactive shell
-        inherits SIGINT=SIG_IGN, and CPython then never installs its handler). The
+        budget: it spent an attempt against the API, and counting only successes
+        would keep retrying past N on exactly the failing run you most want bounded.
+        Skips are free (the head of a collection is typically already migrated). Use
+        it for a bounded run rather than killing the process: a signal-based stop is
+        unreliable (a process backgrounded from a non-interactive shell inherits
+        SIGINT=SIG_IGN, and CPython then never installs its handler), and only an
+        in-tool bound stops at a point you chose rather than wherever the kill lands. The
         budget is checked *before* migration_fn runs, so an item that is not written
         is never counted as processed and the histogram still reconciles.
         """
@@ -300,27 +310,33 @@ class STACMigrationRunner:
                         if modified is None:
                             result.items_skipped += 1  # skips are free: no budget spent
                             bar.update(1)
+                            continue
+
+                        # Build the body on BOTH paths, so a dry run predicts the real run
+                        # exactly. Short-circuiting to "would modify" before this would make
+                        # a dry run structurally incapable of reporting an unmodelable item —
+                        # it would print 0 failed even if every item were unwritable, which is
+                        # worse than useless in the one place it is used as a go/no-go signal.
+                        body = _transaction_body(modified)
+                        if body is None:
+                            # Can't build a valid PUT body — skip WITHOUT writing rather
+                            # than send something the API will reject.
+                            result.items_failed += 1
+                            result.errors.append(
+                                {
+                                    "item_id": item_id,
+                                    "error": "cannot build a transaction-valid PUT body "
+                                    "(pystac can't model it); skipped without writing",
+                                }
+                            )
+                            bar.update(1)
                         elif dry_run:
                             result.items_modified += 1
                             budget_used += 1
                             bar.update(1)
                         else:
-                            body = _transaction_body(modified)
-                            if body is None:
-                                # Can't build a valid PUT body — skip WITHOUT writing rather
-                                # than send something the API will reject.
-                                result.items_failed += 1
-                                result.errors.append(
-                                    {
-                                        "item_id": item_id,
-                                        "error": "cannot build a transaction-valid PUT body "
-                                        "(pystac can't model it); skipped without writing",
-                                    }
-                                )
-                                bar.update(1)
-                            else:
-                                pending.append((collection_id, item_id, body))
-                                budget_used += 1
+                            pending.append((collection_id, item_id, body))
+                            budget_used += 1
 
                     # Then run this page's writes and tally them back here.
                     writes: Iterator[tuple[str, str | None]] = (

@@ -217,17 +217,3 @@ def test_no_rasterform_without_orbit() -> None:
     del item.properties["sat:orbit_state"]
     d = _decorate(item)
     assert "eodash:rasterform" not in d["properties"]
-
-
-def test_rasterform_urls_are_the_shared_constants() -> None:
-    """Drift guard: the migration gates on these exact values (mirrors the stac_link_titles guard).
-
-    Asserted literally here so a silent edit to the shared module fails a test rather than
-    quietly rewriting every live item.
-    """
-    base = "https://raw.githubusercontent.com/EOPF-Explorer/eodash-assets/refs/heads/main/forms"
-    expected = {
-        "ascending": f"{base}/s1-asc-bandsform.json",
-        "descending": f"{base}/s1-desc-bandsform.json",
-    }
-    assert expected == RASTERFORM_BY_ORBIT

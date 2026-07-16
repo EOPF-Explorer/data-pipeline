@@ -203,15 +203,16 @@ def run(
         click.echo(f"Run recorded to {history_file}")
 
     if result.aborted:
-        # A DELETE that succeeded before a failing POST leaves the item out of the
-        # catalogue, where a re-run cannot find it again — so point at the recovery
-        # file rather than just suggesting another run.
+        # Each write is a single atomic PUT, so a failed write left its item untouched:
+        # there is nothing to restore, and re-running is the whole recovery procedure.
+        # Saying otherwise would send an operator to bulk re-POST items that were never
+        # lost, against an API that was just rejecting writes.
         click.echo(
             f"\nABORTED: stopped after {max_consecutive_failures} consecutive write "
             f"failures — the API was rejecting writes, so the run did not finish.\n"
-            f"Items are DELETE-then-POST: any item whose POST failed is no longer in "
-            f"the catalogue and a re-run will NOT see it. Before re-running, restore "
-            f"them from this run's .migration_recovery_*.jsonl (the failed ids are in "
+            f"Each write is a single atomic PUT, so the failed items are untouched and "
+            f"nothing needs restoring. Fix the API error, then re-run — the migration is "
+            f"idempotent and will pick up where it stopped (failed ids are in "
             f"{history_file}).",
             err=True,
         )

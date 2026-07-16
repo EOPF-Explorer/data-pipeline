@@ -67,7 +67,7 @@ backlog (bounded by the cron's `--max-items`).
 
 Note: because the rule keys off `properties.datetime` (a mandatory core STAC
 field, not a server-managed audit timestamp), it does not depend on `created`
-surviving the framework's DELETE-then-POST round-trip.
+surviving the framework's write round-trip.
 
 ```bash
 # Dry-run: review the skip-reason / stamped histogram in the logs first.
@@ -178,9 +178,10 @@ the run exits non-zero. Set it to `0` to restore run-to-completion. (Writes are 
 so a refused write leaves the item intact — this bounds wasted effort and load, no longer data
 loss.)
 
-Interrupting with `Ctrl-C` is safe: queued writes are cancelled and in-flight ones finish their
-DELETE+POST. Note the run's tally is lost with the stack, so nothing is written to
-`.migration_history.json` — the migration is idempotent, so just re-run to continue.
+Interrupting with `Ctrl-C` is safe: queued writes are cancelled and in-flight ones are allowed to
+finish. Each write is a single atomic PUT, so no item is left half-written. Note the run's tally is
+lost with the stack, so nothing is written to `.migration_history.json` — the migration is
+idempotent, so just re-run to continue.
 
 ### Bounded first run — use `--max-writes`, never a kill
 
@@ -225,7 +226,7 @@ change, and to any tool still using DELETE-then-POST.
   write's line can sit arbitrarily far from the end while faster workers append past it.
 
 A normal `Ctrl-C` needs no recovery: queued writes are cancelled and in-flight ones are allowed
-to finish their DELETE+POST, so no item is left torn between the two.
+to finish, and each write is a single atomic PUT — so no item is left half-written either way.
 
 ## CLI Reference
 
