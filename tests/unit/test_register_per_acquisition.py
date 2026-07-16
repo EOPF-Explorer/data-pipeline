@@ -18,6 +18,7 @@ import pystac
 scripts_dir = Path(__file__).parent.parent.parent / "scripts"
 sys.path.insert(0, str(scripts_dir))
 
+from eodash_rasterform import RASTERFORM_BY_ORBIT  # noqa: E402
 from register_per_acquisition import (  # noqa: E402
     acquisition_id,
     decorate_acquisition_item,
@@ -183,3 +184,50 @@ def test_no_orbit_leak() -> None:
         _acq_item(), tile_id="31TCH", cube_collection=CUBE, raster_api=RASTER, stac_api_url=STAC
     )
     assert "ascending" not in urllib.parse.unquote(str(d["links"]))
+
+
+# --- eodash:rasterform (issue #348) ------------------------------------------
+
+
+def _decorate(item: pystac.Item) -> dict:
+    return decorate_acquisition_item(
+        item, tile_id="31TCH", cube_collection=CUBE, raster_api=RASTER, stac_api_url=STAC
+    )
+
+
+def test_rasterform_matches_descending_orbit() -> None:
+    """A descending item gets the descending bands form."""
+    d = _decorate(_acq_item())
+    assert d["properties"]["eodash:rasterform"] == RASTERFORM_BY_ORBIT["descending"]
+    assert "s1-desc-bandsform.json" in d["properties"]["eodash:rasterform"]
+
+
+def test_rasterform_matches_ascending_orbit() -> None:
+    """An ascending item gets the ascending form — the form follows the item, not the run."""
+    item = _acq_item()
+    item.properties["sat:orbit_state"] = "ascending"
+    d = _decorate(item)
+    assert d["properties"]["eodash:rasterform"] == RASTERFORM_BY_ORBIT["ascending"]
+    assert "s1-asc-bandsform.json" in d["properties"]["eodash:rasterform"]
+
+
+def test_no_rasterform_without_orbit() -> None:
+    """No orbit means no single render target, so emit nothing rather than guess."""
+    item = _acq_item()
+    del item.properties["sat:orbit_state"]
+    d = _decorate(item)
+    assert "eodash:rasterform" not in d["properties"]
+
+
+def test_rasterform_urls_are_the_shared_constants() -> None:
+    """Drift guard: the migration gates on these exact values (mirrors the stac_link_titles guard).
+
+    Asserted literally here so a silent edit to the shared module fails a test rather than
+    quietly rewriting every live item.
+    """
+    base = "https://raw.githubusercontent.com/EOPF-Explorer/eodash-assets/refs/heads/main/forms"
+    expected = {
+        "ascending": f"{base}/s1-asc-bandsform.json",
+        "descending": f"{base}/s1-desc-bandsform.json",
+    }
+    assert expected == RASTERFORM_BY_ORBIT

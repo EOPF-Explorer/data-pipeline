@@ -450,3 +450,81 @@ def test_pin_noop_on_empty_cube(tmp_path) -> None:
     new_item, sel_time = _pin_preview_to_best_recent(item, store)
     assert sel_time is None
     assert new_item.properties["sat:orbit_state"] == "ascending"  # untouched
+
+
+# ---------------------------------------------------------------------------
+# eodash:rasterform on the cube item (issue #348)
+# ---------------------------------------------------------------------------
+
+from eodash_rasterform import RASTERFORM_BY_ORBIT  # noqa: E402
+from eopf_geozarr.stac.s1_rtc import Slice  # noqa: E402
+
+
+def _register_and_capture(item=None, coverages=None, coverages_error=None):  # noqa: ANN001
+    """Run register() with the store read stubbed; return the item handed to upsert_item."""
+    coverage_patch = (
+        patch(f"{_MOD}.slice_coverages", side_effect=coverages_error)
+        if coverages_error is not None
+        else patch(f"{_MOD}.slice_coverages", return_value=coverages or [])
+    )
+    with (
+        patch(f"{_MOD}.build_s1_rtc_stac_item", return_value=item or _make_item()),
+        patch(f"{_MOD}.warm_thumbnail_cache"),
+        coverage_patch,
+        patch(f"{_MOD}.upsert_item") as mock_upsert,
+        patch(f"{_MOD}.stac_auth.open_client"),
+        patch(f"{_MOD}.add_acquisition_links"),
+    ):
+        assert (
+            register(
+                _STORE,
+                _COLLECTION,
+                "https://stac.example.com",
+                "https://raster.example.com",
+                "https://s3.example.com",
+            )
+            == 0
+        )
+    return (
+        mock_upsert.call_args[1]["item"]
+        if mock_upsert.call_args[1]
+        else mock_upsert.call_args[0][2]
+    )
+
+
+def test_rasterform_follows_the_reoriented_orbit() -> None:
+    """The form must track the preview slice's orbit, not the builder's original.
+
+    _make_item() is ascending; the preview pins to a descending slice, so the form must flip
+    with it. A setdefault-style assignment would leave the ascending form and lie.
+    """
+    import datetime as _dt2
+
+    chosen = Slice(
+        orbit="descending", dt=_dt2.datetime(2026, 6, 7, 6, 0, tzinfo=_dt2.UTC), coverage=0.9
+    )
+    with patch(f"{_MOD}.pick_slice", return_value=chosen):
+        item = _register_and_capture(coverages=[chosen])
+    assert item.properties["sat:orbit_state"] == "descending"
+    assert item.properties["eodash:rasterform"] == RASTERFORM_BY_ORBIT["descending"]
+
+
+def test_rasterform_set_even_when_coverage_read_fails() -> None:
+    """A coverage-read failure skips reorientation — the form must still be emitted.
+
+    _pin_preview_to_best_recent returns the item untouched on any store-read error, but the
+    builder has already set sat:orbit_state on a single-orbit cube. Deriving the form inside
+    _reorient_item_to_orbit would leave such an item live with an orbit and no form, and the
+    cube is re-upserted on every ingest — so it would also silently wipe the backfill.
+    """
+    item = _register_and_capture(coverages_error=OSError("store unreadable"))
+    assert item.properties["sat:orbit_state"] == "ascending"  # builder's, reorientation skipped
+    assert item.properties["eodash:rasterform"] == RASTERFORM_BY_ORBIT["ascending"]
+
+
+def test_no_rasterform_when_cube_has_no_orbit() -> None:
+    """A dual-orbit cube with no pinned preview has no single render target -> emit nothing."""
+    bare = _make_item()
+    del bare.properties["sat:orbit_state"]
+    item = _register_and_capture(item=bare)
+    assert "eodash:rasterform" not in item.properties

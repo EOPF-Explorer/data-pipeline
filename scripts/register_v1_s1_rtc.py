@@ -22,6 +22,7 @@ import httpx
 sys.path.insert(0, str(Path(__file__).parent))
 
 import stac_auth
+from eodash_rasterform import rasterform_for_orbit
 from eopf_geozarr.stac.s1_rtc import build_s1_rtc_stac_item, pick_slice, slice_coverages
 from pystac import Item, Link
 from register_v1 import (
@@ -174,6 +175,16 @@ def register(
     # Default the cube preview to the best-recent acquisition (most recent >80% coverage, else max
     # coverage) and reorient the item to that slice's orbit so the render targets the right group.
     item, sel_time = _pin_preview_to_best_recent(item, store)
+
+    # eodash's bands form must target the same orbit group the render does. Keyed off the
+    # item's own sat:orbit_state rather than set inside _reorient_item_to_orbit, because a
+    # single-orbit cube gets its orbit from the builder and skips reorientation entirely when
+    # the coverage read fails — that item would otherwise go live with an orbit and no form,
+    # and (since the cube is re-upserted on every ingest) would silently drop the backfilled
+    # one. Reading the property covers both paths and mirrors register_per_acquisition.
+    form = rasterform_for_orbit(item.properties.get("sat:orbit_state"))
+    if form:
+        item.properties["eodash:rasterform"] = form
 
     # build_s1_rtc_stac_item returns s3:// hrefs; TiTiler needs https:// via the gateway
     for asset in item.assets.values():

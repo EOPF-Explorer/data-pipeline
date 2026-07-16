@@ -25,6 +25,7 @@ import argparse
 import urllib.parse
 
 import stac_auth
+from eodash_rasterform import rasterform_for_orbit
 from eopf_geozarr.stac.s1_rtc import acquisition_id as acquisition_id  # re-export for trigger_cdse
 from eopf_geozarr.stac.s1_rtc import build_s1_rtc_per_acquisition_items
 from pystac import Item
@@ -185,6 +186,12 @@ def decorate_acquisition_item(
         "roles": ["thumbnail"],
         "title": "Sentinel-1 GRD RGB composite preview",
     }
+    # eodash's bands form must target this item's orbit group. Read it off the item, not the
+    # run's --orbit-direction: the flag is the run's orbit, the property is the item's, and the
+    # builder is the authority for the latter.
+    form = rasterform_for_orbit(d["properties"].get("sat:orbit_state"))
+    if form:
+        d["properties"]["eodash:rasterform"] = form
     return d
 
 
