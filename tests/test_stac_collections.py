@@ -62,8 +62,14 @@ def test_s1_rtc_collection_valid(collection_id: str, required_data_assets: set[s
 # so a regeneration or a hand edit cannot silently re-arm that.
 S1_TEMPLATE_RELS = {
     "sentinel-1-grd-rtc-staging.json": ["license", "related", "related"] + ["xyz"] * 4,
+    # The acquisitions collection additionally ships its own pre-aggregation links, so a
+    # template apply cannot wipe what aggregate_items wrote (issue #348). They must stay LAST:
+    # aggregate_items strips-then-appends, and any other position makes the two writers
+    # permanently reorder each other. Pinned by
+    # test_aggregate_items.py::TestTemplateSurvivesAggregation.
     "sentinel-1-grd-rtc-acquisitions-staging.json": ["derived_from", "license", "related"]
-    + ["xyz"] * 4,
+    + ["xyz"] * 4
+    + ["pre-aggregation"] * 2,
 }
 
 

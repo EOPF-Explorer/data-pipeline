@@ -67,6 +67,20 @@
       ],
       "id": "cloudless-2024",
       "attribution": "{ EOxCloudless 2024: <a xmlns:dct=\"http://purl.org/dc/terms/\" href=\"https://s2maps.eu\" target=\"_blank\" property=\"dct:title\">Sentinel-2 cloudless - s2maps.eu</a> by <a xmlns:cc=\"http://creativecommons.org/ns#\" href=\"https://eox.at\" target=\"_blank\" property=\"cc:attributionName\" rel=\"cc:attributionURL\">EOX IT Services GmbH</a> (Contains modified Copernicus Sentinel data 2024) }"
+    },
+    {
+      "rel": "pre-aggregation",
+      "href": "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/aggregations/sentinel-1-grd-rtc-acquisitions-staging/daily.json",
+      "type": "application/json",
+      "title": "Daily Item Aggregation",
+      "aggregation:interval": "daily"
+    },
+    {
+      "rel": "pre-aggregation",
+      "href": "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/aggregations/sentinel-1-grd-rtc-acquisitions-staging/monthly.json",
+      "type": "application/json",
+      "title": "Monthly Item Aggregation",
+      "aggregation:interval": "monthly"
     }
   ],
   "title": "Sentinel-1 GRD RTC — per-acquisition slices [V1 staging]",
