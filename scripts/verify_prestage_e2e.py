@@ -19,14 +19,31 @@ Usage
 -----
     uv run python scripts/verify_prestage_e2e.py <stac-item-url> --image <tag>
 
-``--image`` is required on purpose. Before v1.13.0 the only image with these scripts is
-the #344 PR build, whose tag is the PR's *merge* commit — which changes on every push to
-the branch. A default would go stale silently and the gate would then pass against an old
-image, "proving" code that never ran: exactly the green-but-meaningless result this exists
-to catch. Get the current tag from the PR (``gh pr view 344 --json potentialMergeCommit``)
-or pass a release tag once one exists.
+``--image`` is required on purpose: a stale default would pass the gate against old code,
+"proving" code that never ran — exactly the green-but-meaningless result this exists to
+catch.
 
-Needs the ``argo`` CLI and a kube context on the namespace.
+Before v1.13.0 the only image with these scripts is the #344 PR build. **Use ``pr-344``.**
+
+Do *not* derive the tag from ``gh pr view --json potentialMergeCommit``: that names a sha
+CI never built an image from, because GitHub recomputes the potential merge commit whenever
+``main`` moves, not just when the PR branch is pushed. (Nor is it the branch head — a
+push-event build on a feature branch publishes nothing: ``PUSH_IMAGE`` in
+``.github/workflows/build.yml`` is true only for main, tags, workflow_call, or a same-repo
+pull_request.) The tag that exists is the merge commit *as of the last build*. Both wrong
+answers were tried against the registry on 2026-07-16 before ``pr-344`` was found.
+
+``pr-344`` (``type=ref,event=pr``) always tracks the latest PR build. For an immutable tag,
+read it from the build log rather than the PR API::
+
+    gh run list --repo EOPF-Explorer/data-pipeline --branch feat--prestage-source-s3 \
+      --workflow build.yml --limit 2 --json databaseId,event
+    gh run view <pull_request-run-id> --log | grep -m1 DOCKER_METADATA_OUTPUT_TAGS
+
+Once v1.13.0 exists, just pass the release tag.
+
+Needs the ``argo`` CLI and a kube context on the namespace, plus S3 credentials for the
+cleanup assertion (checked up-front — see ``main``).
 """
 
 from __future__ import annotations
@@ -229,13 +246,35 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     item_id = item_id_for(args.source_url)
+
+    # Prove the S3 credentials authenticate BEFORE submitting. The cleanup assertion is the
+    # last thing to run, so a credentials problem would otherwise surface only after a full
+    # convert (~10 min) and take the registered/renders checks down with it — the run is
+    # wasted, not merely failed. (Observed 2026-07-16.)
+    #
+    # list_buckets, not list_objects_v2: the bucket is only known once the workflow reports
+    # convert_source_url, and hard-coding it here would re-derive what the gate deliberately
+    # takes from convert. So this proves "these credentials work against this endpoint", not
+    # "they can read that specific bucket" — it catches the unset/expired/wrong-endpoint case
+    # that actually bites, and leaves the narrower one to the real assertion.
+    s3 = boto3.client("s3", endpoint_url=os.getenv("AWS_ENDPOINT_URL"))
+    try:
+        s3.list_buckets()
+    except Exception as exc:  # noqa: BLE001 -- any S3 failure here is fatal and worth showing
+        logger.error(
+            "S3 preflight failed: %s\n"
+            "The cleanup assertion needs S3. Set AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / "
+            "AWS_ENDPOINT_URL (object-read rights suffice — bucket-owner is NOT required).",
+            exc,
+        )
+        return 1
+
     logger.info("=== submitting: %s (image %s, prestage ON) ===", item_id, args.image)
     workflow = submit(args.namespace, args.template, args.source_url, args.collection, args.image)
     logger.info("workflow: %s", workflow)
     logger.info("watch: argo get -n %s %s", args.namespace, workflow)
 
     wf = fetch(args.namespace, workflow)
-    s3 = boto3.client("s3", endpoint_url=os.getenv("AWS_ENDPOINT_URL"))
     checks = Checks()
     verify(wf, item_id, args.collection, args.stac_api_url, s3, checks)
 

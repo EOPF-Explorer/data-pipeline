@@ -128,3 +128,41 @@ class TestItemIdIsNotReimplemented:
     )
     def test_agrees_with_derive_item_id_on_every_url_shape(self, url):
         assert v.item_id_for(url) == derive_item_id(url)
+
+
+class TestS3Preflight:
+    """Bad S3 credentials must fail before the convert, not after it.
+
+    The cleanup assertion is the last check to run, so without a preflight a credentials
+    problem surfaces ~10 minutes in, after a full convert, and takes the registered/renders
+    checks down with it — the run is wasted rather than merely failed.
+    """
+
+    def test_bad_credentials_fail_before_anything_is_submitted(self, monkeypatch):
+        submitted = []
+        monkeypatch.setattr(v, "submit", lambda *a, **k: submitted.append(a) or "wf-should-not-run")
+
+        class Boom:
+            def list_buckets(self):
+                raise RuntimeError("Unable to locate credentials")
+
+        monkeypatch.setattr(v.boto3, "client", lambda *a, **k: Boom())
+
+        rc = v.main([STAC_URL, "--image", "pr-344"])
+
+        assert rc == 1
+        assert submitted == [], "submitted a workflow despite unusable S3 credentials"
+
+    def test_working_credentials_do_not_block_the_run(self, monkeypatch):
+        """The preflight must not become a second failure mode of its own."""
+
+        class Fine:
+            def list_buckets(self):
+                return {"Buckets": []}
+
+        monkeypatch.setattr(v.boto3, "client", lambda *a, **k: Fine())
+        monkeypatch.setattr(v, "submit", lambda *a, **k: "wf-1")
+        monkeypatch.setattr(v, "fetch", lambda *a, **k: {"status": {"nodes": {}}})
+        monkeypatch.setattr(v, "verify", lambda *a, **k: None)
+
+        assert v.main([STAC_URL, "--image", "pr-344"]) == 0
