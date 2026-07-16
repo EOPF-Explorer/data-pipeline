@@ -61,8 +61,9 @@ def test_s1_rtc_collection_valid(collection_id: str, required_data_assets: set[s
 # carried nothing at all) while live had EGM2008 + the cross-links. Pin the rel multiset
 # so a regeneration or a hand edit cannot silently re-arm that.
 S1_TEMPLATE_RELS = {
-    "sentinel-1-grd-rtc-staging.json": ["license", "related", "related"],
-    "sentinel-1-grd-rtc-acquisitions-staging.json": ["derived_from", "license", "related"],
+    "sentinel-1-grd-rtc-staging.json": ["license", "related", "related"] + ["xyz"] * 4,
+    "sentinel-1-grd-rtc-acquisitions-staging.json": ["derived_from", "license", "related"]
+    + ["xyz"] * 4,
 }
 
 
@@ -81,6 +82,66 @@ def test_s1_templates_carry_no_api_managed_links() -> None:
             rel = link["rel"]
             assert rel not in api_rels, f"{filename} carries API-managed rel={rel}"
             assert "queryables" not in rel, f"{filename} carries API-managed rel={rel}"
+
+
+# --- eodash baseLayers (issue #348) -----------------------------------------
+
+# The basemap set eodash offers in its layer switcher. The same four links are
+# duplicated across every eodash collection's JSON: a shared source constant would
+# only be reachable from build_s1_rtc_collections.py, leaving S2 (hand-written static
+# JSON no generator touches) on a second mechanism — and drift between two mechanisms
+# is invisible. So the contract is pinned once here instead, and the data is repeated.
+EXPECTED_BASELAYERS = [
+    ("OSM", "image/jpeg", ["baselayer", "invisible"]),
+    ("terrain-light", "image/jpeg", ["baselayer", "visible"]),
+    ("overlay_bright", "image/png", ["overlay", "visible"]),
+    ("cloudless-2024", "image/jpeg", ["baselayer", "invisible"]),
+]
+
+# (filename, require_attribution). #348 asked for attribution on the S1 links; S2's
+# predate the request and are backfilled separately (they are applied from `main`,
+# so carrying the change here would leave main's copy to overwrite it).
+BASELAYER_COLLECTIONS = [
+    ("sentinel-1-grd-rtc-staging.json", True),
+    ("sentinel-1-grd-rtc-acquisitions-staging.json", True),
+    ("sentinel-2-l2a.json", False),
+    ("sentinel-2-l2a-staging.json", False),
+]
+
+
+def _xyz_links(filename: str) -> list[dict[str, Any]]:
+    return [link for link in _load(filename)["links"] if link.get("rel") == "xyz"]
+
+
+@pytest.mark.parametrize("filename", [f for f, _ in BASELAYER_COLLECTIONS])
+def test_baselayers_present_in_order(filename: str) -> None:
+    """Every eodash collection offers the same four basemaps, in the same order."""
+    actual = [(lk.get("id"), lk.get("type"), lk.get("roles")) for lk in _xyz_links(filename)]
+    assert actual == EXPECTED_BASELAYERS
+
+
+@pytest.mark.parametrize("filename", [f for f, _ in BASELAYER_COLLECTIONS])
+def test_exactly_one_visible_baselayer(filename: str) -> None:
+    """eodash shows one basemap at a time; `overlay` is a different class and is exempt."""
+    visible = [
+        lk for lk in _xyz_links(filename) if {"baselayer", "visible"} <= set(lk.get("roles", []))
+    ]
+    assert len(visible) == 1, f"{filename}: expected exactly one visible baselayer"
+
+
+@pytest.mark.parametrize(
+    "filename", [f for f, require in BASELAYER_COLLECTIONS if require]
+)
+def test_attribution_present_and_nonempty(filename: str) -> None:
+    """The EOx/s2maps tiles must carry their attribution (issue #348)."""
+    for link in _xyz_links(filename):
+        assert link.get("attribution", "").strip(), f"{filename}: {link.get('id')} lacks attribution"
+
+
+def test_rasterform_is_not_set_at_collection_level() -> None:
+    """#348 puts eodash:rasterform on ITEMS (it varies by orbit), never on the collection."""
+    for filename in S1_TEMPLATE_RELS:
+        assert "eodash:rasterform" not in _load(filename)
 
 
 # --- Sentinel-2 L2A eodash collection metadata (issue #206) ------------------
