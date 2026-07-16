@@ -17,6 +17,10 @@ from pystac import Collection
 STAC_DIR = Path(__file__).parent.parent / "stac"
 
 
+def _load(filename: str) -> dict[str, Any]:
+    return cast("dict[str, Any]", json.loads((STAC_DIR / filename).read_text()))
+
+
 # --- Sentinel-1 GRD RTC collection asset model (PR #279) ---------------------
 
 
@@ -49,6 +53,36 @@ def test_s1_rtc_collection_valid(collection_id: str, required_data_assets: set[s
     assert sar_ext in col.stac_extensions
 
 
+# --- S1 RTC template/live link reconciliation (issue #348) -------------------
+
+# `manage_collections.py create --update` PUTs the template wholesale, so a link that
+# exists only on the live collection is destroyed on the next apply. These templates
+# drifted exactly that way (the cube carried only `license`; the acquisitions template
+# carried nothing at all) while live had EGM2008 + the cross-links. Pin the rel multiset
+# so a regeneration or a hand edit cannot silently re-arm that.
+S1_TEMPLATE_RELS = {
+    "sentinel-1-grd-rtc-staging.json": ["license", "related", "related"],
+    "sentinel-1-grd-rtc-acquisitions-staging.json": ["derived_from", "license", "related"],
+}
+
+
+@pytest.mark.parametrize(("filename", "expected_rels"), sorted(S1_TEMPLATE_RELS.items()))
+def test_s1_templates_carry_live_links(filename: str, expected_rels: list[str]) -> None:
+    """The template must be a superset of the live collection's non-API links."""
+    rels = sorted(link["rel"] for link in _load(filename)["links"])
+    assert rels == sorted(expected_rels)
+
+
+def test_s1_templates_carry_no_api_managed_links() -> None:
+    """Navigation/queryables links are owned by the API — a template must not carry them."""
+    api_rels = {"self", "root", "parent", "child", "items", "data"}
+    for filename in S1_TEMPLATE_RELS:
+        for link in _load(filename)["links"]:
+            rel = link["rel"]
+            assert rel not in api_rels, f"{filename} carries API-managed rel={rel}"
+            assert "queryables" not in rel, f"{filename} carries API-managed rel={rel}"
+
+
 # --- Sentinel-2 L2A eodash collection metadata (issue #206) ------------------
 
 # Collections that must carry the eodash GeoZarr layer metadata.
@@ -58,10 +92,6 @@ STYLE_HREF = (
     "https://raw.githubusercontent.com/EOPF-Explorer/eodash-assets/"
     "refs/heads/main/styles/geozarr.json"
 )
-
-
-def _load(filename: str) -> dict[str, Any]:
-    return cast("dict[str, Any]", json.loads((STAC_DIR / filename).read_text()))
 
 
 @pytest.mark.parametrize("filename", EODASH_COLLECTIONS)
