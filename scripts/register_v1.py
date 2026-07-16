@@ -22,7 +22,7 @@ from s3_item_cleanup import (
     TIMESTAMPS_EXTENSION,
     env_int,
     format_expires,
-    load_exclude_ids,
+    resolve_exclude_ids,
 )
 from storage_tier_utils import extract_region_from_endpoint, get_s3_storage_class
 
@@ -491,18 +491,6 @@ def resolve_retention_days() -> int:
     empty value falls back to the default. See coordination#183.
     """
     return env_int("EXPIRES_RETENTION_DAYS", DEFAULT_RETENTION_DAYS)
-
-
-def resolve_exclude_ids() -> set[str]:
-    """Demo denylist from ``EXPIRES_EXCLUDE_FILE`` (coordination#183).
-
-    This is the *same* list the cleanup honors, so demo protection is defined
-    once and can't drift between register-time and cleanup-time. An id in this
-    list is never stamped with ``expires`` here, and never deleted by the
-    cleanup — so re-registering or reconverting a demo scene keeps it
-    structurally undeletable. Unset ⇒ empty set.
-    """
-    return load_exclude_ids(os.getenv("EXPIRES_EXCLUDE_FILE"))
 
 
 def add_expires(item: Item, retention_days: int, exclude_ids: set[str] | None = None) -> None:

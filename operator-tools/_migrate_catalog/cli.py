@@ -57,6 +57,38 @@ def cli(ctx: click.Context, api_url: str | None, history_file: str | None, verbo
     multiple=True,
     help="Restrict the run to specific item ids (repeatable) — e.g. a single-tile canary",
 )
+@click.option(
+    "--concurrency",
+    default=1,
+    show_default=True,
+    type=click.IntRange(1, 64),
+    help=(
+        "Parallel workers for the per-item writes (I/O-bound). Default 1 is the "
+        "sequential path. Raising this multiplies write load on the STAC API — "
+        "start moderate (~8) and watch read latency."
+    ),
+)
+@click.option(
+    "--max-consecutive-failures",
+    default=25,
+    show_default=True,
+    type=click.IntRange(0, None),
+    help=(
+        "Stop the run after this many writes fail back-to-back (0 disables). A failed "
+        "write leaves its item untouched, so this bounds wasted time against a broken "
+        "API rather than data loss."
+    ),
+)
+@click.option(
+    "--max-writes",
+    default=None,
+    type=click.IntRange(1, None),
+    help=(
+        "Stop cleanly after ATTEMPTING N writes (a bounded first run). Failed writes "
+        "count against N; skipped items do not. Use this instead of killing the "
+        "process — it stops in-tool at an item boundary."
+    ),
+)
 @click.pass_context
 def run(
     ctx: click.Context,
@@ -66,6 +98,9 @@ def run(
     yes: bool,
     page_size: int,
     ids: tuple[str, ...],
+    concurrency: int,
+    max_consecutive_failures: int,
+    max_writes: int | None,
 ) -> None:
     """Run one or more migrations on a collection."""
     for name in migration_names:
@@ -110,14 +145,40 @@ def run(
         selected.reset()  # clear any accumulated per-run state before this run
 
     runner = STACMigrationRunner(api_url, recovery_dir=history_file.parent)
-    result = runner.run_migration(
-        collection_id,
-        migration_fn,
-        migration_name,
-        dry_run=dry_run,
-        page_size=page_size,
-        ids=list(ids) or None,
-    )
+    try:
+        result = runner.run_migration(
+            collection_id,
+            migration_fn,
+            migration_name,
+            dry_run=dry_run,
+            page_size=page_size,
+            ids=list(ids) or None,
+            concurrency=concurrency,
+            max_consecutive_failures=max_consecutive_failures,
+            max_writes=max_writes,
+        )
+    except KeyboardInterrupt:
+        # Queued writes were cancelled and in-flight ones completed, so nothing is torn
+        # (each write is a single atomic PUT) — but the tally is lost with the stack.
+        # Click would otherwise turn this into a bare "Aborted!" (exit 1), which says
+        # nothing about what was written or what to do next, and is indistinguishable
+        # from a declined confirmation prompt. --max-writes is the supported way to bound.
+        click.echo("\nInterrupted.", err=True)
+        click.echo(
+            "Queued writes were cancelled and in-flight writes completed; each write is "
+            "a single atomic PUT, so no item is left half-written.",
+            err=True,
+        )
+        click.echo(
+            f"This run's tally was NOT recorded to {history_file}. The migration is "
+            "idempotent — re-run to continue where it left off.",
+            err=True,
+        )
+        click.echo(
+            "To stop at a set point instead of interrupting, use --max-writes N.",
+            err=True,
+        )
+        sys.exit(130)  # 128 + SIGINT
 
     click.echo()
     click.echo("=" * 50)
@@ -129,6 +190,10 @@ def run(
         click.echo(f"  Items failed:                 {result.items_failed}", err=True)
         for err in result.errors[:5]:
             click.echo(f"    - {err['item_id']}: {err['error']}", err=True)
+    # Both flags can be set (the budget runs out on the same page the breaker trips).
+    # An abort is the more serious outcome, so don't also label it a tidy bounded run.
+    if result.reached_max_writes and not result.aborted:
+        click.echo(f"  Stopped early: --max-writes {max_writes} reached (bounded run)")
     if selected is not None and selected.reporter is not None:
         click.echo(selected.reporter(result))
     click.echo("=" * 50)
@@ -136,6 +201,21 @@ def run(
     if not dry_run:
         record_run(history_file, result)
         click.echo(f"Run recorded to {history_file}")
+
+    if result.aborted:
+        # A DELETE that succeeded before a failing POST leaves the item out of the
+        # catalogue, where a re-run cannot find it again — so point at the recovery
+        # file rather than just suggesting another run.
+        click.echo(
+            f"\nABORTED: stopped after {max_consecutive_failures} consecutive write "
+            f"failures — the API was rejecting writes, so the run did not finish.\n"
+            f"Items are DELETE-then-POST: any item whose POST failed is no longer in "
+            f"the catalogue and a re-run will NOT see it. Before re-running, restore "
+            f"them from this run's .migration_recovery_*.jsonl (the failed ids are in "
+            f"{history_file}).",
+            err=True,
+        )
+        sys.exit(1)
 
 
 @cli.command()

@@ -1,7 +1,11 @@
 import copy
 import json
 import logging
+import os
 import sys
+import threading
+from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -10,6 +14,8 @@ import click
 import pystac
 import requests
 from pystac_client import Client
+from pystac_client.stac_api_io import StacApiIO
+from urllib3.util.retry import Retry
 
 from _migrate_catalog.types import MigrationFn, MigrationResult
 
@@ -21,6 +27,31 @@ if str(_scripts_dir) not in sys.path:
 import stac_auth  # noqa: E402
 
 logger = logging.getLogger(__name__)
+
+# Resilience for the search-pagination client on long backfills. Two failures
+# seen live against the prod STAC API:
+#   - no timeout -> a stalled socket hangs the whole run forever (4.5h wall /
+#     26s CPU, never past "Found N items").
+#   - weak default retries -> a transient ConnectionReset mid-pagination aborts
+#     the entire run (crashed at ~20% of a 23k-item staging backfill).
+# _resilient_stac_io gives the pagination client a per-request timeout plus
+# urllib3 retries with exponential backoff on connection errors and 5xx, for GET
+# and the POST /search pagination. urllib3 cannot always retry a reset mid-body,
+# so this is best-effort; the migration is idempotent (skips already-stamped),
+# so anything that still slips through is recovered by simply re-running.
+# Override the timeout via STAC_HTTP_TIMEOUT.
+_SEARCH_TIMEOUT = float(os.getenv("STAC_HTTP_TIMEOUT", "60"))
+
+
+def _resilient_stac_io() -> StacApiIO:
+    retry = Retry(
+        total=8,
+        backoff_factor=1.0,
+        status_forcelist=(429, 502, 503, 504),
+        allowed_methods=frozenset({"GET", "POST"}),
+        raise_on_status=False,
+    )
+    return StacApiIO(timeout=_SEARCH_TIMEOUT, max_retries=retry)
 
 
 def _transaction_body(item_dict: dict[str, Any]) -> dict[str, Any] | None:
@@ -60,27 +91,86 @@ class STACMigrationRunner:
         self.api_url = api_url.rstrip("/")
         self.session = requests.Session()
         self.session.headers.update({"Content-Type": "application/json"})
-        # Authenticate the delete/post migration writes (no-op when OIDC env is unset).
+        # Authenticate the migration writes (no-op when OIDC env is unset).
         self.session.auth = stac_auth.bearer_auth
+        # requests.Session is not guaranteed thread-safe, so each thread that
+        # writes gets its own (see _session). The constructing thread keeps
+        # `self.session` — the sequential paths (clone_collection, and
+        # run_migration at the default concurrency=1) then behave exactly as
+        # they did before parallel writes existed.
+        self._local = threading.local()
+        self._local.session = self.session
+        # Serialises the recovery-file append. A buffered O_APPEND write appears to
+        # be atomic in practice, but that is a platform property, not a guarantee
+        # (it can split on short writes, and does not hold on every filesystem).
+        # The lock costs nothing next to the HTTP round-trip.
+        self._recovery_lock = threading.Lock()
         self._recovery_file: Path | None = None
         if recovery_dir is not None:
             timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
             self._recovery_file = recovery_dir / f".migration_recovery_{timestamp}.jsonl"
 
+    def _session(self) -> requests.Session:
+        """Return the calling thread's Session, creating it on first use.
+
+        Each per-thread Session must carry the auth hook itself: `requests` runs it
+        per-request off the *Session*, so a worker thread built without it would write
+        unauthenticated — silently, since the API still accepts such writes.
+        """
+        session: requests.Session | None = getattr(self._local, "session", None)
+        if session is None:
+            session = requests.Session()
+            session.headers.update({"Content-Type": "application/json"})
+            session.auth = stac_auth.bearer_auth
+            self._local.session = session
+        return session
+
     def _update_item(self, collection_id: str, item_id: str, item_dict: dict[str, Any]) -> None:
-        """Delete then POST (pgSTAC doesn't support PUT). Logs item to recovery file before delete."""
+        """Replace one item with a single atomic PUT.
+
+        This used to DELETE then POST, on the belief that "pgSTAC doesn't support
+        PUT" — introduced 2026-03 with no recorded rationale and repeated at five
+        sites. It is false: the API advertises the OGC Features transaction
+        extension and PUT works. Verified live against prod on a throwaway
+        collection: PUT's stored result is equivalent to DELETE+POST's on the same
+        input, it 404s rather than creating a missing item, it is correct under 8
+        concurrent workers, and it is 1.94x faster (412 vs 800 ms/item — one round
+        trip instead of two).
+
+        Speed is the lesser point. DELETE-then-POST left a window in which the item
+        existed nowhere: a timeout, crash or kill between the two destroyed it for
+        good, because a re-run cannot heal what /search no longer returns — only the
+        recovery file could. Both halves of that were observed live (a kill tore 3
+        items; write timeouts run ~1 per 10k). A PUT either replaces the item or
+        leaves it untouched, so a torn item is impossible rather than merely rare.
+
+        The recovery file is kept as a record of what was written. Note it holds the
+        POST-update content, so it documents rather than undoes.
+        """
         if self._recovery_file is not None:
-            with open(self._recovery_file, "a") as f:
+            with self._recovery_lock, open(self._recovery_file, "a") as f:
                 f.write(json.dumps(item_dict) + "\n")
-        self.session.delete(
-            f"{self.api_url}/collections/{collection_id}/items/{item_id}", timeout=30
-        )
-        resp = self.session.post(
-            f"{self.api_url}/collections/{collection_id}/items",
+        resp = self._session().put(
+            f"{self.api_url}/collections/{collection_id}/items/{item_id}",
             json=item_dict,
             timeout=30,
         )
         resp.raise_for_status()
+
+    def _safe_update(self, task: tuple[str, str, dict[str, Any]]) -> tuple[str, str | None]:
+        """Run one write, converting failure into a value.
+
+        The ONLY thing dispatched to the worker pool: it does the network I/O and
+        touches no migration state, so the caller can tally outcomes single-threaded.
+        Returns (item_id, None) on success or (item_id, error_message) on failure —
+        one item's failure must never abort the rest of the batch.
+        """
+        collection_id, item_id, item_dict = task
+        try:
+            self._update_item(collection_id, item_id, item_dict)
+            return item_id, None
+        except Exception as e:
+            return item_id, str(e)
 
     def run_migration(
         self,
@@ -90,7 +180,52 @@ class STACMigrationRunner:
         dry_run: bool = False,
         page_size: int = 100,
         ids: list[str] | None = None,
+        concurrency: int = 1,
+        max_consecutive_failures: int = 25,
+        max_writes: int | None = None,
     ) -> MigrationResult:
+        """Apply migration_fn to every item in collection_id.
+
+        The per-item DELETE+POST is a network round-trip, so a sequential run is
+        latency-bound (~5-6k items/hour against prod). `concurrency` > 1 dispatches
+        those writes to a thread pool — the work is I/O-bound, so threads scale it.
+
+        Only the WRITES are parallelized. `migration_fn` keeps non-thread-safe
+        module state (stamp_expires' outcome histogram and exclude-id sets, whose
+        `+=` is not atomic) and its reporter reconciles that histogram against these
+        counters, so it runs on the calling thread and the tally stays lock-free.
+        Writes are bounded to one page at a time, capping in-flight requests.
+
+        concurrency=1 (the default) bypasses the pool entirely and is the exact
+        sequential path used before this existed, so no other migration silently
+        gains write load against prod pgSTAC.
+
+        max_consecutive_failures stops a run whose writes are failing wholesale
+        (see the circuit breaker below); 0 disables it and restores run-to-completion.
+        Sets `result.aborted`.
+
+        max_writes bounds a run to N *attempted* writes and then stops cleanly,
+        setting `result.reached_max_writes`. A failed write still counts against the
+        budget: its DELETE may already have landed, so it has spent real blast
+        radius, and counting only successes would keep retrying past N on exactly
+        the failing run you most want bounded. Skips are free (the head of a
+        collection is typically already migrated). Use it for a bounded run rather than
+        killing the process: the unit of work is a non-atomic DELETE-then-POST, so
+        a kill can leave items deleted-but-not-restored, and a signal-based stop is
+        unreliable anyway (a process backgrounded from a non-interactive shell
+        inherits SIGINT=SIG_IGN, and CPython then never installs its handler). The
+        budget is checked *before* migration_fn runs, so an item that is not written
+        is never counted as processed and the histogram still reconciles.
+        """
+        if concurrency < 1:
+            raise ValueError(f"concurrency must be >= 1, got {concurrency}")
+        if max_consecutive_failures < 0:
+            raise ValueError(
+                f"max_consecutive_failures must be >= 0, got {max_consecutive_failures}"
+            )
+        if max_writes is not None and max_writes < 1:
+            raise ValueError(f"max_writes must be >= 1 or None, got {max_writes}")
+
         started_at = datetime.now(UTC).isoformat()
         result = MigrationResult(
             migration_name=migration_name,
@@ -105,7 +240,7 @@ class STACMigrationRunner:
             errors=[],
         )
 
-        catalog = Client.open(self.api_url)
+        catalog = Client.open(self.api_url, stac_io=_resilient_stac_io())
         # `ids` restricts the run to specific items (the canary path) via the same code path,
         # recovery JSONL, and history as the full run. Omitted from the call when unset so the
         # full-collection search stays byte-identical (backcompat).
@@ -127,46 +262,114 @@ class STACMigrationRunner:
                 f"Processing items from '{collection_id}'{' (dry run)' if dry_run else ''}..."
             )
 
-        # Iterate raw item dicts, not pystac Item objects: some live items carry an asset with no
-        # href (e.g. s1-rtc-30TWQ) that pystac's Item.from_dict rejects, and one such item must not
-        # abort the whole run. The migration functions operate on dicts anyway.
-        with click.progressbar(length=total, show_pos=True, show_percent=True) as bar:
-            for item_dict in search.items_as_dicts():
-                item_id = item_dict.get("id", "unknown")
-                result.items_processed += 1
-                try:
-                    modified = migration_fn(item_dict)
-                    if modified is None:
-                        result.items_skipped += 1
-                    elif dry_run:
-                        result.items_modified += 1
-                    else:
-                        body = _transaction_body(modified)
-                        if body is None:
-                            # Can't build a valid POST body — skip WITHOUT deleting (a
-                            # delete-then-failed-POST would lose the item).
+        pool = ThreadPoolExecutor(max_workers=concurrency) if concurrency > 1 else None
+        consecutive_failures = 0
+        budget_used = 0  # items modified (or, in a dry run, that would be)
+        try:
+            with click.progressbar(length=total, show_pos=True, show_percent=True) as bar:
+                # Iterate raw item dicts, not pystac Item objects: some live items carry an
+                # asset with no href (e.g. s1-rtc-30TWQ) that pystac's Item.from_dict rejects,
+                # and one such item must not abort the whole run. `pages_as_dicts` keeps that
+                # tolerance while still yielding a page at a time, which is what bounds the
+                # in-flight writes below. The migration functions operate on dicts anyway.
+                for page in search.pages_as_dicts():
+                    pending: list[tuple[str, str, dict[str, Any]]] = []
+
+                    # Classify the page on this thread; queue the writes it earned.
+                    for item_dict in page.get("features", []):
+                        # Check the budget BEFORE classifying. Trimming the batch
+                        # afterwards would leave items counted as processed but never
+                        # written, so neither the tally nor stamp_expires' histogram
+                        # would reconcile.
+                        # The flag is only raised once a further item is *inspected*,
+                        # so a budget landing exactly on a page boundary costs one
+                        # extra page fetch (no extra writes). Harmless — not a bug.
+                        if max_writes is not None and budget_used >= max_writes:
+                            result.reached_max_writes = True
+                            break
+
+                        item_id = item_dict.get("id", "unknown")
+                        result.items_processed += 1
+                        try:
+                            modified = migration_fn(item_dict)
+                        except Exception as e:
                             result.items_failed += 1
-                            result.errors.append(
-                                {
-                                    "item_id": item_id,
-                                    "error": "cannot build a transaction-valid POST body "
-                                    "(pystac can't model it); skipped without deleting",
-                                }
-                            )
-                        else:
-                            self._update_item(collection_id, item_id, body)
+                            result.errors.append({"item_id": item_id, "error": str(e)})
+                            bar.update(1)
+                            continue
+                        if modified is None:
+                            result.items_skipped += 1  # skips are free: no budget spent
+                            bar.update(1)
+                        elif dry_run:
                             result.items_modified += 1
-                except Exception as e:
-                    result.items_failed += 1
-                    result.errors.append({"item_id": item_id, "error": str(e)})
-                bar.update(1)
+                            budget_used += 1
+                            bar.update(1)
+                        else:
+                            body = _transaction_body(modified)
+                            if body is None:
+                                # Can't build a valid PUT body — skip WITHOUT writing rather
+                                # than send something the API will reject.
+                                result.items_failed += 1
+                                result.errors.append(
+                                    {
+                                        "item_id": item_id,
+                                        "error": "cannot build a transaction-valid PUT body "
+                                        "(pystac can't model it); skipped without writing",
+                                    }
+                                )
+                                bar.update(1)
+                            else:
+                                pending.append((collection_id, item_id, body))
+                                budget_used += 1
+
+                    # Then run this page's writes and tally them back here.
+                    writes: Iterator[tuple[str, str | None]] = (
+                        pool.map(self._safe_update, pending)
+                        if pool is not None
+                        else map(self._safe_update, pending)
+                    )
+                    for item_id, error in writes:
+                        if error is None:
+                            result.items_modified += 1
+                            consecutive_failures = 0
+                        else:
+                            result.items_failed += 1
+                            consecutive_failures += 1
+                            result.errors.append({"item_id": item_id, "error": error})
+                        bar.update(1)
+
+                    # Circuit breaker, checked once per page. A failed write leaves its item
+                    # untouched (the write is a single atomic PUT), so this is not about
+                    # data loss — it stops a run whose writes are failing wholesale from
+                    # spending hours re-attempting a broken API, and bounds the noise to
+                    # roughly one page past the trip point.
+                    if (
+                        max_consecutive_failures
+                        and consecutive_failures >= max_consecutive_failures
+                    ):
+                        result.aborted = True
+                        break
+
+                    # Budget spent: stop between pages, cleanly. In-tool, at an item
+                    # boundary — no signal, no kill.
+                    if result.reached_max_writes:
+                        break
+        finally:
+            if pool is not None:
+                # cancel_futures: on Ctrl-C, drop writes still queued rather than
+                # pushing a page's worth into prod after the operator asked to stop.
+                # Without this the behaviour is not deterministic: it depends on
+                # whether the interrupt lands inside pool.map's generator (which
+                # cancels) or outside it (which drains).
+                # wait: let in-flight PUTs finish rather than abandoning their sockets.
+                pool.shutdown(wait=True, cancel_futures=True)
 
         result.completed_at = datetime.now(UTC).isoformat()
         return result
 
     def _fetch_existing_ids(self, collection_id: str, page_size: int) -> set[str]:
         """Return the set of item IDs already present in collection_id."""
-        catalog = Client.open(self.api_url)
+        catalog = Client.open(self.api_url, stac_io=_resilient_stac_io())
         search = catalog.search(
             collections=[collection_id],
             max_items=None,
@@ -201,7 +404,7 @@ class STACMigrationRunner:
             existing_ids = self._fetch_existing_ids(target_id, page_size)
             click.echo(f"Found {len(existing_ids)} items already in '{target_id}', skipping them.")
 
-        catalog = Client.open(self.api_url)
+        catalog = Client.open(self.api_url, stac_io=_resilient_stac_io())
         search = catalog.search(collections=[source_id], max_items=None, limit=page_size)
 
         total = search.matched()
