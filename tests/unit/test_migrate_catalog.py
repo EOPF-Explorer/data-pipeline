@@ -531,7 +531,9 @@ def _make_mock_search(items_dicts: list, total: int | None = None) -> MagicMock:
     mock_search.pages.return_value = [mock_page] if mock_items else []
     # run_migration consumes raw dicts a page at a time (robust to items pystac can't model,
     # while still bounding in-flight writes to one page); clone/fetch still use .pages()/.items.
-    mock_search.pages_as_dicts.return_value = [{"features": list(items_dicts)}] if mock_items else []
+    mock_search.pages_as_dicts.return_value = (
+        [{"features": list(items_dicts)}] if mock_items else []
+    )
     mock_search.items_as_dicts.return_value = list(items_dicts)
     return mock_search
 
@@ -2677,8 +2679,16 @@ class TestTransactionBodyDoesNoNetworkIO:
             "assets": {},
             "collection": "test-col",
             "links": [
-                {"rel": "root", "href": "https://api.example.com/stac/", "type": "application/json"},
-                {"rel": "self", "href": "https://api.example.com/stac/x", "type": "application/json"},
+                {
+                    "rel": "root",
+                    "href": "https://api.example.com/stac/",
+                    "type": "application/json",
+                },
+                {
+                    "rel": "self",
+                    "href": "https://api.example.com/stac/x",
+                    "type": "application/json",
+                },
                 {"rel": "xyz", "href": "https://r/{z}/{x}/{y}.png", "type": "image/png"},
             ],
         }

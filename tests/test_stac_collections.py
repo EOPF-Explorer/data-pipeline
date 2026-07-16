@@ -135,13 +135,12 @@ def test_exactly_one_visible_baselayer(filename: str) -> None:
     assert len(visible) == 1, f"{filename}: expected exactly one visible baselayer"
 
 
-@pytest.mark.parametrize(
-    "filename", [f for f, require in BASELAYER_COLLECTIONS if require]
-)
+@pytest.mark.parametrize("filename", [f for f, require in BASELAYER_COLLECTIONS if require])
 def test_attribution_present_and_nonempty(filename: str) -> None:
     """The EOx/s2maps tiles must carry their attribution (issue #348)."""
     for link in _xyz_links(filename):
-        assert link.get("attribution", "").strip(), f"{filename}: {link.get('id')} lacks attribution"
+        attribution = link.get("attribution", "")
+        assert attribution.strip(), f"{filename}: {link.get('id')} lacks attribution"
 
 
 def test_rasterform_is_not_set_at_collection_level() -> None:
