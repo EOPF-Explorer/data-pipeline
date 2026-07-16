@@ -428,30 +428,101 @@ class TestCloneResume:
         assert mock_post.call_count == 3
 
 
-class TestRecoveryFile:
-    def test_recovery_file_written_before_delete(self, tmp_path, item_with_wrong_media_type):
-        runner = STACMigrationRunner("https://api.example.com/stac", recovery_dir=tmp_path)
+class TestAtomicUpdate:
+    """The write must be ONE atomic call.
 
-        recovery_existed_before_delete = []
+    The tool used to DELETE then POST, on the belief that pgSTAC had no PUT. That
+    left a window in which the item existed nowhere: a timeout, crash or kill
+    between the two deleted the item for good, and a re-run could not heal it
+    because /search no longer returns it. Only the recovery file could.
 
-        def delete_side_effect(*args, **kwargs):
-            files = list(tmp_path.glob(".migration_recovery_*.jsonl"))
-            recovery_existed_before_delete.append(bool(files))
-            return MagicMock()
+    The API in fact advertises the OGC Features transaction extension and exposes
+    PUT on the item path. PUT either replaces the item or leaves it untouched, so
+    a torn item is not merely unlikely — it is impossible. These tests exist to
+    stop anyone reintroducing the window.
+    """
 
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
+    def _runner_with_mock_session(self, **kw):  # noqa: ANN202
+        runner = STACMigrationRunner("https://api.example.com/stac", **kw)
+        session = MagicMock()
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        session.put.return_value = resp
+        runner._session = MagicMock(return_value=session)  # type: ignore[method-assign]
+        return runner, session
+
+    def test_update_is_a_single_put_and_never_deletes(self, item_with_wrong_media_type) -> None:
+        runner, session = self._runner_with_mock_session()
+
+        runner._update_item("test-col", "item-1", item_with_wrong_media_type)
+
+        session.put.assert_called_once()
+        session.delete.assert_not_called()  # the window must not exist
+        session.post.assert_not_called()
+        url = session.put.call_args[0][0]
+        assert url == "https://api.example.com/stac/collections/test-col/items/item-1"
+        assert session.put.call_args.kwargs["json"] == item_with_wrong_media_type
+
+    def test_a_failing_put_is_tallied_as_failed_not_modified(self) -> None:
+        """A failed PUT leaves the item intact — but it must still reach items_failed.
+
+        Driven through run_migration rather than asserting _update_item raises: the
+        tallying is the actual contract, and a test that only checks the raise would
+        pass even if run_migration swallowed it.
+        """
+        import requests
+
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        session = MagicMock()
+        resp = MagicMock()
+        resp.raise_for_status.side_effect = requests.HTTPError("500 boom")
+        session.put.return_value = resp
+        runner._session = MagicMock(return_value=session)  # type: ignore[method-assign]
+
+        search = _make_mock_search([_dirty_item(0)], total=1)
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = search
+            result = runner.run_migration("test-col", fix_zarr_media_type, "m")
+
+        assert result.items_failed == 1
+        assert result.items_modified == 0
+        assert "500 boom" in result.errors[0]["error"]
+
+    def test_put_goes_through_the_thread_local_session(self) -> None:
+        """The write must use the per-thread Session (a shared one is not guaranteed
+        thread-safe). Patching the real session object rather than _session keeps
+        that wiring covered."""
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
 
         with (
-            patch.object(runner.session, "delete", side_effect=delete_side_effect),
-            patch.object(runner.session, "post", return_value=mock_resp),
+            patch.object(runner.session, "put", return_value=resp) as mock_put,
+            patch.object(runner.session, "delete") as mock_delete,
         ):
-            runner._update_item("test-col", "item-1", item_with_wrong_media_type)
+            runner._update_item("test-col", "item-1", {"id": "item-1"})
 
-        assert recovery_existed_before_delete == [
-            True
-        ], "Recovery file must exist before delete is called"
+        # __init__ seeds the constructing thread's local with self.session, so a
+        # main-thread write must land on it.
+        mock_put.assert_called_once()
+        mock_delete.assert_not_called()
 
+    def test_recovery_line_written_before_the_put(self, tmp_path, item_with_wrong_media_type):
+        """Still written first — it is now an audit/undo record rather than the only
+        way back, but it must describe a write before that write is attempted."""
+        runner, session = self._runner_with_mock_session(recovery_dir=tmp_path)
+        existed_before_put = []
+
+        def put_side_effect(*args, **kwargs):  # noqa: ANN202
+            existed_before_put.append(bool(list(tmp_path.glob(".migration_recovery_*.jsonl"))))
+            r = MagicMock()
+            r.raise_for_status = MagicMock()
+            return r
+
+        session.put.side_effect = put_side_effect
+        runner._update_item("test-col", "item-1", item_with_wrong_media_type)
+
+        assert existed_before_put == [True]
         files = list(tmp_path.glob(".migration_recovery_*.jsonl"))
         assert len(files) == 1
         with open(files[0]) as f:
@@ -459,33 +530,17 @@ class TestRecoveryFile:
         assert saved["id"] == item_with_wrong_media_type["id"]
 
     def test_no_recovery_file_without_recovery_dir(self, item_with_wrong_media_type):
-        runner = STACMigrationRunner("https://api.example.com/stac")
-
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-
-        with (
-            patch.object(runner.session, "delete", return_value=MagicMock()),
-            patch.object(runner.session, "post", return_value=mock_resp),
-        ):
-            runner._update_item("test-col", "item-1", item_with_wrong_media_type)
-
+        runner, _ = self._runner_with_mock_session()
+        runner._update_item("test-col", "item-1", item_with_wrong_media_type)
         assert runner._recovery_file is None
 
     def test_multiple_updates_append_to_same_recovery_file(
         self, tmp_path, item_with_wrong_media_type, item_clean
     ):
-        runner = STACMigrationRunner("https://api.example.com/stac", recovery_dir=tmp_path)
+        runner, _ = self._runner_with_mock_session(recovery_dir=tmp_path)
 
-        mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
-
-        with (
-            patch.object(runner.session, "delete", return_value=MagicMock()),
-            patch.object(runner.session, "post", return_value=mock_resp),
-        ):
-            runner._update_item("test-col", "item-1", item_with_wrong_media_type)
-            runner._update_item("test-col", "item-2", item_clean)
+        runner._update_item("test-col", "item-1", item_with_wrong_media_type)
+        runner._update_item("test-col", "item-2", item_clean)
 
         files = list(tmp_path.glob(".migration_recovery_*.jsonl"))
         assert len(files) == 1
@@ -593,6 +648,56 @@ class TestHistoryTracking:
         record_run(history_file, migration_result)
 
         assert not was_migration_run(history_file, "fix_url_encoding", "sentinel-2-l2a")
+
+    def test_was_migration_run_ignores_bounded_runs(self, tmp_path, migration_result):
+        """A --max-writes run applied PART of the migration, so the next chunk must
+        not be told it was 'already applied'.
+
+        Chunking a large backfill is the designed workflow (~170k items = ~17 runs).
+        The CLI's warning prompts 'Run again?' defaulting to No, so counting a
+        bounded run as applied would tell the operator the work is done and make the
+        safe-looking default abandon the rest of the backfill.
+        """
+        history_file = tmp_path / "history.json"
+        migration_result.reached_max_writes = True
+        record_run(history_file, migration_result)
+
+        assert not was_migration_run(history_file, "fix_zarr_media_type", "sentinel-2-l2a")
+
+    def test_was_migration_run_ignores_aborted_runs(self, tmp_path, migration_result):
+        """An aborted run stopped because writes were failing wholesale — that is the
+        run that most needs re-running, so it must not read as 'already applied'."""
+        history_file = tmp_path / "history.json"
+        migration_result.aborted = True
+        record_run(history_file, migration_result)
+
+        assert not was_migration_run(history_file, "fix_zarr_media_type", "sentinel-2-l2a")
+
+    def test_was_migration_run_true_once_a_run_completes(self, tmp_path, migration_result):
+        """A bounded run followed by a completed one: the completed one counts."""
+        history_file = tmp_path / "history.json"
+        migration_result.reached_max_writes = True
+        record_run(history_file, migration_result)
+        migration_result.reached_max_writes = False  # the final, unbounded run
+        record_run(history_file, migration_result)
+
+        assert was_migration_run(history_file, "fix_zarr_media_type", "sentinel-2-l2a")
+
+    def test_was_migration_run_handles_history_predating_these_fields(
+        self, tmp_path, migration_result
+    ):
+        """Entries written before aborted/reached_max_writes existed have neither
+        key; they were full runs, so they must still count as applied."""
+        import json as _json
+
+        history_file = tmp_path / "history.json"
+        record_run(history_file, migration_result)
+        data = _json.loads(history_file.read_text())
+        data["runs"][0].pop("aborted", None)
+        data["runs"][0].pop("reached_max_writes", None)
+        history_file.write_text(_json.dumps(data))
+
+        assert was_migration_run(history_file, "fix_zarr_media_type", "sentinel-2-l2a")
 
 
 # === stamp_expires (coordination#183, Task 4) ===
@@ -869,6 +974,69 @@ class TestHistogramReporting:
         assert "TYPO_demo_xyz" in text
         assert "real_demo" not in text  # the matched id is not flagged
 
+    def test_partial_run_does_not_cry_wolf_about_unmatched_exclude_ids(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A run that stopped early only scanned part of the collection, so an
+        exclude id it never reached is NOT evidence of broken demo protection.
+
+        This is the crown-jewel alarm, and --max-writes makes partial scans the
+        normal workflow (~17 chunks for the prod backfill). Firing it every time
+        would train operators to ignore the one warning that must never be ignored.
+        Measured live: a bounded prod run reached 2 of 12 demo ids and warned about
+        the other 10, all of which were simply beyond where it stopped.
+        """
+        from _migrate_catalog.migrations.stamp_expires import report
+
+        exclude_file = tmp_path / "exclude.txt"
+        exclude_file.write_text("seen_demo\nnot_yet_reached_demo\n")
+        monkeypatch.setenv("EXPIRES_EXCLUDE_FILE", str(exclude_file))
+        monkeypatch.delenv("EXPIRES_MIN_DATETIME", raising=False)
+        reset_histogram()
+        stamp_expires(_stampable_item(item_id="seen_demo"))  # only this one scanned
+
+        bounded = _result(processed=1, modified=0, skipped=1)
+        bounded.reached_max_writes = True
+        text = report(bounded)
+        assert "matched no item" not in text, "a partial scan must not raise the alarm"
+        assert "not_yet_reached_demo" in text  # still surfaced, as information
+        assert "stopped early" in text.lower()
+
+    def test_aborted_run_also_does_not_cry_wolf(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from _migrate_catalog.migrations.stamp_expires import report
+
+        exclude_file = tmp_path / "exclude.txt"
+        exclude_file.write_text("seen_demo\nnot_yet_reached_demo\n")
+        monkeypatch.setenv("EXPIRES_EXCLUDE_FILE", str(exclude_file))
+        monkeypatch.delenv("EXPIRES_MIN_DATETIME", raising=False)
+        reset_histogram()
+        stamp_expires(_stampable_item(item_id="seen_demo"))
+
+        aborted = _result(processed=1, modified=0, skipped=1)
+        aborted.aborted = True
+        assert "matched no item" not in report(aborted)
+
+    def test_complete_run_still_raises_the_alarm(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The suppression must be narrow: on a run that scanned everything, an
+        unmatched id IS a stale/typo'd id protecting nothing, and must fail loud."""
+        from _migrate_catalog.migrations.stamp_expires import report
+
+        exclude_file = tmp_path / "exclude.txt"
+        exclude_file.write_text("real_demo\nTYPO_demo_xyz\n")
+        monkeypatch.setenv("EXPIRES_EXCLUDE_FILE", str(exclude_file))
+        monkeypatch.delenv("EXPIRES_MIN_DATETIME", raising=False)
+        reset_histogram()
+        stamp_expires(_stampable_item(item_id="real_demo"))
+
+        complete = _result(processed=1, modified=0, skipped=1)  # neither flag set
+        text = report(complete)
+        assert "matched no item" in text
+        assert "TYPO_demo_xyz" in text
+
     def test_report_quiet_when_all_exclude_ids_match(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
@@ -901,7 +1069,16 @@ class TestRunCommandSurfacesHistogram:
 
         seen_at_start = {}
 
-        def fake_run(collection_id, fn, name, dry_run, page_size):  # noqa: ANN001
+        def fake_run(  # noqa: ANN001
+            collection_id,
+            fn,
+            name,
+            dry_run,
+            page_size,
+            concurrency,
+            max_consecutive_failures,
+            max_writes,
+        ):
             seen_at_start["total"] = sum(SKIP_HISTOGRAM.values())  # proves reset ran first
             fn(_stampable_item(item_id="a"))
             fn(_stampable_item(item_id="b", expires="2025-07-01T00:00:00Z"))
@@ -934,3 +1111,942 @@ def test_search_client_is_resilient() -> None:
     assert retry.total and retry.total >= 5
     assert retry.backoff_factor and retry.backoff_factor > 0
     assert "POST" in retry.allowed_methods  # /search pagination uses POST
+
+
+# === Parallel writes (--concurrency) ===
+
+import threading  # noqa: E402
+import time  # noqa: E402
+from concurrent.futures import ThreadPoolExecutor  # noqa: E402
+
+
+def _dirty_item(i: int) -> dict:
+    """An item fix_zarr_media_type will modify (so it reaches the write path)."""
+    return {
+        "id": f"item-{i}",
+        "assets": {"data": {"href": "https://ex.com/d.zarr", "type": "application/vnd+zarr"}},
+        "links": [],
+    }
+
+
+def _clean_item(i: int) -> dict:
+    """An item fix_zarr_media_type leaves alone (so it counts as a skip)."""
+    return {
+        "id": f"clean-{i}",
+        "assets": {
+            "data": {"href": "https://ex.com/d.zarr", "type": "application/vnd.zarr; version=3"}
+        },
+        "links": [],
+    }
+
+
+class TestRunMigrationConcurrency:
+    def _runner_recording_writes(self) -> tuple[STACMigrationRunner, list, list]:
+        """Runner whose _update_item records (item_id, thread) instead of doing I/O."""
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        lock = threading.Lock()
+        written: list[str] = []
+        write_threads: list[int] = []
+
+        def record(collection_id, item_id, item_dict):  # noqa: ANN001, ANN202
+            with lock:
+                written.append(item_id)
+                write_threads.append(threading.get_ident())
+
+        runner._update_item = record  # type: ignore[method-assign]
+        return runner, written, write_threads
+
+    def _run(self, runner, items, concurrency, dry_run=False):  # noqa: ANN001, ANN202
+        mock_search = _make_mock_search(items, total=len(items))
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = mock_search
+            return runner.run_migration(
+                "test-col",
+                fix_zarr_media_type,
+                "fix_zarr_media_type",
+                dry_run=dry_run,
+                concurrency=concurrency,
+            )
+
+    def test_default_concurrency_is_sequential_and_unchanged(self) -> None:
+        """Default (1) must behave exactly like today's sequential path: all writes
+        happen on the calling thread, and the tally is unchanged."""
+        runner, written, write_threads = self._runner_recording_writes()
+        items = [_dirty_item(i) for i in range(5)] + [_clean_item(i) for i in range(3)]
+
+        result = self._run(runner, items, concurrency=1)
+
+        assert result.items_processed == 8
+        assert result.items_modified == 5
+        assert result.items_skipped == 3
+        assert result.items_failed == 0
+        assert sorted(written) == sorted(f"item-{i}" for i in range(5))
+        assert set(write_threads) == {threading.get_ident()}, "concurrency=1 must not offload I/O"
+
+    def test_parallel_tally_matches_sequential(self) -> None:
+        """concurrency=4 must produce the same counters as concurrency=1."""
+        items = [_dirty_item(i) for i in range(20)] + [_clean_item(i) for i in range(10)]
+
+        seq_runner, seq_written, _ = self._runner_recording_writes()
+        par_runner, par_written, _ = self._runner_recording_writes()
+
+        seq = self._run(seq_runner, items, concurrency=1)
+        par = self._run(par_runner, items, concurrency=4)
+
+        assert (par.items_processed, par.items_modified, par.items_skipped, par.items_failed) == (
+            seq.items_processed,
+            seq.items_modified,
+            seq.items_skipped,
+            seq.items_failed,
+        )
+        assert sorted(par_written) == sorted(seq_written)
+
+    def test_parallel_writes_every_item_exactly_once(self) -> None:
+        runner, written, _ = self._runner_recording_writes()
+        items = [_dirty_item(i) for i in range(50)]
+
+        result = self._run(runner, items, concurrency=8)
+
+        assert result.items_modified == 50
+        assert sorted(written) == sorted(f"item-{i}" for i in range(50))
+        assert len(written) == len(set(written)), "no item may be written twice"
+
+    def test_parallel_actually_uses_multiple_threads(self) -> None:
+        """Guards the point of the change: writes really are dispatched to a pool."""
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        barrier = threading.Barrier(4, timeout=30)
+        lock = threading.Lock()
+        threads: set[int] = set()
+
+        def record(collection_id, item_id, item_dict):  # noqa: ANN001, ANN202
+            barrier.wait()  # times out unless >=4 writes run concurrently
+            with lock:
+                threads.add(threading.get_ident())
+
+        runner._update_item = record  # type: ignore[method-assign]
+        result = self._run(runner, [_dirty_item(i) for i in range(8)], concurrency=4)
+
+        assert result.items_modified == 8
+        assert len(threads) >= 4
+
+    def test_dry_run_never_writes_even_with_concurrency(self) -> None:
+        runner, written, _ = self._runner_recording_writes()
+        items = [_dirty_item(i) for i in range(10)]
+
+        result = self._run(runner, items, concurrency=4, dry_run=True)
+
+        assert result.items_modified == 10
+        assert written == [], "dry run must not reach the write path"
+
+    def test_one_failing_write_does_not_abort_the_batch(self) -> None:
+        """A single write raising must be isolated: it lands in items_failed +
+        errors, and every other item still gets written."""
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        lock = threading.Lock()
+        written: list[str] = []
+
+        def record(collection_id, item_id, item_dict):  # noqa: ANN001, ANN202
+            if item_id == "item-3":
+                raise RuntimeError("API error")
+            with lock:
+                written.append(item_id)
+
+        runner._update_item = record  # type: ignore[method-assign]
+        result = self._run(runner, [_dirty_item(i) for i in range(10)], concurrency=4)
+
+        assert result.items_failed == 1
+        assert result.items_modified == 9
+        assert len(result.errors) == 1
+        assert result.errors[0]["item_id"] == "item-3"
+        assert "API error" in result.errors[0]["error"]
+        assert "item-3" not in written
+        assert len(written) == 9
+
+    def test_migration_fn_runs_only_on_the_calling_thread(self) -> None:
+        """The core design invariant: migration_fn holds non-thread-safe module
+        state (stamp_expires' histogram / exclude sets), so only the WRITES are
+        parallelized — classification stays on the main thread."""
+        runner, _, _ = self._runner_recording_writes()
+        lock = threading.Lock()
+        fn_threads: set[int] = set()
+
+        def tracking_fn(item):  # noqa: ANN001, ANN202
+            with lock:
+                fn_threads.add(threading.get_ident())
+            return fix_zarr_media_type(item)
+
+        mock_search = _make_mock_search([_dirty_item(i) for i in range(30)], total=30)
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = mock_search
+            runner.run_migration("test-col", tracking_fn, "tracking", concurrency=8)
+
+        assert fn_threads == {threading.get_ident()}
+
+
+def _multi_page_search(pages_of_items: list[list[dict]], total: int) -> MagicMock:
+    """A search yielding several pages — the real shape of a large backfill."""
+    pages = []
+    for items in pages_of_items:
+        mocks = []
+        for d in items:
+            m = MagicMock()
+            m.to_dict.return_value = d
+            mocks.append(m)
+        page = MagicMock()
+        page.items = mocks
+        pages.append(page)
+    search = MagicMock()
+    search.matched.return_value = total
+    search.pages.return_value = pages
+    return search
+
+
+class TestConcurrencyAcrossPages:
+    """run_migration classifies and dispatches per PAGE, so multi-page is the real
+    production path (a 191k-item backfill is ~1,900 pages) — single-page tests
+    would not catch a batch leaking between pages."""
+
+    def test_every_item_across_pages_written_exactly_once(self) -> None:
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        lock = threading.Lock()
+        written: list[str] = []
+
+        def record(collection_id, item_id, item_dict):  # noqa: ANN001, ANN202
+            with lock:
+                written.append(item_id)
+
+        runner._update_item = record  # type: ignore[method-assign]
+        pages = [[_dirty_item(pg * 20 + i) for i in range(20)] for pg in range(5)]
+        search = _multi_page_search(pages, total=100)
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = search
+            result = runner.run_migration(
+                "test-col", fix_zarr_media_type, "fix_zarr_media_type", concurrency=8
+            )
+
+        assert result.items_processed == 100
+        assert result.items_modified == 100
+        assert result.items_failed == 0
+        assert sorted(written) == sorted(f"item-{i}" for i in range(100))
+        assert len(written) == len(set(written))
+
+
+class TestCircuitBreaker:
+    """A write is DELETE-then-POST, so if the API refuses writes wholesale, running
+    to completion would delete-and-not-restore the entire collection. The run must
+    stop instead."""
+
+    def _runner_failing_after(self, ok_count: int) -> STACMigrationRunner:
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        lock = threading.Lock()
+        seen = {"n": 0}
+
+        def record(collection_id, item_id, item_dict):  # noqa: ANN001, ANN202
+            with lock:
+                seen["n"] += 1
+                n = seen["n"]
+            if n > ok_count:
+                raise RuntimeError("503 Service Unavailable")
+
+        runner._update_item = record  # type: ignore[method-assign]
+        return runner
+
+    def test_aborts_once_writes_fail_wholesale(self) -> None:
+        runner = self._runner_failing_after(0)  # every write fails
+        pages = [[_dirty_item(pg * 10 + i) for i in range(10)] for pg in range(20)]
+        search = _multi_page_search(pages, total=200)
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = search
+            result = runner.run_migration(
+                "test-col",
+                fix_zarr_media_type,
+                "fix_zarr_media_type",
+                max_consecutive_failures=25,
+            )
+
+        assert result.aborted is True
+        # Stops early instead of destroying all 200: the breaker is checked per page,
+        # so it trips within a page of the threshold.
+        assert result.items_processed < 200
+        assert result.items_failed >= 25
+        assert result.items_failed <= 40
+
+    def test_intermittent_failures_do_not_abort(self) -> None:
+        """The counter is CONSECUTIVE: scattered transient errors must not stop a
+        run that is otherwise healthy."""
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        lock = threading.Lock()
+        seen = {"n": 0}
+
+        def record(collection_id, item_id, item_dict):  # noqa: ANN001, ANN202
+            with lock:
+                seen["n"] += 1
+                n = seen["n"]
+            if n % 10 == 0:  # every 10th write fails, never 25 in a row
+                raise RuntimeError("transient")
+
+        runner._update_item = record  # type: ignore[method-assign]
+        pages = [[_dirty_item(pg * 20 + i) for i in range(20)] for pg in range(10)]
+        search = _multi_page_search(pages, total=200)
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = search
+            result = runner.run_migration(
+                "test-col",
+                fix_zarr_media_type,
+                "fix_zarr_media_type",
+                max_consecutive_failures=25,
+            )
+
+        assert result.aborted is False
+        assert result.items_processed == 200  # ran to completion
+        assert result.items_failed == 20
+
+    def test_zero_disables_the_breaker(self) -> None:
+        runner = self._runner_failing_after(0)
+        pages = [[_dirty_item(pg * 10 + i) for i in range(10)] for pg in range(5)]
+        search = _multi_page_search(pages, total=50)
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = search
+            result = runner.run_migration(
+                "test-col", fix_zarr_media_type, "fix_zarr_media_type", max_consecutive_failures=0
+            )
+
+        assert result.aborted is False
+        assert result.items_processed == 50  # ran to completion despite all failing
+        assert result.items_failed == 50
+
+    def test_healthy_run_is_not_marked_aborted(self) -> None:
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        runner._update_item = MagicMock()  # type: ignore[method-assign]
+        search = _multi_page_search([[_dirty_item(i) for i in range(10)]], total=10)
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = search
+            result = runner.run_migration("test-col", fix_zarr_media_type, "fix_zarr_media_type")
+
+        assert result.aborted is False
+        assert result.items_modified == 10
+
+    def test_negative_threshold_rejected(self) -> None:
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        search = _make_mock_search([_dirty_item(0)], total=1)
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = search
+            with pytest.raises(ValueError, match="max_consecutive_failures must be >= 0"):
+                runner.run_migration("c", fix_zarr_media_type, "m", max_consecutive_failures=-1)
+
+    def test_negative_concurrency_rejected(self) -> None:
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        search = _make_mock_search([_dirty_item(0)], total=1)
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = search
+            with pytest.raises(ValueError, match="concurrency must be >= 1"):
+                runner.run_migration("c", fix_zarr_media_type, "m", concurrency=0)
+
+
+class TestMaxWrites:
+    """A bounded run must be expressible IN the tool.
+
+    Bounding it from outside (watch a file, send a signal) is how a prod run once
+    blew past its 10k limit to 20,613 writes: a process backgrounded from a
+    non-interactive shell inherits SIGINT=SIG_IGN, so CPython never installs its
+    handler and `kill -INT` is a silent no-op. Killing it then tore 3 items between
+    their DELETE and their POST. `--max-writes` stops at an item boundary with no
+    signal and no kill, so nothing can be left torn.
+    """
+
+    def _runner_recording(self) -> tuple[STACMigrationRunner, list]:
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        lock = threading.Lock()
+        written: list[str] = []
+
+        def record(collection_id, item_id, item_dict):  # noqa: ANN001, ANN202
+            with lock:
+                written.append(item_id)
+
+        runner._update_item = record  # type: ignore[method-assign]
+        return runner, written
+
+    def test_stops_at_exactly_max_writes(self) -> None:
+        runner, written = self._runner_recording()
+        # 10 pages x 20 stampable items = 200 candidates, budget 25.
+        pages = [[_dirty_item(pg * 20 + i) for i in range(20)] for pg in range(10)]
+        search = _multi_page_search(pages, total=200)
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = search
+            result = runner.run_migration(
+                "test-col",
+                fix_zarr_media_type,
+                "fix_zarr_media_type",
+                concurrency=8,
+                max_writes=25,
+            )
+
+        assert len(written) == 25, f"must write EXACTLY 25, wrote {len(written)}"
+        assert result.items_modified == 25
+        assert result.reached_max_writes is True
+
+    def test_counters_stay_consistent_when_bounded(self) -> None:
+        """The budget is checked BEFORE migration_fn runs, so an item that is never
+        written is never counted as processed — otherwise the tally (and
+        stamp_expires' histogram) would not reconcile."""
+        runner, _ = self._runner_recording()
+        pages = [[_dirty_item(pg * 20 + i) for i in range(20)] for pg in range(10)]
+        search = _multi_page_search(pages, total=200)
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = search
+            result = runner.run_migration(
+                "test-col", fix_zarr_media_type, "fix_zarr_media_type", max_writes=25
+            )
+
+        assert result.items_processed == result.items_modified + result.items_skipped + (
+            result.items_failed
+        )
+        assert result.items_processed == 25  # only the classified ones counted
+
+    def test_stamp_expires_histogram_reconciles_when_bounded(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The real proof: report() must not warn on a bounded run."""
+        from _migrate_catalog.migrations.stamp_expires import report
+
+        # Pin an empty exclude file: unset, resolve_exclude_ids() falls back to the
+        # baked demo list, whose ids match nothing here and would trip an unrelated
+        # "matched no item" warning.
+        exclude_file = tmp_path / "exclude.txt"
+        exclude_file.write_text("")
+        monkeypatch.setenv("EXPIRES_EXCLUDE_FILE", str(exclude_file))
+        monkeypatch.delenv("EXPIRES_MIN_DATETIME", raising=False)
+        reset_histogram()
+
+        runner, _ = self._runner_recording()
+        pages = [[_stampable_item(item_id=f"s-{pg}-{i}") for i in range(20)] for pg in range(10)]
+        search = _multi_page_search(pages, total=200)
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = search
+            result = runner.run_migration(
+                "test-col", stamp_expires, "stamp_expires", concurrency=4, max_writes=30
+            )
+
+        assert result.items_modified == 30
+        assert SKIP_HISTOGRAM["stamped"] == 30
+        text = report(result)
+        assert "does not reconcile" not in text
+        assert "WARNING" not in text
+
+    def test_none_means_unbounded(self) -> None:
+        runner, written = self._runner_recording()
+        pages = [[_dirty_item(pg * 20 + i) for i in range(20)] for pg in range(5)]
+        search = _multi_page_search(pages, total=100)
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = search
+            result = runner.run_migration(
+                "test-col", fix_zarr_media_type, "fix_zarr_media_type", max_writes=None
+            )
+
+        assert len(written) == 100
+        assert result.reached_max_writes is False
+
+    def test_budget_larger_than_collection_is_not_flagged(self) -> None:
+        runner, written = self._runner_recording()
+        search = _multi_page_search([[_dirty_item(i) for i in range(10)]], total=10)
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = search
+            result = runner.run_migration(
+                "test-col", fix_zarr_media_type, "fix_zarr_media_type", max_writes=999
+            )
+
+        assert len(written) == 10
+        assert result.reached_max_writes is False  # finished naturally, not bounded
+
+    def test_budget_exactly_equal_to_writable_size_is_not_flagged(self) -> None:
+        """Budget == what the collection needs: the run finished, it wasn't cut
+        short, so reached_max_writes stays False (same as budget > collection)."""
+        runner, written = self._runner_recording()
+        search = _multi_page_search([[_dirty_item(i) for i in range(10)]], total=10)
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = search
+            result = runner.run_migration(
+                "test-col", fix_zarr_media_type, "fix_zarr_media_type", max_writes=10
+            )
+
+        assert len(written) == 10
+        assert result.reached_max_writes is False
+
+    def test_failed_writes_consume_budget(self) -> None:
+        """max_writes bounds ATTEMPTS, not successes — a failed write may already
+        have landed its DELETE, so it has spent real blast radius. Counting only
+        successes would keep retrying past N on exactly the failing run you most
+        want bounded."""
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        lock = threading.Lock()
+        attempts: list[str] = []
+
+        def record(collection_id, item_id, item_dict):  # noqa: ANN001, ANN202
+            with lock:
+                attempts.append(item_id)
+                n = len(attempts)
+            if n % 2 == 0:
+                raise RuntimeError("503")
+
+        runner._update_item = record  # type: ignore[method-assign]
+        pages = [[_dirty_item(pg * 20 + i) for i in range(20)] for pg in range(10)]
+        search = _multi_page_search(pages, total=200)
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = search
+            result = runner.run_migration(
+                "test-col",
+                fix_zarr_media_type,
+                "fix_zarr_media_type",
+                max_writes=10,
+                max_consecutive_failures=0,
+            )
+
+        assert len(attempts) == 10, "budget bounds attempts, not successes"
+        assert result.items_modified + result.items_failed == 10
+        assert result.items_failed > 0
+        assert result.items_modified < 10  # fewer modified than the budget, by design
+
+    def test_stops_fetching_pages_once_budget_is_spent(self) -> None:
+        """The page-level break must stop PAGINATION too, not just the writes.
+
+        Without it the item-level check still yields exactly N writes, so the tally
+        looks right — but the run keeps fetching every remaining page. At prod scale
+        (191k items, page_size 100, budget 10k) that is ~1,810 pointless POST /search
+        round-trips against the API whose latency the bounded run exists to watch,
+        while the tool appears hung.
+        """
+        runner, written = self._runner_recording()
+        pages = [[_dirty_item(pg * 20 + i) for i in range(20)] for pg in range(50)]
+        fetched: list[int] = []
+
+        def page_gen():  # noqa: ANN202
+            for i, p in enumerate(pages):
+                fetched.append(i)
+                mocks = []
+                for d in p:
+                    m = MagicMock()
+                    m.to_dict.return_value = d
+                    mocks.append(m)
+                page = MagicMock()
+                page.items = mocks
+                yield page
+
+        search = MagicMock()
+        search.matched.return_value = 1000
+        search.pages.side_effect = lambda: page_gen()
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = search
+            runner.run_migration(
+                "test-col", fix_zarr_media_type, "fix_zarr_media_type", max_writes=25
+            )
+
+        assert len(written) == 25
+        # 25 writes needs pages 1-2 (20 + 5); page 2 also trips the flag.
+        assert len(fetched) <= 3, f"kept paginating after the budget: {len(fetched)} pages fetched"
+
+    def test_skips_do_not_consume_budget(self) -> None:
+        """The prod head is ~21k already-stamped items. A budget must be spent on
+        real writes, not burned by skips, or a bounded run does nothing."""
+        runner, written = self._runner_recording()
+        page = [_clean_item(i) for i in range(50)] + [_dirty_item(i) for i in range(20)]
+        search = _multi_page_search([page], total=70)
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = search
+            result = runner.run_migration(
+                "test-col", fix_zarr_media_type, "fix_zarr_media_type", max_writes=5
+            )
+
+        assert len(written) == 5
+        assert result.items_skipped == 50  # all skips seen, none consumed budget
+
+    def test_dry_run_bound_counts_would_be_writes(self) -> None:
+        runner, written = self._runner_recording()
+        pages = [[_dirty_item(pg * 20 + i) for i in range(20)] for pg in range(10)]
+        search = _multi_page_search(pages, total=200)
+
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = search
+            result = runner.run_migration(
+                "test-col",
+                fix_zarr_media_type,
+                "fix_zarr_media_type",
+                dry_run=True,
+                max_writes=15,
+            )
+
+        assert result.items_modified == 15
+        assert written == []
+        assert result.reached_max_writes is True
+
+    def test_negative_max_writes_rejected(self) -> None:
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        search = _make_mock_search([_dirty_item(0)], total=1)
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = search
+            with pytest.raises(ValueError, match="max_writes must be >= 1"):
+                runner.run_migration("c", fix_zarr_media_type, "m", max_writes=0)
+
+
+class TestInterruptCancelsQueuedWrites:
+    """An operator WILL Ctrl-C this tool (the rollout plan says to stop and restart
+    it). Queued writes must be cancelled rather than drained into prod after the
+    stop, and in-flight writes must be allowed to finish so no item is left torn
+    between its DELETE and its POST.
+
+    The interrupt is injected via the progress bar because that is where the real
+    hazard lives: the main thread is then OUTSIDE pool.map's generator, which keeps
+    the generator alive through the unwind so its own `finally: future.cancel()`
+    never runs. (An interrupt raised inside the generator cancels by itself, so a
+    test that injects it there passes with or without the fix and proves nothing.)
+    """
+
+    def _run_interrupted(self, n_items: int, concurrency: int) -> tuple[list[str], list[str]]:
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        lock = threading.Lock()
+        started: list[str] = []
+        finished: list[str] = []
+
+        def record(collection_id, item_id, item_dict):  # noqa: ANN001, ANN202
+            with lock:
+                started.append(item_id)
+            time.sleep(0.005)  # the DELETE -> POST window
+            with lock:
+                finished.append(item_id)
+
+        runner._update_item = record  # type: ignore[method-assign]
+
+        # Ctrl-C once a few writes have been tallied: main thread is in bar.update,
+        # between two yields of the generator, with the rest still queued.
+        updates = {"n": 0}
+        bar = MagicMock()
+
+        def update(_n: int) -> None:
+            updates["n"] += 1
+            if updates["n"] == 5:
+                raise KeyboardInterrupt
+
+        bar.update.side_effect = update
+
+        search = _make_mock_search([_dirty_item(i) for i in range(n_items)], total=n_items)
+        with (
+            patch("_migrate_catalog.runner.Client") as mock_client,
+            patch("_migrate_catalog.runner.click.progressbar") as mock_pb,
+        ):
+            mock_client.open.return_value.search.return_value = search
+            mock_pb.return_value.__enter__.return_value = bar
+            with pytest.raises(KeyboardInterrupt):
+                runner.run_migration(
+                    "test-col", fix_zarr_media_type, "fix_zarr_media_type", concurrency=concurrency
+                )
+        return started, finished
+
+    def test_queued_writes_are_cancelled_not_drained(self) -> None:
+        n = 400
+        started, _ = self._run_interrupted(n_items=n, concurrency=4)
+        assert len(started) < n, (
+            f"Ctrl-C must cancel queued writes, but {len(started)}/{n} were still "
+            f"pushed to the API after the operator asked to stop"
+        )
+
+    def test_in_flight_writes_finish_cleanly(self) -> None:
+        """No item may be left between its DELETE and its POST."""
+        started, finished = self._run_interrupted(n_items=400, concurrency=4)
+        torn = set(started) - set(finished)
+        assert torn == set(), f"in-flight writes must drain; torn={torn}"
+
+
+class TestStampExpiresUnderConcurrency:
+    def test_histogram_reconciles_under_concurrency(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """End-to-end proof that the real stamp_expires migration keeps a correct
+        histogram at concurrency > 1 — i.e. report() does not warn."""
+        from _migrate_catalog.migrations.stamp_expires import report
+
+        # Pin an explicit exclude file: unset, resolve_exclude_ids() falls back to
+        # the baked demo denylist, whose ids match nothing here and would trip the
+        # unrelated "matched no item" warning.
+        exclude_file = tmp_path / "exclude.txt"
+        exclude_file.write_text("demo_keep\n")
+        monkeypatch.setenv("EXPIRES_EXCLUDE_FILE", str(exclude_file))
+        monkeypatch.delenv("EXPIRES_MIN_DATETIME", raising=False)
+        reset_histogram()
+
+        items = [_stampable_item(item_id=f"s-{i}") for i in range(20)]
+        items += [
+            _stampable_item(item_id=f"done-{i}", expires="2025-07-01T00:00:00Z") for i in range(10)
+        ]
+        items += [_stampable_item(item_id="demo_keep")]
+
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        runner._update_item = MagicMock()  # type: ignore[method-assign]
+        mock_search = _make_mock_search(items, total=len(items))
+        with patch("_migrate_catalog.runner.Client") as mock_client:
+            mock_client.open.return_value.search.return_value = mock_search
+            result = runner.run_migration("test-col", stamp_expires, "stamp_expires", concurrency=4)
+
+        assert result.items_modified == 20
+        assert result.items_skipped == 11  # 10 already_stamped + 1 excluded
+        assert SKIP_HISTOGRAM["stamped"] == 20
+        assert SKIP_HISTOGRAM["already_stamped"] == 10
+        assert SKIP_HISTOGRAM["excluded"] == 1
+
+        text = report(result)
+        assert "does not reconcile" not in text
+        assert "matched no item" not in text
+        assert "WARNING" not in text
+
+
+class TestRecoveryFileThreadSafety:
+    def _mock_out_http(self, runner: STACMigrationRunner) -> None:
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock()
+        mock_session = MagicMock()
+        mock_session.post.return_value = mock_resp
+        runner._session = MagicMock(return_value=mock_session)  # type: ignore[method-assign]
+
+    def test_concurrent_appends_yield_intact_json_lines(self, tmp_path: Path) -> None:
+        """Contract: concurrent writes leave one intact, parseable JSON line per
+        item — the restore path reads this file line by line.
+
+        Note this is a regression guard, not proof that the lock works: a buffered
+        O_APPEND write of this size turns out to be atomic anyway (verified by
+        removing the lock — this still passed). It fails if a future change breaks
+        line integrity some other way, e.g. by sharing one open handle across
+        threads. test_recovery_append_happens_under_the_lock covers the lock itself.
+        """
+        runner = STACMigrationRunner("https://api.example.com/stac", recovery_dir=tmp_path)
+        self._mock_out_http(runner)
+
+        n = 40
+        items = [
+            {"id": f"item-{i}", "properties": {"pad": "x" * 60_000}, "assets": {}} for i in range(n)
+        ]
+
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            list(ex.map(lambda it: runner._update_item("test-col", it["id"], it), items))
+
+        files = list(tmp_path.glob(".migration_recovery_*.jsonl"))
+        assert len(files) == 1
+        lines = files[0].read_text().strip().splitlines()
+        assert len(lines) == n
+        ids = {json.loads(line)["id"] for line in lines}  # raises if any line interleaved
+        assert ids == {f"item-{i}" for i in range(n)}
+
+    def test_recovery_append_happens_under_the_lock(self, tmp_path: Path) -> None:
+        """The append must happen *inside* _recovery_lock, so line integrity does
+        not depend on the platform's append-atomicity behaviour."""
+        runner = STACMigrationRunner("https://api.example.com/stac", recovery_dir=tmp_path)
+        self._mock_out_http(runner)
+        assert runner._recovery_file is not None
+        recovery_file = runner._recovery_file
+
+        def size() -> int:
+            return recovery_file.stat().st_size if recovery_file.exists() else 0
+
+        sizes: dict[str, int] = {}
+        inner = threading.Lock()
+
+        class RecordingLock:
+            def __enter__(self) -> None:
+                inner.acquire()
+                sizes["at_acquire"] = size()
+
+            def __exit__(self, *exc: object) -> None:
+                sizes["at_release"] = size()
+                inner.release()
+
+        runner._recovery_lock = RecordingLock()  # type: ignore[assignment]
+        runner._update_item("test-col", "item-1", {"id": "item-1", "pad": "x" * 1000})
+
+        assert sizes, "the recovery append never acquired the lock"
+        assert sizes["at_acquire"] == 0
+        assert sizes["at_release"] > 0, "the append must land inside the lock, not after it"
+
+
+class TestSessionThreadLocality:
+    def test_each_thread_gets_its_own_session(self) -> None:
+        """requests.Session is not guaranteed thread-safe, so pooled writes must
+        not share one."""
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        lock = threading.Lock()
+        sessions: list[int] = []
+        ready = threading.Barrier(4, timeout=30)
+
+        def grab(_: int) -> None:
+            ready.wait()  # hold all 4 threads alive at once so ids can't be recycled
+            session = runner._session()
+            with lock:
+                sessions.append(id(session))
+            ready.wait()
+
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            list(ex.map(grab, range(4)))
+
+        assert len(set(sessions)) == 4, "each worker thread needs a distinct Session"
+
+    def test_same_thread_reuses_its_session(self) -> None:
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        assert runner._session() is runner._session()
+
+    def test_session_carries_json_content_type(self) -> None:
+        runner = STACMigrationRunner("https://api.example.com/stac")
+
+        def header() -> str:
+            return runner._session().headers["Content-Type"]
+
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            worker_header = ex.submit(header).result()
+
+        assert header() == "application/json"
+        assert worker_header == "application/json"
+
+
+class TestConcurrencyCliOption:
+    def _invoke(self, monkeypatch: pytest.MonkeyPatch, args: list[str]):  # noqa: ANN202
+        import importlib
+
+        from click.testing import CliRunner
+
+        climod = importlib.import_module("_migrate_catalog.cli")
+        runner_inst = MagicMock()
+        runner_inst.run_migration.return_value = _result(processed=0, modified=0, skipped=0)
+        monkeypatch.setattr(climod, "STACMigrationRunner", lambda *a, **k: runner_inst)
+        res = CliRunner().invoke(climod.cli, args)
+        return res, runner_inst
+
+    def test_concurrency_flag_is_forwarded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        res, runner_inst = self._invoke(
+            monkeypatch,
+            ["run", "coll", "--migration", "fix_url_encoding", "--dry-run", "--concurrency", "8"],
+        )
+        assert res.exit_code == 0, res.output
+        assert runner_inst.run_migration.call_args.kwargs["concurrency"] == 8
+
+    def test_concurrency_defaults_to_one(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Default 1 keeps every other migration on today's sequential path."""
+        res, runner_inst = self._invoke(
+            monkeypatch, ["run", "coll", "--migration", "fix_url_encoding", "--dry-run"]
+        )
+        assert res.exit_code == 0, res.output
+        assert runner_inst.run_migration.call_args.kwargs["concurrency"] == 1
+
+    def test_max_writes_flag_is_forwarded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """THE test for the incident. A bound the CLI parses, advertises in --help,
+        and then quietly drops is worse than no bound at all: the operator believes
+        the run is capped at 10k and it runs to 191k. Pin the wire, not just the
+        mechanism."""
+        res, runner_inst = self._invoke(
+            monkeypatch,
+            [
+                "run",
+                "coll",
+                "--migration",
+                "fix_url_encoding",
+                "--dry-run",
+                "--max-writes",
+                "10000",
+            ],
+        )
+        assert res.exit_code == 0, res.output
+        assert runner_inst.run_migration.call_args.kwargs["max_writes"] == 10000
+
+    def test_max_writes_defaults_to_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        res, runner_inst = self._invoke(
+            monkeypatch, ["run", "coll", "--migration", "fix_url_encoding", "--dry-run"]
+        )
+        assert res.exit_code == 0, res.output
+        assert runner_inst.run_migration.call_args.kwargs["max_writes"] is None
+
+    def test_max_consecutive_failures_flag_is_forwarded(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        res, runner_inst = self._invoke(
+            monkeypatch,
+            [
+                "run",
+                "coll",
+                "--migration",
+                "fix_url_encoding",
+                "--dry-run",
+                "--max-consecutive-failures",
+                "3",
+            ],
+        )
+        assert res.exit_code == 0, res.output
+        assert runner_inst.run_migration.call_args.kwargs["max_consecutive_failures"] == 3
+
+    def test_max_writes_rejects_zero(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        res, _ = self._invoke(
+            monkeypatch,
+            ["run", "coll", "--migration", "fix_url_encoding", "--dry-run", "--max-writes", "0"],
+        )
+        assert res.exit_code != 0  # click.IntRange(1, None) rejects it
+
+
+class TestCliStopPaths:
+    def _climod(self):  # noqa: ANN202
+        import importlib
+
+        return importlib.import_module("_migrate_catalog.cli")
+
+    def test_keyboard_interrupt_exits_130_and_points_at_max_writes(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An operator's wrapper keys on the exit code, and the operator needs to be
+        told the tally is gone and that --max-writes is the supported bound."""
+        from click.testing import CliRunner
+
+        climod = self._climod()
+        runner_inst = MagicMock()
+        runner_inst.run_migration.side_effect = KeyboardInterrupt
+        monkeypatch.setattr(climod, "STACMigrationRunner", lambda *a, **k: runner_inst)
+
+        res = CliRunner().invoke(
+            climod.cli, ["run", "coll", "--migration", "fix_url_encoding", "--yes"]
+        )
+
+        assert res.exit_code == 130, f"expected 128+SIGINT, got {res.exit_code}"
+        assert "--max-writes" in res.output
+        assert "idempotent" in res.output
+
+    def test_bounded_run_is_not_labelled_a_success_when_it_also_aborted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """aborted + reached_max_writes can both be set (budget spent on the same
+        page the breaker trips). "(bounded run)" must not appear over a run that the
+        API was rejecting wholesale — that reads as "went to plan"."""
+        from click.testing import CliRunner
+
+        climod = self._climod()
+        runner_inst = MagicMock()
+        result = _result(processed=25, modified=0, skipped=0, failed=25)
+        result.aborted = True
+        result.reached_max_writes = True
+        runner_inst.run_migration.return_value = result
+        monkeypatch.setattr(climod, "STACMigrationRunner", lambda *a, **k: runner_inst)
+        monkeypatch.setattr(climod, "record_run", lambda *a, **k: None)
+        monkeypatch.setattr(climod, "was_migration_run", lambda *a, **k: False)
+
+        res = CliRunner().invoke(
+            climod.cli,
+            ["run", "coll", "--migration", "fix_url_encoding", "--yes", "--max-writes", "25"],
+        )
+
+        assert res.exit_code == 1  # the abort dominates
+        assert "ABORTED" in res.output
+        assert "bounded run" not in res.output, "an aborted run must not read as a success"
