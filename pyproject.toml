@@ -41,9 +41,9 @@ dependencies = [
 [dependency-groups]
 dev = [
     "ruff==0.15.20",
-    "mypy==2.1.0",
+    "mypy==2.2.0",
     "pre-commit==4.6.0",
-    "types-boto3==1.43.39",
+    "types-boto3==1.43.44",
     "types-requests==2.33.0.20260518",
     "pip-audit==2.10.1",
 ]
