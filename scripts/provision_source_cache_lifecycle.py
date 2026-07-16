@@ -86,6 +86,37 @@ def _describe(rule: dict) -> str:
     return f"  {rule.get('ID')}  status={rule.get('Status')}  prefix={prefix}  expiry={days}d"
 
 
+def _report(bucket: str, current: list[dict], proposed: list[dict]) -> None:
+    """Show what is there now and what would replace it — the whole point of the dry run."""
+    logger.info("=== current rules on s3://%s ===", bucket)
+    for rule in current:
+        logger.info("%s", _describe(rule))
+    if not current:
+        logger.info("  (none)")
+    logger.info("=== proposed ===")
+    for rule in proposed:
+        logger.info("%s", _describe(rule))
+    logger.info("=== preserving %d pre-existing rule(s) ===", len(proposed) - 1)
+
+
+def _verify_stored(client: Any, bucket: str, prefix: str, days: int, want_count: int) -> list[dict]:
+    """Read back what the put actually stored. A put that reports success but stores
+    something else — or drops another rule — is exactly what this catches."""
+    stored = read_rules(client, bucket)
+    ours = [rule for rule in stored if rule.get("ID") == RULE_ID]
+    if len(ours) != 1:
+        raise RuntimeError(f"verification failed: {len(ours)} '{RULE_ID}' rules stored, want 1")
+    if ours[0].get("Expiration", {}).get("Days") != days:
+        raise RuntimeError(f"verification failed: stored expiry {ours[0]} != {days}d")
+    if ours[0].get("Filter", {}).get("Prefix") != prefix:
+        raise RuntimeError(f"verification failed: stored prefix {ours[0]} != {prefix!r}")
+    if len(stored) != want_count:
+        raise RuntimeError(
+            f"verification failed: {len(stored)} rules stored, want {want_count} — rules dropped"
+        )
+    return stored
+
+
 def provision(client: Any, bucket: str, prefix: str, days: int, *, apply: bool) -> list[dict]:
     """Ensure exactly one RULE_ID rule expiring `prefix` after `days`. Returns the rules."""
     if not prefix.strip():
@@ -95,16 +126,7 @@ def provision(client: Any, bucket: str, prefix: str, days: int, *, apply: bool) 
 
     current = read_rules(client, bucket)
     proposed = merge_rules(current, prefix, days)
-
-    logger.info("=== current rules on s3://%s ===", bucket)
-    for rule in current or []:
-        logger.info("%s", _describe(rule))
-    if not current:
-        logger.info("  (none)")
-    logger.info("=== proposed ===")
-    for rule in proposed:
-        logger.info("%s", _describe(rule))
-    logger.info("=== preserving %d pre-existing rule(s) ===", len(proposed) - 1)
+    _report(bucket, current, proposed)
 
     if not apply:
         logger.info("\nDRY RUN — nothing written. Re-run with --apply to commit.")
@@ -113,21 +135,7 @@ def provision(client: Any, bucket: str, prefix: str, days: int, *, apply: bool) 
     client.put_bucket_lifecycle_configuration(
         Bucket=bucket, LifecycleConfiguration={"Rules": proposed}
     )
-
-    # A put that reports success but stores something else is exactly what this catches.
-    stored = read_rules(client, bucket)
-    ours = [rule for rule in stored if rule.get("ID") == RULE_ID]
-    if len(ours) != 1:
-        raise RuntimeError(f"verification failed: {len(ours)} '{RULE_ID}' rules stored, want 1")
-    if ours[0].get("Expiration", {}).get("Days") != days:
-        raise RuntimeError(f"verification failed: stored expiry {ours[0]} != {days}d")
-    if ours[0].get("Filter", {}).get("Prefix") != prefix:
-        raise RuntimeError(f"verification failed: stored prefix {ours[0]} != {prefix!r}")
-    if len(stored) != len(proposed):
-        raise RuntimeError(
-            f"verification failed: {len(stored)} rules stored, want {len(proposed)} — rules dropped"
-        )
-
+    stored = _verify_stored(client, bucket, prefix, days, len(proposed))
     logger.info(
         "VERIFIED: '%s' expires %s after %dd; %d rule(s).", RULE_ID, prefix, days, len(stored)
     )

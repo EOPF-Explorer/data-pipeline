@@ -333,6 +333,71 @@ def _assert_staged_readable(client: Any, bucket: str, key: str) -> None:
         ) from exc
 
 
+def _copy_all(
+    source_client: Any,
+    dest_client: Any,
+    source_bucket: str,
+    dest_bucket: str,
+    pending: dict[str, str],
+    workers: int,
+) -> None:
+    """Copy every ``{source_key: dest_key}`` in ``pending``, reporting throughput."""
+    started = time.monotonic()
+    copied_bytes = 0
+    done = 0
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [
+            pool.submit(
+                _copy_one,
+                source_client,
+                dest_client,
+                source_bucket,
+                source_key,
+                dest_bucket,
+                dest_key,
+            )
+            for source_key, dest_key in pending.items()
+        ]
+        for future in as_completed(futures):
+            copied_bytes += future.result()
+            done += 1
+            if done % 100 == 0:
+                logger.info("  %d/%d objects, %.2f GB", done, len(pending), copied_bytes / 1e9)
+    elapsed = time.monotonic() - started
+    logger.info(
+        "Copied %d objects, %.2f GB in %.1fs (%.0f MB/s)",
+        done,
+        copied_bytes / 1e9,
+        elapsed,
+        copied_bytes / elapsed / 1e6 if elapsed else 0,
+    )
+
+
+def _verify_staged(
+    dest_client: Any, dest_bucket: str, dest_root: str, source_count: int, source_bytes: int
+) -> bool:
+    """True only if the staged copy matches the source and can actually be read back.
+
+    Never report a stage as usable without proving it matches the source AND that the thing
+    downstream actually does can be done to it — hence both the count/byte comparison and
+    the GET.
+    """
+    staged_objects = _list_objects(dest_client, dest_bucket, dest_root, hint=DEST_HINT)
+    staged_bytes = sum(size for size, _ in staged_objects.values())
+    if len(staged_objects) != source_count or staged_bytes != source_bytes:
+        logger.error(
+            "Verification FAILED: staged %d objects / %d bytes, source %d objects / %d bytes",
+            len(staged_objects),
+            staged_bytes,
+            source_count,
+            source_bytes,
+        )
+        return False
+    logger.info("Verified %d objects, %d bytes", len(staged_objects), staged_bytes)
+    _assert_staged_readable(dest_client, dest_bucket, sorted(staged_objects)[0])
+    return True
+
+
 def run_prestage(args: argparse.Namespace) -> int:
     """Copy the source Zarr to the output bucket and report the staged s3:// URL."""
     if args.mode == "passthrough":
@@ -367,60 +432,22 @@ def run_prestage(args: argparse.Namespace) -> int:
     )
 
     already_staged = _list_objects(dest_client, args.dest_bucket, dest_root, hint=DEST_HINT)
-    pending = {
-        key: dest_root + key.removeprefix(source_prefix)
-        for key, meta in source_objects.items()
-        if already_staged.get(dest_root + key.removeprefix(source_prefix)) != meta
-    }
+    pending: dict[str, str] = {}
+    for source_key, meta in source_objects.items():
+        dest_key = dest_root + source_key.removeprefix(source_prefix)
+        if already_staged.get(dest_key) != meta:
+            pending[source_key] = dest_key
     if skipped := len(source_objects) - len(pending):
         logger.info("Skipping %d object(s) already staged with matching size+ETag", skipped)
 
-    started = time.monotonic()
-    copied_bytes = 0
-    done = 0
-    with ThreadPoolExecutor(max_workers=args.copy_workers) as pool:
-        futures = [
-            pool.submit(
-                _copy_one,
-                source_client,
-                dest_client,
-                source.bucket,
-                source_key,
-                args.dest_bucket,
-                dest_key,
-            )
-            for source_key, dest_key in pending.items()
-        ]
-        for future in as_completed(futures):
-            copied_bytes += future.result()
-            done += 1
-            if done % 100 == 0:
-                logger.info("  %d/%d objects, %.2f GB", done, len(pending), copied_bytes / 1e9)
-    elapsed = time.monotonic() - started
-    logger.info(
-        "Copied %d objects, %.2f GB in %.1fs (%.0f MB/s)",
-        done,
-        copied_bytes / 1e9,
-        elapsed,
-        copied_bytes / elapsed / 1e6 if elapsed else 0,
+    _copy_all(
+        source_client, dest_client, source.bucket, args.dest_bucket, pending, args.copy_workers
     )
 
-    # Never report a stage as usable without proving it matches the source AND that the
-    # thing downstream actually does can be done to it.
-    staged_objects = _list_objects(dest_client, args.dest_bucket, dest_root, hint=DEST_HINT)
-    staged_bytes = sum(size for size, _ in staged_objects.values())
-    if len(staged_objects) != len(source_objects) or staged_bytes != source_bytes:
-        logger.error(
-            "Verification FAILED: staged %d objects / %d bytes, source %d objects / %d bytes",
-            len(staged_objects),
-            staged_bytes,
-            len(source_objects),
-            source_bytes,
-        )
+    if not _verify_staged(
+        dest_client, args.dest_bucket, dest_root, len(source_objects), source_bytes
+    ):
         return 2
-    logger.info("Verified %d objects, %d bytes", len(staged_objects), staged_bytes)
-
-    _assert_staged_readable(dest_client, args.dest_bucket, sorted(staged_objects)[0])
 
     _write_outputs(
         args.output_dir,
