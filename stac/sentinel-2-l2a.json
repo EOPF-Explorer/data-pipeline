@@ -15,7 +15,8 @@
       "href": "https://s2maps-tiles.eu/wmts/1.0.0/osm_3857/default/g/{z}/{y}/{x}.jpeg",
       "type": "image/jpeg",
       "roles": ["baselayer", "invisible"],
-      "title": "OSM Background"
+      "title": "OSM Background",
+      "attribution": "{ OSM: Data &copy; <a href=\"http://www.openstreetmap.org/copyright\" target=\"_blank\">OpenStreetMap</a> contributors and <a href=\"https://maps.eox.at/#data\" target=\"_blank\">others</a>, Rendering &copy; <a href=\"http://eox.at\" target=\"_blank\">EOX</a> }"
     },
     {
       "id": "terrain-light",
@@ -23,7 +24,8 @@
       "href": "https://s2maps-tiles.eu/wmts/1.0.0/terrain-light_3857/default/g/{z}/{y}/{x}.jpeg",
       "type": "image/jpeg",
       "roles": ["baselayer", "visible"],
-      "title": "Terrain Light"
+      "title": "Terrain Light",
+      "attribution": "{ OSM: Data &copy; <a href=\"http://www.openstreetmap.org/copyright\" target=\"_blank\">OpenStreetMap</a> contributors and <a href=\"https://maps.eox.at/#data\" target=\"_blank\">others</a>, Rendering &copy; <a href=\"http://eox.at\" target=\"_blank\">EOX</a> }"
     },
     {
       "id": "overlay_bright",
@@ -31,7 +33,8 @@
       "href": "https://s2maps-tiles.eu/wmts/1.0.0/overlay_base_bright_3857/default/g/{z}/{y}/{x}.png",
       "type": "image/png",
       "roles": ["overlay", "visible"],
-      "title": "Overlay labels"
+      "title": "Overlay labels",
+      "attribution": "{ Overlay: Data &copy; <a href=\"http://www.openstreetmap.org/copyright\" target=\"_blank\">OpenStreetMap</a> contributors, Made with Natural Earth, Rendering &copy; <a href=\"https://eox.at\" target=\"_blank\">EOX</a> }"
     },
     {
       "id": "cloudless-2024",
@@ -39,13 +42,28 @@
       "href": "https://s2maps-tiles.eu/wmts/1.0.0/s2cloudless-2024_3857/default/g/{z}/{y}/{x}.jpeg",
       "type": "image/jpeg",
       "roles": ["baselayer", "invisible"],
-      "title": "EOxCloudless 2024"
+      "title": "EOxCloudless 2024",
+      "attribution": "{ EOxCloudless 2024: <a xmlns:dct=\"http://purl.org/dc/terms/\" href=\"https://s2maps.eu\" target=\"_blank\" property=\"dct:title\">Sentinel-2 cloudless - s2maps.eu</a> by <a xmlns:cc=\"http://creativecommons.org/ns#\" href=\"https://eox.at\" target=\"_blank\" property=\"cc:attributionName\" rel=\"cc:attributionURL\">EOX IT Services GmbH</a> (Contains modified Copernicus Sentinel data 2024) }"
     },
     {
       "rel": "style",
       "href": "https://raw.githubusercontent.com/EOPF-Explorer/eodash-assets/refs/heads/main/styles/geozarr.json",
       "type": "application/json",
       "asset:keys": ["reflectance"]
+    },
+    {
+      "rel": "pre-aggregation",
+      "href": "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/aggregations/sentinel-2-l2a/daily.json",
+      "type": "application/json",
+      "title": "Daily Item Aggregation",
+      "aggregation:interval": "daily"
+    },
+    {
+      "rel": "pre-aggregation",
+      "href": "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/aggregations/sentinel-2-l2a/monthly.json",
+      "type": "application/json",
+      "title": "Monthly Item Aggregation",
+      "aggregation:interval": "monthly"
     }
   ],
   "title": "Sentinel-2 Level-2A",

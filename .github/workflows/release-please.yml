@@ -21,12 +21,61 @@ jobs:
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
+      pr: ${{ steps.release.outputs.pr }}
     steps:
       - uses:  googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         id: release
         with:
           config-file: "release-please-config.json"
           manifest-file: ".release-please-manifest.json"
+
+  # Release Please bumps $.project.version in pyproject.toml but cannot
+  # regenerate uv.lock, which carries its own copy of that version. Without
+  # this, every release ships a lock whose data-pipeline stamp lags pyproject,
+  # breaking `uv lock --check` and making `uv run` rewrite the lock mid-commit.
+  # Relock on the release branch so the version bump and the lock land together.
+  #
+  # Kept in its own job so a transient `uv lock` failure cannot skip
+  # docker-build, which only needs release-please: an unpublished image is a
+  # worse outcome than a lock that the next run re-syncs anyway.
+  sync-release-lock:
+    name: Sync uv.lock on release PR
+    needs: release-please
+    if: needs.release-please.outputs.pr
+    permissions:
+      contents: write # Push the uv.lock commit to the release PR branch.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout release PR branch
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ fromJSON(needs.release-please.outputs.pr).headBranchName }}
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
+        with:
+          version: "0.11.17"
+          enable-cache: false # Job can push to a release branch; avoid cache poisoning.
+
+      - name: Sync uv.lock with the bumped version
+        env:
+          BRANCH: ${{ fromJSON(needs.release-please.outputs.pr).headBranchName }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # --upgrade-package (not a bare `uv lock`) so this can only ever move
+          # our own version stamp: the release is already tested, and a bare
+          # lock would be free to pull in any dependency that drifted.
+          uv lock --upgrade-package data-pipeline
+          if git diff --quiet -- uv.lock; then
+            echo "uv.lock already in sync with pyproject.toml"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add uv.lock
+          git commit -m "chore: sync uv.lock with released version"
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" "HEAD:${BRANCH}"
 
   docker-build:
     name: Docker image after release

@@ -148,12 +148,83 @@ uv run operator-tools/manage_collections.py clean sentinel-2-l2a-staging-backup-
 uv run operator-tools/manage_collections.py delete sentinel-2-l2a-staging-backup-20260312 --yes
 ```
 
+## Concurrency (large backfills)
+
+A migration's per-item write is a single `PUT` round-trip, so a sequential run is
+latency-bound (~412 ms/item against prod). `--concurrency N` dispatches those writes to a
+thread pool. Measured against the real API on a throwaway 1000-item collection: **6.25× at 8
+workers** (344s → 55s). Applied to the ~5–6k items/hour prod baseline, a ~170k-item backfill drops
+from ~31h to roughly ~5h. Quote the ratio, not the absolute rate — a small collection writes
+faster than a 191k-row one.
+
+```bash
+uv run operator-tools/migrate_catalog.py run sentinel-2-l2a \
+  --migration stamp_expires --yes --concurrency 8
+```
+
+Only the writes are parallelized — the migration function itself still runs on one thread, so
+per-migration state (such as `stamp_expires`'s outcome histogram) stays correct.
+
+The default is `1`, the exact sequential path, so no migration gains write load unless asked.
+**`--concurrency N` multiplies write load on a prod database that also serves STAC Browser and
+titiler**: sequential was accidentally a rate limit. Start moderate (~8), watch STAC read
+latency for the first few thousand items, and lower it if latency climbs.
+
+Sequential was also accidentally a *slow blast radius*: an API that starts refusing writes fails
+every item it touches, and going faster means more failures before anyone notices.
+`--max-consecutive-failures` (default 25) stops the run instead, bounding it to roughly one page;
+the run exits non-zero. Set it to `0` to restore run-to-completion. (Writes are now atomic PUTs,
+so a refused write leaves the item intact — this bounds wasted effort and load, no longer data
+loss.)
+
+Interrupting with `Ctrl-C` is safe: queued writes are cancelled and in-flight ones finish their
+DELETE+POST. Note the run's tally is lost with the stack, so nothing is written to
+`.migration_history.json` — the migration is idempotent, so just re-run to continue.
+
+### Bounded first run — use `--max-writes`, never a kill
+
+For a bounded first run ("stamp a few thousand, watch the rate and read latency"), use
+`--max-writes N`. It stops cleanly at an item boundary once N writes have been *attempted*, then
+reports and records the run normally. Failed writes count against N (their DELETE may already
+have landed, so they spent real blast radius); skipped items do not, which matters because the
+head of a collection is typically already migrated.
+
+```bash
+uv run operator-tools/migrate_catalog.py run sentinel-2-l2a \
+  --migration stamp_expires --yes --concurrency 8 --max-writes 10000
+```
+
+**Do not bound a run by killing it.** Signals are an
+unreliable stop: a process backgrounded with `&` from a non-interactive shell inherits
+`SIGINT=SIG_IGN`, so CPython never installs its handler and `kill -INT` does nothing. That
+combination once took a "bounded" 10,000-item run to 20,613 writes and tore 3 items on the way
+out. `--max-writes` needs no signal and cannot tear an item.
+
 ## Recovery Files
 
 Each non-dry-run migration writes a `.migration_recovery_<timestamp>.jsonl` file alongside
 `.migration_history.json`. Each line is the migrated version of an item that was submitted to
 the API. If a run is interrupted after some DELETEs but before the corresponding POSTs complete,
 use this file to re-POST the affected items manually.
+
+**Note:** since writes became a single atomic `PUT`, an interrupted run can no longer leave an
+item deleted-but-not-restored — a PUT either replaces the item or leaves it untouched. This file
+is now a record of what was written, not the only way back. (It holds the *post*-update content,
+so it documents rather than undoes.) The recovery notes below apply to runs made before that
+change, and to any tool still using DELETE-then-POST.
+
+**Recovering.** Two cases:
+
+- *Reported failures* (the run finished or aborted): the failed item ids are recorded in
+  `.migration_history.json` under this run's `errors` (the console prints only the first 5).
+  `GET` each of those ids and re-`POST` the matching recovery line for any that 404.
+- *Hard kill* (`SIGKILL`, power loss): the run recorded nothing, so ids are unknown. `GET`
+  **every** id in this run's recovery file and re-`POST` the ones that 404. Do not assume the
+  affected items are at the tail — a recovery line is written *before* its DELETE, so a slow
+  write's line can sit arbitrarily far from the end while faster workers append past it.
+
+A normal `Ctrl-C` needs no recovery: queued writes are cancelled and in-flight ones are allowed
+to finish their DELETE+POST, so no item is left torn between the two.
 
 ## CLI Reference
 
@@ -172,6 +243,9 @@ Commands:
     --yes / -y                             Skip confirmation prompt
     --page-size INT   (default: 100)       Items fetched per API page
     --ids TEXT        (repeatable)         Restrict the run to specific item ids (canary)
+    --concurrency INT (default: 1)         Parallel workers for the per-item writes
+    --max-consecutive-failures INT (25)    Stop after N back-to-back write failures (0=off)
+    --max-writes INT                       Stop cleanly after attempting N writes
   verify COLLECTION_ID                     Check if migration is fully applied
     --migration TEXT  (repeatable)         Migration(s) to verify
     --page-size INT   (default: 100)       Items fetched per API page
