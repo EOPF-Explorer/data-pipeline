@@ -43,6 +43,7 @@ def _load(module_name: str, file_path: Path):
 
 
 manage_item_module = _load("manage_item", OPERATOR_TOOLS / "manage_item.py")
+manage_collections_module = _load("manage_collections", OPERATOR_TOOLS / "manage_collections.py")
 
 item_cli = manage_item_module.cli
 
@@ -128,6 +129,86 @@ class TestManageItemReplaceItemHelper:
 
         with pytest.raises(requests.HTTPError):
             manage_item_module._replace_item(session, API_URL, COLLECTION_ID, _make_item())
+
+
+# ---------------------------------------------------------------------------
+# manage_collections._replace_item: direct helper tests
+# ---------------------------------------------------------------------------
+class TestManageCollectionsReplaceItemHelper:
+    def test_issues_single_put_to_item_url(self):
+        session = MagicMock(spec=requests.Session)
+        session.put.return_value = _make_response(200)
+        item = _make_item()
+
+        manage_collections_module._replace_item(session, API_URL, COLLECTION_ID, item)
+
+        session.put.assert_called_once_with(
+            f"{API_URL}/collections/{COLLECTION_ID}/items/{ITEM_ID}",
+            json=item.to_dict(),
+            timeout=30,
+        )
+        session.delete.assert_not_called()
+        session.post.assert_not_called()
+
+    @pytest.mark.parametrize("status_code", [404, 500])
+    def test_raises_on_http_error(self, status_code):
+        session = MagicMock(spec=requests.Session)
+        session.put.return_value = _make_response(status_code)
+
+        with pytest.raises(requests.HTTPError):
+            manage_collections_module._replace_item(session, API_URL, COLLECTION_ID, _make_item())
+
+
+# ---------------------------------------------------------------------------
+# manage_collections.STACCollectionManager.sync_storage_tiers per-item loop
+# ---------------------------------------------------------------------------
+class TestCollectionSyncStorageTiersLoop:
+    """The per-item write loop had no unit coverage before #352."""
+
+    TIERS_UPDATED = (1, 1, 1, 0, 0, 0)
+
+    def _run_sync(self, item_dicts: list[dict], put_side_effect):
+        manager = manage_collections_module.STACCollectionManager(API_URL)
+        with (
+            patch.object(manager, "get_collection_items", return_value=item_dicts),
+            patch(
+                "update_stac_storage_tier.update_item_storage_tiers",
+                return_value=self.TIERS_UPDATED,
+            ),
+            patch("requests.Session.put", side_effect=put_side_effect) as mock_put,
+            patch("requests.Session.delete") as mock_delete,
+            patch("requests.Session.post") as mock_post,
+        ):
+            stats = manager.sync_storage_tiers(COLLECTION_ID, S3_ENDPOINT)
+        return stats, mock_put, mock_delete, mock_post
+
+    @staticmethod
+    def _item_dict(item_id: str) -> dict:
+        return {**FAKE_ITEM_DICT, "id": item_id}
+
+    def test_updates_use_put_only(self):
+        items = [self._item_dict("item-000"), self._item_dict("item-001")]
+        stats, mock_put, mock_delete, mock_post = self._run_sync(
+            items, lambda *a, **k: _make_response(200)
+        )
+
+        assert stats["items_updated"] == 2
+        assert stats["items_failed"] == 0
+        assert mock_put.call_count == 2
+        mock_delete.assert_not_called()
+        mock_post.assert_not_called()
+
+    def test_put_failure_counts_item_failed_and_continues(self):
+        items = [self._item_dict("item-000"), self._item_dict("item-001")]
+
+        def _put(url, *args, **kwargs):
+            return _make_response(500 if "item-000" in url else 200)
+
+        stats, mock_put, _, _ = self._run_sync(items, _put)
+
+        assert stats["items_failed"] == 1
+        assert stats["items_updated"] == 1
+        assert mock_put.call_count == 2  # loop continues past the failure
 
 
 # ---------------------------------------------------------------------------

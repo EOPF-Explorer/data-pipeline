@@ -1080,16 +1080,7 @@ def change_storage_tier(
             update_item_storage_tiers(item, s3_endpoint)
 
             try:
-                # Use DELETE then POST (pgstac doesn't support PUT)
-                delete_url = f"{manager.api_url}/collections/{collection_id}/items/{item_id}"
-                manager.session.delete(delete_url, timeout=30)
-                create_url = f"{manager.api_url}/collections/{collection_id}/items"
-                manager.session.post(
-                    create_url,
-                    json=item.to_dict(),
-                    headers={"Content-Type": "application/json"},
-                    timeout=30,
-                )
+                _replace_item(manager.session, manager.api_url, collection_id, item)
                 click.echo(f"\n✅ Updated STAC metadata for item {item_id}")
             except Exception as e:
                 click.echo(f"\n❌ Failed to update STAC item: {e}", err=True)
