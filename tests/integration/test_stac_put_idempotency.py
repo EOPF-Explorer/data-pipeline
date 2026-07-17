@@ -61,6 +61,7 @@ def _load(module_name: str, file_path: Path):
 
 
 manage_item_module = _load("manage_item", OPERATOR_TOOLS / "manage_item.py")
+register_v1 = _load("register_v1", SCRIPTS_DIR / "register_v1.py")
 
 # ---------------------------------------------------------------------------
 # Scratch-collection guards
@@ -182,3 +183,36 @@ class TestPatternRReplace:
         assert stored["id"] == "probe-item-r1"
         assert stored["properties"]["constellation"] == "probe-mutated"
         assert stored["geometry"] == {"type": "Point", "coordinates": [0.0, 0.0]}
+
+
+# ---------------------------------------------------------------------------
+# Pattern U — upsert via the real register_v1.upsert_item
+# ---------------------------------------------------------------------------
+class TestPatternUUpsert:
+    def test_upsert_creates_then_replaces(self, session, api_url, scratch_collection):
+        import pystac_client
+
+        client = pystac_client.Client.open(api_url)
+        item = _make_item("probe-item-u1", scratch_collection)
+        _assert_scratch(scratch_collection)
+
+        # Create path: item absent → upsert must POST (a PUT here would 404).
+        register_v1.upsert_item(client, scratch_collection, item)
+        matching = [
+            f
+            for f in _get_item_features(session, api_url, scratch_collection)
+            if f["id"] == "probe-item-u1"
+        ]
+        assert len(matching) == 1, "create path must register the item exactly once"
+
+        # Replace path: item present → upsert must PUT the mutation in place.
+        item.properties["constellation"] = "probe-mutated"
+        register_v1.upsert_item(client, scratch_collection, item)
+        matching = [
+            f
+            for f in _get_item_features(session, api_url, scratch_collection)
+            if f["id"] == "probe-item-u1"
+        ]
+        assert len(matching) == 1, "replace must never duplicate"
+        assert matching[0]["properties"]["constellation"] == "probe-mutated"
+        assert matching[0]["geometry"] == {"type": "Point", "coordinates": [0.0, 0.0]}

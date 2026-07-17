@@ -57,22 +57,23 @@ def _make_item(item_id: str = "test-item-001") -> MagicMock:
     return item
 
 
-class TestUpsertItemDeleteFailure:
-    """DELETE fails → raise_for_status raises → POST must not be called."""
+class TestUpsertItemPutFailure:
+    """PUT on an existing item fails → raises; 404 (ghost id) is a real error,
+    never a silent create via POST."""
 
     @pytest.mark.parametrize("status_code", [403, 404, 500, 503])
-    def test_raises_on_delete_failure(self, status_code):
+    def test_raises_on_put_failure(self, status_code):
         client = _make_client(item_exists=True)
-        client._stac_io.session.delete.return_value = _make_response(status_code)
+        client._stac_io.session.put.return_value = _make_response(status_code)
         item = _make_item()
 
         with pytest.raises(requests.HTTPError):
             upsert_item(client, "my-collection", item)
 
     @pytest.mark.parametrize("status_code", [403, 404, 500, 503])
-    def test_post_not_called_when_delete_fails(self, status_code):
+    def test_post_not_called_when_put_fails(self, status_code):
         client = _make_client(item_exists=True)
-        client._stac_io.session.delete.return_value = _make_response(status_code)
+        client._stac_io.session.put.return_value = _make_response(status_code)
         item = _make_item()
 
         with contextlib.suppress(requests.HTTPError):
@@ -81,30 +82,30 @@ class TestUpsertItemDeleteFailure:
         client._stac_io.session.post.assert_not_called()
 
 
-class TestUpsertItemDeleteSuccess:
-    """DELETE succeeds → POST is called with the item payload."""
+class TestUpsertItemReplaceExisting:
+    """Item exists → single PUT to the item URL; no DELETE, no POST."""
 
-    def test_delete_then_post_when_item_exists(self):
+    def test_put_when_item_exists(self):
         client = _make_client(item_exists=True, base_url="https://stac.example.com")
-        client._stac_io.session.delete.return_value = _make_response(200)
-        client._stac_io.session.post.return_value = _make_response(201)
+        client._stac_io.session.put.return_value = _make_response(200)
         item = _make_item("existing-item")
 
         upsert_item(client, "my-collection", item)
 
-        client._stac_io.session.delete.assert_called_once_with(
-            "https://stac.example.com/collections/my-collection/items/existing-item",
-            timeout=30,
+        client._stac_io.session.put.assert_called_once()
+        put_call = client._stac_io.session.put.call_args
+        assert put_call.args[0] == (
+            "https://stac.example.com/collections/my-collection/items/existing-item"
         )
-        client._stac_io.session.post.assert_called_once()
-        post_call = client._stac_io.session.post.call_args
-        assert post_call.kwargs["json"] == item.to_dict()
+        assert put_call.kwargs["json"] == item.to_dict()
+        client._stac_io.session.delete.assert_not_called()
+        client._stac_io.session.post.assert_not_called()
 
 
 class TestUpsertItemNewItem:
-    """Item does not exist → no DELETE, POST called directly."""
+    """Item does not exist → POST to the items URL; no DELETE, no PUT."""
 
-    def test_no_delete_when_item_is_new(self):
+    def test_no_delete_or_put_when_item_is_new(self):
         client = _make_client(item_exists=False)
         client._stac_io.session.post.return_value = _make_response(201)
         item = _make_item("new-item")
@@ -112,6 +113,7 @@ class TestUpsertItemNewItem:
         upsert_item(client, "my-collection", item)
 
         client._stac_io.session.delete.assert_not_called()
+        client._stac_io.session.put.assert_not_called()
         client._stac_io.session.post.assert_called_once()
 
     def test_post_url_for_new_item(self):

@@ -137,20 +137,19 @@ def upsert_item(client: Client, collection_id: str, item: Item) -> None:
     # Use client's base URL directly (includes /stac if present)
     base_url = str(client.self_href).rstrip("/")
     if exists:
-        # DELETE then POST (pgstac doesn't support PUT for items)
-        delete_url = f"{base_url}/collections/{collection_id}/items/{item.id}"
-        delete_resp = client._stac_io.session.delete(delete_url, timeout=30)
-        delete_resp.raise_for_status()
-        logger.info(f"Deleted existing {item.id}")
-
-    # POST new/updated item
-    create_url = f"{base_url}/collections/{collection_id}/items"
-    resp = client._stac_io.session.post(
-        create_url,
-        json=item.to_dict(),
-        headers={"Content-Type": "application/json"},
-        timeout=30,
-    )
+        resp = client._stac_io.session.put(
+            f"{base_url}/collections/{collection_id}/items/{item.id}",
+            json=item.to_dict(),
+            headers={"Content-Type": "application/json"},
+            timeout=30,
+        )
+    else:
+        resp = client._stac_io.session.post(
+            f"{base_url}/collections/{collection_id}/items",
+            json=item.to_dict(),
+            headers={"Content-Type": "application/json"},
+            timeout=30,
+        )
     resp.raise_for_status()
     logger.info(f"✅ Registered {item.id} (HTTP {resp.status_code})")
 
