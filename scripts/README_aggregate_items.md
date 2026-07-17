@@ -191,10 +191,10 @@ After running the script, verify the results:
 
 ```bash
 # Check the JSON files are accessible
-curl -s https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/aggregations/sentinel-2-l2a/daily.json | python -m json.tool | head -10
+curl -s https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/aggregations/sentinel-2-l2a/daily.json | uv run python -m json.tool | head -10
 
 # Check the collection has pre-aggregation links
-curl -s https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a | python -m json.tool | grep -A4 pre-aggregation
+curl -s https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a | uv run python -m json.tool | grep -A4 pre-aggregation
 ```
 
 ## Error Handling

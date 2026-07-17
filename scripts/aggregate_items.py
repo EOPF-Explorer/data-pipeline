@@ -24,6 +24,7 @@ import sys
 
 import boto3
 import httpx
+import stac_auth
 from pystac_client import Client
 
 # Configure logging (set LOG_LEVEL=DEBUG for verbose output)
@@ -187,10 +188,13 @@ def update_collection_links(
 
         collection_data["links"] = links
 
+        # httpx (not a requests session) → merge a fresh token snapshot per call.
+        # auth_headers() is re-evaluated on every put, so it stays fresh like the
+        # bearer_auth hook used at the pystac/operator sites. No-op when OIDC env unset.
         put_resp = http.put(
             collection_url,
             json=collection_data,
-            headers={"Content-Type": "application/json"},
+            headers={"Content-Type": "application/json", **stac_auth.auth_headers()},
         )
         put_resp.raise_for_status()
 
