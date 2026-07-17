@@ -368,6 +368,36 @@ class TestUpdateStacItem:
     @patch("update_stac_storage_tier.httpx.Client")
     @patch("update_stac_storage_tier.update_item_storage_tiers")
     @patch("update_stac_storage_tier.Client")
+    def test_exists_check_error_falls_back_to_post_and_logs(
+        self, mock_client_class, mock_update_tiers, mock_httpx, stac_item_before, caplog
+    ):
+        """A transient exists-check failure takes the POST path — and says so,
+        because an existing item routed to POST surfaces as a confusing 409."""
+        import logging
+
+        from update_stac_storage_tier import update_stac_item
+
+        self._mock_httpx(mock_httpx, stac_item_before)
+        mock_update_tiers.return_value = (1, 1, 1, 0, 0, 0)
+        mock_stac_client, mock_session = self._make_stac_client(item_exists=False)
+        mock_stac_client.get_collection.side_effect = Exception("API unreachable")
+        mock_client_class.open.return_value = mock_stac_client
+
+        with caplog.at_level(logging.DEBUG, logger="update_stac_storage_tier"):
+            update_stac_item(
+                "https://stac.api.com/collections/test/items/test-item",
+                "https://stac.api.com",
+                "https://s3.endpoint.com",
+                dry_run=False,
+            )
+
+        mock_session.post.assert_called_once()
+        mock_session.put.assert_not_called()
+        assert "exists-check failed" in caplog.text
+
+    @patch("update_stac_storage_tier.httpx.Client")
+    @patch("update_stac_storage_tier.update_item_storage_tiers")
+    @patch("update_stac_storage_tier.Client")
     def test_put_failure_raises(
         self, mock_client_class, mock_update_tiers, mock_httpx, stac_item_before
     ):

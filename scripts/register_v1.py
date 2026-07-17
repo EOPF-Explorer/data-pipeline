@@ -131,7 +131,8 @@ def upsert_item(client: Client, collection_id: str, item: Item) -> None:
     # Check if exists — get_item returns None if not found, does not raise
     try:
         exists = client.get_collection(collection_id).get_item(item.id) is not None
-    except Exception:
+    except Exception as e:
+        logger.debug(f"exists-check failed for {item.id}, assuming absent: {e}")
         exists = False
 
     # Use client's base URL directly (includes /stac if present)

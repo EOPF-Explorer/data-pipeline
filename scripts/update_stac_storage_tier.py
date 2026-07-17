@@ -394,7 +394,8 @@ def update_stac_item(
         # Check if exists — get_item returns None if not found, does not raise
         try:
             exists = client.get_collection(collection_id).get_item(item_id) is not None
-        except Exception:
+        except Exception as e:
+            logger.debug(f"exists-check failed for {item_id}, assuming absent: {e}")
             exists = False
 
         if exists:
