@@ -2,8 +2,8 @@
 
 Slice 1 covers the R5 writer-pin guard (`assert_writer_pinned`): the migration re-derives vv/vh +
 overviews with the data-model writer's private `_downsample_2d`/`OVERVIEW_CHAIN`, so it must refuse to
-run unless the writer is at the pinned, value-identical behavior (eopf-geozarr 0.10.1 == data-model
-f882a3f).
+run unless the writer is at the pinned, value-identical behavior (eopf-geozarr 0.10.2 == data-model
+9ede8c3, whose s1_ingest is byte-identical to the originally validated f882a3f writer).
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ _SPEC.loader.exec_module(s1_store_meta)  # type: ignore[union-attr]
 
 
 def test_passes_on_the_pinned_env() -> None:
-    """The worktree pins f882a3f / 0.10.1, so the guard must accept it (no raise)."""
+    """The worktree pins 9ede8c3 / 0.10.2, so the guard must accept it (no raise)."""
     s1_store_meta.assert_writer_pinned()
 
 

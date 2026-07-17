@@ -829,7 +829,7 @@ distributed = [
 
 [[package]]
 name = "data-pipeline"
-version = "1.12.0"
+version = "1.13.0"
 source = { editable = "." }
 dependencies = [
     { name = "boto3" },
@@ -876,7 +876,7 @@ requires-dist = [
     { name = "boto3", specifier = "==1.42.89" },
     { name = "cf-xarray", specifier = "==0.11.3" },
     { name = "click", specifier = "==8.4.2" },
-    { name = "eopf-geozarr", git = "https://github.com/EOPF-Explorer/data-model.git?rev=b0d31be43842428dfb6606755917b538b73522ef" },
+    { name = "eopf-geozarr", git = "https://github.com/EOPF-Explorer/data-model.git?rev=9ede8c34dfe534727e93d80e278ad4390f5656d0" },
     { name = "httpx", specifier = "==0.28.1" },
     { name = "mgrs", specifier = "==1.5.4" },
     { name = "morecantile", specifier = "==7.0.3" },
@@ -996,8 +996,8 @@ wheels = [
 
 [[package]]
 name = "eopf-geozarr"
-version = "0.10.1"
-source = { git = "https://github.com/EOPF-Explorer/data-model.git?rev=b0d31be43842428dfb6606755917b538b73522ef#b0d31be43842428dfb6606755917b538b73522ef" }
+version = "0.10.2"
+source = { git = "https://github.com/EOPF-Explorer/data-model.git?rev=9ede8c34dfe534727e93d80e278ad4390f5656d0#9ede8c34dfe534727e93d80e278ad4390f5656d0" }
 dependencies = [
     { name = "aiohttp" },
     { name = "boto3" },
@@ -1412,15 +1412,15 @@ wheels = [
 
 [[package]]
 name = "jupyter-builder"
-version = "1.1.0"
+version = "1.0.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "jupyter-core" },
     { name = "traitlets" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/0d/df/db5efc4e28803a1421350445e53d85ec571a4e6928e3524ccc39f4e16584/jupyter_builder-1.1.0.tar.gz", hash = "sha256:b996e8af616900f18724fa34883169d869be2205497940bec78a3a1031eb897d", size = 971142, upload-time = "2026-07-11T07:24:02.4Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/fb/45/d0df8b43c10a61529c0f4a8af5e19ebe108f0c3af8f57e0fc358969907af/jupyter_builder-1.0.2.tar.gz", hash = "sha256:6155d78a5325010532a6419ffcba89eac643fd1aa56ea83115e661924d6f6aab", size = 968638, upload-time = "2026-06-12T02:33:25.767Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7c/fb/53adbc72931b4429275b160044c3e1bcbc8fbb5ea6b8f318a357834842fb/jupyter_builder-1.1.0-py3-none-any.whl", hash = "sha256:d9d5280e8845f726663545c3a6db55bd205127616eeb8958481091d6cba71b6a", size = 912964, upload-time = "2026-07-11T07:24:00.279Z" },
+    { url = "https://files.pythonhosted.org/packages/28/b6/c418e0b3256f67c04933566b80bfce947350682db92c4b786a8653db32d6/jupyter_builder-1.0.2-py3-none-any.whl", hash = "sha256:b024f65d36e1d530542db597b00dd513261aa59842e0d0fbbb1015a9f1935e9c", size = 910789, upload-time = "2026-06-12T02:33:23.317Z" },
 ]
 
 [[package]]
