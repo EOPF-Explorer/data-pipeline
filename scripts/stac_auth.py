@@ -31,8 +31,16 @@ logger = logging.getLogger(__name__)
 _EXPIRY_MARGIN_S = 30
 
 _lock = threading.Lock()
-_cached_token: str | None = None
-_cached_expiry: float = 0.0  # time.monotonic() seconds when the cached token expires
+
+
+class _TokenCache:
+    """The cached client-credentials token, guarded by ``_lock``."""
+
+    token: str | None = None
+    expiry: float = 0.0  # time.monotonic() seconds when the cached token expires
+
+
+_cache = _TokenCache()
 
 
 def _oidc_env() -> tuple[str, str, str] | None:
@@ -58,9 +66,8 @@ def get_token() -> str | None:
     token_url, client_id, client_secret = env
 
     with _lock:
-        global _cached_token, _cached_expiry
-        if _cached_token is not None and time.monotonic() < _cached_expiry:
-            return _cached_token
+        if _cache.token is not None and time.monotonic() < _cache.expiry:
+            return _cache.token
 
         try:
             resp = httpx.post(
@@ -87,8 +94,8 @@ def get_token() -> str | None:
 
         token = str(access_token)
         expires_in = float(payload.get("expires_in", 300))
-        _cached_token = token
-        _cached_expiry = time.monotonic() + max(expires_in - _EXPIRY_MARGIN_S, 0)
+        _cache.token = token
+        _cache.expiry = time.monotonic() + max(expires_in - _EXPIRY_MARGIN_S, 0)
         logger.info("Fetched OIDC token for client %s (expires in %ss)", client_id, expires_in)
         return token
 

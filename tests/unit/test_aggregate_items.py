@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
 from pystac import Item
 
 from scripts.aggregate_items import (
@@ -351,15 +352,19 @@ class TestMainDryRun:
 
 
 class TestTemplateSurvivesAggregation:
-    """The S1 acquisitions template ships the pre-aggregation links itself (issue #348).
+    """The templates ship their own pre-aggregation links (issues #270 / #348).
 
     Two writers own collection["links"]: manage_collections PUTs the template wholesale,
-    aggregate_items strips-then-appends against live. Carrying the links in the template is
-    what stops the first from wiping the second — but only if the two agree on the result,
-    which depends on the links being LAST (append position). Prove it rather than assert it.
+    aggregate_items strips-then-appends against live. Before this, the templates carried no
+    pre-aggregation links, so a `create --update` silently deleted whatever aggregate_items
+    had published — which is exactly what happened to sentinel-2-l2a-staging (its S3
+    aggregation objects are live and served, but the collection's links were gone).
+
+    Carrying the links in the template fixes that only if both writers agree on the result,
+    which requires them to be LAST. Prove it rather than assert it.
     """
 
-    def _capture_put(self, collection_data: dict) -> dict:
+    def _capture_put(self, collection_id: str, collection_data: dict) -> dict:
         get_resp = MagicMock()
         get_resp.json.return_value = collection_data
         get_resp.raise_for_status = MagicMock()
@@ -380,23 +385,27 @@ class TestTemplateSurvivesAggregation:
         with patch("scripts.aggregate_items.httpx.Client", return_value=client):
             update_collection_links(
                 "https://api.explorer.eopf.copernicus.eu/stac",
-                "sentinel-1-grd-rtc-acquisitions-staging",
+                collection_id,
                 "https://s3.explorer.eopf.copernicus.eu",  # s3_gateway_url
                 "esa-zarr-sentinel-explorer-fra",  # s3_bucket
                 "aggregations",  # s3_prefix
             )
         return captured["json"]
 
-    def test_aggregation_rewrite_is_a_no_op_on_the_committed_template(self):
+    @pytest.mark.parametrize(
+        "collection_id",
+        [
+            "sentinel-2-l2a",
+            "sentinel-2-l2a-staging",
+            "sentinel-1-grd-rtc-acquisitions-staging",
+        ],
+    )
+    def test_aggregation_rewrite_is_a_no_op_on_the_committed_template(self, collection_id):
         """Running aggregate_items against the template must reproduce the template's links."""
         template = json.loads(
-            (
-                Path(__file__).parent.parent.parent
-                / "stac"
-                / "sentinel-1-grd-rtc-acquisitions-staging.json"
-            ).read_text()
+            (Path(__file__).parent.parent.parent / "stac" / f"{collection_id}.json").read_text()
         )
-        put_body = self._capture_put(json.loads(json.dumps(template)))
+        put_body = self._capture_put(collection_id, json.loads(json.dumps(template)))
         assert put_body["links"] == template["links"]
 
 

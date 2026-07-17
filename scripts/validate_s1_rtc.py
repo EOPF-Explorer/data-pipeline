@@ -19,7 +19,6 @@ from enum import IntEnum
 from typing import Any
 
 import numpy as np
-import rioxarray  # noqa: F401  -- registers the .rio accessor used by check_crs
 import xarray as xr
 
 
@@ -75,6 +74,8 @@ def check_dtype_dims(
 
 def check_crs(ds: xr.Dataset) -> Check:
     """A resolvable CRS via rioxarray (CF grid_mapping wired) — WARN if absent."""
+    import rioxarray  # noqa: F401  -- imported for its side effect: registers the .rio accessor
+
     try:
         crs = ds["vv"].rio.crs if "vv" in ds else ds.rio.crs
     except Exception:  # noqa: BLE001 -- rioxarray raises various errors when no CRS is resolvable

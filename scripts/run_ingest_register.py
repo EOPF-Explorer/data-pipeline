@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import argparse
 import logging
-import subprocess
+import subprocess  # nosec B404 -- composes this repo's own scripts with fixed argv (no shell)
 import sys
 
 log = logging.getLogger(__name__)
@@ -105,7 +105,7 @@ def run_pipeline(
         "--orbit-direction",
         orbit_direction,
     ]
-    result = subprocess.run(ingest_cmd)  # noqa: S603
+    result = subprocess.run(ingest_cmd)  # noqa: S603  # nosec B603 -- fixed argv, no shell
     if result.returncode == 2:
         log.info("no acquisitions found — skipping register")
         return 0
@@ -129,7 +129,7 @@ def run_pipeline(
         "--s3-endpoint",
         s3_endpoint,
     ]
-    result = subprocess.run(register_cmd)  # noqa: S603
+    result = subprocess.run(register_cmd)  # noqa: S603  # nosec B603 -- fixed argv, no shell
     if result.returncode != 0:
         return result.returncode
 
@@ -157,7 +157,7 @@ def run_pipeline(
         "--raster-api-url",
         raster_api_url,
     ]
-    result = subprocess.run(peracq_cmd)  # noqa: S603
+    result = subprocess.run(peracq_cmd)  # noqa: S603  # nosec B603 -- fixed argv, no shell
     return result.returncode
 
 
