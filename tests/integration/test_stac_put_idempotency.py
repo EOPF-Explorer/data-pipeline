@@ -61,6 +61,7 @@ def _load(module_name: str, file_path: Path):
 
 
 manage_item_module = _load("manage_item", OPERATOR_TOOLS / "manage_item.py")
+manage_collections_module = _load("manage_collections", OPERATOR_TOOLS / "manage_collections.py")
 register_v1 = _load("register_v1", SCRIPTS_DIR / "register_v1.py")
 
 # ---------------------------------------------------------------------------
@@ -126,12 +127,25 @@ def _delete_collection(
 
 
 def _sweep_stale_scratch_collections(session: requests.Session, api_url: str) -> None:
-    """Delete leftovers from earlier crashed runs — strict name match only."""
-    resp = session.get(f"{api_url}/collections", timeout=30)
-    resp.raise_for_status()
-    for collection in resp.json().get("collections", []):
-        if SCRATCH_NAME_RE.match(collection.get("id", "")):
-            _delete_collection(session, api_url, collection["id"])
+    """Delete leftovers from earlier crashed runs — strict name match only.
+
+    Follows pagination: zzz- names sort last, so on a paginated listing they
+    would never appear on the first page.
+    """
+    url = f"{api_url}/collections"
+    for _ in range(50):  # safety cap on pages
+        resp = session.get(url, timeout=30)
+        resp.raise_for_status()
+        body = resp.json()
+        for collection in body.get("collections", []):
+            if SCRATCH_NAME_RE.match(collection.get("id", "")):
+                _delete_collection(session, api_url, collection["id"])
+        next_link = next(
+            (link for link in body.get("links", []) if link.get("rel") == "next"), None
+        )
+        if next_link is None or not next_link.get("href"):
+            return
+        url = next_link["href"]
 
 
 # ---------------------------------------------------------------------------
@@ -164,23 +178,33 @@ def scratch_collection(session: requests.Session, api_url: str):
 
 
 # ---------------------------------------------------------------------------
-# Pattern R — pure replace via the file-local _replace_item helper
+# Pattern R — pure replace via the file-local _replace_item helpers
+# (both twins live-covered so they cannot silently drift apart)
 # ---------------------------------------------------------------------------
 class TestPatternRReplace:
+    @pytest.mark.parametrize(
+        "helper_module",
+        [manage_item_module, manage_collections_module],
+        ids=["manage_item", "manage_collections"],
+    )
     def test_replace_persists_mutation_without_duplicating(
-        self, session, api_url, scratch_collection
+        self, session, api_url, scratch_collection, helper_module
     ):
-        item = _make_item("probe-item-r1", scratch_collection)
+        item_id = f"probe-item-r1-{helper_module.__name__}"
+        item = _make_item(item_id, scratch_collection)
         resp = _post_item(session, api_url, scratch_collection, item)
         assert resp.status_code in (200, 201), f"seed POST failed: {resp.text}"
 
         item.properties["constellation"] = "probe-mutated"
-        manage_item_module._replace_item(session, api_url, scratch_collection, item)
+        helper_module._replace_item(session, api_url, scratch_collection, item)
 
-        features = _get_item_features(session, api_url, scratch_collection)
-        assert len(features) == 1, "PUT must replace, never duplicate"
-        stored = features[0]
-        assert stored["id"] == "probe-item-r1"
+        matching = [
+            f
+            for f in _get_item_features(session, api_url, scratch_collection)
+            if f["id"] == item_id
+        ]
+        assert len(matching) == 1, "PUT must replace, never duplicate"
+        stored = matching[0]
         assert stored["properties"]["constellation"] == "probe-mutated"
         assert stored["geometry"] == {"type": "Point", "coordinates": [0.0, 0.0]}
 
