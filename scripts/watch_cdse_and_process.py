@@ -16,7 +16,7 @@ import json
 import logging
 import math
 import os
-import subprocess
+import subprocess  # nosec B404 -- composes this repo's own scripts with fixed argv (no shell)
 from pathlib import Path
 
 import mgrs
@@ -229,10 +229,10 @@ def process_product(args: argparse.Namespace, product: dict[str, str], tile: str
         )
         return True
 
-    if subprocess.run(a_cmd).returncode != 0:  # noqa: S603 -- Script A streams to terminal (not captured)
+    if subprocess.run(a_cmd).returncode != 0:  # noqa: S603  # nosec B603 -- fixed argv; streams to terminal
         log.error("Script A (s1tiling) failed for %s", product["product_id"])
         return False
-    if subprocess.run(b_cmd).returncode != 0:  # noqa: S603
+    if subprocess.run(b_cmd).returncode != 0:  # noqa: S603  # nosec B603 -- fixed argv, no shell
         log.error("Script B (ingest/register) failed for %s", product["product_id"])
         return False
     return True

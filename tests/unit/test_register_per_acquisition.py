@@ -18,10 +18,8 @@ import pystac
 scripts_dir = Path(__file__).parent.parent.parent / "scripts"
 sys.path.insert(0, str(scripts_dir))
 
-from register_per_acquisition import (  # noqa: E402
-    acquisition_id,
-    decorate_acquisition_item,
-)
+from eopf_geozarr.stac.s1_rtc import acquisition_id  # noqa: E402
+from register_per_acquisition import decorate_acquisition_item  # noqa: E402
 
 CUBE = "sentinel-1-grd-rtc-staging"  # cube collection (render endpoint)
 ACQ = "sentinel-1-grd-rtc-acquisitions"  # per-acquisition collection (items go here)

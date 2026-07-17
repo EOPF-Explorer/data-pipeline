@@ -25,7 +25,6 @@ import argparse
 import urllib.parse
 
 import stac_auth
-from eopf_geozarr.stac.s1_rtc import acquisition_id as acquisition_id  # re-export for trigger_cdse
 from eopf_geozarr.stac.s1_rtc import build_s1_rtc_per_acquisition_items
 from pystac import Item
 from register_v1 import EXPLORER_BASE, _render_to_query

@@ -27,11 +27,11 @@ def reset_stac_auth_cache(monkeypatch):
     """Clear the stac_auth module-global token cache + OIDC env around every test."""
     for key in OIDC_ENV:
         monkeypatch.delenv(key, raising=False)
-    stac_auth._cached_token = None
-    stac_auth._cached_expiry = 0.0
+    stac_auth._cache.token = None
+    stac_auth._cache.expiry = 0.0
     yield
-    stac_auth._cached_token = None
-    stac_auth._cached_expiry = 0.0
+    stac_auth._cache.token = None
+    stac_auth._cache.expiry = 0.0
 
 
 @pytest.fixture

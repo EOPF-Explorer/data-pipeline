@@ -26,8 +26,9 @@ import logging
 import sys
 from pathlib import Path
 
+from eopf_geozarr.stac.s1_rtc import acquisition_id
 from pystac_client import Client
-from register_per_acquisition import DEFAULT_ACQ_COLLECTION, acquisition_id
+from register_per_acquisition import DEFAULT_ACQ_COLLECTION
 
 # Reuse the watcher's tile geometry + CDSE query constants (single source of truth); query_cdse
 # itself is *not* reused -- it drops the datetime/platform this trigger needs (see query_products).

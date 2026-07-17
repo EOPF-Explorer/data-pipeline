@@ -9,7 +9,7 @@ Argo workflow gets a fresh volume.
 import argparse
 import re
 import shutil
-import subprocess
+import subprocess  # nosec B404 -- runs aws-cli/s1tiling with fixed argv (no shell)
 import sys
 from pathlib import Path
 
@@ -103,7 +103,7 @@ def _run(cmd: list[str], dry_run: bool, *, check: bool = True) -> int:
     print(" \\\n  ".join(str(c) for c in cmd))
     if dry_run:
         return 0
-    result = subprocess.run(cmd)  # noqa: S603
+    result = subprocess.run(cmd)  # noqa: S603  # nosec B603 -- fixed argv, no shell
     if check and result.returncode != 0:
         sys.exit(result.returncode)
     return result.returncode
