@@ -26,6 +26,8 @@ scripts_dir = Path(__file__).parent.parent / "scripts"
 if str(scripts_dir) not in sys.path:
     sys.path.insert(0, str(scripts_dir))
 
+import stac_auth  # noqa: E402
+
 # S3-deletion helpers now live in scripts/ (baked into the pipeline image) so
 # the cleanup cron can share them (coordination#183). Re-imported here so this
 # module and manage_collections.py keep importing them from manage_item.
@@ -119,6 +121,7 @@ class STACItemManager:
         self.api_url = api_url.rstrip("/")
         self.session = requests.Session()
         self.session.headers.update({"Content-Type": "application/json"})
+        self.session.auth = stac_auth.bearer_auth
 
     def get_item(self, collection_id: str, item_id: str) -> dict[str, Any] | None:
         """

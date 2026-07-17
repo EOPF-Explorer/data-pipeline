@@ -1,0 +1,150 @@
+# One-off Argo Workflow: wipe S1 RTC tiles (cube store + STAC items, both orbits) for the #306
+# geoid reprocess (plan T3/T5).
+#
+# Per --tiles entry it FAIL-CLOSED backs up then removes the cube store, then deletes the STAC items:
+#   1. aws s3 cp --recursive <store> <backup>   (backup MUST land first)
+#   2. verify the backup object count >= the source count   (versioning is OFF on the cube bucket;
+#      never rm on an incomplete backup — plan I3)
+#   3. aws s3 rm --recursive <store>
+#   4. python /app/scripts/wipe_s1rtc_tiles.py --tiles … --execute   (cube item + ALL per-acq items,
+#      both orbits)
+# The cube bucket is owned by the eopfexplorer account; creds come from the in-cluster
+# `geozarr-s3-credentials` SealedSecret (NO literals here), endpoint is OVH `de`. STAC writes use the
+# pipeline's own (currently unauthenticated) write context — same as migrate-s1-rtc-datamodel-workflow.
+#
+# Usage (the s1rtc cron MUST be suspended — C2 concurrency):
+#   1. DRY-RUN (default, writes nothing — lists store object counts + the exact STAC ids):
+#        argo submit -n devseed-staging deploy/wipe-s1rtc-tiles-workflow.yaml \
+#          -p pipeline_image_version=<RC-tag> -p tiles=30UVU
+#   2. REAL wipe (only after the dry-run looks right — a backup_prefix is REQUIRED):
+#        argo submit -n devseed-staging deploy/wipe-s1rtc-tiles-workflow.yaml \
+#          -p pipeline_image_version=<RC-tag> -p tiles=30UVU -p dry_run=false \
+#          -p backup_prefix=s3://esa-zarr-sentinel-explorer-fra/backups/s1-306-geoid-20260626
+#
+# pipeline_image_version MUST be an RC build that contains scripts/wipe_s1rtc_tiles.py
+# (verify: `docker run --rm <image> python /app/scripts/wipe_s1rtc_tiles.py --help`).
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: wipe-s1rtc-tiles-
+  namespace: devseed-staging
+spec:
+  serviceAccountName: operate-workflow-sa
+  entrypoint: wipe
+  # Success cleaned after a day; failures kept 3 days for debugging.
+  ttlStrategy:
+    secondsAfterSuccess: 86400
+    secondsAfterFailure: 259200
+  arguments:
+    parameters:
+    - name: pipeline_image_version          # REQUIRED — RC tag containing scripts/wipe_s1rtc_tiles.py
+      value: v0.8.0-s1rtc-rc5
+    - name: tiles                           # REQUIRED — comma-separated MGRS tiles, e.g. 30UVU,30UWB
+      value: ""
+    - name: stac_api_url
+      value: https://api.explorer.eopf.copernicus.eu/stac
+    - name: cube_collection
+      value: sentinel-1-grd-rtc-staging
+    - name: acq_collection
+      value: sentinel-1-grd-rtc-acquisitions-staging
+    - name: bucket                          # cube bucket
+      value: esa-zarr-sentinel-explorer-fra
+    - name: store_prefix                    # path under the bucket to the cube stores
+      value: tests-output/sentinel-1-grd-rtc-staging
+    - name: s3_endpoint
+      value: https://s3.de.io.cloud.ovh.net
+    - name: dry_run                         # SAFE DEFAULT: list only, write nothing
+      value: "true"
+    - name: backup_prefix                   # REQUIRED for a real run (s3:// prefix; versioning is OFF)
+      value: ""
+  templates:
+  - name: wipe
+    activeDeadlineSeconds: 7200             # 2h ceiling
+    nodeSelector:
+      nodepool: pipeline
+    tolerations:
+    - key: nodepool
+      operator: Equal
+      value: pipeline
+      effect: NoSchedule
+    script:
+      image: w9mllyot.c1.de1.container-registry.ovh.net/eopf-sentinel-zarr-explorer/data-pipeline:{{workflow.parameters.pipeline_image_version}}
+      imagePullPolicy: Always
+      # All params arrive via env (never interpolated into the shell → no injection). The S3 endpoint
+      # is taken from AWS_ENDPOINT_URL, so the aws commands need no --endpoint-url.
+      command: [bash]
+      source: |
+        set -uo pipefail
+        if [ -z "$TILES" ]; then echo "ERROR: -p tiles is required"; exit 2; fi
+        IFS=',' read -ra TILE_ARR <<< "$TILES"
+
+        # --- Phase 1: per-tile cube store backup -> verify -> rm (fail-closed) -------------------
+        for tile in "${TILE_ARR[@]}"; do
+          store="s3://${BUCKET}/${STORE_PREFIX}/s1-rtc-${tile}.zarr"
+          src_count=$(aws s3 ls --recursive "$store" | wc -l | tr -d ' ')
+          echo "tile ${tile}: ${store} has ${src_count} objects"
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "[dry-run] would back up ${store} -> ${BACKUP_PREFIX:-<backup_prefix>}/s1-rtc-${tile}.zarr then rm it"
+            continue
+          fi
+          if [ -z "$BACKUP_PREFIX" ]; then echo "ERROR: backup_prefix is required for a real wipe"; exit 1; fi
+          if [ "$src_count" -eq 0 ]; then echo "ERROR: ${store} empty/missing — refusing to back up+rm ${tile}"; exit 1; fi
+          backup="${BACKUP_PREFIX%/}/s1-rtc-${tile}.zarr"
+          echo "backing up ${store} -> ${backup}"
+          aws s3 cp --recursive "$store" "$backup"
+          bkp_count=$(aws s3 ls --recursive "$backup" | wc -l | tr -d ' ')
+          if [ "$bkp_count" -lt "$src_count" ]; then
+            echo "ERROR: backup incomplete (${bkp_count} < ${src_count}) — refusing to rm ${tile}"; exit 1
+          fi
+          echo "backup verified (${bkp_count} objects); removing ${store}"
+          aws s3 rm --recursive "$store"
+        done
+
+        # --- Phase 2: STAC deletes (cube item + ALL per-acq items, both orbits) ------------------
+        args=(
+          --stac-api-url "$STAC_API_URL"
+          --tiles "$TILES"
+          --cube-collection "$CUBE_COLLECTION"
+          --acq-collection "$ACQ_COLLECTION"
+        )
+        [ "$DRY_RUN" = "false" ] && args+=(--execute)
+        python /app/scripts/wipe_s1rtc_tiles.py "${args[@]}"
+      resources:
+        requests:
+          memory: 2Gi
+          cpu: "1"
+      env:
+      - name: PYTHONUNBUFFERED
+        value: "1"
+      - name: TILES
+        value: "{{workflow.parameters.tiles}}"
+      - name: STAC_API_URL
+        value: "{{workflow.parameters.stac_api_url}}"
+      - name: CUBE_COLLECTION
+        value: "{{workflow.parameters.cube_collection}}"
+      - name: ACQ_COLLECTION
+        value: "{{workflow.parameters.acq_collection}}"
+      - name: BUCKET
+        value: "{{workflow.parameters.bucket}}"
+      - name: STORE_PREFIX
+        value: "{{workflow.parameters.store_prefix}}"
+      - name: S3_ENDPOINT
+        value: "{{workflow.parameters.s3_endpoint}}"
+      - name: DRY_RUN
+        value: "{{workflow.parameters.dry_run}}"
+      - name: BACKUP_PREFIX
+        value: "{{workflow.parameters.backup_prefix}}"
+      - name: AWS_ACCESS_KEY_ID
+        valueFrom:
+          secretKeyRef:
+            name: geozarr-s3-credentials
+            key: AWS_ACCESS_KEY_ID
+      - name: AWS_SECRET_ACCESS_KEY
+        valueFrom:
+          secretKeyRef:
+            name: geozarr-s3-credentials
+            key: AWS_SECRET_ACCESS_KEY
+      - name: AWS_ENDPOINT_URL
+        value: "{{workflow.parameters.s3_endpoint}}"
+      - name: AWS_DEFAULT_REGION
+        value: "de"

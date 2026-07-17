@@ -2,6 +2,7 @@ import copy
 import json
 import logging
 import os
+import sys
 import threading
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
@@ -10,12 +11,20 @@ from pathlib import Path
 from typing import Any
 
 import click
+import pystac
 import requests
 from pystac_client import Client
 from pystac_client.stac_api_io import StacApiIO
 from urllib3.util.retry import Retry
 
 from _migrate_catalog.types import MigrationFn, MigrationResult
+
+# Add scripts directory to path for the shared OIDC auth helper
+_scripts_dir = Path(__file__).parent.parent.parent / "scripts"
+if str(_scripts_dir) not in sys.path:
+    sys.path.insert(0, str(_scripts_dir))
+
+import stac_auth  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +54,22 @@ def _resilient_stac_io() -> StacApiIO:
     return StacApiIO(timeout=_SEARCH_TIMEOUT, max_retries=retry)
 
 
+def _transaction_body(item_dict: dict[str, Any]) -> dict[str, Any] | None:
+    """A transaction-valid write body for a raw STAC-API item dict, or ``None`` if one can't be built.
+
+    The GET/search representation omits nullable-but-required fields — notably
+    ``properties.datetime`` on datacube items (null datetime) — which the transaction API
+    rejects with 400. pystac re-materializes them (and preserves link order). Returns ``None`` for
+    items pystac can't model (e.g. an asset with no href): the caller must report the item failed
+    and write nothing — the item stays untouched in the catalogue (writes are a single atomic PUT),
+    and a PUT the API is guaranteed to 400 would only burn write budget.
+    """
+    try:
+        return pystac.Item.from_dict(item_dict).to_dict()
+    except Exception:
+        return None
+
+
 def compose_migrations(fns: list[MigrationFn]) -> MigrationFn:
     """Return a single MigrationFn that applies all fns in a single pass."""
 
@@ -66,6 +91,8 @@ class STACMigrationRunner:
         self.api_url = api_url.rstrip("/")
         self.session = requests.Session()
         self.session.headers.update({"Content-Type": "application/json"})
+        # Authenticate the migration writes (no-op when OIDC env is unset).
+        self.session.auth = stac_auth.bearer_auth
         # requests.Session is not guaranteed thread-safe, so each thread that
         # writes gets its own (see _session). The constructing thread keeps
         # `self.session` — the sequential paths (clone_collection, and
@@ -90,6 +117,9 @@ class STACMigrationRunner:
         if session is None:
             session = requests.Session()
             session.headers.update({"Content-Type": "application/json"})
+            # Same auth as the constructing thread's session, or concurrent
+            # writes would silently go unauthenticated.
+            session.auth = stac_auth.bearer_auth
             self._local.session = session
         return session
 
@@ -147,11 +177,15 @@ class STACMigrationRunner:
         migration_name: str,
         dry_run: bool = False,
         page_size: int = 100,
+        ids: list[str] | None = None,
         concurrency: int = 1,
         max_consecutive_failures: int = 25,
         max_writes: int | None = None,
     ) -> MigrationResult:
         """Apply migration_fn to every item in collection_id.
+
+        `ids` restricts the run to specific item ids (the single-tile canary path)
+        through the exact same code path, recovery file, and history as a full run.
 
         The per-item DELETE+POST is a network round-trip, so a sequential run is
         latency-bound (~5-6k items/hour against prod). `concurrency` > 1 dispatches
@@ -208,7 +242,15 @@ class STACMigrationRunner:
         )
 
         catalog = Client.open(self.api_url, stac_io=_resilient_stac_io())
-        search = catalog.search(collections=[collection_id], max_items=None, limit=page_size)
+        # `ids` restricts the run to specific items (the canary path) via the same code path,
+        # recovery JSONL, and history as the full run. Omitted from the call when unset so the
+        # full-collection search stays byte-identical (backcompat).
+        if ids:
+            search = catalog.search(
+                collections=[collection_id], ids=ids, max_items=None, limit=page_size
+            )
+        else:
+            search = catalog.search(collections=[collection_id], max_items=None, limit=page_size)
 
         total = search.matched()
         if total is not None:
@@ -226,11 +268,15 @@ class STACMigrationRunner:
         budget_used = 0  # items modified (or, in a dry run, that would be)
         try:
             with click.progressbar(length=total, show_pos=True, show_percent=True) as bar:
-                for page in search.pages():
+                # Iterate raw item-dict pages, not pystac Item objects: some live items carry an
+                # asset with no href (e.g. s1-rtc-30TWQ) that pystac's Item.from_dict rejects, and
+                # one such item must not abort the whole run. The migration functions operate on
+                # dicts anyway; _transaction_body re-materializes each write body via pystac.
+                for page in search.pages_as_dicts():
                     pending: list[tuple[str, str, dict[str, Any]]] = []
 
                     # Classify the page on this thread; queue the writes it earned.
-                    for item_dict in (item.to_dict() for item in page.items):
+                    for item_dict in page.get("features", []):
                         # Check the budget BEFORE classifying. Trimming the batch
                         # afterwards would leave items counted as processed but never
                         # written, so neither the tally nor stamp_expires' histogram
@@ -259,8 +305,23 @@ class STACMigrationRunner:
                             budget_used += 1
                             bar.update(1)
                         else:
-                            pending.append((collection_id, item_id, modified))
-                            budget_used += 1
+                            body = _transaction_body(modified)
+                            if body is None:
+                                # Can't build a transaction-valid write body (pystac can't
+                                # model the item) — report it failed, write nothing. No
+                                # budget spent: no write was attempted.
+                                result.items_failed += 1
+                                result.errors.append(
+                                    {
+                                        "item_id": item_id,
+                                        "error": "cannot build a transaction-valid body "
+                                        "(pystac can't model it); skipped without writing",
+                                    }
+                                )
+                                bar.update(1)
+                            else:
+                                pending.append((collection_id, item_id, body))
+                                budget_used += 1
 
                     # Then run this page's writes and tally them back here.
                     writes: Iterator[tuple[str, str | None]] = (

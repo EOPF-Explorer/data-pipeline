@@ -289,9 +289,9 @@ class TestUpdateStacItem:
 
     @patch("update_stac_storage_tier.httpx.Client")
     @patch("update_stac_storage_tier.update_item_storage_tiers")
-    @patch("update_stac_storage_tier.Client")
+    @patch("update_stac_storage_tier.stac_auth.open_client")
     def test_updates_stac_when_changes_made(
-        self, mock_client_class, mock_update_tiers, mock_httpx, stac_item_before
+        self, mock_open_client, mock_update_tiers, mock_httpx, stac_item_before
     ):
         """Test STAC API is updated when changes are made."""
         from update_stac_storage_tier import update_stac_item
@@ -314,7 +314,7 @@ class TestUpdateStacItem:
         mock_session.post.return_value = mock_post_response
         mock_session.delete.return_value = Mock()
         mock_stac_client._stac_io.session = mock_session
-        mock_client_class.open.return_value = mock_stac_client
+        mock_open_client.return_value = mock_stac_client
 
         result = update_stac_item(
             "https://stac.api.com/collections/test/items/test-item",
