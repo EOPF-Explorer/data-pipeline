@@ -1,6 +1,7 @@
 """Unit tests for update_stac_storage_tier.py script."""
 
 import json
+import logging
 import sys
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -373,8 +374,6 @@ class TestUpdateStacItem:
     ):
         """A transient exists-check failure takes the POST path — and says so,
         because an existing item routed to POST surfaces as a confusing 409."""
-        import logging
-
         from update_stac_storage_tier import update_stac_item
 
         self._mock_httpx(mock_httpx, stac_item_before)

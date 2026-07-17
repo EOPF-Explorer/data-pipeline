@@ -1,6 +1,7 @@
 """Unit tests for register_v1.py — upsert_item + expires stamping."""
 
 import contextlib
+import logging
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -135,8 +136,6 @@ class TestUpsertItemNewItem:
     def test_exists_check_error_falls_back_to_post_and_logs(self, caplog):
         """A transient exists-check failure takes the POST path — and says so,
         because an existing item routed to POST surfaces as a confusing 409."""
-        import logging
-
         client = _make_client(item_exists=False)
         client.get_collection.side_effect = Exception("API unreachable")
         client._stac_io.session.post.return_value = _make_response(201)

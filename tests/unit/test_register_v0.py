@@ -7,6 +7,7 @@ would turn every first-time registration into a PUT → 404 → crash.
 """
 
 import contextlib
+import logging
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, Mock
@@ -77,8 +78,6 @@ class TestUpsertItemNewItem:
     def test_exists_check_error_falls_back_to_post_and_logs(self, caplog):
         """A transient exists-check failure takes the POST path — and says so,
         because an existing item routed to POST surfaces as a confusing 409."""
-        import logging
-
         client = _make_client(item_exists=False)
         client.get_collection.side_effect = Exception("API unreachable")
         client._stac_io.session.post.return_value = _make_response(201)
