@@ -7,7 +7,7 @@ allow-direct-references = true
 
 [project]
 name = "data-pipeline"
-version = "1.12.0"
+version = "1.13.0"
 description = "Minimal event-driven Argo Workflows pipeline for Sentinel-2 GeoZarr conversion and STAC registration"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -34,7 +34,10 @@ dependencies = [
     "tenacity==9.1.4",
     "morecantile==7.0.3",
     "cf-xarray==0.11.3",
-    "eopf-geozarr @ git+https://github.com/EOPF-Explorer/data-model.git@v0.10.1",
+    # v0.10.2 ships data-model#220 (concurrent-safe source caching, fixes the fsspec
+    # simplecache race behind data-pipeline#339). Chunk-alignment was split out to
+    # data-model#221, so quality/atmosphere aot/wvp ship unsharded until that lands.
+    "eopf-geozarr @ git+https://github.com/EOPF-Explorer/data-model.git@v0.10.2",
     "requests==2.34.2",
 ]
 

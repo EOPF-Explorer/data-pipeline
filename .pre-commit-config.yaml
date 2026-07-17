@@ -49,7 +49,10 @@ repos:
     hooks:
       - id: pytest
         name: pytest
-        entry: uv run --group test pytest
+        # --locked: error out on a stale uv.lock rather than rewriting it
+        # mid-commit, which trips pre-commit's "files were modified by this
+        # hook" and pushes everyone to --no-verify.
+        entry: uv run --locked --group test pytest
         language: system
         pass_filenames: false
         always_run: true

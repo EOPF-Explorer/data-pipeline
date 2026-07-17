@@ -13,11 +13,11 @@ from urllib.parse import urlparse
 
 import aiohttp
 import fsspec
-import xarray as xr
 import zarr
 from eopf_geozarr.conversion.fs_utils import (
     get_storage_options,
 )
+from eopf_geozarr.conversion.open_source import open_source_datatree
 from eopf_geozarr.s2_optimization.s2_converter import convert_s2_optimized
 from source_url_utils import derive_item_id, resolve_zarr_url
 
@@ -117,18 +117,24 @@ def run_conversion(
     # Load input dataset
     logger.info(f"{'   📥 Loading input dataset '}{zarr_url}")
     storage_options = get_storage_options(str(zarr_url))
+    cache_dir: str | None = None
     if str(zarr_url).startswith("https://"):
-        # fsspec registers `filecache` as WholeFileCacheFileSystem, which is incompatible with
-        # zarr 3's async FsspecStore (no _cat_file on the class). `simplecache` caches each
-        # remote key on local disk once per job; repeated reads (e.g. multiscale) hit the cache.
+        # `open_source_datatree` opens with chunks={} (the store's native chunk
+        # grid), so each on-disk zarr chunk is read by exactly one dask task —
+        # this is what actually closes the concurrent same-key read race
+        # (#339), not the `simplecache` wrapping this used to build by hand.
+        # `cache_dir` gives it an atomic (LocalStore: temp-file + rename)
+        # on-disk cache so repeated reads (e.g. building overview levels)
+        # don't re-fetch from the source; unlike the old `simplecache`, a
+        # concurrent reader can never observe a partially-written entry.
         #
-        # `asynchronous` must be True on both the outer chain and the HTTPS target FS or aiohttp
-        # raises inside the nested cache path.
+        # `asynchronous` must be True on both the outer chain and the HTTPS
+        # target FS or aiohttp raises inside the nested cache path.
         #
         # Do not pass fsspec's `retries`/`backoff_factor` into HTTP storage_options: they end up
         # on aiohttp ClientSession.request() and raise TypeError.
         default_cache = os.path.join(tempfile.gettempdir(), "zarr-source-cache")
-        cache_target = os.environ.get("ZARR_SOURCE_CACHE_DIR", default_cache)
+        cache_dir = os.environ.get("ZARR_SOURCE_CACHE_DIR", default_cache)
         max_conn = int(
             os.environ.get(
                 "ZARR_SOURCE_HTTP_MAX_CONNECTIONS",
@@ -148,20 +154,11 @@ def run_conversion(
             return aiohttp.ClientSession(connector=connector, **{**_extra_client_kwargs, **kwargs})
 
         merged_target["get_client"] = _get_client
-
-        storage_options = {
-            "protocol": "simplecache",
-            "target_protocol": "https",
-            "cache_storage": cache_target,
-            "expiry_time": 3600,
-            "asynchronous": True,
-            "target_options": merged_target,
-        }
-    dt_input = xr.open_datatree(
+        storage_options = merged_target
+    dt_input = open_source_datatree(
         str(zarr_url),
-        engine="zarr",
-        chunks="auto",
         storage_options=storage_options,
+        cache_dir=cache_dir,
     )
 
     try:
@@ -247,7 +244,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     # s3:// is the pre-staged path (prestage_source.py): it resolves through
-    # get_storage_options()'s s3fs branch, with no simplecache — see #339.
+    # get_storage_options()'s s3fs branch and skips the HTTPS cache_dir branch
+    # above, so there is no local cache entry for concurrent readers to race
+    # on — the other half of the #339 fix.
     if urlparse(args.source_url).scheme not in {"https", "s3"}:
         logger.error("Error: --source-url must be an HTTPS or S3 URL, got: %r", args.source_url)
         return 1
