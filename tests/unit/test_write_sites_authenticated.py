@@ -131,6 +131,21 @@ def test_manage_item_session_unauthenticated_without_env():
     assert _auth_header_on_write(mgr.session) is None
 
 
+def test_cleanup_expired_items_session_authenticated(oidc_env, token_response):
+    import cleanup_expired_items
+
+    session = cleanup_expired_items._session("https://api.test/stac")
+    with patch("stac_auth.httpx.post", return_value=token_response()):
+        assert _auth_header_on_write(session) == "Bearer test-token"
+
+
+def test_cleanup_expired_items_session_unauthenticated_without_env():
+    import cleanup_expired_items
+
+    session = cleanup_expired_items._session("https://api.test/stac")
+    assert _auth_header_on_write(session) is None
+
+
 # --- Delegation: pystac write sites open via the helper ----------------------
 
 
