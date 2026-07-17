@@ -61,29 +61,28 @@ def rewrite_asset_hrefs(item: Item, old_base: str, new_base: str, s3_endpoint: s
 
 def upsert_item(client: Client, collection_id: str, item: Item) -> None:
     """Register or update STAC item using pystac-client session."""
-    # Check if exists
+    # Check if exists — get_item returns None if not found, does not raise
     try:
-        client.get_collection(collection_id).get_item(item.id)
-        exists = True
+        exists = client.get_collection(collection_id).get_item(item.id) is not None
     except Exception:
         exists = False
 
     # Use client's base URL directly (includes /stac if present)
     base_url = str(client.self_href).rstrip("/")
     if exists:
-        # DELETE then POST (pgstac doesn't support PUT for items)
-        delete_url = f"{base_url}/collections/{collection_id}/items/{item.id}"
-        client._stac_io.session.delete(delete_url, timeout=30)
-        logger.info(f"Deleted existing {item.id}")
-
-    # POST new/updated item
-    create_url = f"{base_url}/collections/{collection_id}/items"
-    resp = client._stac_io.session.post(
-        create_url,
-        json=item.to_dict(),
-        headers={"Content-Type": "application/json"},
-        timeout=30,
-    )
+        resp = client._stac_io.session.put(
+            f"{base_url}/collections/{collection_id}/items/{item.id}",
+            json=item.to_dict(),
+            headers={"Content-Type": "application/json"},
+            timeout=30,
+        )
+    else:
+        resp = client._stac_io.session.post(
+            f"{base_url}/collections/{collection_id}/items",
+            json=item.to_dict(),
+            headers={"Content-Type": "application/json"},
+            timeout=30,
+        )
     resp.raise_for_status()
     logger.info(f"✅ Registered {item.id} (HTTP {resp.status_code})")
 

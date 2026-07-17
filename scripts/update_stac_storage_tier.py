@@ -391,25 +391,28 @@ def update_stac_item(
             raise RuntimeError("pystac-client session not initialized")
         stac_session = client._stac_io.session
 
-        # DELETE then POST (pgstac doesn't support PUT for items)
-        delete_url = f"{base_url}/collections/{collection_id}/items/{item_id}"
+        # Check if exists — get_item returns None if not found, does not raise
         try:
-            delete_resp = stac_session.delete(delete_url, timeout=30)
-            delete_resp.raise_for_status()
-            logger.debug(f"  Deleted existing {item_id}")
-        except Exception as e:
-            logger.warning(f"  Failed to delete existing item (may not exist): {e}")
-            # Continue with POST anyway - might be first-time creation
+            exists = client.get_collection(collection_id).get_item(item_id) is not None
+        except Exception:
+            exists = False
 
-        create_url = f"{base_url}/collections/{collection_id}/items"
-        post_resp = stac_session.post(
-            create_url,
-            json=item.to_dict(),
-            headers={"Content-Type": "application/json"},
-            timeout=30,
-        )
-        post_resp.raise_for_status()
-        logger.info(f"  ✅ Updated {item_id} (HTTP {post_resp.status_code})")
+        if exists:
+            resp = stac_session.put(
+                f"{base_url}/collections/{collection_id}/items/{item_id}",
+                json=item.to_dict(),
+                headers={"Content-Type": "application/json"},
+                timeout=30,
+            )
+        else:
+            resp = stac_session.post(
+                f"{base_url}/collections/{collection_id}/items",
+                json=item.to_dict(),
+                headers={"Content-Type": "application/json"},
+                timeout=30,
+            )
+        resp.raise_for_status()
+        logger.info(f"  ✅ Updated {item_id} (HTTP {resp.status_code})")
     else:
         logger.info("  No changes needed")
 
