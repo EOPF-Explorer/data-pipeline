@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.13.1 (2026-07-17)
+
+## What's Changed
+* S1 GRD RTC — Phases 5 + 6 (local prototype → productionization) by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/186
+* fix(cleanup): authenticate STAC DELETE in cleanup_expired_items by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/359
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.13.0...v1.13.1
+
 ## 1.13.0 (2026-07-17)
 
 ## What's Changed
