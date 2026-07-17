@@ -165,15 +165,13 @@ class TestManageCollectionsReplaceItemHelper:
 class TestCollectionSyncStorageTiersLoop:
     """The per-item write loop had no unit coverage before #352."""
 
-    TIERS_UPDATED = (1, 1, 1, 0, 0, 0)
-
     def _run_sync(self, item_dicts: list[dict], put_side_effect):
         manager = manage_collections_module.STACCollectionManager(API_URL)
         with (
             patch.object(manager, "get_collection_items", return_value=item_dicts),
             patch(
                 "update_stac_storage_tier.update_item_storage_tiers",
-                return_value=self.TIERS_UPDATED,
+                return_value=TIERS_UPDATED,
             ),
             patch("requests.Session.put", side_effect=put_side_effect) as mock_put,
             patch("requests.Session.delete") as mock_delete,
@@ -209,6 +207,36 @@ class TestCollectionSyncStorageTiersLoop:
         assert stats["items_failed"] == 1
         assert stats["items_updated"] == 1
         assert mock_put.call_count == 2  # loop continues past the failure
+
+    def test_failed_write_is_not_reported_as_correction(self):
+        """An item whose PUT failed must not appear in the corrections summary."""
+        items = [self._item_dict("item-000"), self._item_dict("item-001")]
+
+        def _put(url, *args, **kwargs):
+            return _make_response(500 if "item-000" in url else 200)
+
+        stats, _, _, _ = self._run_sync(items, _put)
+
+        corrected_ids = [c["item_id"] for c in stats["corrections"]]
+        assert corrected_ids == ["item-001"]
+
+    def test_dry_run_still_reports_would_be_corrections(self):
+        """Dry-run performs no writes but must still list the would-be corrections."""
+        manager = manage_collections_module.STACCollectionManager(API_URL)
+        items = [self._item_dict("item-000")]
+        with (
+            patch.object(manager, "get_collection_items", return_value=items),
+            patch(
+                "update_stac_storage_tier.update_item_storage_tiers",
+                return_value=TIERS_UPDATED,
+            ),
+            patch("requests.Session.put") as mock_put,
+        ):
+            stats = manager.sync_storage_tiers(COLLECTION_ID, S3_ENDPOINT, dry_run=True)
+
+        mock_put.assert_not_called()
+        assert stats["items_updated"] == 1
+        assert [c["item_id"] for c in stats["corrections"]] == ["item-000"]
 
 
 # ---------------------------------------------------------------------------

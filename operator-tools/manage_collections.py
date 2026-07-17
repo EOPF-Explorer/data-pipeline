@@ -391,15 +391,13 @@ class STACCollectionManager:
                             }
                         )
 
-                    # Track corrections (items that were updated)
-                    if assets_updated > 0:
-                        corrections.append(
-                            {
-                                "item_id": item_id,
-                                "assets_updated": assets_updated,
-                                "assets_added": assets_added,
-                            }
-                        )
+                    # Track corrections (items that were updated); reported only if
+                    # the write-back succeeds (or would-be updated in dry-run)
+                    correction = {
+                        "item_id": item_id,
+                        "assets_updated": assets_updated,
+                        "assets_added": assets_added,
+                    }
 
                     total_assets_updated += assets_updated
                     total_assets_added += assets_added
@@ -410,12 +408,14 @@ class STACCollectionManager:
                         try:
                             _replace_item(self.session, self.api_url, collection_id, item)
                             items_updated += 1
+                            corrections.append(correction)
                         except Exception as e:
                             click.echo(f"\n  ⚠️  Failed to update item {item_id}: {e}", err=True)
                             items_failed += 1
                     elif assets_updated > 0:
                         # Dry run - just count as would-be updated
                         items_updated += 1
+                        corrections.append(correction)
                     else:
                         items_no_changes += 1
 
