@@ -113,10 +113,13 @@ def _post_item(
     )
 
 
-def _get_item_features(session: requests.Session, api_url: str, collection_id: str) -> list[dict]:
+def _features_with_id(
+    session: requests.Session, api_url: str, collection_id: str, item_id: str
+) -> list[dict]:
+    """Stored features matching item_id — len must be 1 after any write (no duplicates)."""
     resp = session.get(f"{api_url}/collections/{collection_id}/items", timeout=30)
     resp.raise_for_status()
-    return resp.json()["features"]
+    return [f for f in resp.json()["features"] if f["id"] == item_id]
 
 
 def _delete_collection(
@@ -198,11 +201,7 @@ class TestPatternRReplace:
         item.properties["constellation"] = "probe-mutated"
         helper_module._replace_item(session, api_url, scratch_collection, item)
 
-        matching = [
-            f
-            for f in _get_item_features(session, api_url, scratch_collection)
-            if f["id"] == item_id
-        ]
+        matching = _features_with_id(session, api_url, scratch_collection, item_id)
         assert len(matching) == 1, "PUT must replace, never duplicate"
         stored = matching[0]
         assert stored["properties"]["constellation"] == "probe-mutated"
@@ -222,21 +221,13 @@ class TestPatternUUpsert:
 
         # Create path: item absent → upsert must POST (a PUT here would 404).
         register_v1.upsert_item(client, scratch_collection, item)
-        matching = [
-            f
-            for f in _get_item_features(session, api_url, scratch_collection)
-            if f["id"] == "probe-item-u1"
-        ]
+        matching = _features_with_id(session, api_url, scratch_collection, "probe-item-u1")
         assert len(matching) == 1, "create path must register the item exactly once"
 
         # Replace path: item present → upsert must PUT the mutation in place.
         item.properties["constellation"] = "probe-mutated"
         register_v1.upsert_item(client, scratch_collection, item)
-        matching = [
-            f
-            for f in _get_item_features(session, api_url, scratch_collection)
-            if f["id"] == "probe-item-u1"
-        ]
+        matching = _features_with_id(session, api_url, scratch_collection, "probe-item-u1")
         assert len(matching) == 1, "replace must never duplicate"
         assert matching[0]["properties"]["constellation"] == "probe-mutated"
         assert matching[0]["geometry"] == {"type": "Point", "coordinates": [0.0, 0.0]}

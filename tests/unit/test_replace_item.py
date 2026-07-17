@@ -165,7 +165,7 @@ class TestManageCollectionsReplaceItemHelper:
 class TestCollectionSyncStorageTiersLoop:
     """The per-item write loop had no unit coverage before #352."""
 
-    def _run_sync(self, item_dicts: list[dict], put_side_effect):
+    def _run_sync(self, item_dicts: list[dict], put_side_effect, dry_run: bool = False):
         manager = manage_collections_module.STACCollectionManager(API_URL)
         with (
             patch.object(manager, "get_collection_items", return_value=item_dicts),
@@ -177,7 +177,7 @@ class TestCollectionSyncStorageTiersLoop:
             patch("requests.Session.delete") as mock_delete,
             patch("requests.Session.post") as mock_post,
         ):
-            stats = manager.sync_storage_tiers(COLLECTION_ID, S3_ENDPOINT)
+            stats = manager.sync_storage_tiers(COLLECTION_ID, S3_ENDPOINT, dry_run=dry_run)
         return stats, mock_put, mock_delete, mock_post
 
     @staticmethod
@@ -222,17 +222,9 @@ class TestCollectionSyncStorageTiersLoop:
 
     def test_dry_run_still_reports_would_be_corrections(self):
         """Dry-run performs no writes but must still list the would-be corrections."""
-        manager = manage_collections_module.STACCollectionManager(API_URL)
         items = [self._item_dict("item-000")]
-        with (
-            patch.object(manager, "get_collection_items", return_value=items),
-            patch(
-                "update_stac_storage_tier.update_item_storage_tiers",
-                return_value=TIERS_UPDATED,
-            ),
-            patch("requests.Session.put") as mock_put,
-        ):
-            stats = manager.sync_storage_tiers(COLLECTION_ID, S3_ENDPOINT, dry_run=True)
+
+        stats, mock_put, _, _ = self._run_sync(items, None, dry_run=True)
 
         mock_put.assert_not_called()
         assert stats["items_updated"] == 1
