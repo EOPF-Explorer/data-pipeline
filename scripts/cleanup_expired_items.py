@@ -32,6 +32,7 @@ from urllib.parse import urlparse
 
 import boto3
 import requests
+import stac_auth
 from botocore.exceptions import ClientError
 from pystac_client import Client
 from s3_item_cleanup import (
@@ -228,14 +229,15 @@ def process_item(
 
 
 def _session(stac_api_url: str) -> requests.Session:
-    """Build the STAC HTTP session.
+    """Build the STAC HTTP session with a fresh Bearer per request.
 
-    Auth seam: when the stac-auth-proxy branch lands, wire the bearer token
-    here (2-line change) — e.g. ``import stac_auth; stac_auth.apply(session)``.
-    Today it is an unauthenticated session, matching main.
+    ``bearer_auth`` re-reads the cached token on every request (refreshed near
+    expiry), so a long cleanup batch can't send a stale one. A no-op when the
+    OIDC env is unset — pre-enforcement runs are unchanged.
     """
     session = requests.Session()
     session.headers.update({"Content-Type": "application/json"})
+    session.auth = stac_auth.bearer_auth
     return session
 
 
