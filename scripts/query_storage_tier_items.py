@@ -5,6 +5,11 @@ Searches for items in a 36h time window around age_days, filters out items
 already at the target storage tier (via storage:refs metadata), and caps
 output at max_batch_size. Outputs JSON array of item IDs to stdout for
 Argo withParam.
+
+Demo scenes are never selected: the same denylist that protects them from
+expiry cleanup (``--exclude-file`` → ``$EXPIRES_EXCLUDE_FILE`` → the baked
+``demo_exclude_ids.txt``) is applied here so the tier-down cron cannot move
+a demo scene off the performance tier when it crosses the age threshold.
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ from datetime import UTC, datetime, timedelta
 
 from pystac import Item
 from pystac_client import Client
+from s3_item_cleanup import resolve_exclude_ids
 from update_stac_storage_tier import TIER_TO_SCHEME
 
 # Configure logging
@@ -87,11 +93,13 @@ def query_items(
     age_days: int,
     target_storage_ref: str,
     max_batch_size: int,
+    exclude_ids: set[str] | frozenset[str] = frozenset(),
 ) -> list[str]:
     """Query STAC and return item IDs needing storage tier change.
 
     Queries a 36h time window (age_days-0.5 to age_days+1 days old),
-    filters out already-migrated items, and caps at max_batch_size.
+    filters out already-migrated and excluded items, and caps at
+    max_batch_size.
 
     Args:
         stac_api_url: STAC API base URL.
@@ -99,6 +107,7 @@ def query_items(
         age_days: Target age in days for storage tier transition.
         target_storage_ref: The storage:refs value indicating target tier.
         max_batch_size: Maximum number of items to return.
+        exclude_ids: Item IDs that must never be selected (demo denylist).
 
     Returns:
         List of item IDs needing storage tier change.
@@ -120,12 +129,15 @@ def query_items(
 
     total_found = 0
     already_migrated = 0
+    excluded = 0
     need_work: list[str] = []
 
     for page in search.pages():
         for item in page.items:
             total_found += 1
-            if is_already_migrated(item, target_storage_ref):
+            if item.id in exclude_ids:
+                excluded += 1
+            elif is_already_migrated(item, target_storage_ref):
                 already_migrated += 1
             else:
                 need_work.append(item.id)
@@ -133,6 +145,7 @@ def query_items(
     capped = need_work[:max_batch_size]
     logger.info(f"Total found: {total_found}")
     logger.info(f"Already migrated: {already_migrated}")
+    logger.info(f"Excluded (demo denylist): {excluded}")
     logger.info(f"Need work: {len(need_work)}")
     logger.info(f"Processing (capped at {max_batch_size}): {len(capped)}")
 
@@ -159,6 +172,14 @@ def main(argv: list[str] | None = None) -> int:
         default=100,
         help="Maximum number of items to return (default: 100)",
     )
+    parser.add_argument(
+        "--exclude-file",
+        default=None,
+        help=(
+            "Path to a denylist of item IDs that must never be selected. "
+            "Falls back to $EXPIRES_EXCLUDE_FILE, then the baked demo_exclude_ids.txt."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -170,6 +191,7 @@ def main(argv: list[str] | None = None) -> int:
             age_days=args.age_days,
             target_storage_ref=target_storage_ref,
             max_batch_size=args.max_batch_size,
+            exclude_ids=resolve_exclude_ids(args.exclude_file),
         )
         sys.stdout.write(json.dumps(items))
         sys.stdout.flush()
