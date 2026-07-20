@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.13.2 (2026-07-20)
+
+## What's Changed
+* fix(aggregate): stream item pages as dicts to keep memory flat by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/362
+* fix(storage-tier): never select demo scenes for tier migration by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/361
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.13.1...v1.13.2
+
 ## 1.13.1 (2026-07-17)
 
 ## What's Changed
