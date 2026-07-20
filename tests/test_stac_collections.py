@@ -17,6 +17,10 @@ from pystac import Collection
 STAC_DIR = Path(__file__).parent.parent / "stac"
 
 
+def _load(filename: str) -> dict[str, Any]:
+    return cast("dict[str, Any]", json.loads((STAC_DIR / filename).read_text()))
+
+
 # --- Sentinel-1 GRD RTC collection asset model (PR #279) ---------------------
 
 
@@ -49,6 +53,95 @@ def test_s1_rtc_collection_valid(collection_id: str, required_data_assets: set[s
     assert sar_ext in col.stac_extensions
 
 
+# --- S1 RTC template/live link reconciliation (issue #348) -------------------
+
+# `manage_collections.py create --update` PUTs the template wholesale, so a link that
+# exists only on the live collection is destroyed on the next apply. These templates
+# drifted exactly that way (the cube carried only `license`; the acquisitions template
+# carried nothing at all) while live had EGM2008 + the cross-links. Pin the rel multiset
+# so a regeneration or a hand edit cannot silently re-arm that.
+S1_TEMPLATE_RELS = {
+    "sentinel-1-grd-rtc-staging.json": ["license", "related", "related"] + ["xyz"] * 4,
+    # The acquisitions collection additionally ships its own pre-aggregation links, so a
+    # template apply cannot wipe what aggregate_items wrote (issue #348). They must stay LAST:
+    # aggregate_items strips-then-appends, and any other position makes the two writers
+    # permanently reorder each other. Pinned by
+    # test_aggregate_items.py::TestTemplateSurvivesAggregation.
+    "sentinel-1-grd-rtc-acquisitions-staging.json": ["derived_from", "license", "related"]
+    + ["xyz"] * 4
+    + ["pre-aggregation"] * 2,
+}
+
+
+@pytest.mark.parametrize(("filename", "expected_rels"), sorted(S1_TEMPLATE_RELS.items()))
+def test_s1_templates_carry_live_links(filename: str, expected_rels: list[str]) -> None:
+    """The template must be a superset of the live collection's non-API links."""
+    rels = sorted(link["rel"] for link in _load(filename)["links"])
+    assert rels == sorted(expected_rels)
+
+
+def test_s1_templates_carry_no_api_managed_links() -> None:
+    """Navigation/queryables links are owned by the API — a template must not carry them."""
+    api_rels = {"self", "root", "parent", "child", "items", "data"}
+    for filename in S1_TEMPLATE_RELS:
+        for link in _load(filename)["links"]:
+            rel = link["rel"]
+            assert rel not in api_rels, f"{filename} carries API-managed rel={rel}"
+            assert "queryables" not in rel, f"{filename} carries API-managed rel={rel}"
+
+
+# --- eodash baseLayers (issues #270 / #348) ----------------------------------
+
+# The basemap set eodash offers in its layer switcher. The same four links are
+# duplicated across every eodash collection's JSON: a shared source constant would
+# only be reachable from build_s1_rtc_collections.py, leaving S2 (hand-written static
+# JSON no generator touches) on a second mechanism — and drift between two mechanisms
+# is invisible. So the contract is pinned once here instead, and the data is repeated.
+# Attribution strings are issue #270's, verbatim; issue #348 restates them identically
+# for the S1 collections, so the two families cannot drift.
+EXPECTED_BASELAYERS = [
+    ("OSM", "image/jpeg", ["baselayer", "invisible"]),
+    ("terrain-light", "image/jpeg", ["baselayer", "visible"]),
+    ("overlay_bright", "image/png", ["overlay", "visible"]),
+    ("cloudless-2024", "image/jpeg", ["baselayer", "invisible"]),
+]
+
+BASELAYER_COLLECTIONS = [
+    "sentinel-1-grd-rtc-staging.json",
+    "sentinel-1-grd-rtc-acquisitions-staging.json",
+    "sentinel-2-l2a.json",
+    "sentinel-2-l2a-staging.json",
+]
+
+
+def _xyz_links(filename: str) -> list[dict[str, Any]]:
+    return [link for link in _load(filename)["links"] if link.get("rel") == "xyz"]
+
+
+@pytest.mark.parametrize("filename", BASELAYER_COLLECTIONS)
+def test_baselayers_present_in_order(filename: str) -> None:
+    """Every eodash collection offers the same four basemaps, in the same order."""
+    actual = [(lk.get("id"), lk.get("type"), lk.get("roles")) for lk in _xyz_links(filename)]
+    assert actual == EXPECTED_BASELAYERS
+
+
+@pytest.mark.parametrize("filename", BASELAYER_COLLECTIONS)
+def test_exactly_one_visible_baselayer(filename: str) -> None:
+    """eodash shows one basemap at a time; `overlay` is a different class and is exempt."""
+    visible = [
+        lk for lk in _xyz_links(filename) if {"baselayer", "visible"} <= set(lk.get("roles", []))
+    ]
+    assert len(visible) == 1, f"{filename}: expected exactly one visible baselayer"
+
+
+@pytest.mark.parametrize("filename", BASELAYER_COLLECTIONS)
+def test_attribution_present_and_nonempty(filename: str) -> None:
+    """The EOx/s2maps tiles must be attributed wherever they are shown (#270 / #348)."""
+    for link in _xyz_links(filename):
+        attribution = link.get("attribution", "")
+        assert attribution.strip(), f"{filename}: {link.get('id')} lacks attribution"
+
+
 # --- Sentinel-2 L2A eodash collection metadata (issue #206) ------------------
 
 # Collections that must carry the eodash GeoZarr layer metadata.
@@ -58,10 +151,6 @@ STYLE_HREF = (
     "https://raw.githubusercontent.com/EOPF-Explorer/eodash-assets/"
     "refs/heads/main/styles/geozarr.json"
 )
-
-
-def _load(filename: str) -> dict[str, Any]:
-    return cast("dict[str, Any]", json.loads((STAC_DIR / filename).read_text()))
 
 
 @pytest.mark.parametrize("filename", EODASH_COLLECTIONS)
@@ -107,47 +196,19 @@ def test_no_leak_into_other_collections() -> None:
         ], f"unexpected style link in {path.name}"
 
 
-# --- baselayer attribution (issue #270) --------------------------------------
+# --- pre-aggregation links (issues #270 / #348) -------------------------------
 
-# The basemaps eodash offers in its layer switcher, and the attribution each must carry.
-# Attribution strings are issue #270's, verbatim; the same values are used for the S1
-# collections (issue #348 restates them identically), so the two families cannot drift.
-EXPECTED_BASELAYERS = [
-    ("OSM", "image/jpeg", ["baselayer", "invisible"]),
-    ("terrain-light", "image/jpeg", ["baselayer", "visible"]),
-    ("overlay_bright", "image/png", ["overlay", "visible"]),
-    ("cloudless-2024", "image/jpeg", ["baselayer", "invisible"]),
+# Collections whose templates carry pre-aggregation links. The S1 cube collection is
+# deliberately absent: its items are datacubes with no `datetime`, so it is never
+# aggregated and has no links to protect.
+AGGREGATED_COLLECTIONS = [
+    "sentinel-2-l2a.json",
+    "sentinel-2-l2a-staging.json",
+    "sentinel-1-grd-rtc-acquisitions-staging.json",
 ]
 
 
-def _xyz_links(filename: str) -> list[dict[str, Any]]:
-    return [link for link in _load(filename)["links"] if link.get("rel") == "xyz"]
-
-
-@pytest.mark.parametrize("filename", EODASH_COLLECTIONS)
-def test_baselayers_present_in_order(filename: str) -> None:
-    actual = [(lk.get("id"), lk.get("type"), lk.get("roles")) for lk in _xyz_links(filename)]
-    assert actual == EXPECTED_BASELAYERS
-
-
-@pytest.mark.parametrize("filename", EODASH_COLLECTIONS)
-def test_every_baselayer_has_attribution(filename: str) -> None:
-    """The EOx/s2maps tiles must be attributed wherever they are shown (issue #270)."""
-    for link in _xyz_links(filename):
-        attribution = link.get("attribution", "")
-        assert attribution.strip(), f"{filename}: {link.get('id')} lacks attribution"
-
-
-@pytest.mark.parametrize("filename", EODASH_COLLECTIONS)
-def test_exactly_one_visible_baselayer(filename: str) -> None:
-    """eodash shows one basemap at a time; `overlay` is a different class and is exempt."""
-    visible = [
-        lk for lk in _xyz_links(filename) if {"baselayer", "visible"} <= set(lk.get("roles", []))
-    ]
-    assert len(visible) == 1, f"{filename}: expected exactly one visible baselayer"
-
-
-@pytest.mark.parametrize("filename", EODASH_COLLECTIONS)
+@pytest.mark.parametrize("filename", AGGREGATED_COLLECTIONS)
 def test_pre_aggregation_links_are_last(filename: str) -> None:
     """The templates carry the pre-aggregation links so a `create --update` cannot wipe them.
 
