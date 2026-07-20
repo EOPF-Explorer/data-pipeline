@@ -5,7 +5,6 @@ import json
 from datetime import datetime
 from io import StringIO
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -20,16 +19,14 @@ from scripts.aggregate_items import (
 )
 
 
-def _make_item(item_id: str, dt: datetime | None = None, dt_str: str | None = None) -> Item:
+def _make_item(item_id: str, dt: datetime | None = None) -> Item:
     """Create a minimal STAC item with a datetime.
 
     When *dt* is None, pystac requires start/end_datetime — we supply dummy
-    values so the Item can be constructed for testing fallback paths.
+    values so the Item can be constructed for testing the skip path.
     """
     props: dict = {}
     extra_kwargs: dict = {}
-    if dt_str:
-        props["datetime"] = dt_str
     if dt is None:
         # pystac enforces: if datetime is None, start/end must be provided
         extra_kwargs["start_datetime"] = datetime(2000, 1, 1)
@@ -46,25 +43,38 @@ def _make_item(item_id: str, dt: datetime | None = None, dt_str: str | None = No
 
 
 class FakeItemSearch:
-    """Simulates STAC search results for aggregation tests."""
+    """Simulates STAC search results for aggregation tests.
 
-    def __init__(self, items: list[Item]):
+    Deliberately exposes ONLY ``pages_as_dicts()`` — counting must stream raw
+    feature dicts. Materializing pystac Items via ``pages()`` roots every item
+    in the Client's ResolvedObjectCache, which OOM-killed the nightly S2 run
+    (memory grows with collection size).
+    """
+
+    def __init__(self, items: list[Item], page_size: int | None = None):
         self._items = items
+        self._page_size = page_size or max(len(items), 1)
 
-    def pages(self):
-        return [SimpleNamespace(items=self._items)]
+    def pages_as_dicts(self):
+        for start in range(0, len(self._items), self._page_size):
+            page = self._items[start : start + self._page_size]
+            yield {
+                "type": "FeatureCollection",
+                "features": [i.to_dict() if isinstance(i, Item) else i for i in page],
+            }
 
 
 class FakeStacClient:
     """Simulates a pystac_client.Client."""
 
-    def __init__(self, items: list[Item]):
+    def __init__(self, items: list[Item], page_size: int | None = None):
         self._items = items
+        self._page_size = page_size
         self.search_calls: list[dict] = []
 
     def search(self, **kwargs):
         self.search_calls.append(kwargs)
-        return FakeItemSearch(self._items)
+        return FakeItemSearch(self._items, page_size=self._page_size)
 
 
 # --- Pure function tests (no mocking) ---
@@ -157,11 +167,14 @@ class TestCountItemsByDatetime:
         assert result["2026-01-15"] == 2
         assert result["2026-01-16"] == 1
 
-    def test_falls_back_to_properties_datetime(self):
-        items = [
-            _make_item("a", dt=None, dt_str="2026-02-20T12:00:00Z"),
-        ]
-        client = FakeStacClient(items)
+    def test_counts_datetime_string_from_raw_feature(self):
+        # Raw feature dict as the STAC API returns it — no pystac parsing involved.
+        feature = {
+            "type": "Feature",
+            "id": "a",
+            "properties": {"datetime": "2026-02-20T12:00:00Z"},
+        }
+        client = FakeStacClient([feature])
 
         with patch("scripts.aggregate_items.Client.open", return_value=client):
             result = count_items_by_datetime("https://stac.test", "test-collection")
@@ -200,6 +213,18 @@ class TestCountItemsByDatetime:
             result = count_items_by_datetime("https://stac.test", "empty")
 
         assert len(result) == 0
+
+    def test_counts_across_multiple_pages(self):
+        items = [_make_item(f"item-{i}", dt=datetime(2026, 1, 1 + i % 3, 12, 0)) for i in range(10)]
+        client = FakeStacClient(items, page_size=3)
+
+        with patch("scripts.aggregate_items.Client.open", return_value=client):
+            result = count_items_by_datetime("https://stac.test", "paged")
+
+        assert sum(result.values()) == 10
+        assert result["2026-01-01"] == 4
+        assert result["2026-01-02"] == 3
+        assert result["2026-01-03"] == 3
 
 
 # --- Collection link tests ---
