@@ -33,7 +33,7 @@ from urllib.parse import urlparse
 import boto3
 import requests
 import stac_auth
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 from pystac_client import Client
 from s3_item_cleanup import (
     count_s3_objects_for_item,
@@ -141,11 +141,15 @@ def _delete_stac_item(
     the caller's S3 objects are already gone, so the item is briefly orphaned
     until a later run re-processes it (that run finds 0 objects remaining and
     completes the delete). Raising here would abort the whole batch instead.
+
+    ``RuntimeError`` is caught alongside the requests errors because the auth
+    hook runs *inside* ``session.delete``: ``stac_auth.get_token`` re-raises a
+    failed token request as ``RuntimeError``, which is not a ``RequestException``.
     """
     url = f"{stac_base_url.rstrip('/')}/collections/{collection}/items/{item_id}"
     try:
         resp = session.delete(url, timeout=30)
-    except requests.RequestException as exc:
+    except (requests.RequestException, RuntimeError) as exc:
         logger.warning("STAC delete failed for %s: %s — retrying on a later run", item_id, exc)
         return False, "stac_delete_failed"
     if resp.status_code in (200, 202, 204, 404):
@@ -214,7 +218,10 @@ def process_item(
             )
 
         remaining = count_s3_objects_for_item(s3_client, s3_urls)
-    except ClientError as exc:
+    # BotoCoreError covers the transport failures ClientError does NOT: a read
+    # timeout or endpoint blip is not a service-returned error, and letting one
+    # escape would abort the batch mid-run with no summary (issue #364).
+    except (ClientError, BotoCoreError) as exc:
         logger.warning("S3 error validating %s: %s — retaining STAC item", item.get("id"), exc)
         return _audit(item, dry_run, "s3_validation_failed")
 
@@ -351,7 +358,8 @@ def _fetch_item(
         if resp.status_code == 404:
             return None, "gone"
         logger.warning("Re-fetch of %s returned HTTP %d", item_id, resp.status_code)
-    except requests.RequestException as exc:
+    # RuntimeError: the auth hook runs inside session.get (see _delete_stac_item).
+    except (requests.RequestException, RuntimeError) as exc:
         logger.warning("Re-fetch failed for %s: %s", item_id, exc)
     return None, "error"
 

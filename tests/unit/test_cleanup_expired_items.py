@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, EndpointConnectionError
 from cleanup_expired_items import (
     build_search_kwargs,
     evaluate_guards,
@@ -382,6 +382,55 @@ def test_execute_reports_stac_delete_failed_on_transport_error(expired_item: dic
 
     assert rec["status"] == "stac_delete_failed"
     assert rec["stac_deleted"] is False
+
+
+def test_execute_reports_stac_delete_failed_on_auth_hook_error(expired_item: dict) -> None:
+    """The Bearer auth hook runs *inside* session.delete, and stac_auth re-raises a
+    failed token request as RuntimeError — not a RequestException. It must not
+    escape and abort the batch."""
+    s3 = MagicMock()
+    s3.get_paginator.return_value = _paginator([["a"], []])
+    s3.delete_objects.return_value = {"Deleted": [{"Key": "a"}], "Errors": []}
+    session = MagicMock()
+    session.delete.side_effect = RuntimeError("OIDC token request failed: ReadTimeout")
+
+    rec = process_item(
+        expired_item,
+        now=NOW,
+        exclude_ids=set(),
+        allowed_bucket=BUCKET,
+        s3_client=s3,
+        session=session,
+        stac_base_url="https://stac.example.com",
+        dry_run=False,
+    )
+
+    assert rec["status"] == "stac_delete_failed"
+    assert rec["stac_deleted"] is False
+
+
+def test_execute_retains_stac_item_on_s3_transport_error(expired_item: dict) -> None:
+    """A botocore transport error is NOT a ClientError (it descends from
+    BotoCoreError). It must be caught too, or an S3 blip aborts the whole run."""
+    s3 = MagicMock()
+    paginator = MagicMock()
+    paginator.paginate.side_effect = EndpointConnectionError(endpoint_url="https://s3.example.com")
+    s3.get_paginator.return_value = paginator
+    session = MagicMock()
+
+    rec = process_item(
+        expired_item,
+        now=NOW,
+        exclude_ids=set(),
+        allowed_bucket=BUCKET,
+        s3_client=s3,
+        session=session,
+        stac_base_url="https://stac.example.com",
+        dry_run=False,
+    )
+
+    session.delete.assert_not_called()  # STAC item retained
+    assert rec["status"] == "s3_validation_failed"
 
 
 def test_execute_treats_404_stac_delete_as_success(expired_item: dict) -> None:

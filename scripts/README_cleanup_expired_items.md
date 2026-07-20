@@ -91,10 +91,14 @@ s3_objects_deleted, s3_objects_failed, s3_remaining, stac_deleted, status
 stac-auth-proxy enforcement lands; wire the bearer in `_session()`),
 `already_gone` (re-fetch got 404 — already deleted, idempotent success),
 `refetch_failed` (re-fetch errored — the item is skipped rather than acted on
-with stale data), `no_expires`, `not_expired`, `excluded`, `wrong_bucket`.
+with stale data), `stac_delete_failed` (the STAC DELETE hit a transport or auth
+error after the S3 objects were removed — the item is briefly orphaned and a
+later run completes the delete), `no_expires`, `not_expired`, `excluded`,
+`wrong_bucket`.
 
 Exit code is `1` if any item ended in `s3_validation_failed`, `auth_required`,
-`refetch_failed`, or a `stac_delete_http_*` status. `already_gone` is a success.
+`refetch_failed`, `stac_delete_failed`, or a `stac_delete_http_*` status.
+`already_gone` is a success.
 
 ## Notes on the discovery query (verified live 2026-07-10)
 
