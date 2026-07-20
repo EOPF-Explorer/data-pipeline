@@ -44,6 +44,11 @@ def count_items_by_datetime(stac_api_url: str, collection_id: str) -> collection
 
     Uses the STAC ``fields`` extension to fetch only ``datetime``, keeping
     payloads minimal for large collections.
+
+    Streams raw feature dicts via ``pages_as_dicts()`` — never materialize
+    pystac Items here: each Item gets rooted in the Client's
+    ResolvedObjectCache, so memory grows with collection size (OOM-killed the
+    nightly sentinel-2-l2a run at 8Gi).
     """
     catalog = Client.open(stac_api_url)
     search = catalog.search(
@@ -55,24 +60,17 @@ def count_items_by_datetime(stac_api_url: str, collection_id: str) -> collection
     counts: collections.Counter[str] = collections.Counter()
     total = 0
 
-    for page in search.pages():
-        page_items = list(page.items)
-        for item in page_items:
-            dt = item.datetime
-            if dt is None:
-                # Fallback: try properties.datetime string
-                dt_str = item.properties.get("datetime")
-                if dt_str:
-                    day = dt_str[:10]  # YYYY-MM-DD
-                    counts[day] += 1
-                    total += 1
-                    continue
-                logger.warning(f"Skipping item {item.id}: no datetime")
+    for page in search.pages_as_dicts():
+        features = page.get("features", [])
+        for feature in features:
+            dt_str = (feature.get("properties") or {}).get("datetime")
+            if not dt_str:
+                logger.warning(f"Skipping item {feature.get('id')}: no datetime")
                 continue
-            counts[dt.strftime("%Y-%m-%d")] += 1
+            counts[dt_str[:10]] += 1  # YYYY-MM-DD
             total += 1
 
-        if total > 0 and total % 1000 < len(page_items):
+        if total > 0 and total % 1000 < len(features):
             logger.info(f"Processed {total} items so far...")
 
     logger.info(f"Total items counted: {total}")
