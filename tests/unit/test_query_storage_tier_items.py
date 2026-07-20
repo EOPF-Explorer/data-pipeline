@@ -301,7 +301,9 @@ class TestMain:
     def test_baked_demo_denylist_applied_by_default(self, monkeypatch):
         """Without --exclude-file or env var, the baked demo list still protects."""
         monkeypatch.delenv("EXPIRES_EXCLUDE_FILE", raising=False)
-        demo_id = "S2C_MSIL2A_20250512T100611_N0511_R022_T32TQR_20250512T173114"
+        from scripts.s3_item_cleanup import BAKED_EXCLUDE_FILE, load_exclude_ids
+
+        demo_id = sorted(load_exclude_ids(str(BAKED_EXCLUDE_FILE)))[0]
         items = [
             create_stac_item(demo_id, storage_refs=["performance"]),  # baked demo id
             create_stac_item("item-2", storage_refs=["performance"]),

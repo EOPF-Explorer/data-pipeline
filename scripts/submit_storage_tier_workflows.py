@@ -24,6 +24,7 @@ from pystac_client import Client
 # The tier-aware selection reuses the proven client-side predicate and tier map
 # from the same scripts/ package (both are on the path in-image and under pytest).
 from query_storage_tier_items import is_already_migrated
+from s3_item_cleanup import resolve_exclude_ids
 from update_stac_storage_tier import TIER_TO_SCHEME
 
 logging.basicConfig(
@@ -139,6 +140,7 @@ def query_stac_items(
     window_end: str,
     date_field: str = "datetime",
     target_storage_ref: str | None = None,
+    exclude_ids: set[str] | frozenset[str] = frozenset(),
 ) -> list[str]:
     """Query STAC for items whose ``date_field`` falls in the window. Returns item IDs.
 
@@ -155,6 +157,10 @@ def query_stac_items(
     target tier, using the same asset-level ``storage:refs`` check as the optimizer
     (``is_already_migrated``). This keeps a recurring run cheap and makes a re-run a
     zero-item no-op. When ``None`` no tier filter is applied.
+
+    ``exclude_ids`` are never selected regardless of window or tier — the demo
+    denylist, so the recurring tier-down cannot move a protected scene off the
+    performance tier (a reconversion re-arms the ``created`` age band 90 days out).
     """
     catalog = Client.open(stac_api_url)
     if window_start is None:
@@ -181,11 +187,18 @@ def query_stac_items(
             filter_lang="cql2-json",
             limit=100,
         )
-    if target_storage_ref is not None:
-        return [
-            item.id for item in search.items() if not is_already_migrated(item, target_storage_ref)
-        ]
-    return [item.id for item in search.items()]
+    selected: list[str] = []
+    excluded = 0
+    for item in search.items():
+        if item.id in exclude_ids:
+            excluded += 1
+            continue
+        if target_storage_ref is not None and is_already_migrated(item, target_storage_ref):
+            continue
+        selected.append(item.id)
+    if excluded:
+        logger.info(f"  Excluded {excluded} denylisted item(s) (demo protection)")
+    return selected
 
 
 def submit_batch(webhook_url: str, payload: dict[str, object], dry_run: bool) -> bool:
@@ -269,8 +282,18 @@ def main() -> None:
     parser.add_argument(
         "--delay", type=float, default=1.0, help="Delay between window submissions in seconds"
     )
+    parser.add_argument(
+        "--exclude-file",
+        default=None,
+        help=(
+            "Path to a denylist of item IDs that must never be selected. "
+            "Falls back to $EXPIRES_EXCLUDE_FILE, then the baked demo_exclude_ids.txt."
+        ),
+    )
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+
+    exclude_ids = resolve_exclude_ids(args.exclude_file)
 
     try:
         start_date, end_date = resolve_window_bounds(
@@ -325,6 +348,7 @@ def main() -> None:
             window_end,
             date_field,
             target_storage_ref,
+            exclude_ids=exclude_ids,
         )
         if not item_ids:
             logger.info("  Found 0 items — skipping")
