@@ -342,6 +342,51 @@ class TestQueryStacItemsTierFilter:
 
         assert result == []
 
+    def test_excluded_ids_never_selected(self) -> None:
+        """Denylisted items are dropped even when they need the tier move."""
+        demo = _FakeItem("demo-scene", "performance")
+        regular = _FakeItem("regular-scene", "performance")
+        mock_search = MagicMock()
+        mock_search.items.return_value = [demo, regular]
+        mock_catalog = MagicMock()
+        mock_catalog.search.return_value = mock_search
+
+        with patch("submit_storage_tier_workflows.Client") as mock_client:
+            mock_client.open.return_value = mock_catalog
+            result = query_stac_items(
+                "https://stac.example.com",
+                "sentinel-2",
+                "2026-01-01T00:00:00Z",
+                "2026-04-14T00:00:00Z",
+                date_field="created",
+                target_storage_ref="standard",
+                exclude_ids={"demo-scene"},
+            )
+
+        assert result == ["regular-scene"]
+
+    def test_excluded_ids_apply_without_tier_filter(self) -> None:
+        """The denylist also applies when the already-at-target filter is disabled."""
+        mock_search = MagicMock()
+        mock_search.items.return_value = [
+            _FakeItem("demo-scene", None),
+            _FakeItem("regular-scene", None),
+        ]
+        mock_catalog = MagicMock()
+        mock_catalog.search.return_value = mock_search
+
+        with patch("submit_storage_tier_workflows.Client") as mock_client:
+            mock_client.open.return_value = mock_catalog
+            result = query_stac_items(
+                "https://stac.example.com",
+                "sentinel-2",
+                "2026-01-01T00:00:00Z",
+                "2026-04-14T00:00:00Z",
+                exclude_ids={"demo-scene"},
+            )
+
+        assert result == ["regular-scene"]
+
     def test_open_lower_bound_uses_less_than_filter(self) -> None:
         """window_start=None issues a single-sided CQL2 '<' filter on the date field."""
         mock_search = MagicMock()
@@ -518,6 +563,7 @@ class TestMainDateFieldForwarding:
             window_end: str,
             date_field: str,
             target_storage_ref: str | None,
+            exclude_ids: set[str] | frozenset[str] = frozenset(),
         ) -> list[str]:
             captured.append(date_field)
             return []
@@ -560,6 +606,7 @@ class TestMainDateFieldForwarding:
             window_end: str,
             date_field: str,
             target_storage_ref: str | None,
+            exclude_ids: set[str] | frozenset[str] = frozenset(),
         ) -> list[str]:
             captured.append(date_field)
             return []
@@ -636,6 +683,7 @@ class TestMainMinAgeMode:
             window_end: str,
             date_field: str,
             target_storage_ref: str | None,
+            exclude_ids: set[str] | frozenset[str] = frozenset(),
         ) -> list[str]:
             captured.append(
                 {
@@ -693,6 +741,7 @@ class TestMainMinAgeMode:
             window_end: str,
             date_field: str,
             target_storage_ref: str | None,
+            exclude_ids: set[str] | frozenset[str] = frozenset(),
         ) -> list[str]:
             captured.append(date_field)
             return []
@@ -777,6 +826,7 @@ class TestMainMinAgeMode:
             window_end: str,
             date_field: str,
             target_storage_ref: str | None,
+            exclude_ids: set[str] | frozenset[str] = frozenset(),
         ) -> list[str]:
             captured.append(
                 {
