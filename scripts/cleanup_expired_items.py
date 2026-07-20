@@ -57,7 +57,9 @@ DEFAULT_MAX_ITEMS = 100
 
 # Per-item statuses that make the run exit non-zero. `already_gone` is NOT here
 # (idempotent success); `stac_delete_http_*` is matched separately by prefix.
-FAILURE_STATUSES = frozenset({"s3_validation_failed", "auth_required", "refetch_failed"})
+FAILURE_STATUSES = frozenset(
+    {"s3_validation_failed", "auth_required", "refetch_failed", "stac_delete_failed"}
+)
 
 
 def _now() -> datetime:
@@ -133,9 +135,19 @@ def _delete_stac_item(
     item_id: str,
 ) -> tuple[bool, str]:
     """DELETE the STAC item. 404 is success (idempotent); 401/403 is a distinct
-    ``auth_required`` signal (expected once stac-auth-proxy enforcement lands)."""
+    ``auth_required`` signal (expected once stac-auth-proxy enforcement lands).
+
+    A transport error is reported as ``stac_delete_failed`` rather than raised:
+    the caller's S3 objects are already gone, so the item is briefly orphaned
+    until a later run re-processes it (that run finds 0 objects remaining and
+    completes the delete). Raising here would abort the whole batch instead.
+    """
     url = f"{stac_base_url.rstrip('/')}/collections/{collection}/items/{item_id}"
-    resp = session.delete(url, timeout=30)
+    try:
+        resp = session.delete(url, timeout=30)
+    except requests.RequestException as exc:
+        logger.warning("STAC delete failed for %s: %s — retrying on a later run", item_id, exc)
+        return False, "stac_delete_failed"
     if resp.status_code in (200, 202, 204, 404):
         return True, "deleted"
     if resp.status_code in (401, 403):
