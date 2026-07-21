@@ -14,7 +14,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
-from botocore.exceptions import ClientError
+import requests
+from botocore.exceptions import ClientError, EndpointConnectionError
 from cleanup_expired_items import (
     build_search_kwargs,
     evaluate_guards,
@@ -358,6 +359,80 @@ def test_execute_reports_auth_required_on_403(expired_item: dict) -> None:
     assert rec["stac_deleted"] is False
 
 
+def test_execute_reports_stac_delete_failed_on_transport_error(expired_item: dict) -> None:
+    """A transient network error on the STAC DELETE must become a per-item status,
+    not an exception: process_item's contract is that expected per-item failures
+    never raise, so the batch continues and the audit log stays complete."""
+    s3 = MagicMock()
+    s3.get_paginator.return_value = _paginator([["a"], []])
+    s3.delete_objects.return_value = {"Deleted": [{"Key": "a"}], "Errors": []}
+    session = MagicMock()
+    session.delete.side_effect = requests.exceptions.ReadTimeout("read timed out")
+
+    rec = process_item(
+        expired_item,
+        now=NOW,
+        exclude_ids=set(),
+        allowed_bucket=BUCKET,
+        s3_client=s3,
+        session=session,
+        stac_base_url="https://stac.example.com",
+        dry_run=False,
+    )
+
+    assert rec["status"] == "stac_delete_failed"
+    assert rec["stac_deleted"] is False
+
+
+def test_execute_reports_stac_delete_failed_on_auth_hook_error(expired_item: dict) -> None:
+    """The Bearer auth hook runs *inside* session.delete, and stac_auth re-raises a
+    failed token request as RuntimeError — not a RequestException. It must not
+    escape and abort the batch."""
+    s3 = MagicMock()
+    s3.get_paginator.return_value = _paginator([["a"], []])
+    s3.delete_objects.return_value = {"Deleted": [{"Key": "a"}], "Errors": []}
+    session = MagicMock()
+    session.delete.side_effect = RuntimeError("OIDC token request failed: ReadTimeout")
+
+    rec = process_item(
+        expired_item,
+        now=NOW,
+        exclude_ids=set(),
+        allowed_bucket=BUCKET,
+        s3_client=s3,
+        session=session,
+        stac_base_url="https://stac.example.com",
+        dry_run=False,
+    )
+
+    assert rec["status"] == "stac_delete_failed"
+    assert rec["stac_deleted"] is False
+
+
+def test_execute_retains_stac_item_on_s3_transport_error(expired_item: dict) -> None:
+    """A botocore transport error is NOT a ClientError (it descends from
+    BotoCoreError). It must be caught too, or an S3 blip aborts the whole run."""
+    s3 = MagicMock()
+    paginator = MagicMock()
+    paginator.paginate.side_effect = EndpointConnectionError(endpoint_url="https://s3.example.com")
+    s3.get_paginator.return_value = paginator
+    session = MagicMock()
+
+    rec = process_item(
+        expired_item,
+        now=NOW,
+        exclude_ids=set(),
+        allowed_bucket=BUCKET,
+        s3_client=s3,
+        session=session,
+        stac_base_url="https://stac.example.com",
+        dry_run=False,
+    )
+
+    session.delete.assert_not_called()  # STAC item retained
+    assert rec["status"] == "s3_validation_failed"
+
+
 def test_execute_treats_404_stac_delete_as_success(expired_item: dict) -> None:
     s3 = MagicMock()
     s3.get_paginator.return_value = _paginator([["a"], []])
@@ -500,6 +575,51 @@ def test_run_cleanup_refetch_error_skips_and_exits_1(expired_item, capsys) -> No
     assert code == 1
     assert records[0]["status"] == "refetch_failed"
     s3.delete_objects.assert_not_called()  # did NOT fall back to stale + delete
+
+
+def test_run_cleanup_survives_stac_delete_timeout_mid_batch(expired_item, capsys) -> None:
+    """Regression (2026-07-20 06:00Z tick): a ReadTimeout on one item's STAC
+    DELETE aborted the whole run — the rest of the batch was skipped and no
+    cleanup_summary was emitted, which is our only real-vs-cosmetic signal."""
+    items = [dict(expired_item, id="a"), dict(expired_item, id="b")]
+
+    client = MagicMock()
+    client.self_href = "https://stac.example.com"
+    client.search.return_value.items_as_dicts.return_value = iter(items)
+
+    session = MagicMock()
+
+    def _get(url, timeout=30):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = items[0] if url.endswith("a") else items[1]
+        return resp
+
+    session.get.side_effect = _get
+    # First item times out, second deletes cleanly.
+    session.delete.side_effect = [
+        requests.exceptions.ReadTimeout("read timed out"),
+        MagicMock(status_code=204),
+    ]
+
+    s3 = MagicMock()
+    paginator = MagicMock()
+    paginator.paginate.return_value = [{"Contents": []}]
+    s3.get_paginator.return_value = paginator
+
+    with (
+        patch("cleanup_expired_items.Client.open", return_value=client),
+        patch("cleanup_expired_items._session", return_value=session),
+        patch("cleanup_expired_items._s3_client", return_value=s3),
+    ):
+        code = run_cleanup(_args(execute=True))
+
+    records = _capture_lines(capsys)
+    statuses = [r["status"] for r in records if r["event"] == "cleanup_item"]
+    assert statuses == ["stac_delete_failed", "deleted"]  # batch continued
+    assert records[-1]["event"] == "cleanup_summary"  # summary still emitted
+    assert records[-1]["processed"] == 2
+    assert code == 1  # the timeout is still a failure
 
 
 def test_run_cleanup_paginates_fully_before_deleting(expired_item) -> None:
