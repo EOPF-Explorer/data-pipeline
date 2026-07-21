@@ -13,13 +13,13 @@ from urllib.parse import urlparse
 
 import aiohttp
 import fsspec
-import httpx
 import zarr
 from eopf_geozarr.conversion.fs_utils import (
     get_storage_options,
 )
 from eopf_geozarr.conversion.open_source import open_source_datatree
 from eopf_geozarr.s2_optimization.s2_converter import convert_s2_optimized
+from source_url_utils import derive_item_id, resolve_zarr_url
 
 # Configure logging (set LOG_LEVEL=DEBUG for verbose output)
 logging.basicConfig(
@@ -43,24 +43,6 @@ DEFAULT_EXPERIMENTAL_SCALE_OFFSET_CODEC = False
 
 # Cap simultaneous aiohttp connections to the HTTPS source per pod (override via env).
 DEFAULT_SOURCE_HTTP_MAX_CONNECTIONS = 10
-
-
-def get_zarr_url(stac_item_url: str) -> str:
-    """Get Zarr asset URL from STAC item (priority: product, zarr, any .zarr)."""
-    with httpx.Client(timeout=30.0, follow_redirects=True) as client:
-        assets = client.get(stac_item_url).raise_for_status().json().get("assets", {})
-
-    # Try priority assets first
-    for key in ["product", "zarr"]:
-        if key in assets and (href := assets[key].get("href")):
-            return str(href)
-
-    # Fallback: any asset with .zarr in href
-    for asset in assets.values():
-        if ".zarr" in asset.get("href", ""):
-            return str(asset["href"])
-
-    raise RuntimeError("No Zarr asset found in STAC item")
 
 
 # === Conversion Workflow ===
@@ -96,16 +78,12 @@ def run_conversion(
     Returns:
         Output Zarr URL (s3://...)
     """
-    item_id = urlparse(source_url).path.rstrip("/").split("/")[-1].replace(".json", "")
+    item_id = derive_item_id(source_url)
     logger.info(f"🔄 Converting (S2 Optimized): {item_id}")
     logger.info(f"   Collection: {collection}")
 
-    # Resolve source: STAC item or direct Zarr URL
-    zarr_url = (
-        get_zarr_url(source_url)
-        if ("/items/" in source_url or source_url.endswith(".json"))
-        else source_url
-    )
+    # Resolve source: STAC item, direct Zarr URL, or a pre-staged s3:// copy
+    zarr_url = resolve_zarr_url(source_url)
     logger.info(f"   Source: {zarr_url}")
 
     # Apply defaults
@@ -202,7 +180,7 @@ def run_conversion(
     return output_url
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     """CLI entry point for S2 Optimized GeoZarr conversion.
 
     Returns:
@@ -263,10 +241,14 @@ def main() -> int:
         default="8GB",
         help="Memory limit per Dask worker (default: 8GB)",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
-    if urlparse(args.source_url).scheme != "https":
-        logger.error("Error: --source-url must be an HTTPS URL, got: %r", args.source_url)
+    # s3:// is the pre-staged path (prestage_source.py): it resolves through
+    # get_storage_options()'s s3fs branch and skips the HTTPS cache_dir branch
+    # above, so there is no local cache entry for concurrent readers to race
+    # on — the other half of the #339 fix.
+    if urlparse(args.source_url).scheme not in {"https", "s3"}:
+        logger.error("Error: --source-url must be an HTTPS or S3 URL, got: %r", args.source_url)
         return 1
 
     try:
