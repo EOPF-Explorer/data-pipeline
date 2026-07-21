@@ -10,7 +10,16 @@
     }
   ],
   "title": "Sentinel-1 GRD RTC [V1 staging]",
-  "assets": {},
+  "assets": {
+    "thumbnail": {
+      "href": "https://raw.githubusercontent.com/EOPF-Explorer/data-pipeline/main/stac/thumbnails/sentinel-1-grd-rtc.png",
+      "type": "image/png",
+      "roles": [
+        "thumbnail"
+      ],
+      "title": "Sentinel-1 GRD RTC tile-cube thumbnail"
+    }
+  },
   "extent": {
     "spatial": {
       "bbox": [
