@@ -136,6 +136,7 @@ def run_script(
     batch_size: int = 200,
     max_acquisition_age_days: int | None = None,
     max_cloud_cover: object = _UNSET,
+    max_items: object = _UNSET,
 ) -> dict:
     """Helper to run `discover` mode with test data and read back the manifest files.
 
@@ -182,6 +183,10 @@ def run_script(
     # the blank-disables-filter path is exercisable.
     if max_cloud_cover is not _UNSET:
         argv += ["--max-cloud-cover", str(max_cloud_cover)]
+    # _UNSET ⇒ omit the flag entirely (no cap); any other value (including "") is passed
+    # through so the blank-disables-cap path is exercisable.
+    if max_items is not _UNSET:
+        argv += ["--max-items", str(max_items)]
     with (
         patch("scripts.query_stac.Client.open", side_effect=mock_client_open),
         patch("sys.argv", argv),
@@ -525,6 +530,56 @@ class TestProcessingOrder:
         result = run_script(source, [])
 
         assert result["output"][0]["datetime"] == "2024-01-01T00:00:00"
+
+
+class TestMaxItems:
+    """`discover --max-items N` caps the queue at the N newest, inside the tool."""
+
+    def _eight_dated(self) -> list[Item]:
+        # Distinct datetimes so newest-first order is unambiguous; supplied out of order.
+        return [
+            create_stac_item(f"item-{month:02d}", SOURCE_COLLECTION, dt=datetime(2024, month, 1))
+            for month in (3, 8, 1, 6, 2, 7, 4, 5)
+        ]
+
+    def test_caps_to_newest_n(self):
+        """With 8 candidates and --max-items 5, exactly the 5 newest survive, in order."""
+        result = run_script(self._eight_dated(), [], max_items=5)
+
+        assert [it["item_id"] for it in result["output"]] == [
+            "item-08",
+            "item-07",
+            "item-06",
+            "item-05",
+            "item-04",
+        ]
+
+    def test_count_and_num_batches_reflect_truncation(self):
+        """count and num_batches are computed AFTER the cap, not before."""
+        result = run_script(self._eight_dated(), [], batch_size=2, max_items=5)
+
+        assert result["count"] == 5
+        assert result["num_batches"] == 3  # ceil(5/2)
+
+    def test_no_flag_is_byte_identical(self):
+        """Omitting the flag leaves all items (backward compatible)."""
+        capped = run_script(self._eight_dated(), [], max_items=5)
+        uncapped = run_script(self._eight_dated(), [])
+
+        assert capped["count"] == 5
+        assert uncapped["count"] == 8
+
+    def test_blank_disables_cap(self):
+        """An empty value (shared-template reuse path) means no cap."""
+        result = run_script(self._eight_dated(), [], max_items="")
+
+        assert result["count"] == 8
+
+    def test_cap_larger_than_available_keeps_all(self):
+        """A cap above the candidate count is a no-op, not an error."""
+        result = run_script(self._eight_dated(), [], max_items=100)
+
+        assert result["count"] == 8
 
 
 class TestAcquisitionFilter:
