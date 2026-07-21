@@ -581,6 +581,12 @@ class TestMaxItems:
 
         assert result["count"] == 8
 
+    @pytest.mark.parametrize("bad", ["0", "-5"])
+    def test_rejects_non_positive_cap(self, bad):
+        """A non-positive cap would invert the bound (keep oldest / empty queue) — reject it."""
+        with pytest.raises(SystemExit):
+            run_script(self._eight_dated(), [], max_items=bad)
+
 
 class TestAcquisitionFilter:
     """`--max-acquisition-age-days` keeps only recently-acquired items (scheduled end 2024-01-01)."""

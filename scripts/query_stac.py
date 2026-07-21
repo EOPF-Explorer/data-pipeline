@@ -67,7 +67,12 @@ def _optional_int(value: str) -> int | None:
     """
     if value.strip() == "":
         return None
-    return int(value)
+    n = int(value)
+    if n < 1:
+        # A safety cap that silently inverts is worse than none: --max-items -5 would slice
+        # items[:-5] (keeping the OLDEST, dropping the 5 newest) and 0 would empty the queue.
+        raise argparse.ArgumentTypeError(f"--max-items must be >= 1, got {n}")
+    return n
 
 
 def _validate_bbox(bbox: object) -> None:
