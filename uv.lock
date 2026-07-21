@@ -876,7 +876,7 @@ requires-dist = [
     { name = "boto3", specifier = "==1.42.89" },
     { name = "cf-xarray", specifier = "==0.11.3" },
     { name = "click", specifier = "==8.4.2" },
-    { name = "eopf-geozarr", git = "https://github.com/EOPF-Explorer/data-model.git?rev=9ede8c34dfe534727e93d80e278ad4390f5656d0" },
+    { name = "eopf-geozarr", git = "https://github.com/EOPF-Explorer/data-model.git?rev=5ea5662361d3127e0dcb912dd56937eecd7b2a34" },
     { name = "httpx", specifier = "==0.28.1" },
     { name = "mgrs", specifier = "==1.5.4" },
     { name = "morecantile", specifier = "==7.0.3" },
@@ -997,7 +997,7 @@ wheels = [
 [[package]]
 name = "eopf-geozarr"
 version = "0.10.2"
-source = { git = "https://github.com/EOPF-Explorer/data-model.git?rev=9ede8c34dfe534727e93d80e278ad4390f5656d0#9ede8c34dfe534727e93d80e278ad4390f5656d0" }
+source = { git = "https://github.com/EOPF-Explorer/data-model.git?rev=5ea5662361d3127e0dcb912dd56937eecd7b2a34#5ea5662361d3127e0dcb912dd56937eecd7b2a34" }
 dependencies = [
     { name = "aiohttp" },
     { name = "boto3" },
@@ -1007,7 +1007,6 @@ dependencies = [
     { name = "pydantic" },
     { name = "pydantic-zarr" },
     { name = "pyproj" },
-    { name = "pystac" },
     { name = "rioxarray" },
     { name = "s3fs" },
     { name = "structlog" },
