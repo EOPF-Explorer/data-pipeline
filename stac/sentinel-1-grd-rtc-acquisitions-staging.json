@@ -225,5 +225,15 @@
     "https://stac-extensions.github.io/sar/v1.0.0/schema.json",
     "https://stac-extensions.github.io/sat/v1.0.0/schema.json",
     "https://stac-extensions.github.io/render/v1.0.0/schema.json"
-  ]
+  ],
+  "assets": {
+    "thumbnail": {
+      "href": "https://raw.githubusercontent.com/EOPF-Sample-Service/eopf-stac/main/thumbnails/sentinel-1-l1-grd.png",
+      "type": "image/png",
+      "roles": [
+        "thumbnail"
+      ],
+      "title": "Sentinel-1 GRD RTC per-acquisition thumbnail"
+    }
+  }
 }
