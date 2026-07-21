@@ -18,6 +18,7 @@ Transforms Sentinel-1/2 satellite data into web-ready visualizations:
 **Supported Missions:**
 - Sentinel-2 L2A (Multi-spectral optical)
 - Sentinel-1 GRD (SAR backscatter)
+- Sentinel-3 OLCI L1 EFR (Ocean/Land Colour radiances — `sentinel-3-olci-l1-efr-staging`, staging only)
 
 
 ## Setup
