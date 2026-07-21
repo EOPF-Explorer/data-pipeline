@@ -39,6 +39,22 @@ for lib in ["botocore", "s3fs", "aiobotocore", "urllib3", "httpx", "httpcore"]:
 
 EXPLORER_BASE = os.getenv("EXPLORER_BASE_URL", "https://explorer.eopf.copernicus.eu")
 
+# Sentinel-3 OLCI visualization gate. Ships OFF: titiler-eopf cannot open the OLCI swath
+# store today (no `proj:` convention — affine-only readers), so any oa08/oa06/oa04 tile
+# link would dead-link every item. The links are written but suppressed until the Phase D
+# reader-open smoke test passes; flip to True (or set S3_VIZ_ENABLED=1) only then.
+S3_VIZ_ENABLED = os.getenv("S3_VIZ_ENABLED", "").lower() in {"1", "true", "yes"}
+
+# OLCI false-color query: oa08 (R) / oa06 (G) / oa04 (B) radiance, rescale 0–100.
+# Bands live directly under /measurements (no reflectance subgroup, unlike S2).
+_S3_OLCI_VIZ_QUERY = (
+    "rescale=0%2C100"
+    "&variables=%2Fmeasurements%3Aoa08_radiance"
+    "&variables=%2Fmeasurements%3Aoa06_radiance"
+    "&variables=%2Fmeasurements%3Aoa04_radiance"
+    "&bidx=1"
+)
+
 
 # === Utilities ===
 
@@ -330,6 +346,27 @@ def add_visualization_links(
                 f"TileJSON for {item.id}",
             )
         )
+    elif coll_lower.startswith(("sentinel-3", "sentinel3")) and S3_VIZ_ENABLED:
+        # S3 OLCI: false color from radiance bands (oa08/oa06/oa04). GATED OFF by default
+        # (S3_VIZ_ENABLED) — titiler can't open the swath store yet, so these would
+        # dead-link. When off, S3 falls through with no xyz/tilejson (only the bare viewer
+        # + explorer link above), matching the pre-existing OLCI behaviour.
+        item.add_link(
+            Link(
+                "xyz",
+                f"{base_url}/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png?{_S3_OLCI_VIZ_QUERY}",
+                "image/png",
+                "Sentinel-3 OLCI False Color",
+            )
+        )
+        item.add_link(
+            Link(
+                "tilejson",
+                f"{base_url}/WebMercatorQuad/tilejson.json?{_S3_OLCI_VIZ_QUERY}",
+                "application/json",
+                f"TileJSON for {item.id}",
+            )
+        )
 
     _add_explorer_link(item, collection_id)
 
@@ -391,6 +428,14 @@ def add_thumbnail_asset(
         else:
             logger.debug("No VH asset found for S-1 thumbnail")
             return
+    elif coll_lower.startswith(("sentinel-3", "sentinel3")):
+        # S3 OLCI false-color preview — GATED OFF by default (S3_VIZ_ENABLED). When off,
+        # no thumbnail is added (avoids a dead preview until titiler can open the store).
+        if not S3_VIZ_ENABLED:
+            logger.debug("S3 OLCI thumbnail gated off (S3_VIZ_ENABLED)")
+            return
+        params = "format=png&" + _S3_OLCI_VIZ_QUERY
+        title = "Sentinel-3 OLCI False Color Preview"
     else:
         logger.debug(f"Unknown mission for thumbnail: {collection_id}")
         return
@@ -896,8 +941,11 @@ def run_registration(
     # 4. Add store link to root Zarr location (best practice)
     add_store_link(item, geozarr_url)
 
-    # 5. Consolidate reflectance assets into single asset with bands/cube metadata
-    consolidate_reflectance_assets(item, geozarr_url)
+    # 5. Consolidate reflectance assets into single asset with bands/cube metadata.
+    #    Sentinel-2 only: it keys on S2 SR_*/B* asset names, so it silently no-ops on
+    #    OLCI radiance groups / S1 — gate it explicitly so only S2 items are touched.
+    if collection.lower().startswith(("sentinel-2", "sentinel2")):
+        consolidate_reflectance_assets(item, geozarr_url)
 
     # 6. Add projection metadata from zarr
     add_projection_from_zarr(item)
