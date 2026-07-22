@@ -1,4 +1,4 @@
-"""Unit tests for scripts/repair_stac_raster_links.py (#371 repair tool)."""
+"""Unit tests for operator-tools/repair_stac_raster_links.py (#371 repair tool)."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).parents[2] / "scripts"))
+sys.path.insert(0, str(Path(__file__).parents[2] / "operator-tools"))
 import repair_stac_raster_links as mod  # noqa: E402
 
 API = "https://api.explorer.eopf.copernicus.eu/stac"

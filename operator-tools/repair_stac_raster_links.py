@@ -30,7 +30,11 @@ from typing import Any
 
 import requests
 
-sys.path.insert(0, str(Path(__file__).parent))
+# Add scripts directory to path for the shared OIDC write auth
+scripts_dir = Path(__file__).parent.parent / "scripts"
+if str(scripts_dir) not in sys.path:
+    sys.path.insert(0, str(scripts_dir))
+
 import stac_auth  # noqa: E402
 
 logger = logging.getLogger(__name__)
