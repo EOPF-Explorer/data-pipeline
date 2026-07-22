@@ -65,11 +65,20 @@ moved to `tests-output/` by platform-deploy #342), https gateway hrefs resolve
    `s3-olci-staging/` is what made `/info` 500 with `"No group found in store …
    prefix='tests-output/'"`. Fixed by platform-deploy #342 (output prefix →
    `tests-output`); the pre-flip scene needs one webhook re-run.
-2. **No CRS in the store (converter gap, data-model).** The output has CF swath
+2. **DataTree alignment (converter gap, data-model) — current first blocker,
+   verified live 2026-07-22 after the prefix fix.** `/info` now opens the store and
+   fails with `group '/measurements/r2' is not aligned with its parents`: the
+   converter writes the base arrays + coords directly in `measurements/` with
+   `r2/r4/r8` nested beneath, so children share dim names (`rows`/`columns`) at
+   different sizes and inherit the parent's 2-D coords — xarray DataTree rejects
+   that. S2 stores avoid it by keeping every resolution in its own leaf group with
+   no arrays in the parent.
+3. **No CRS in the store (converter gap, data-model).** The output has CF swath
    geolocation (2-D lat/lon + `coordinates` attrs at every level) but **no
    `grid_mapping` attribute and no CRS variable** — `ds.rio.crs` is `None`, the exact
-   S1 failure mode fixed by data-model #176/#201. Reported on data-model PR #212.
-3. **Swath tiling (open design question).** Even with a datum declared, the grid is
+   S1 failure mode fixed by data-model #176/#201. Will hit once alignment is fixed.
+   Reported on data-model PR #212.
+4. **Swath tiling (open design question).** Even with a datum declared, the grid is
    curvilinear (no affine transform); current GeoZarr readers don't tile that.
    Either titiler gains geolocation-array reprojection or the converter emits a
    gridded variant.
