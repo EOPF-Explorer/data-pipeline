@@ -280,3 +280,9 @@ def test_discovery_follows_next_pagination():
 def test_session_wires_bearer_auth_hook():
     session = mod.make_session()
     assert session.auth is mod.stac_auth.bearer_auth
+
+
+def test_parse_ids_file_plain_and_jsonl(tmp_path):
+    f = tmp_path / "ids.jsonl"
+    f.write_text('{"id": "a", "updated": "x"}\n\nplain-id-b\n{"id": "c"}\n')
+    assert mod.parse_ids_file(f) == ["a", "plain-id-b", "c"]

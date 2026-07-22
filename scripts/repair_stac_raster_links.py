@@ -301,6 +301,17 @@ class RepairRun:
         )
 
 
+def parse_ids_file(path: Path) -> list[str]:
+    """Read target ids from a file: one per line, or JSONL objects with an 'id' key."""
+    ids: list[str] = []
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        ids.append(json.loads(line)["id"] if line.startswith("{") else line)
+    return ids
+
+
 def make_session() -> requests.Session:
     """A session whose every request carries a fresh bearer (no-op without OIDC env)."""
     session = requests.Session()
@@ -319,6 +330,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--stac-api-url", default="https://api.explorer.eopf.copernicus.eu/stac")
     parser.add_argument("--ids", nargs="+", help="explicit item ids (canary path)")
+    parser.add_argument(
+        "--ids-file",
+        type=Path,
+        help="file of target ids: one per line, or JSONL objects with an 'id' key",
+    )
     parser.add_argument(
         "--updated-since",
         default="2026-07-21T11:15:00Z",
@@ -350,9 +366,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.restore:
         run.restore(args.restore, force=args.force)
     else:
-        ids = args.ids or discover_corrupted_ids(
-            session, run.api_url, args.collection, args.updated_since
-        )
+        ids = list(args.ids or [])
+        if args.ids_file:
+            ids.extend(parse_ids_file(args.ids_file))
+        if not ids:
+            ids = discover_corrupted_ids(session, run.api_url, args.collection, args.updated_since)
         logger.info("%d target item(s)", len(ids))
         run.repair(ids)
 
