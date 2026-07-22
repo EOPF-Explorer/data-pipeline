@@ -219,12 +219,12 @@ class TestPatternUUpsert:
         item = _make_item("probe-item-u1", scratch_collection)
         _assert_scratch(scratch_collection)
 
-        # Create path: item absent → upsert must POST (a PUT here would 404).
+        # Create path: item absent → first POST succeeds (a PUT here would 404).
         register_v1.upsert_item(client, scratch_collection, item)
         matching = _features_with_id(session, api_url, scratch_collection, "probe-item-u1")
         assert len(matching) == 1, "create path must register the item exactly once"
 
-        # Replace path: item present → upsert must PUT the mutation in place.
+        # Replace path: item present → POST 409s, upsert must PUT the mutation in place.
         item.properties["constellation"] = "probe-mutated"
         register_v1.upsert_item(client, scratch_collection, item)
         matching = _features_with_id(session, api_url, scratch_collection, "probe-item-u1")

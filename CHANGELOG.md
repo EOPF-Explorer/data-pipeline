@@ -1,5 +1,38 @@
 # Changelog
 
+## 1.13.2 (2026-07-20)
+
+## What's Changed
+* fix(aggregate): stream item pages as dicts to keep memory flat by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/362
+* fix(storage-tier): never select demo scenes for tier migration by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/361
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.13.1...v1.13.2
+
+## 1.13.1 (2026-07-17)
+
+## What's Changed
+* S1 GRD RTC — Phases 5 + 6 (local prototype → productionization) by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/186
+* fix(cleanup): authenticate STAC DELETE in cleanup_expired_items by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/359
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.13.0...v1.13.1
+
+## 1.13.0 (2026-07-17)
+
+## What's Changed
+* docs(cleanup): document demo-scene expires protection conditions by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/338
+* fix(deps): re-sync uv.lock version stamp with pyproject (1.10.0 -> 1.12.0) by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/341
+* fix(ci): keep uv.lock in sync across releases by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/345
+* fix(migrate): make search-pagination client resilient (timeout + retry) by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/340
+* fix(expires): default demo exclude-list to baked file (protection on by default) by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/342
+* feat(migrate): parallelize and bound backfills, and make item writes atomic by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/350
+* feat(stac): attribute the S2 eodash baselayers and pin their aggregation links by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/355
+* fix(convert): concurrent-safe source opening — pin data-model v0.10.2 and wire open_source_datatree (#339) by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/347
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.12.0...v1.13.0
+
 ## 1.12.0 (2026-07-14)
 
 ## What's Changed

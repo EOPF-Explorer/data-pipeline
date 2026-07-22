@@ -186,6 +186,33 @@ class TestQueryItems:
 
         assert result == []
 
+    def test_excluded_ids_never_selected(self):
+        """Items on the demo denylist are skipped even when they need work."""
+        items = [
+            create_stac_item("demo-1", storage_refs=["standard"]),  # needs work but excluded
+            create_stac_item("item-2", storage_refs=["standard"]),  # needs work
+        ]
+        client = FakeStacClient(items)
+
+        with patch("scripts.query_storage_tier_items.Client.open", return_value=client):
+            result = query_items(
+                STAC_API_URL, COLLECTION, 7, "glacier", 100, exclude_ids={"demo-1"}
+            )
+
+        assert result == ["item-2"]
+
+    def test_exclusion_does_not_consume_batch_capacity(self):
+        """Excluded items must not eat into max_batch_size."""
+        items = [create_stac_item("demo-1", storage_refs=["standard"])] + [
+            create_stac_item(f"item-{i}", storage_refs=["standard"]) for i in range(3)
+        ]
+        client = FakeStacClient(items)
+
+        with patch("scripts.query_storage_tier_items.Client.open", return_value=client):
+            result = query_items(STAC_API_URL, COLLECTION, 7, "glacier", 3, exclude_ids={"demo-1"})
+
+        assert result == ["item-0", "item-1", "item-2"]
+
 
 # --- Tests for main ---
 
@@ -270,6 +297,70 @@ class TestMain:
         assert exit_code == 0
         output = json.loads(stdout.getvalue())
         assert len(output) == 100
+
+    def test_baked_demo_denylist_applied_by_default(self, monkeypatch):
+        """Without --exclude-file or env var, the baked demo list still protects."""
+        monkeypatch.delenv("EXPIRES_EXCLUDE_FILE", raising=False)
+        from scripts.s3_item_cleanup import BAKED_EXCLUDE_FILE, load_exclude_ids
+
+        demo_id = sorted(load_exclude_ids(str(BAKED_EXCLUDE_FILE)))[0]
+        items = [
+            create_stac_item(demo_id, storage_refs=["performance"]),  # baked demo id
+            create_stac_item("item-2", storage_refs=["performance"]),
+        ]
+        client = FakeStacClient(items)
+
+        with (
+            patch("scripts.query_storage_tier_items.Client.open", return_value=client),
+            patch("sys.stdout", new_callable=StringIO) as stdout,
+        ):
+            exit_code = main(
+                [
+                    "--stac-api-url",
+                    STAC_API_URL,
+                    "--collection",
+                    COLLECTION,
+                    "--age-days",
+                    "180",
+                    "--to-storage-class",
+                    "STANDARD",
+                ]
+            )
+
+        assert exit_code == 0
+        assert json.loads(stdout.getvalue()) == ["item-2"]
+
+    def test_explicit_exclude_file(self, tmp_path):
+        """--exclude-file takes precedence and is honored."""
+        exclude_file = tmp_path / "exclude.txt"
+        exclude_file.write_text("# comment\nitem-1\n")
+        items = [
+            create_stac_item("item-1", storage_refs=["standard"]),
+            create_stac_item("item-2", storage_refs=["standard"]),
+        ]
+        client = FakeStacClient(items)
+
+        with (
+            patch("scripts.query_storage_tier_items.Client.open", return_value=client),
+            patch("sys.stdout", new_callable=StringIO) as stdout,
+        ):
+            exit_code = main(
+                [
+                    "--stac-api-url",
+                    STAC_API_URL,
+                    "--collection",
+                    COLLECTION,
+                    "--age-days",
+                    "7",
+                    "--to-storage-class",
+                    "STANDARD_IA",
+                    "--exclude-file",
+                    str(exclude_file),
+                ]
+            )
+
+        assert exit_code == 0
+        assert json.loads(stdout.getvalue()) == ["item-2"]
 
     def test_error_returns_nonzero(self):
         with patch(

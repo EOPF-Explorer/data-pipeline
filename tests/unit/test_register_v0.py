@@ -1,13 +1,12 @@
 """Unit tests for register_v0.py upsert_item (issue #352).
 
-Mirrors test_register_v1. The create-path test is load-bearing: register_v0's
-old existence check treated "collection resolves" as "item exists" (get_item
-returns None for an absent item, it does not raise), which under exists→PUT
-would turn every first-time registration into a PUT → 404 → crash.
+Mirrors test_register_v1: POST first, and on 409 (item exists) replace via a
+single atomic PUT. No client-side existence pre-check (it can mis-read
+transient/conformance errors as "absent" and then 409, #186) and never a
+DELETE (no code path can leave the item deleted-but-not-recreated, #352).
 """
 
 import contextlib
-import logging
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, Mock
@@ -22,14 +21,10 @@ sys.path.insert(0, str(scripts_dir))
 from register_v0 import upsert_item  # noqa: E402
 
 
-def _make_client(item_exists: bool, base_url: str = "https://stac.example.com") -> MagicMock:
-    """Build a minimal pystac_client.Client mock."""
+def _make_client(base_url: str = "https://stac.example.com") -> MagicMock:
+    """Build a minimal pystac_client.Client mock — only self_href + _stac_io.session used."""
     client = MagicMock()
     client.self_href = base_url
-
-    # get_item returns the item if present, None if absent — it does NOT raise.
-    client.get_collection.return_value.get_item.return_value = MagicMock() if item_exists else None
-
     return client
 
 
@@ -53,10 +48,10 @@ def _make_item(item_id: str = "test-item-001") -> MagicMock:
 
 
 class TestUpsertItemNewItem:
-    """get_item returns None → item is new → POST; no DELETE, no PUT."""
+    """First POST succeeds (item did not exist) → single POST; no PUT, no DELETE."""
 
-    def test_none_from_get_item_takes_post_path(self):
-        client = _make_client(item_exists=False)
+    def test_post_path_for_new_item(self):
+        client = _make_client()
         client._stac_io.session.post.return_value = _make_response(201)
         item = _make_item("new-item")
 
@@ -68,38 +63,30 @@ class TestUpsertItemNewItem:
         client._stac_io.session.put.assert_not_called()
         client._stac_io.session.delete.assert_not_called()
 
-    def test_raises_on_post_failure(self):
-        client = _make_client(item_exists=False)
+    def test_raises_on_post_failure_without_put(self):
+        """A non-409 POST error (e.g. 500) raises immediately — no PUT, no DELETE."""
+        client = _make_client()
         client._stac_io.session.post.return_value = _make_response(500)
 
         with pytest.raises(requests.HTTPError):
             upsert_item(client, "my-collection", _make_item())
 
-    def test_exists_check_error_falls_back_to_post_and_logs(self, caplog):
-        """A transient exists-check failure takes the POST path — and says so,
-        because an existing item routed to POST surfaces as a confusing 409."""
-        client = _make_client(item_exists=False)
-        client.get_collection.side_effect = Exception("API unreachable")
-        client._stac_io.session.post.return_value = _make_response(201)
-
-        with caplog.at_level(logging.DEBUG, logger="register_v0"):
-            upsert_item(client, "my-collection", _make_item())
-
-        client._stac_io.session.post.assert_called_once()
         client._stac_io.session.put.assert_not_called()
-        assert "exists-check failed" in caplog.text
+        client._stac_io.session.delete.assert_not_called()
 
 
 class TestUpsertItemReplaceExisting:
-    """Item exists → single PUT to the item URL; no DELETE, no POST."""
+    """POST 409 (item exists) → single atomic PUT to the item URL; no DELETE."""
 
-    def test_put_when_item_exists(self):
-        client = _make_client(item_exists=True, base_url="https://stac.example.com")
+    def test_409_triggers_put_replace(self):
+        client = _make_client(base_url="https://stac.example.com")
+        client._stac_io.session.post.return_value = _make_response(409)
         client._stac_io.session.put.return_value = _make_response(200)
         item = _make_item("existing-item")
 
         upsert_item(client, "my-collection", item)
 
+        client._stac_io.session.post.assert_called_once()
         client._stac_io.session.put.assert_called_once()
         put_call = client._stac_io.session.put.call_args
         assert put_call.args[0] == (
@@ -107,25 +94,28 @@ class TestUpsertItemReplaceExisting:
         )
         assert put_call.kwargs["json"] == item.to_dict()
         client._stac_io.session.delete.assert_not_called()
-        client._stac_io.session.post.assert_not_called()
 
 
 class TestUpsertItemPutFailure:
-    """PUT fails (incl. ghost-id 404) → raises; POST is never a fallback."""
+    """POST 409, then PUT fails (incl. ghost-id 404) → raises; re-POST is never a fallback."""
 
     @pytest.mark.parametrize("status_code", [403, 404, 500, 503])
     def test_raises_on_put_failure(self, status_code):
-        client = _make_client(item_exists=True)
+        client = _make_client()
+        client._stac_io.session.post.return_value = _make_response(409)
         client._stac_io.session.put.return_value = _make_response(status_code)
 
         with pytest.raises(requests.HTTPError):
             upsert_item(client, "my-collection", _make_item())
 
-    def test_post_not_called_when_put_fails(self):
-        client = _make_client(item_exists=True)
+    def test_no_repost_when_put_fails(self):
+        client = _make_client()
+        client._stac_io.session.post.return_value = _make_response(409)
         client._stac_io.session.put.return_value = _make_response(404)
 
         with contextlib.suppress(requests.HTTPError):
             upsert_item(client, "my-collection", _make_item())
 
-        client._stac_io.session.post.assert_not_called()
+        # only the first POST (the 409) was made; no re-POST after the PUT failed
+        assert client._stac_io.session.post.call_count == 1
+        client._stac_io.session.delete.assert_not_called()

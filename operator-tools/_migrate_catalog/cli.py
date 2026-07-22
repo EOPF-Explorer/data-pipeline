@@ -52,6 +52,12 @@ def cli(ctx: click.Context, api_url: str | None, history_file: str | None, verbo
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation prompt")
 @click.option("--page-size", default=100, show_default=True, help="Items per page when fetching")
 @click.option(
+    "--ids",
+    "ids",
+    multiple=True,
+    help="Restrict the run to specific item ids (repeatable) — e.g. a single-tile canary",
+)
+@click.option(
     "--concurrency",
     default=1,
     show_default=True,
@@ -92,6 +98,7 @@ def run(
     dry_run: bool,
     yes: bool,
     page_size: int,
+    ids: tuple[str, ...],
     concurrency: int,
     max_consecutive_failures: int,
     max_writes: int | None,
@@ -129,6 +136,8 @@ def run(
         click.echo(f"Description: {description}")
         click.echo(f"Collection:  {collection_id}")
         click.echo(f"API:         {api_url}")
+        if ids:
+            click.echo(f"IDs:         {', '.join(ids)}")
         if not click.confirm("Proceed?", default=False):
             click.echo("Aborted.")
             return
@@ -144,6 +153,7 @@ def run(
             migration_name,
             dry_run=dry_run,
             page_size=page_size,
+            ids=list(ids) or None,
             concurrency=concurrency,
             max_consecutive_failures=max_consecutive_failures,
             max_writes=max_writes,

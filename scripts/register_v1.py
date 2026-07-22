@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 
 import httpx
+import stac_auth
 import zarr
 from pystac import Asset, Item, Link
 from pystac.extensions.projection import ProjectionExtension
@@ -127,30 +128,27 @@ def rewrite_asset_hrefs(item: Item, old_base: str, new_base: str) -> None:
 
 
 def upsert_item(client: Client, collection_id: str, item: Item) -> None:
-    """Register or update STAC item using pystac-client session."""
-    # Check if exists — get_item returns None if not found, does not raise
-    try:
-        exists = client.get_collection(collection_id).get_item(item.id) is not None
-    except Exception as e:
-        logger.debug(f"exists-check failed for {item.id}, assuming absent: {e}")
-        exists = False
+    """Register or update a STAC item: POST, and on 409 (item exists) PUT to replace.
 
-    # Use client's base URL directly (includes /stac if present)
+    Letting the server report the conflict (409) is more robust than a client-side
+    existence pre-check, which can mis-read transient/conformance errors as "absent"
+    and then 409 (#186). Replacing via a single PUT (#352) means no code path can
+    leave an item deleted-but-not-recreated, unlike the previous DELETE-then-POST.
+    """
+    io = client._stac_io
+    assert io is not None  # noqa: S101  # nosec B101 -- pystac-client always sets this after open()
+    session = io.session
     base_url = str(client.self_href).rstrip("/")
-    if exists:
-        resp = client._stac_io.session.put(
-            f"{base_url}/collections/{collection_id}/items/{item.id}",
-            json=item.to_dict(),
-            headers={"Content-Type": "application/json"},
-            timeout=30,
-        )
-    else:
-        resp = client._stac_io.session.post(
-            f"{base_url}/collections/{collection_id}/items",
-            json=item.to_dict(),
-            headers={"Content-Type": "application/json"},
-            timeout=30,
-        )
+    create_url = f"{base_url}/collections/{collection_id}/items"
+    item_dict = item.to_dict()
+    headers = {"Content-Type": "application/json"}
+
+    resp = session.post(create_url, json=item_dict, headers=headers, timeout=30)
+
+    if resp.status_code == 409:
+        item_url = f"{base_url}/collections/{collection_id}/items/{item.id}"
+        resp = session.put(item_url, json=item_dict, headers=headers, timeout=30)
+
     resp.raise_for_status()
     logger.info(f"✅ Registered {item.id} (HTTP {resp.status_code})")
 
@@ -177,17 +175,123 @@ def add_projection_from_zarr(item: Item) -> None:
                 logger.debug(f"Could not read zarr projection: {e}")
 
 
-def add_visualization_links(item: Item, raster_base: str, collection_id: str) -> None:
-    """Add viewer/xyz/tilejson links for TiTiler visualization."""
-    base_url = f"{raster_base}/collections/{collection_id}/items/{item.id}"
-    item.add_link(Link("viewer", f"{base_url}/viewer", "text/html", f"Viewer for {item.id}"))
+# Render names preferred when an item declares the STAC `render` extension,
+# in priority order. The first match wins; otherwise the first render is used.
+_PREFERRED_RENDERS = ("rgb", "visual", "thumbnail", "default")
 
-    # Mission-specific tile configurations
+
+def _select_render(item: Item) -> dict | None:
+    """Return the preferred render config from a render-extension ``renders`` dict.
+
+    Items built with the render extension carry ``properties.renders`` mapping a
+    render name to a config (expression/variables, rescale, bidx, ...). This lets
+    the data producer own the visualization rather than hardcoding it here.
+    Returns ``None`` when no usable renders are present.
+    """
+    renders = item.properties.get("renders")
+    if not isinstance(renders, dict) or not renders:
+        return None
+    candidates = [renders.get(name) for name in _PREFERRED_RENDERS]
+    candidates.append(next(iter(renders.values())))
+    for candidate in candidates:
+        if isinstance(candidate, dict):
+            return candidate
+    return None
+
+
+def _render_to_query(render: dict, *, include_tilesize: bool) -> str:
+    """Convert a render-extension config into a titiler query string.
+
+    Serializes the fields S1 RTC renders use: ``expression``, ``rescale`` (a
+    list of ``[min, max]`` pairs — a single pair applies to all bands) and
+    ``bidx``. ``tilesize`` is only valid on the tiles/tilejson endpoints, not
+    ``/preview``.
+    """
+    q = urllib.parse.quote
+    parts = [f"expression={q(render['expression'], safe='')}"]
+    for mn, mx in render.get("rescale", []):
+        parts.append(f"rescale={q(f'{mn},{mx}', safe='')}")
+    for b in render.get("bidx", []):
+        parts.append(f"bidx={b}")
+    if include_tilesize and (tilesize := render.get("tilesize")):
+        parts.append(f"tilesize={tilesize}")
+    return "&".join(parts)
+
+
+def _with_sel_time(query: str, sel_time: str | None) -> str:
+    """Append the ``sel=time={datetime}`` selector to a titiler query when a slice is pinned.
+
+    Used for the S1 RTC cube item so its preview defaults to a chosen acquisition; ``None`` leaves the
+    query unchanged (other callers/missions render the default slice). Colons are percent-encoded so the
+    href is unambiguous (TiTiler decodes before parsing ``time=<value>``).
+    """
+    if not sel_time:
+        return query
+    return f"{query}&sel=time={urllib.parse.quote(sel_time, safe='')}"
+
+
+def add_visualization_links(
+    item: Item, raster_base: str, collection_id: str, sel_time: str | None = None
+) -> None:
+    """Add the TiTiler visualization links.
+
+    The render path (producer ``renders`` config) emits an interactive ``map.html`` ``viewer``, a
+    ``tilejson`` and an ``xyz`` ``{z}/{x}/{y}`` tile template (for machine map clients); the mission
+    fallbacks keep the legacy bare ``/viewer`` + ``xyz`` tile template.
+
+    ``sel_time`` (when set) pins the render to one cube slice by datetime — the cube item passes the
+    best-recent acquisition so its preview isn't the default (oldest) slice.
+    """
+    base_url = f"{raster_base}/collections/{collection_id}/items/{item.id}"
+
+    # Prefer a producer-declared render config (STAC render extension) over the
+    # hardcoded mission defaults below.
+    if render := _select_render(item):
+        query = _with_sel_time(_render_to_query(render, include_tilesize=True), sel_time)
+        title = render.get("title") or f"Visualization for {item.id}"
+        # Human-clickable interactive viewer carrying the render expression/rescale/sel. map.html
+        # fills the tile coords in itself, so it stays clickable in a STAC browser (unlike the raw
+        # {z}/{x}/{y} xyz template below, whose placeholders 422 if a human clicks them). The xyz
+        # link is for machine map clients (QGIS/Leaflet/OpenLayers) that substitute z/x/y before
+        # requesting — both coexist, as on S2.
+        item.add_link(
+            Link(
+                "viewer",
+                f"{base_url}/WebMercatorQuad/map.html?{query}",
+                "text/html",
+                title,
+            )
+        )
+        item.add_link(
+            Link(
+                "tilejson",
+                f"{base_url}/WebMercatorQuad/tilejson.json?{query}",
+                "application/json",
+                f"TileJSON for {item.id}",
+            )
+        )
+        item.add_link(
+            Link(
+                "xyz",
+                f"{base_url}/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png?{query}",
+                "image/png",
+                title,
+            )
+        )
+        _add_explorer_link(item, collection_id)
+        return
+
+    # Mission-specific tile configurations (no producer render config): bare viewer + legacy xyz.
+    item.add_link(Link("viewer", f"{base_url}/viewer", "text/html", f"Viewer for {item.id}"))
     coll_lower = collection_id.lower()
     if coll_lower.startswith(("sentinel-1", "sentinel1")):
         # S1: VH band visualization
+        # vh asset points to {store}/{orbit_group} — variables path is /{orbit_group}:vh
+        # (same convention as S2: /{group}:{variable}; TiTiler v0.5.0 selects resolution
+        # from the multiscale group hierarchy / CRS, not a tile_matrix_set)
         if (vh := item.assets.get("vh")) and ".zarr/" in (vh.href or ""):
-            var_path = f"/{vh.href.split('.zarr/')[1]}:grd"
+            orbit_group = vh.href.split(".zarr/")[1]
+            var_path = f"/{orbit_group}:vh"
             query = f"variables={urllib.parse.quote(var_path, safe='')}&bidx=1&rescale=0%2C219&assets=vh"
             item.add_link(
                 Link(
@@ -225,7 +329,11 @@ def add_visualization_links(item: Item, raster_base: str, collection_id: str) ->
             )
         )
 
-    # Add EOPF Explorer link
+    _add_explorer_link(item, collection_id)
+
+
+def _add_explorer_link(item: Item, collection_id: str) -> None:
+    """Add the EOPF Explorer ``via`` link for the item."""
     item.add_link(
         Link(
             "via",
@@ -235,13 +343,37 @@ def add_visualization_links(item: Item, raster_base: str, collection_id: str) ->
     )
 
 
-def add_thumbnail_asset(item: Item, raster_base: str, collection_id: str) -> None:
-    """Add thumbnail preview asset for STAC browsers."""
+def add_thumbnail_asset(
+    item: Item, raster_base: str, collection_id: str, sel_time: str | None = None
+) -> None:
+    """Add thumbnail preview asset for STAC browsers.
+
+    ``sel_time`` (when set) pins the preview image to one cube slice by datetime — the actual image the
+    STAC browser shows, so the cube item passes the best-recent acquisition.
+    """
     if "thumbnail" in item.assets:
         return
 
     base_url = f"{raster_base}/collections/{collection_id}/items/{item.id}"
     coll_lower = collection_id.lower()
+
+    # Prefer a producer-declared render config (STAC render extension).
+    if render := _select_render(item):
+        params = _with_sel_time(
+            "format=png&" + _render_to_query(render, include_tilesize=False), sel_time
+        )
+        title = render.get("title") or f"{item.id} preview"
+        item.add_asset(
+            "thumbnail",
+            Asset(
+                href=f"{base_url}/preview?{params}",
+                media_type="image/png",
+                roles=["thumbnail"],
+                title=title,
+            ),
+        )
+        logger.debug(f"Added thumbnail asset from render config: {title}")
+        return
 
     # Mission-specific thumbnail parameters
     if coll_lower.startswith(("sentinel-2", "sentinel2")):
@@ -250,7 +382,8 @@ def add_thumbnail_asset(item: Item, raster_base: str, collection_id: str) -> Non
     elif coll_lower.startswith(("sentinel-1", "sentinel1")):
         # Use VH band for S-1 thumbnail
         if (vh := item.assets.get("vh")) and ".zarr/" in (vh.href or ""):
-            var_path = f"/{vh.href.split('.zarr/')[1]}:grd"
+            orbit_group = vh.href.split(".zarr/")[1]
+            var_path = f"/{orbit_group}:vh"
             params = f"format=png&variables={urllib.parse.quote(var_path, safe='')}&bidx=1&rescale=0%2C219&assets=vh"
             title = "Sentinel-1 GRD VH Preview"
         else:
@@ -799,7 +932,7 @@ def run_registration(
         logger.info("   🛡️  No expires (demo/exclude-listed or retention=0) — undeletable")
 
     # 13. Register to STAC API
-    client = Client.open(stac_api_url)
+    client = stac_auth.open_client(stac_api_url)
     upsert_item(client, collection, item)
 
     logger.info(

@@ -1,0 +1,242 @@
+{
+  "id": "sentinel-1-grd-rtc-staging",
+  "type": "Collection",
+  "links": [
+    {
+      "rel": "license",
+      "href": "https://sentinel.esa.int/documents/247904/690755/Sentinel_Data_Legal_Notice",
+      "type": "application/pdf",
+      "title": "Legal notice on the use of Copernicus Sentinel Data and Service Information"
+    }
+  ],
+  "title": "Sentinel-1 GRD RTC [V1 staging]",
+  "assets": {
+    "thumbnail": {
+      "href": "https://raw.githubusercontent.com/EOPF-Explorer/data-pipeline/main/stac/thumbnails/sentinel-1-grd-rtc.png",
+      "type": "image/png",
+      "roles": [
+        "thumbnail"
+      ],
+      "title": "Sentinel-1 GRD RTC tile-cube thumbnail"
+    }
+  },
+  "extent": {
+    "spatial": {
+      "bbox": [
+        [
+          -5.2,
+          42.0,
+          9.2,
+          49.0
+        ]
+      ]
+    },
+    "temporal": {
+      "interval": [
+        [
+          "2025-02-05T06:01:10Z",
+          null
+        ]
+      ]
+    }
+  },
+  "license": "proprietary",
+  "keywords": [
+    "Copernicus",
+    "Sentinel",
+    "EU",
+    "ESA",
+    "Satellite",
+    "SAR",
+    "Radar",
+    "RTC",
+    "GRD"
+  ],
+  "providers": [
+    {
+      "url": "https://commission.europa.eu/",
+      "name": "European Commission",
+      "roles": [
+        "licensor"
+      ]
+    },
+    {
+      "url": "https://sentinel.esa.int/web/sentinel/missions/sentinel-1",
+      "name": "ESA",
+      "roles": [
+        "producer",
+        "processor"
+      ]
+    },
+    {
+      "url": "https://zarr.eopf.copernicus.eu/",
+      "name": "EOPF Sentinel Zarr Samples Service",
+      "roles": [
+        "host",
+        "processor"
+      ]
+    }
+  ],
+  "summaries": {
+    "gsd": [
+      10
+    ],
+    "instruments": [
+      "c-sar"
+    ],
+    "constellation": [
+      "sentinel-1"
+    ],
+    "sar:instrument_mode": [
+      "IW"
+    ],
+    "sar:frequency_band": [
+      "C"
+    ],
+    "sar:center_frequency": [
+      5.405
+    ],
+    "sar:polarizations": [
+      [
+        "VV",
+        "VH"
+      ]
+    ],
+    "sar:product_type": [
+      "GRD"
+    ],
+    "sat:orbit_state": [
+      "ascending",
+      "descending"
+    ]
+  },
+  "description": "Sentinel-1 Ground Range Detected (GRD) data processed to Radiometric Terrain Correction (RTC), stored as analysis-ready Zarr V3 tiles. Each tile aggregates all acquisitions for a given MGRS tile and orbit direction into a time-stacked Zarr store.",
+  "item_assets": {
+    "zarr-store": {
+      "type": "application/vnd.zarr; version=3",
+      "roles": [
+        "data"
+      ],
+      "title": "Sentinel-1 GRD RTC Zarr store"
+    },
+    "gamma0-rtc-backscatter-asc": {
+      "type": "application/vnd.zarr; version=3",
+      "roles": [
+        "data"
+      ],
+      "title": "γ⁰ RTC backscatter (ascending)",
+      "bands": [
+        {
+          "name": "vv",
+          "description": "γ⁰ RTC backscatter, VV polarization",
+          "data_type": "float32",
+          "nodata": "nan",
+          "unit": "gamma0 (linear power)"
+        },
+        {
+          "name": "vh",
+          "description": "γ⁰ RTC backscatter, VH polarization",
+          "data_type": "float32",
+          "nodata": "nan",
+          "unit": "gamma0 (linear power)"
+        }
+      ],
+      "data_type": "float32",
+      "nodata": "nan",
+      "unit": "gamma0 (linear power)",
+      "gsd": 10
+    },
+    "border-mask-asc": {
+      "type": "application/vnd.zarr; version=3",
+      "roles": [
+        "data"
+      ],
+      "title": "Valid-data mask (ascending)",
+      "bands": [
+        {
+          "name": "border_mask",
+          "description": "Valid-data mask (0 = border/no-data, non-zero = valid)",
+          "data_type": "uint8",
+          "nodata": 0
+        }
+      ],
+      "gsd": 10
+    },
+    "gamma0-rtc-backscatter-desc": {
+      "type": "application/vnd.zarr; version=3",
+      "roles": [
+        "data"
+      ],
+      "title": "γ⁰ RTC backscatter (descending)",
+      "bands": [
+        {
+          "name": "vv",
+          "description": "γ⁰ RTC backscatter, VV polarization",
+          "data_type": "float32",
+          "nodata": "nan",
+          "unit": "gamma0 (linear power)"
+        },
+        {
+          "name": "vh",
+          "description": "γ⁰ RTC backscatter, VH polarization",
+          "data_type": "float32",
+          "nodata": "nan",
+          "unit": "gamma0 (linear power)"
+        }
+      ],
+      "data_type": "float32",
+      "nodata": "nan",
+      "unit": "gamma0 (linear power)",
+      "gsd": 10
+    },
+    "border-mask-desc": {
+      "type": "application/vnd.zarr; version=3",
+      "roles": [
+        "data"
+      ],
+      "title": "Valid-data mask (descending)",
+      "bands": [
+        {
+          "name": "border_mask",
+          "description": "Valid-data mask (0 = border/no-data, non-zero = valid)",
+          "data_type": "uint8",
+          "nodata": 0
+        }
+      ],
+      "gsd": 10
+    },
+    "thumbnail": {
+      "type": "image/png",
+      "roles": [
+        "thumbnail"
+      ],
+      "title": "Sentinel-1 GRD RGB composite preview"
+    }
+  },
+  "stac_version": "1.1.0",
+  "stac_extensions": [
+    "https://stac-extensions.github.io/sar/v1.0.0/schema.json",
+    "https://stac-extensions.github.io/sat/v1.0.0/schema.json",
+    "https://stac-extensions.github.io/render/v1.0.0/schema.json"
+  ],
+  "renders": {
+    "rgb": {
+      "title": "VV, VH, VV/VH composite",
+      "assets": [
+        "gamma0-rtc-backscatter-asc",
+        "gamma0-rtc-backscatter-desc"
+      ],
+      "expression": "/ascending:vv;/ascending:vh;(/ascending:vv)/(/ascending:vh)",
+      "rescale": [
+        [
+          0.0,
+          0.2
+        ]
+      ],
+      "bidx": [
+        1
+      ],
+      "tilesize": 256
+    }
+  }
+}

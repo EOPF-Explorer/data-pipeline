@@ -27,6 +27,9 @@ dmypy.json
 # Local security scans
 trivy-image-report.txt
 
+# CDSE watcher local state (scripts/watch_cdse_and_process.py)
+data/.processed_products.json
+
 # Environment
 .env
 .env.local
@@ -72,6 +75,9 @@ pipeline_utils.py
 # Migration recovery files
 operator-tools/.migration_recovery_*.jsonl
 operator-tools/.migration_history.json
+
+*.json
+*.geojson
 
 # Local planning/spec docs (not part of the deliverable)
 claude-docs/

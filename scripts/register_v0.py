@@ -11,6 +11,7 @@ import urllib.parse
 from urllib.parse import urlparse
 
 import httpx
+import stac_auth
 import zarr
 from pystac import Asset, Item, Link
 from pystac.extensions.projection import ProjectionExtension
@@ -60,28 +61,29 @@ def rewrite_asset_hrefs(item: Item, old_base: str, new_base: str, s3_endpoint: s
 
 
 def upsert_item(client: Client, collection_id: str, item: Item) -> None:
-    """Register or update STAC item using pystac-client session."""
-    # Check if exists — get_item returns None if not found, does not raise
-    try:
-        exists = client.get_collection(collection_id).get_item(item.id) is not None
-    except Exception as e:
-        logger.debug(f"exists-check failed for {item.id}, assuming absent: {e}")
-        exists = False
+    """Register or update a STAC item: POST, and on 409 (item exists) PUT to replace.
 
+    Letting the server report the conflict (409) is more robust than a client-side
+    existence pre-check, which can mis-read transient/conformance errors as "absent"
+    and then 409 (#186). Replacing via a single PUT (#352) means no code path can
+    leave an item deleted-but-not-recreated, unlike the previous DELETE-then-POST.
+    """
     # Use client's base URL directly (includes /stac if present)
     base_url = str(client.self_href).rstrip("/")
-    if exists:
+    item_dict = item.to_dict()
+    headers = {"Content-Type": "application/json"}
+
+    resp = client._stac_io.session.post(
+        f"{base_url}/collections/{collection_id}/items",
+        json=item_dict,
+        headers=headers,
+        timeout=30,
+    )
+    if resp.status_code == 409:
         resp = client._stac_io.session.put(
             f"{base_url}/collections/{collection_id}/items/{item.id}",
-            json=item.to_dict(),
-            headers={"Content-Type": "application/json"},
-            timeout=30,
-        )
-    else:
-        resp = client._stac_io.session.post(
-            f"{base_url}/collections/{collection_id}/items",
-            json=item.to_dict(),
-            headers={"Content-Type": "application/json"},
+            json=item_dict,
+            headers=headers,
             timeout=30,
         )
     resp.raise_for_status()
@@ -349,7 +351,7 @@ def run_registration(
     add_derived_from_link(item, source_url)
 
     # 8. Register to STAC API
-    client = Client.open(stac_api_url)
+    client = stac_auth.open_client(stac_api_url)
     upsert_item(client, collection, item)
 
     logger.info(

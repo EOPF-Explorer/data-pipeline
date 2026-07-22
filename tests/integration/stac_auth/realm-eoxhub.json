@@ -1,0 +1,76 @@
+{
+  "realm": "eoxhub",
+  "enabled": true,
+  "accessTokenLifespan": 300,
+  "sslRequired": "none",
+  "clientScopes": [
+    {
+      "name": "stac:write",
+      "description": "Grants write access to the STAC Transactions API",
+      "protocol": "openid-connect",
+      "attributes": {
+        "include.in.token.scope": "true",
+        "display.on.consent.screen": "false"
+      }
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "stac-writer",
+      "description": "M2M client for authenticated STAC writes (mirrors the prod client T4 creates).",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "stac-writer-secret",
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "defaultClientScopes": ["acr", "basic", "email", "profile", "roles", "web-origins", "stac:write"],
+      "protocolMappers": [
+        {
+          "name": "aud-stac-api",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.custom.audience": "stac-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "not-a-writer",
+      "description": "Authenticated realm client WITHOUT stac:write — proves authenticated != authorized.",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "not-a-writer-secret",
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "defaultClientScopes": ["acr", "basic", "email", "profile", "roles", "web-origins"],
+      "protocolMappers": [
+        {
+          "name": "aud-stac-api",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "config": {
+            "included.custom.audience": "stac-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "no-audience-writer",
+      "description": "Has stac:write but NO stac-api audience — proves audience enforcement.",
+      "enabled": true,
+      "publicClient": false,
+      "secret": "no-audience-secret",
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "defaultClientScopes": ["acr", "basic", "email", "profile", "roles", "web-origins", "stac:write"]
+    }
+  ]
+}

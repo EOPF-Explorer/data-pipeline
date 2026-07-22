@@ -1,7 +1,6 @@
 """Unit tests for update_stac_storage_tier.py script."""
 
 import json
-import logging
 import sys
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -288,13 +287,9 @@ class TestUpdateStacItem:
 
         assert result["updated"] == 1
 
-    def _make_stac_client(self, item_exists: bool) -> tuple[Mock, Mock]:
+    def _make_stac_client(self) -> tuple[Mock, Mock]:
         mock_stac_client = Mock()
         mock_stac_client.self_href = "https://stac.api.com"
-        # get_item returns the item if present, None if absent — it does NOT raise.
-        mock_stac_client.get_collection.return_value.get_item.return_value = (
-            Mock() if item_exists else None
-        )
         mock_session = Mock()
         mock_session.put.return_value = Mock(status_code=200)
         mock_session.post.return_value = Mock(status_code=201)
@@ -312,45 +307,17 @@ class TestUpdateStacItem:
 
     @patch("update_stac_storage_tier.httpx.Client")
     @patch("update_stac_storage_tier.update_item_storage_tiers")
-    @patch("update_stac_storage_tier.Client")
-    def test_puts_when_item_exists(
-        self, mock_client_class, mock_update_tiers, mock_httpx, stac_item_before
-    ):
-        """Existing item → single atomic PUT to the item URL; no DELETE, no POST."""
-        from update_stac_storage_tier import update_stac_item
-
-        self._mock_httpx(mock_httpx, stac_item_before)
-        mock_update_tiers.return_value = (1, 1, 1, 0, 0, 0)
-        mock_stac_client, mock_session = self._make_stac_client(item_exists=True)
-        mock_client_class.open.return_value = mock_stac_client
-
-        result = update_stac_item(
-            "https://stac.api.com/collections/test/items/test-item",
-            "https://stac.api.com",
-            "https://s3.endpoint.com",
-            dry_run=False,
-        )
-
-        assert result["updated"] == 1
-        mock_session.put.assert_called_once()
-        put_call = mock_session.put.call_args
-        assert put_call.args[0] == "https://stac.api.com/collections/test/items/test-item"
-        mock_session.delete.assert_not_called()
-        mock_session.post.assert_not_called()
-
-    @patch("update_stac_storage_tier.httpx.Client")
-    @patch("update_stac_storage_tier.update_item_storage_tiers")
-    @patch("update_stac_storage_tier.Client")
+    @patch("update_stac_storage_tier.stac_auth.open_client")
     def test_posts_when_item_new(
-        self, mock_client_class, mock_update_tiers, mock_httpx, stac_item_before
+        self, mock_open_client, mock_update_tiers, mock_httpx, stac_item_before
     ):
-        """Absent item (get_item → None) → POST create; no DELETE, no PUT."""
+        """First POST succeeds (item did not exist) → single POST; no PUT, no DELETE."""
         from update_stac_storage_tier import update_stac_item
 
         self._mock_httpx(mock_httpx, stac_item_before)
         mock_update_tiers.return_value = (1, 1, 1, 0, 0, 0)
-        mock_stac_client, mock_session = self._make_stac_client(item_exists=False)
-        mock_client_class.open.return_value = mock_stac_client
+        mock_stac_client, mock_session = self._make_stac_client()
+        mock_open_client.return_value = mock_stac_client
 
         result = update_stac_item(
             "https://stac.api.com/collections/test/items/test-item",
@@ -368,37 +335,38 @@ class TestUpdateStacItem:
 
     @patch("update_stac_storage_tier.httpx.Client")
     @patch("update_stac_storage_tier.update_item_storage_tiers")
-    @patch("update_stac_storage_tier.Client")
-    def test_exists_check_error_falls_back_to_post_and_logs(
-        self, mock_client_class, mock_update_tiers, mock_httpx, stac_item_before, caplog
+    @patch("update_stac_storage_tier.stac_auth.open_client")
+    def test_put_replace_on_409(
+        self, mock_open_client, mock_update_tiers, mock_httpx, stac_item_before
     ):
-        """A transient exists-check failure takes the POST path — and says so,
-        because an existing item routed to POST surfaces as a confusing 409."""
+        """POST 409 (item exists) → single atomic PUT to the item URL; no DELETE."""
         from update_stac_storage_tier import update_stac_item
 
         self._mock_httpx(mock_httpx, stac_item_before)
         mock_update_tiers.return_value = (1, 1, 1, 0, 0, 0)
-        mock_stac_client, mock_session = self._make_stac_client(item_exists=False)
-        mock_stac_client.get_collection.side_effect = Exception("API unreachable")
-        mock_client_class.open.return_value = mock_stac_client
+        mock_stac_client, mock_session = self._make_stac_client()
+        mock_session.post.return_value = Mock(status_code=409)
+        mock_open_client.return_value = mock_stac_client
 
-        with caplog.at_level(logging.DEBUG, logger="update_stac_storage_tier"):
-            update_stac_item(
-                "https://stac.api.com/collections/test/items/test-item",
-                "https://stac.api.com",
-                "https://s3.endpoint.com",
-                dry_run=False,
-            )
+        result = update_stac_item(
+            "https://stac.api.com/collections/test/items/test-item",
+            "https://stac.api.com",
+            "https://s3.endpoint.com",
+            dry_run=False,
+        )
 
+        assert result["updated"] == 1
         mock_session.post.assert_called_once()
-        mock_session.put.assert_not_called()
-        assert "exists-check failed" in caplog.text
+        mock_session.put.assert_called_once()
+        put_call = mock_session.put.call_args
+        assert put_call.args[0] == "https://stac.api.com/collections/test/items/test-item"
+        mock_session.delete.assert_not_called()
 
     @patch("update_stac_storage_tier.httpx.Client")
     @patch("update_stac_storage_tier.update_item_storage_tiers")
-    @patch("update_stac_storage_tier.Client")
+    @patch("update_stac_storage_tier.stac_auth.open_client")
     def test_put_failure_raises(
-        self, mock_client_class, mock_update_tiers, mock_httpx, stac_item_before
+        self, mock_open_client, mock_update_tiers, mock_httpx, stac_item_before
     ):
         """A failed PUT must raise — never swallowed like the old DELETE was."""
         import requests
@@ -406,9 +374,10 @@ class TestUpdateStacItem:
 
         self._mock_httpx(mock_httpx, stac_item_before)
         mock_update_tiers.return_value = (1, 1, 1, 0, 0, 0)
-        mock_stac_client, mock_session = self._make_stac_client(item_exists=True)
+        mock_stac_client, mock_session = self._make_stac_client()
+        mock_session.post.return_value = Mock(status_code=409)
         mock_session.put.return_value.raise_for_status.side_effect = requests.HTTPError("500 Error")
-        mock_client_class.open.return_value = mock_stac_client
+        mock_open_client.return_value = mock_stac_client
 
         with pytest.raises(requests.HTTPError):
             update_stac_item(
