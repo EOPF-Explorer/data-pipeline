@@ -47,6 +47,11 @@ for _p in (str(SCRIPTS_DIR), str(OPERATOR_TOOLS)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+# STAC write enforcement (2026-07-21): prod /stac writes 401 without a bearer.
+# stac_auth is a no-op when the OIDC_* env is absent, so unauthenticated targets
+# keep working; against an enforced host, export the OIDC_* env alongside the gates.
+import stac_auth  # noqa: E402
+
 
 def _load(module_name: str, file_path: Path):
     # Reuse an already-loaded instance: replacing sys.modules[module_name] would
@@ -163,6 +168,7 @@ def api_url() -> str:
 def session() -> requests.Session:
     s = requests.Session()
     s.headers.update({"Content-Type": "application/json"})
+    s.auth = stac_auth.bearer_auth  # no-op without OIDC env
     return s
 
 
@@ -213,9 +219,8 @@ class TestPatternRReplace:
 # ---------------------------------------------------------------------------
 class TestPatternUUpsert:
     def test_upsert_creates_then_replaces(self, session, api_url, scratch_collection):
-        import pystac_client
-
-        client = pystac_client.Client.open(api_url)
+        # Same client factory as the production call sites (bearer wired when configured).
+        client = stac_auth.open_client(api_url)
         item = _make_item("probe-item-u1", scratch_collection)
         _assert_scratch(scratch_collection)
 
