@@ -50,17 +50,32 @@ all under `workspaces/devseed-staging/data-pipeline/`):
 Webhook POST on a real S3A item → workflow `eopf-samples-convert-v1-s3-qx2v2`
 SUCCEEDED, all 7 steps, ~34 min. Verified: `staged==true` on prestage
 (anti-passthrough held), item GET 200, assets under
-`…-fra/s3-olci-staging/sentinel-3-olci-l1-efr-staging/`, https gateway hrefs resolve
+`…-fra/s3-olci-staging/sentinel-3-olci-l1-efr-staging/` (prefix as of this run;
+moved to `tests-output/` by platform-deploy #342), https gateway hrefs resolve
 (`zarr.json` 200), `alternate.s3` present, `expires` stamped (+183 d), no viz links.
 
 ## Why visualization is OFF
 
-`S3_VIZ_ENABLED` defaults off. titiler `/info` on the converted store returns
-HTTP 500 `"No group found in store … prefix='tests-output/'"` — titiler resolves the
-store root under `tests-output/` while the data lives under `s3-olci-staging/`
-(store-root resolution mismatch, titiler-eopf#108). This fails before the
-swath/projection question is even reached. Flip the gate only after a titiler
-reader-open smoke test passes against a real OLCI store.
+`S3_VIZ_ENABLED` defaults off. Three layers, in dependency order (updated 2026-07-22):
+
+1. **Store location — RESOLVED, was ours not titiler's.** The deployed titiler
+   reconstructs store paths as `{TITILER_EOPF_STORE_URL}/{collection}/{item_id}.zarr`
+   under `tests-output/` and **ignores STAC asset hrefs** (known since the S1 work;
+   href-based resolution is titiler-eopf#108, a nice-to-have). Writing OLCI under
+   `s3-olci-staging/` is what made `/info` 500 with `"No group found in store …
+   prefix='tests-output/'"`. Fixed by platform-deploy #342 (output prefix →
+   `tests-output`); the pre-flip scene needs one webhook re-run.
+2. **No CRS in the store (converter gap, data-model).** The output has CF swath
+   geolocation (2-D lat/lon + `coordinates` attrs at every level) but **no
+   `grid_mapping` attribute and no CRS variable** — `ds.rio.crs` is `None`, the exact
+   S1 failure mode fixed by data-model #176/#201. Reported on data-model PR #212.
+3. **Swath tiling (open design question).** Even with a datum declared, the grid is
+   curvilinear (no affine transform); current GeoZarr readers don't tile that.
+   Either titiler gains geolocation-array reprojection or the converter emits a
+   gridded variant.
+
+Flip the gate only after a titiler reader-open smoke test passes against a real
+OLCI store.
 
 ## Operations
 
@@ -81,7 +96,8 @@ the first window, check dedup against already-registered items, re-suspend if in
 prod-shared and has **no versioning — deletes are permanent**. Before flipping
 `dry_run` to false: run a manual dry-run (`argo submit --from cronwf/…-cleanup
 -p dry_run=true -p max_items_per_run=100`), verify every candidate is confined to
-`s3-olci-staging/sentinel-3-olci-l1-efr-staging/`, then get explicit sign-off.
+`tests-output/sentinel-3-olci-l1-efr-staging/` (pre-#342 items may still reference
+`s3-olci-staging/…`), then get explicit sign-off.
 
 **Known-absent secret:** `eodc-s3-credentials` does not exist in `devseed-staging`.
 The prestage template mounts it `optional: true`, so pods start; the OLCI source is
