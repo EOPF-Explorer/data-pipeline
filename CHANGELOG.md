@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.14.0 (2026-07-22)
+
+## What's Changed
+* feat(prestage): stage S2 source zarr to OVH S3 before conversion (fixes blosc decompression failures and timeout issues) by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/344
+* feat(stac): add collection thumbnails for S1 RTC staging collections by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/369
+* feat(operator): bounded repair tool for /stac/raster corrupted item links by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/373
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.13.2...v1.14.0
+
 ## 1.13.2 (2026-07-20)
 
 ## What's Changed
