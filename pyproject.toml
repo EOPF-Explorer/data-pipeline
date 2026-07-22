@@ -34,13 +34,14 @@ dependencies = [
     "tenacity==9.1.4",
     "morecantile==7.0.3",
     "cf-xarray==0.11.3",
-    # data-model branch s1-tiling-v0.10.2 = data-model#216 (S1 RTC support, head
-    # b0d31be) merged with v0.10.2, which ships data-model#220 (concurrent-safe
-    # source caching, fixes the fsspec simplecache race behind data-pipeline#339).
-    # This branch needs BOTH: S1 registration/ingest and open_source_datatree.
-    # Chunk-alignment was split out to data-model#221, so quality/atmosphere
-    # aot/wvp ship unsharded until that lands.
-    "eopf-geozarr @ git+https://github.com/EOPF-Explorer/data-model.git@9ede8c34dfe534727e93d80e278ad4390f5656d0",
+    # Pinned by SHA (not tag) to the EOPF-Explorer mirror of data-model PR #212,
+    # which adds the Sentinel-3 OLCI L1 optimization path
+    # (eopf_geozarr.s3_olci_optimization.olci_converter.convert_olci_optimized).
+    # ⚠️ This SHA was cut from v0.10.2 BEFORE the S1-RTC work: eopf_geozarr.stac is
+    # absent, so S1-RTC breaks by design on this branch (see tests/unit/conftest.py
+    # guard + the S3-OLCI runbook). Pin by SHA only — the PR branch can be
+    # force-pushed. Re-pin only when the S1+S3 data-model merge lands.
+    "eopf-geozarr @ git+https://github.com/EOPF-Explorer/data-model.git@5ea5662361d3127e0dcb912dd56937eecd7b2a34",
     "mgrs==1.5.4",
     "requests==2.34.2",
 ]

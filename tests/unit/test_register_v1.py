@@ -21,6 +21,7 @@ from register_v1 import (  # noqa: E402
     add_expires,
     add_thumbnail_asset,
     add_visualization_links,
+    consolidate_reflectance_assets,
     resolve_exclude_ids,
     resolve_retention_days,
     upsert_item,
@@ -304,6 +305,91 @@ class TestSelTimePinsSlice:
         assert all("sel=time" not in h for h in hrefs)
 
 
+# =============================================================================
+# Sentinel-3 OLCI branches (viz gated off by default) — Task A4
+# =============================================================================
+
+S3_COLLECTION = "sentinel-3-olci-l1-efr-staging"
+
+
+def _s3_item(item_id: str = "S3A_OL_1_EFR_test") -> Item:
+    """A real pystac OLCI item (no renders) with oaNN_radiance-style data assets."""
+    item = Item(
+        id=item_id,
+        geometry=None,
+        bbox=None,
+        datetime=_dt.datetime(2026, 7, 14, tzinfo=_dt.UTC),
+        properties={},
+    )
+    href = f"s3://bucket/{item_id}.zarr/measurements"
+    for band in ("oa04_radiance", "oa06_radiance", "oa08_radiance"):
+        item.add_asset(band, Asset(href=href, roles=["data"]))
+    return item
+
+
+class TestSentinel3VisualizationGatedOff:
+    """With S3_VIZ_ENABLED off (default), OLCI items carry no xyz/tilejson/thumbnail."""
+
+    def test_no_xyz_or_tilejson_when_gate_off(self, monkeypatch):
+        monkeypatch.setattr("register_v1.S3_VIZ_ENABLED", False)
+        item = _s3_item()
+        add_visualization_links(item, RASTER_BASE, S3_COLLECTION)
+        rels = {link.rel for link in item.links}
+        assert "xyz" not in rels
+        assert "tilejson" not in rels
+
+    def test_no_thumbnail_when_gate_off(self, monkeypatch):
+        monkeypatch.setattr("register_v1.S3_VIZ_ENABLED", False)
+        item = _s3_item()
+        add_thumbnail_asset(item, RASTER_BASE, S3_COLLECTION)
+        assert "thumbnail" not in item.assets
+
+    def test_s2_links_unaffected_by_s3_branch(self, monkeypatch):
+        """The S3 elif must not alter S2's hardcoded true-color xyz (no-regression)."""
+        monkeypatch.setattr("register_v1.S3_VIZ_ENABLED", False)
+        item = _real_item()
+        add_visualization_links(item, RASTER_BASE, "sentinel-2-l2a")
+        xyz = next(link for link in item.links if link.rel == "xyz")
+        assert xyz.title == "Sentinel-2 L2A True Color"
+
+
+class TestSentinel3VisualizationGatedOn:
+    """With S3_VIZ_ENABLED on (test-only), OLCI items get oa08/oa06/oa04 links."""
+
+    def test_xyz_and_tilejson_use_olci_bands(self, monkeypatch):
+        monkeypatch.setattr("register_v1.S3_VIZ_ENABLED", True)
+        item = _s3_item()
+        add_visualization_links(item, RASTER_BASE, S3_COLLECTION)
+        xyz = next(link for link in item.links if link.rel == "xyz")
+        assert xyz.title == "Sentinel-3 OLCI False Color"
+        assert xyz.media_type == "image/png"
+        for band in ("oa08_radiance", "oa06_radiance", "oa04_radiance"):
+            assert band in xyz.href
+        assert "rescale=0%2C100" in xyz.href
+        assert any(link.rel == "tilejson" for link in item.links)
+
+    def test_thumbnail_uses_olci_bands(self, monkeypatch):
+        monkeypatch.setattr("register_v1.S3_VIZ_ENABLED", True)
+        item = _s3_item()
+        add_thumbnail_asset(item, RASTER_BASE, S3_COLLECTION)
+        thumb = item.assets["thumbnail"]
+        assert thumb.href.startswith(f"{RASTER_BASE}/collections/{S3_COLLECTION}/")
+        assert "format=png" in thumb.href
+        assert "oa08_radiance" in thumb.href
+
+
+class TestConsolidationGatedForSentinel2Only:
+    """consolidate_reflectance_assets is a no-op on OLCI assets (register gates it to S2)."""
+
+    def test_no_reflectance_asset_created_for_olci(self):
+        item = _s3_item()
+        consolidate_reflectance_assets(item, "s3://bucket/S3A_OL_1_EFR_test.zarr")
+        # OLCI has no SR_*/B* assets to fold, so no synthetic reflectance asset appears
+        # and the original radiance assets are untouched.
+        assert "reflectance" not in item.assets
+        assert set(item.assets) == {"oa04_radiance", "oa06_radiance", "oa08_radiance"}
+
+
 # === expires stamping (coordination#183, Task 2) ===
 
 
@@ -343,6 +429,14 @@ class TestAddExpires:
         add_expires(item, 183)
         add_expires(item, 183)  # re-stamp must not duplicate the extension URL
         assert item.stac_extensions.count(TIMESTAMPS_EXTENSION) == 1
+
+    def test_stamps_expires_on_sentinel3_item(self) -> None:
+        # add_expires is mission-agnostic: OLCI items must get expires (+retention)
+        # so the cleanup cron can drain them, exactly like S2/S1.
+        item = _expires_item("S3A_OL_1_EFR_test")
+        add_expires(item, 183)
+        assert "expires" in item.properties
+        assert TIMESTAMPS_EXTENSION in item.stac_extensions
 
     def test_zero_retention_is_a_noop(self) -> None:
         item = _expires_item()

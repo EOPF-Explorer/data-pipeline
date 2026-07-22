@@ -1,0 +1,321 @@
+#!/usr/bin/env python3
+"""S3 OLCI Optimized GeoZarr conversion entry point - uses OLCI-specific converter."""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import os
+import sys
+import tempfile
+from typing import Any
+from urllib.parse import urlparse
+
+import aiohttp
+import fsspec
+import zarr
+from eopf_geozarr.conversion.fs_utils import (
+    get_storage_options,
+)
+from eopf_geozarr.conversion.open_source import open_source_datatree
+from eopf_geozarr.s3_olci_optimization.olci_converter import convert_olci_optimized
+from source_url_utils import derive_item_id, resolve_zarr_url
+
+# Configure logging (set LOG_LEVEL=DEBUG for verbose output)
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
+for lib in ["botocore", "s3fs", "aiobotocore", "urllib3"]:
+    logging.getLogger(lib).setLevel(logging.WARNING)
+
+
+# === S3 OLCI Optimized Conversion Parameters ===
+
+# Default parameters for OLCI optimized conversion. spatial_chunk/compression_level/
+# enable_sharding are accepted by convert_olci_optimized as forward-compatible knobs
+# (not yet wired into encoding) — defaults track the converter's own. min_dimension IS
+# wired: it stops overview generation once a spatial dim would drop below it.
+DEFAULT_SPATIAL_CHUNK = 1024
+DEFAULT_COMPRESSION_LEVEL = 3
+DEFAULT_ENABLE_SHARDING = False
+DEFAULT_MIN_DIMENSION = 256
+DEFAULT_DASK_CLUSTER = True
+
+# Cap simultaneous aiohttp connections to the HTTPS source per pod (override via env).
+DEFAULT_SOURCE_HTTP_MAX_CONNECTIONS = 10
+
+
+# === Conversion Workflow ===
+
+
+def run_conversion(
+    source_url: str,
+    collection: str,
+    s3_output_bucket: str,
+    s3_output_prefix: str,
+    spatial_chunk: int | None = None,
+    compression_level: int | None = None,
+    enable_sharding: bool | None = None,
+    min_dimension: int | None = None,
+    use_dask_cluster: bool = DEFAULT_DASK_CLUSTER,
+    n_workers: int = 3,
+    memory_limit: str = "8GB",
+) -> str:
+    """Run S3 OLCI Optimized GeoZarr conversion workflow.
+
+    Args:
+        source_url: Source STAC item URL or direct Zarr URL
+        collection: Collection ID (for output path)
+        s3_output_bucket: S3 bucket for output
+        s3_output_prefix: S3 prefix for output
+        spatial_chunk: Override spatial chunk size (default: 1024)
+        compression_level: Compression level 1-9 (default: 3)
+        enable_sharding: Enable sharding (default: False)
+        min_dimension: Stop overview generation below this spatial size (default: 256)
+        use_dask_cluster: Use dask cluster for parallel processing
+
+    Returns:
+        Output Zarr URL (s3://...)
+    """
+    item_id = derive_item_id(source_url)
+    logger.info(f"🔄 Converting (OLCI Optimized): {item_id}")
+    logger.info(f"   Collection: {collection}")
+
+    # Resolve source: STAC item, direct Zarr URL, or a pre-staged s3:// copy
+    zarr_url = resolve_zarr_url(source_url)
+    logger.info(f"   Source: {zarr_url}")
+
+    # Apply defaults
+    spatial_chunk = spatial_chunk or DEFAULT_SPATIAL_CHUNK
+    compression_level = compression_level or DEFAULT_COMPRESSION_LEVEL
+    enable_sharding = enable_sharding if enable_sharding is not None else DEFAULT_ENABLE_SHARDING
+    min_dimension = min_dimension or DEFAULT_MIN_DIMENSION
+    use_dask_cluster = use_dask_cluster if use_dask_cluster is not None else DEFAULT_DASK_CLUSTER
+
+    logger.info(
+        f"   Parameters: chunk={spatial_chunk}, compression={compression_level}, "
+        f"sharding={enable_sharding}, min_dimension={min_dimension}, dask={use_dask_cluster}"
+    )
+
+    # Construct output path and clean existing
+    output_url = f"s3://{s3_output_bucket}/{s3_output_prefix}/{collection}/{item_id}.zarr"
+    logger.info(f"   Output: {output_url}")
+
+    try:
+        fs = fsspec.filesystem("s3", client_kwargs={"endpoint_url": os.getenv("AWS_ENDPOINT_URL")})
+        fs.rm(output_url, recursive=True)
+        logger.info("   🧹 Cleaned existing output")
+    except FileNotFoundError:
+        logger.debug("   No existing output to clean")
+    except Exception as e:
+        logger.warning(f"   ⚠️  Cleanup warning: {e}")
+
+    client = setup_dask_cluster(
+        enable_dask=use_dask_cluster, verbose=True, n_workers=n_workers, memory_limit=memory_limit
+    )
+
+    # Load input dataset
+    logger.info(f"{'   📥 Loading input dataset '}{zarr_url}")
+    storage_options = get_storage_options(str(zarr_url))
+    cache_dir: str | None = None
+    if str(zarr_url).startswith("https://"):
+        # `open_source_datatree` opens with chunks={} (the store's native chunk
+        # grid), so each on-disk zarr chunk is read by exactly one dask task —
+        # this is what actually closes the concurrent same-key read race
+        # (#339), not the `simplecache` wrapping this used to build by hand.
+        # `cache_dir` gives it an atomic (LocalStore: temp-file + rename)
+        # on-disk cache so repeated reads (e.g. building overview levels)
+        # don't re-fetch from the source; unlike the old `simplecache`, a
+        # concurrent reader can never observe a partially-written entry.
+        #
+        # `asynchronous` must be True on both the outer chain and the HTTPS
+        # target FS or aiohttp raises inside the nested cache path.
+        #
+        # Do not pass fsspec's `retries`/`backoff_factor` into HTTP storage_options: they end up
+        # on aiohttp ClientSession.request() and raise TypeError.
+        default_cache = os.path.join(tempfile.gettempdir(), "zarr-source-cache")
+        cache_dir = os.environ.get("ZARR_SOURCE_CACHE_DIR", default_cache)
+        max_conn = int(
+            os.environ.get(
+                "ZARR_SOURCE_HTTP_MAX_CONNECTIONS",
+                str(DEFAULT_SOURCE_HTTP_MAX_CONNECTIONS),
+            )
+        )
+        merged_target: dict[str, Any] = dict(storage_options) if storage_options else {}
+        merged_target["asynchronous"] = True
+        # TCPConnector must be created inside an async context (aiohttp 3.9+ /
+        # Python 3.12+ call asyncio.get_running_loop() in __init__).  Pass a
+        # custom get_client factory so the connector is built lazily, safely
+        # inside fsspec's own async path.
+        _extra_client_kwargs: dict[str, Any] = dict(merged_target.pop("client_kwargs", None) or {})
+
+        async def _get_client(**kwargs: Any) -> aiohttp.ClientSession:
+            connector = aiohttp.TCPConnector(limit=max_conn, limit_per_host=max_conn)
+            return aiohttp.ClientSession(connector=connector, **{**_extra_client_kwargs, **kwargs})
+
+        merged_target["get_client"] = _get_client
+        storage_options = merged_target
+    dt_input = open_source_datatree(
+        str(zarr_url),
+        storage_options=storage_options,
+        cache_dir=cache_dir,
+    )
+
+    try:
+        convert_olci_optimized(
+            dt_input=dt_input,
+            output_path=output_url,
+            spatial_chunk=spatial_chunk,
+            compression_level=compression_level,
+            enable_sharding=enable_sharding,
+            min_dimension=min_dimension,
+            keep_scale_offset=False,
+        )
+    finally:
+        if client is not None:
+            client.close()
+
+    logger.info(f"✅ Conversion complete → {output_url}")
+    return output_url
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point for S3 OLCI Optimized GeoZarr conversion.
+
+    Returns:
+        Exit code: 0 for success, non-zero for error
+    """
+    parser = argparse.ArgumentParser(
+        description="Convert EOPF Sentinel-3 OLCI Zarr to GeoZarr format using OLCI-optimized "
+        "converter"
+    )
+    parser.add_argument("--source-url", required=True, help="Source STAC item or Zarr URL")
+    parser.add_argument("--collection", required=True, help="Collection ID")
+    parser.add_argument("--s3-output-bucket", required=True, help="S3 bucket")
+    parser.add_argument("--s3-output-prefix", required=True, help="S3 prefix")
+    parser.add_argument(
+        "--spatial-chunk",
+        type=int,
+        default=DEFAULT_SPATIAL_CHUNK,
+        help=f"Spatial chunk size (default: {DEFAULT_SPATIAL_CHUNK})",
+    )
+    parser.add_argument(
+        "--compression-level",
+        type=int,
+        default=DEFAULT_COMPRESSION_LEVEL,
+        help=f"Compression level 1-9 (default: {DEFAULT_COMPRESSION_LEVEL})",
+    )
+    parser.add_argument(
+        "--enable-sharding",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_ENABLE_SHARDING,
+        help=f"Enable or disable sharding (default: {DEFAULT_ENABLE_SHARDING})",
+    )
+    parser.add_argument(
+        "--min-dimension",
+        type=int,
+        default=DEFAULT_MIN_DIMENSION,
+        help=f"Stop overview generation below this spatial size (default: {DEFAULT_MIN_DIMENSION})",
+    )
+    parser.add_argument(
+        "--dask-cluster",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_DASK_CLUSTER,
+        help=f"Enable or disable dask cluster (default: {DEFAULT_DASK_CLUSTER})",
+    )
+    parser.add_argument(
+        "--n-workers",
+        type=int,
+        default=3,
+        help="Number of Dask workers (default: 3)",
+    )
+    parser.add_argument(
+        "--memory-limit",
+        type=str,
+        default="8GB",
+        help="Memory limit per Dask worker (default: 8GB)",
+    )
+    args = parser.parse_args(argv)
+
+    # s3:// is the pre-staged path (prestage_source.py): it resolves through
+    # get_storage_options()'s s3fs branch and skips the HTTPS cache_dir branch
+    # above, so there is no local cache entry for concurrent readers to race
+    # on — the other half of the #339 fix.
+    if urlparse(args.source_url).scheme not in {"https", "s3"}:
+        logger.error("Error: --source-url must be an HTTPS or S3 URL, got: %r", args.source_url)
+        return 1
+
+    try:
+        run_conversion(
+            source_url=args.source_url,
+            collection=args.collection,
+            s3_output_bucket=args.s3_output_bucket,
+            s3_output_prefix=args.s3_output_prefix,
+            spatial_chunk=args.spatial_chunk,
+            compression_level=args.compression_level,
+            enable_sharding=args.enable_sharding,
+            min_dimension=args.min_dimension,
+            use_dask_cluster=args.dask_cluster,
+            n_workers=args.n_workers,
+            memory_limit=args.memory_limit,
+        )
+    except zarr.errors.GroupNotFoundError as e:
+        logger.error(f"Source dataset not found: {args.source_url} - {e}")
+        return 2
+
+    return 0
+
+
+def setup_dask_cluster(
+    enable_dask: bool, verbose: bool = False, n_workers: int = 3, memory_limit: str = "8GB"
+) -> Any | None:
+    """
+    Set up a dask cluster for parallel processing.
+
+    Parameters
+    ----------
+    enable_dask : bool
+        Whether to enable dask cluster
+    verbose : bool, default False
+        Enable verbose output
+
+    Returns
+    -------
+    dask.distributed.Client or None
+        Dask client if enabled, None otherwise
+    """
+    if not enable_dask:
+        return None
+
+    try:
+        from dask.distributed import Client
+
+        # Set up local cluster with high memory limits
+        client = Client(
+            n_workers=n_workers,
+            memory_limit=memory_limit,
+        )
+
+        if verbose:
+            logger.info(f"🚀 Dask cluster started: {str(client)}")
+            logger.info(f"   Dashboard: {client.dashboard_link}")
+            logger.info(f"   Workers: {len(client.scheduler_info()['workers'])}")
+            logger.info(f"   Memory limit per worker: {memory_limit}")
+        else:
+            logger.info("🚀 Dask cluster started for parallel processing")
+        return client
+
+    except ImportError:
+        logger.error(
+            "dask.distributed not available. Install with: pip install 'dask[distributed]'"
+        )
+        sys.exit(1)
+    except Exception as e:
+        logger.error("Error starting dask cluster: %s", e)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
