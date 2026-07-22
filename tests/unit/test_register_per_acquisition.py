@@ -12,12 +12,16 @@ import datetime as dt
 import sys
 import urllib.parse
 from pathlib import Path
+from unittest.mock import MagicMock, Mock, patch
 
 import pystac
+import pytest
+import requests
 
 scripts_dir = Path(__file__).parent.parent.parent / "scripts"
 sys.path.insert(0, str(scripts_dir))
 
+import register_per_acquisition as rpa  # noqa: E402
 from eopf_geozarr.stac.s1_rtc import acquisition_id  # noqa: E402
 from register_per_acquisition import decorate_acquisition_item  # noqa: E402
 
@@ -181,3 +185,69 @@ def test_no_orbit_leak() -> None:
         _acq_item(), tile_id="31TCH", cube_collection=CUBE, raster_api=RASTER, stac_api_url=STAC
     )
     assert "ascending" not in urllib.parse.unquote(str(d["links"]))
+
+
+# ---------------------------------------------------------------------------
+# _upsert_items write pattern (#352): POST, on 409 a single PUT — never DELETE
+# ---------------------------------------------------------------------------
+
+
+def _write_client(base_url: str = STAC) -> MagicMock:
+    client = MagicMock()
+    client.self_href = base_url
+    return client
+
+
+def _resp(status_code: int) -> Mock:
+    resp = Mock(spec=requests.Response)
+    resp.status_code = status_code
+    if status_code >= 400:
+        resp.raise_for_status.side_effect = requests.HTTPError(
+            f"{status_code} Error", response=resp
+        )
+    else:
+        resp.raise_for_status.return_value = None
+    return resp
+
+
+_ITEM = {"id": "s1-rtc-31TCH-20260605t060907", "properties": {"datetime": "2026-06-05T06:09:07Z"}}
+
+
+class TestUpsertItemsWritePattern:
+    def test_post_only_when_new(self):
+        client = _write_client()
+        client._stac_io.session.post.return_value = _resp(201)
+        with patch("register_per_acquisition.stac_auth.open_client", return_value=client):
+            rpa._upsert_items(STAC, ACQ, [_ITEM])
+
+        session = client._stac_io.session
+        session.post.assert_called_once()
+        assert session.post.call_args.args[0] == f"{STAC}/collections/{ACQ}/items"
+        assert session.post.call_args.kwargs["json"] == _ITEM
+        session.put.assert_not_called()
+        session.delete.assert_not_called()
+
+    def test_409_triggers_put_replace_never_delete(self):
+        client = _write_client()
+        client._stac_io.session.post.return_value = _resp(409)
+        client._stac_io.session.put.return_value = _resp(200)
+        with patch("register_per_acquisition.stac_auth.open_client", return_value=client):
+            rpa._upsert_items(STAC, ACQ, [_ITEM])
+
+        session = client._stac_io.session
+        session.put.assert_called_once()
+        assert session.put.call_args.args[0] == f"{STAC}/collections/{ACQ}/items/{_ITEM['id']}"
+        assert session.put.call_args.kwargs["json"] == _ITEM
+        session.delete.assert_not_called()
+
+    def test_put_failure_raises(self):
+        client = _write_client()
+        client._stac_io.session.post.return_value = _resp(409)
+        client._stac_io.session.put.return_value = _resp(500)
+        with (
+            patch("register_per_acquisition.stac_auth.open_client", return_value=client),
+            pytest.raises(requests.HTTPError),
+        ):
+            rpa._upsert_items(STAC, ACQ, [_ITEM])
+
+        client._stac_io.session.delete.assert_not_called()

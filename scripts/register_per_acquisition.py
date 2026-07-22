@@ -197,11 +197,12 @@ def existing_item_ids(stac_api_url: str, collection: str, candidate_ids: list[st
 
 
 def _upsert_items(stac_api_url: str, collection: str, items: list[dict]) -> None:
-    """Unconditional DELETE-then-POST each item (pgstac has no item PUT).
+    """Register each item: POST, and on 409 (item exists) PUT to replace.
 
-    register_v1.upsert_item achieves the same update semantics but reactively — it POSTs
-    first and only DELETE-then-re-POSTs on a 409. Here the caller already filters out
-    already-registered ids (incremental skip in main), so an unconditional delete is fine.
+    Same shape as register_v1.upsert_item — no exists pre-check (#186) and no DELETE,
+    so no code path can leave an item deleted-but-not-recreated (#352). The caller's
+    incremental skip makes the 409 leg rare (a re-run racing a just-registered id),
+    not impossible.
     """
     client = stac_auth.open_client(stac_api_url)
     io = client._stac_io
@@ -209,8 +210,11 @@ def _upsert_items(stac_api_url: str, collection: str, items: list[dict]) -> None
     base = str(client.self_href).rstrip("/")
     for item in items:
         item_id = item["id"]
-        io.session.delete(f"{base}/collections/{collection}/items/{item_id}", timeout=30)
         resp = io.session.post(f"{base}/collections/{collection}/items", json=item, timeout=30)
+        if resp.status_code == 409:
+            resp = io.session.put(
+                f"{base}/collections/{collection}/items/{item_id}", json=item, timeout=30
+            )
         resp.raise_for_status()
         print(f"registered {item_id} (datetime {item['properties']['datetime']})")
 
