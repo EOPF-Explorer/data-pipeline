@@ -26,7 +26,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 import requests
 
@@ -136,14 +136,14 @@ class RepairRun:
         self.truncated = False
         self._backup_path: Path | None = None
         self._results_path: Path | None = None
-        self._backup_fh = None
+        self._backup_fh: TextIO | None = None
 
     def item_url(self, item_id: str) -> str:
         return f"{self.api_url}/collections/{self.collection}/items/{item_id}"
 
-    def _open_backup(self) -> None:
+    def _open_backup(self) -> TextIO:
         if self._backup_fh is not None:
-            return
+            return self._backup_fh
         self.backup_dir.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
         self._backup_path = self.backup_dir / f"raster-link-repair-{self.collection}-{stamp}.jsonl"
@@ -152,16 +152,19 @@ class RepairRun:
             self._backup_path, "a", encoding="utf-8"
         )
         logger.info("Backups: %s", self._backup_path.resolve())
+        return self._backup_fh
 
     def _backup(self, item: dict[str, Any]) -> None:
         """Append the pre-write doc and fsync BEFORE any write goes out."""
-        self._open_backup()
+        backup_fh = self._open_backup()
         line = json.dumps({"collection": self.collection, "id": item["id"], "item": item})
-        self._backup_fh.write(line + "\n")
-        self._backup_fh.flush()
-        os.fsync(self._backup_fh.fileno())
+        backup_fh.write(line + "\n")
+        backup_fh.flush()
+        os.fsync(backup_fh.fileno())
 
     def _record_result(self, item_id: str, updated_after: str | None) -> None:
+        if self._results_path is None:
+            raise RuntimeError("_record_result called before any backup was written")
         with open(self._results_path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps({"id": item_id, "updated_after": updated_after}) + "\n")
             fh.flush()
