@@ -15,8 +15,12 @@ This branch (`feat/s3-olci-pipeline`) builds a **dedicated S3-only RC image**:
 - The eopf-geozarr pin `5ea5662` (data-model OLCI PR #212) provides
   `s3_olci_optimization.olci_converter` but **drops the `eopf_geozarr.stac` package**
   (S1-RTC support). No data-model ref has both (checked all branches 2026-07-21).
-- Consequence: 10 S1-RTC tests fail on this branch **by design**. Do not skip them to
-  fake green. S1 keeps running on main's image.
+- Consequence: the S1-RTC test surface cannot run on this branch **by design**. A
+  guard in `tests/unit/conftest.py` excludes those modules from collection (they
+  would abort the whole suite at import) and skips two S1-only cases with an
+  explicit reason — the exclusion is loud and documented, not hidden, and
+  auto-reactivates once `eopf_geozarr.stac` returns. S1 keeps running on main's
+  image.
 - Eventual path (user-driven): merge S1 + S3 data-model into main, then re-pin.
 - data-pipeline PR #370 is **DRAFT / do-not-merge** for this reason; the image is built
   from the tag, not the PR.
@@ -116,7 +120,7 @@ EODC's public STAC (mirrors S2). Re-check on the first cron-driven prestage run.
 
 - Run tests with `uv run pytest` (repo convention; `.venv/bin/python -m pytest` is
   an equivalent fallback if `uv run` resolves a broken system interpreter locally).
-  Expected on this branch: full suite green except the 10 by-design S1-RTC
-  failures; a conftest guard keeps collection alive.
+  Expected on this branch: full suite green, with the S1-RTC surface excluded /
+  skipped by the conftest guard (see "Image / branch model" above).
 - `make typecheck` shows ~74 pre-existing errors (unpinned venv mypy); the CI gate
   is pre-commit mypy 1.11.2, which passes.
