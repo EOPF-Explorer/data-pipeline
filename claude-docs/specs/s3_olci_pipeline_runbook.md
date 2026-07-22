@@ -105,8 +105,9 @@ EODC's public STAC (mirrors S2). Re-check on the first cron-driven prestage run.
 
 ## Dev environment quirks
 
-- Run tests with `.venv/bin/python -m pytest` (not `uv run pytest` — broken x86
-  system Python on this machine). Expected on this branch: full suite green except
-  the 10 by-design S1-RTC failures; a conftest guard keeps collection alive.
+- Run tests with `uv run pytest` (repo convention; `.venv/bin/python -m pytest` is
+  an equivalent fallback if `uv run` resolves a broken system interpreter locally).
+  Expected on this branch: full suite green except the 10 by-design S1-RTC
+  failures; a conftest guard keeps collection alive.
 - `make typecheck` shows ~74 pre-existing errors (unpinned venv mypy); the CI gate
   is pre-commit mypy 1.11.2, which passes.

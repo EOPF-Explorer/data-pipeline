@@ -40,6 +40,13 @@ def _run_with_mocks(mock_client, convert_side_effect=None, **arg_overrides):
     mock_fs.rm.side_effect = FileNotFoundError  # no existing output to clean
     output_url = None
 
+    # Swallow the injected error ONLY when a caller deliberately makes the converter
+    # raise (those tests assert on close() separately); otherwise let unexpected
+    # exceptions propagate so real regressions fail loudly instead of passing silently.
+    maybe_suppress = (
+        contextlib.suppress(Exception) if convert_side_effect else contextlib.nullcontext()
+    )
+
     with (
         patch.object(convert_v1_s3, "resolve_zarr_url", return_value="s3://bucket/scene.zarr"),
         patch.object(convert_v1_s3, "setup_dask_cluster", return_value=mock_client),
@@ -47,7 +54,7 @@ def _run_with_mocks(mock_client, convert_side_effect=None, **arg_overrides):
         patch.object(convert_v1_s3, "convert_olci_optimized", mock_convert),
         patch("fsspec.filesystem", return_value=mock_fs),
         patch.object(convert_v1_s3, "open_source_datatree", return_value=MagicMock()),
-        contextlib.suppress(Exception),  # callers that inject side_effect check close() separately
+        maybe_suppress,
     ):
         output_url = run_conversion(**{**_BASE_ARGS, **arg_overrides})
 

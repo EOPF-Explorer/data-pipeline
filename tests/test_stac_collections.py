@@ -157,3 +157,27 @@ def test_pre_aggregation_links_are_last(filename: str) -> None:
     """
     rels = [link["rel"] for link in _load(filename)["links"]]
     assert rels[-2:] == ["pre-aggregation", "pre-aggregation"]
+
+
+# --- Sentinel-3 OLCI L1 EFR staging collection (S3-OLCI pipeline) ------------
+
+
+def test_s3_olci_collection_valid() -> None:
+    """The S3 OLCI collection definition must load as a valid pystac Collection."""
+    col_path = STAC_DIR / "sentinel-3-olci-l1-efr-staging.json"
+    assert col_path.exists(), f"Collection file not found: {col_path}"
+
+    col = pystac.Collection.from_file(str(col_path))
+
+    assert col.id == "sentinel-3-olci-l1-efr-staging"
+    assert col.extent.temporal.intervals[0][0] is not None
+
+    # Single multiscale radiance asset carrying all 21 Oa bands.
+    item_assets = col.extra_fields.get("item_assets", {})
+    assert set(item_assets.keys()) == {"measurements"}
+    assert len(item_assets["measurements"]["bands"]) == 21
+
+    # Deliberately NOT a datacube: OLCI L1 EFR is swath data with no native CRS,
+    # so the datacube extension / cube:dimensions must stay absent.
+    assert not any("datacube" in ext for ext in col.stac_extensions)
+    assert "cube:dimensions" not in json.dumps(col.to_dict())

@@ -108,7 +108,7 @@ def run_conversion(
         fs.rm(output_url, recursive=True)
         logger.info("   🧹 Cleaned existing output")
     except FileNotFoundError:
-        pass
+        logger.debug("   No existing output to clean")
     except Exception as e:
         logger.warning(f"   ⚠️  Cleanup warning: {e}")
 

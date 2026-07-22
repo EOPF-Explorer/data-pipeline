@@ -24,7 +24,9 @@ import stac_auth  # noqa: E402
 _S1_SUPPORT = importlib.util.find_spec("eopf_geozarr.stac") is not None
 
 if not _S1_SUPPORT:
-    # Paths are relative to this conftest's directory (tests/unit/).
+    # collect_ignore_glob is a pytest hook VARIABLE consumed by pytest during collection
+    # (not dead code, despite what static analyzers report). Paths are relative to this
+    # conftest's directory (tests/unit/).
     collect_ignore_glob = [
         "*s1_rtc*",
         "test_trigger_cdse.py",
@@ -49,6 +51,7 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if any(name in item.nodeid for name in _S1_ONLY_TESTS):
             item.add_marker(skip_s1)
+
 
 OIDC_ENV = {
     "OIDC_TOKEN_URL": "https://kc.example.com/realms/eoxhub/protocol/openid-connect/token",

@@ -14,7 +14,6 @@ from pystac import Asset, Item
 scripts_dir = Path(__file__).parent.parent.parent / "scripts"
 sys.path.insert(0, str(scripts_dir))
 
-import register_v1  # noqa: E402
 from register_v1 import (  # noqa: E402
     TIMESTAMPS_EXTENSION,
     _render_to_query,
@@ -332,7 +331,7 @@ class TestSentinel3VisualizationGatedOff:
     """With S3_VIZ_ENABLED off (default), OLCI items carry no xyz/tilejson/thumbnail."""
 
     def test_no_xyz_or_tilejson_when_gate_off(self, monkeypatch):
-        monkeypatch.setattr(register_v1, "S3_VIZ_ENABLED", False)
+        monkeypatch.setattr("register_v1.S3_VIZ_ENABLED", False)
         item = _s3_item()
         add_visualization_links(item, RASTER_BASE, S3_COLLECTION)
         rels = {link.rel for link in item.links}
@@ -340,14 +339,14 @@ class TestSentinel3VisualizationGatedOff:
         assert "tilejson" not in rels
 
     def test_no_thumbnail_when_gate_off(self, monkeypatch):
-        monkeypatch.setattr(register_v1, "S3_VIZ_ENABLED", False)
+        monkeypatch.setattr("register_v1.S3_VIZ_ENABLED", False)
         item = _s3_item()
         add_thumbnail_asset(item, RASTER_BASE, S3_COLLECTION)
         assert "thumbnail" not in item.assets
 
     def test_s2_links_unaffected_by_s3_branch(self, monkeypatch):
         """The S3 elif must not alter S2's hardcoded true-color xyz (no-regression)."""
-        monkeypatch.setattr(register_v1, "S3_VIZ_ENABLED", False)
+        monkeypatch.setattr("register_v1.S3_VIZ_ENABLED", False)
         item = _real_item()
         add_visualization_links(item, RASTER_BASE, "sentinel-2-l2a")
         xyz = next(link for link in item.links if link.rel == "xyz")
@@ -358,7 +357,7 @@ class TestSentinel3VisualizationGatedOn:
     """With S3_VIZ_ENABLED on (test-only), OLCI items get oa08/oa06/oa04 links."""
 
     def test_xyz_and_tilejson_use_olci_bands(self, monkeypatch):
-        monkeypatch.setattr(register_v1, "S3_VIZ_ENABLED", True)
+        monkeypatch.setattr("register_v1.S3_VIZ_ENABLED", True)
         item = _s3_item()
         add_visualization_links(item, RASTER_BASE, S3_COLLECTION)
         xyz = next(link for link in item.links if link.rel == "xyz")
@@ -370,7 +369,7 @@ class TestSentinel3VisualizationGatedOn:
         assert any(link.rel == "tilejson" for link in item.links)
 
     def test_thumbnail_uses_olci_bands(self, monkeypatch):
-        monkeypatch.setattr(register_v1, "S3_VIZ_ENABLED", True)
+        monkeypatch.setattr("register_v1.S3_VIZ_ENABLED", True)
         item = _s3_item()
         add_thumbnail_asset(item, RASTER_BASE, S3_COLLECTION)
         thumb = item.assets["thumbnail"]
