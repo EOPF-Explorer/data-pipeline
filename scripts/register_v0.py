@@ -68,19 +68,22 @@ def upsert_item(client: Client, collection_id: str, item: Item) -> None:
     and then 409 (#186). Replacing via a single PUT (#352) means no code path can
     leave an item deleted-but-not-recreated, unlike the previous DELETE-then-POST.
     """
+    io = client._stac_io
+    assert io is not None  # noqa: S101  # nosec B101 -- pystac-client always sets this after open()
+    session = io.session
     # Use client's base URL directly (includes /stac if present)
     base_url = str(client.self_href).rstrip("/")
     item_dict = item.to_dict()
     headers = {"Content-Type": "application/json"}
 
-    resp = client._stac_io.session.post(
+    resp = session.post(
         f"{base_url}/collections/{collection_id}/items",
         json=item_dict,
         headers=headers,
         timeout=30,
     )
     if resp.status_code == 409:
-        resp = client._stac_io.session.put(
+        resp = session.put(
             f"{base_url}/collections/{collection_id}/items/{item.id}",
             json=item_dict,
             headers=headers,
