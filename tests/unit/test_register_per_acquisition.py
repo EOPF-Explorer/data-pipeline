@@ -23,7 +23,6 @@ sys.path.insert(0, str(scripts_dir))
 
 import register_per_acquisition as rpa  # noqa: E402
 from eopf_geozarr.stac.s1_rtc import acquisition_id  # noqa: E402
-from register_per_acquisition import decorate_acquisition_item  # noqa: E402
 
 CUBE = "sentinel-1-grd-rtc-staging"  # cube collection (render endpoint)
 ACQ = "sentinel-1-grd-rtc-acquisitions"  # per-acquisition collection (items go here)
@@ -86,7 +85,7 @@ def test_acquisition_id_format() -> None:
 def test_render_links_point_at_cube_endpoint_with_sel_datetime() -> None:
     """tilejson + viewer target the CUBE item's endpoint (not the acquisition item's), carry the
     composite render + sel=time={datetime}; never the acquisitions collection, no positional index."""
-    d = decorate_acquisition_item(
+    d = rpa.decorate_acquisition_item(
         _acq_item(), tile_id="31TCH", cube_collection=CUBE, raster_api=RASTER, stac_api_url=STAC
     )
     links = _links(d)
@@ -113,7 +112,7 @@ def test_render_links_point_at_cube_endpoint_with_sel_datetime() -> None:
 def test_xyz_link_shape() -> None:
     """The xyz link carries the literal {z}/{x}/{y} template (catches f-string escaping bugs),
     is image/png, ordered right after tilejson, and shares tilejson's exact query."""
-    d = decorate_acquisition_item(
+    d = rpa.decorate_acquisition_item(
         _acq_item(), tile_id="31TCH", cube_collection=CUBE, raster_api=RASTER, stac_api_url=STAC
     )
     xyz = next(lk for lk in d["links"] if lk["rel"] == "xyz")
@@ -131,7 +130,7 @@ def test_xyz_link_shape() -> None:
 def test_link_titles_and_order_match_cube_convention() -> None:
     """Acq visualization links mirror the cube (register_v1): order store→viewer→tilejson→xyz,
     viewer/xyz titled by the render composite, tilejson 'TileJSON for {id}'."""
-    d = decorate_acquisition_item(
+    d = rpa.decorate_acquisition_item(
         _acq_item(), tile_id="31TCH", cube_collection=CUBE, raster_api=RASTER, stac_api_url=STAC
     )
     rels = [lk["rel"] for lk in d["links"]]
@@ -146,7 +145,7 @@ def test_link_titles_and_order_match_cube_convention() -> None:
 def test_two_related_links_for_stac_browser_grouping() -> None:
     """Acq items carry two related links — parent cube + sibling acquisitions collection — so a rel
     group has >=2 entries and STAC Browser renders grouped 'Additional Resources' category headers."""
-    d = decorate_acquisition_item(
+    d = rpa.decorate_acquisition_item(
         _acq_item(), tile_id="31TCH", cube_collection=CUBE, raster_api=RASTER, stac_api_url=STAC
     )
     related = [lk for lk in d["links"] if lk["rel"] == "related"]
@@ -159,7 +158,7 @@ def test_two_related_links_for_stac_browser_grouping() -> None:
 
 
 def test_thumbnail_via_and_store_link_kept() -> None:
-    d = decorate_acquisition_item(
+    d = rpa.decorate_acquisition_item(
         _acq_item(), tile_id="31TCH", cube_collection=CUBE, raster_api=RASTER, stac_api_url=STAC
     )
     thumb = d["assets"]["thumbnail"]
@@ -181,7 +180,7 @@ def test_thumbnail_via_and_store_link_kept() -> None:
 
 def test_no_orbit_leak() -> None:
     """A descending item's links never reference the ascending group."""
-    d = decorate_acquisition_item(
+    d = rpa.decorate_acquisition_item(
         _acq_item(), tile_id="31TCH", cube_collection=CUBE, raster_api=RASTER, stac_api_url=STAC
     )
     assert "ascending" not in urllib.parse.unquote(str(d["links"]))
