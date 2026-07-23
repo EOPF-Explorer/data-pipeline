@@ -128,11 +128,12 @@ def rewrite_asset_hrefs(item: Item, old_base: str, new_base: str) -> None:
 
 
 def upsert_item(client: Client, collection_id: str, item: Item) -> None:
-    """Register or update a STAC item: POST, and on 409 (item exists) DELETE then re-POST.
+    """Register or update a STAC item: POST, and on 409 (item exists) PUT to replace.
 
-    pgstac has no item PUT, so updating an existing item is delete-then-recreate. Letting
-    the server report the conflict (409) is more robust than a client-side existence
-    pre-check, which can mis-read transient/conformance errors as "absent" and then 409.
+    Letting the server report the conflict (409) is more robust than a client-side
+    existence pre-check, which can mis-read transient/conformance errors as "absent"
+    and then 409 (#186). Replacing via a single PUT (#352) means no code path can
+    leave an item deleted-but-not-recreated, unlike the previous DELETE-then-POST.
     """
     io = client._stac_io
     assert io is not None  # noqa: S101  # nosec B101 -- pystac-client always sets this after open()
@@ -145,11 +146,8 @@ def upsert_item(client: Client, collection_id: str, item: Item) -> None:
     resp = session.post(create_url, json=item_dict, headers=headers, timeout=30)
 
     if resp.status_code == 409:
-        delete_url = f"{base_url}/collections/{collection_id}/items/{item.id}"
-        delete_resp = session.delete(delete_url, timeout=30)
-        delete_resp.raise_for_status()
-        logger.info(f"Deleted existing {item.id}")
-        resp = session.post(create_url, json=item_dict, headers=headers, timeout=30)
+        item_url = f"{base_url}/collections/{collection_id}/items/{item.id}"
+        resp = session.put(item_url, json=item_dict, headers=headers, timeout=30)
 
     resp.raise_for_status()
     logger.info(f"✅ Registered {item.id} (HTTP {resp.status_code})")

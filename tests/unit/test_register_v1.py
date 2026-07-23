@@ -54,9 +54,9 @@ def _make_item(item_id: str = "test-item-001") -> MagicMock:
 
 
 class TestUpsertItemNewItem:
-    """First POST succeeds (item did not exist) → no DELETE, single POST."""
+    """First POST succeeds (item did not exist) → single POST; no PUT, no DELETE."""
 
-    def test_no_delete_when_post_succeeds(self):
+    def test_no_put_or_delete_when_post_succeeds(self):
         client = _make_client()
         client._stac_io.session.post.return_value = _make_response(201)
         item = _make_item("new-item")
@@ -64,6 +64,7 @@ class TestUpsertItemNewItem:
         upsert_item(client, "my-collection", item)
 
         client._stac_io.session.delete.assert_not_called()
+        client._stac_io.session.put.assert_not_called()
         client._stac_io.session.post.assert_called_once()
         assert client._stac_io.session.post.call_args.kwargs["json"] == item.to_dict()
 
@@ -76,61 +77,67 @@ class TestUpsertItemNewItem:
         post_call = client._stac_io.session.post.call_args
         assert post_call.args[0] == "https://stac.example.com/collections/sentinel-2/items"
 
-    def test_raises_on_post_failure_without_delete(self):
-        """A non-409 POST error (e.g. 500) raises immediately and never DELETEs."""
+    def test_raises_on_post_failure_without_put(self):
+        """A non-409 POST error (e.g. 500) raises immediately — no PUT, no DELETE."""
         client = _make_client()
         client._stac_io.session.post.return_value = _make_response(500)
 
         with pytest.raises(requests.HTTPError):
             upsert_item(client, "my-collection", _make_item())
 
+        client._stac_io.session.put.assert_not_called()
         client._stac_io.session.delete.assert_not_called()
 
 
 class TestUpsertItemExistingItem:
-    """First POST returns 409 (item exists) → DELETE then re-POST. Regression for the
-    cron-wide register-stac 409 on re-registering the fixed-id cube item s1-rtc-{tile}."""
+    """First POST returns 409 (item exists) → single atomic PUT to the item URL; never
+    DELETE. Covers the idempotent-replace invariant (#352: no code path can leave the
+    item deleted-but-not-recreated) and the fixed-id re-registration regression (#186:
+    cron-wide register-stac 409 on the cube item s1-rtc-{tile})."""
 
-    def test_409_triggers_delete_then_repost(self):
+    def test_409_triggers_put_replace(self):
         client = _make_client(base_url="https://stac.example.com")
-        client._stac_io.session.post.side_effect = [_make_response(409), _make_response(201)]
-        client._stac_io.session.delete.return_value = _make_response(200)
+        client._stac_io.session.post.return_value = _make_response(409)
+        client._stac_io.session.put.return_value = _make_response(200)
         item = _make_item("existing-item")
 
         upsert_item(client, "my-collection", item)
 
-        client._stac_io.session.delete.assert_called_once_with(
-            "https://stac.example.com/collections/my-collection/items/existing-item",
-            timeout=30,
+        client._stac_io.session.post.assert_called_once()
+        client._stac_io.session.delete.assert_not_called()
+        client._stac_io.session.put.assert_called_once()
+        put_call = client._stac_io.session.put.call_args
+        assert put_call.args[0] == (
+            "https://stac.example.com/collections/my-collection/items/existing-item"
         )
-        assert client._stac_io.session.post.call_count == 2
-        for call in client._stac_io.session.post.call_args_list:
-            assert call.kwargs["json"] == item.to_dict()
+        assert put_call.kwargs["json"] == item.to_dict()
 
 
-class TestUpsertItemDeleteFailure:
-    """First POST 409, then DELETE fails → raises, and the re-POST is not attempted."""
+class TestUpsertItemPutFailure:
+    """POST 409, then PUT fails → raises; 404 (ghost id) is a real error, never a
+    silent create via re-POST."""
 
     @pytest.mark.parametrize("status_code", [403, 404, 500, 503])
-    def test_raises_on_delete_failure(self, status_code):
+    def test_raises_on_put_failure(self, status_code):
         client = _make_client()
-        client._stac_io.session.post.side_effect = [_make_response(409), _make_response(201)]
-        client._stac_io.session.delete.return_value = _make_response(status_code)
+        client._stac_io.session.post.return_value = _make_response(409)
+        client._stac_io.session.put.return_value = _make_response(status_code)
 
         with pytest.raises(requests.HTTPError):
             upsert_item(client, "my-collection", _make_item())
 
     @pytest.mark.parametrize("status_code", [403, 404, 500, 503])
-    def test_no_repost_when_delete_fails(self, status_code):
+    def test_no_repost_or_delete_when_put_fails(self, status_code):
         client = _make_client()
-        client._stac_io.session.post.side_effect = [_make_response(409), _make_response(201)]
-        client._stac_io.session.delete.return_value = _make_response(status_code)
+        client._stac_io.session.post.return_value = _make_response(409)
+        client._stac_io.session.put.return_value = _make_response(status_code)
 
         with contextlib.suppress(requests.HTTPError):
             upsert_item(client, "my-collection", _make_item())
 
-        # only the first POST (the 409) was made; no re-POST after the delete failed
+        # only the first POST (the 409) was made; no re-POST after the PUT failed
         assert client._stac_io.session.post.call_count == 1
+        client._stac_io.session.delete.assert_not_called()
 
 
 # =============================================================================
