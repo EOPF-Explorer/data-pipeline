@@ -44,8 +44,12 @@ EXPLORER_BASE = os.getenv("EXPLORER_BASE_URL", "https://explorer.eopf.copernicus
 # (/info 200) and renders real tiles. Still env-gated so the flip stays a deliberate,
 # revertible deployment step: set S3_VIZ_ENABLED=1 to add xyz/tilejson/thumbnail links.
 # Separate known gap, NOT fixed by this gate: the `viewer` link below is written
-# unconditionally and its map builds layers from tilejson without zoom params, so it stays
-# blank for OLCI until titiler can derive zoom bounds for this store.
+# unconditionally and points at the bare /viewer endpoint, which builds its own tilejson
+# URL from the UI fields only — it cannot be passed the zoom bounds, so it 500s and the map
+# renders blank for OLCI. This is an endpoint choice on our side, NOT a titiler limitation:
+# /WebMercatorQuad/map.html forwards minzoom/maxzoom through to its tilejson fetch and
+# renders fine with the same query. Fixing it means making that unconditional link
+# mission-aware; tracked separately.
 S3_VIZ_ENABLED = os.getenv("S3_VIZ_ENABLED", "").lower() in {"1", "true", "yes"}
 
 # Base level of the gridded OLCI store. The converter reprojects the swath onto a regular

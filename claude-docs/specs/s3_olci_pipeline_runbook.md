@@ -1,8 +1,11 @@
 # Sentinel-3 OLCI L1 EFR pipeline — runbook
 
 Status as of 2026-07-28: **E2E re-validated in devseed-staging on the gridded converter**
-(rc2). Crons remain **suspended**. Visualization is **verified working** and enabled via
-`S3_VIZ_ENABLED=1` in platform-deploy; the code default stays off. Staging only.
+(rc2). Crons remain **suspended**. Visualization is **verified working against a live
+store** but is **NOT yet enabled** — the deployed image is still rc2 and carries no
+`S3_VIZ_ENABLED`, so registered items currently have no viz links. Enabling it is
+**pending a platform-deploy PR** (branch `feat/s3olci-enable-viz`, sets `S3_VIZ_ENABLED=1`
+and pins rc4). The code default stays off. Staging only.
 
 Collection: `sentinel-3-olci-l1-efr-staging` on `https://api.explorer.eopf.copernicus.eu/stac`
 (⚠️ staging isolation is by the `-staging` collection-id suffix — the API **host is shared
@@ -112,9 +115,14 @@ Two gotchas worth keeping:
   `_S3_OLCI_TILEJSON_ZOOM` to the tilejson link only — they describe the tile matrix, not
   the render, and the same query is shared with `/preview` and `/tiles`.
 
-Still open: the unconditional `viewer` link builds its layers from tilejson **without**
-zoom params, so its map stays blank for OLCI until titiler can derive zoom bounds. That
-link predates this work and is not gated by `S3_VIZ_ENABLED`.
+Still open: the unconditional `viewer` link points at the bare `/viewer` endpoint, which
+builds its own tilejson URL from the UI fields only and cannot be passed zoom bounds — so
+it 500s and the map renders blank for OLCI. **This is our endpoint choice, not a titiler
+limitation:** `/WebMercatorQuad/map.html` forwards `minzoom`/`maxzoom` through to its
+tilejson fetch and renders correctly with the same query (verified 2026-07-28). Fixing it
+means making that unconditional link mission-aware. The link predates this work and is not
+gated by `S3_VIZ_ENABLED`; STAC Browser's image comes from the thumbnail asset, which does
+render.
 
 ## Operations
 

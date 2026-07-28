@@ -392,11 +392,17 @@ class TestSentinel3VisualizationGatedOn:
         -> 200. Both are required; minzoom alone still 500s.
         """
         monkeypatch.setattr("register_v1.S3_VIZ_ENABLED", True)
+        from urllib.parse import parse_qs, urlparse
+
         item = _s3_item()
         add_visualization_links(item, RASTER_BASE, S3_COLLECTION)
         tilejson = next(link for link in item.links if link.rel == "tilejson")
-        assert "minzoom=" in tilejson.href
-        assert "maxzoom=" in tilejson.href
+        params = parse_qs(urlparse(tilejson.href).query)
+        # Assert the VALUES, not just the parameter names: an empty pair renders the link
+        # a 422 (int_parsing) and an inverted pair yields a 200 whose declared zoom range
+        # is empty, so clients draw nothing. Both are silent without this.
+        minzoom, maxzoom = int(params["minzoom"][0]), int(params["maxzoom"][0])
+        assert 0 <= minzoom < maxzoom, f"degenerate zoom range {minzoom}..{maxzoom}"
 
     def test_zoom_bounds_stay_out_of_the_shared_render_query(self, monkeypatch):
         """Zoom bounds describe the tile matrix, not the render — keep them off xyz/thumbnail."""
@@ -405,9 +411,11 @@ class TestSentinel3VisualizationGatedOn:
         add_visualization_links(item, RASTER_BASE, S3_COLLECTION)
         add_thumbnail_asset(item, RASTER_BASE, S3_COLLECTION)
         xyz = next(link for link in item.links if link.rel == "xyz")
-        assert "minzoom=" not in xyz.href
-        assert "minzoom=" not in item.assets["thumbnail"].href
-        assert "minzoom=" not in register_v1._S3_OLCI_VIZ_QUERY
+        # Check BOTH spellings — asserting only "minzoom" let a leaked "maxzoom" through.
+        for param in ("minzoom=", "maxzoom="):
+            assert param not in xyz.href
+            assert param not in item.assets["thumbnail"].href
+            assert param not in register_v1._S3_OLCI_VIZ_QUERY
 
     def test_xyz_query_carries_rescale(self, monkeypatch):
         """Guards the wash-out fix: stripping rescale must fail the suite."""
