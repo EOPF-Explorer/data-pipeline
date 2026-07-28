@@ -14,6 +14,7 @@ from pystac import Asset, Item
 scripts_dir = Path(__file__).parent.parent.parent / "scripts"
 sys.path.insert(0, str(scripts_dir))
 
+import register_v1  # noqa: E402
 from register_v1 import (  # noqa: E402
     TIMESTAMPS_EXTENSION,
     _render_to_query,
@@ -367,7 +368,6 @@ class TestSentinel3VisualizationGatedOn:
         for band in ("oa08_radiance", "oa06_radiance", "oa04_radiance"):
             # r0 = base level of the gridded store (data-model #212), not bare measurements
             assert f"%2Fmeasurements%2Fr0%3A{band}" in xyz.href
-        assert "rescale=0%2C100" in xyz.href
         assert any(link.rel == "tilejson" for link in item.links)
 
     def test_thumbnail_uses_olci_bands(self, monkeypatch):
@@ -390,6 +390,47 @@ class TestConsolidationGatedForSentinel2Only:
         # and the original radiance assets are untouched.
         assert "reflectance" not in item.assets
         assert set(item.assets) == {"oa04_radiance", "oa06_radiance", "oa08_radiance"}
+
+
+class TestOlciFalseColorQuery:
+    """The false-colour query must keep variables and rescales index-aligned.
+
+    titiler pairs the Nth `variables` with the Nth `rescale`, so a drift between the two
+    lists silently swaps colour channels or applies the blue stretch to the red band —
+    it renders 200 and merely looks wrong, which no HTTP check would catch.
+    """
+
+    @staticmethod
+    def _params(name: str) -> list[str]:
+        from urllib.parse import parse_qsl
+
+        return [v for k, v in parse_qsl(register_v1._S3_OLCI_VIZ_QUERY) if k == name]
+
+    def test_variables_and_rescales_are_index_aligned(self):
+        variables, rescales = self._params("variables"), self._params("rescale")
+        assert len(variables) == len(rescales) == len(register_v1._S3_OLCI_FALSE_COLOR_BANDS)
+        for (band, (lo, hi)), var, res in zip(
+            register_v1._S3_OLCI_FALSE_COLOR_BANDS, variables, rescales, strict=True
+        ):
+            assert var == f"/measurements/r0:{band}"
+            assert res == f"{lo},{hi}"
+
+    def test_rgb_order_is_oa08_oa06_oa04(self):
+        """Red=665nm, green=560nm, blue=490nm — reordering these silently recolours."""
+        assert [b for b, _ in register_v1._S3_OLCI_FALSE_COLOR_BANDS] == [
+            "oa08_radiance",
+            "oa06_radiance",
+            "oa04_radiance",
+        ]
+
+    def test_per_band_rescale_not_a_shared_range(self):
+        """A single shared range blew out 42-90% of pixels; bounds must differ per band."""
+        bounds = [b for _, b in register_v1._S3_OLCI_FALSE_COLOR_BANDS]
+        assert len(set(bounds)) == len(bounds)
+        assert "rescale=0%2C100" not in register_v1._S3_OLCI_VIZ_QUERY
+
+    def test_color_formula_present(self):
+        assert self._params("color_formula") == [register_v1._S3_OLCI_COLOR_FORMULA]
 
 
 class TestRemapOlciMeasurementPaths:

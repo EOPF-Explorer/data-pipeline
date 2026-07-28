@@ -39,11 +39,12 @@ for lib in ["botocore", "s3fs", "aiobotocore", "urllib3", "httpx", "httpcore"]:
 
 EXPLORER_BASE = os.getenv("EXPLORER_BASE_URL", "https://explorer.eopf.copernicus.eu")
 
-# Sentinel-3 OLCI visualization gate. Ships OFF. The gridded converter (data-model #212)
-# removed the two structural blockers — the store is now a regular EPSG:4326 grid with
-# per-level spatial_ref/grid_mapping — but titiler-eopf has not yet been smoke-tested
-# against it, so tile links would dead-link every item if wrong. Flip to True (or set
-# S3_VIZ_ENABLED=1) only after /info and a real tile render both succeed.
+# Sentinel-3 OLCI visualization gate. The gridded converter (data-model #212) cleared the
+# structural blockers, and rc2 verified live on 2026-07-28 that titiler opens the store
+# (/info 200) and renders real tiles. Still env-gated so the flip stays a deliberate,
+# revertible deployment step: set S3_VIZ_ENABLED=1 to add xyz/tilejson/thumbnail links.
+# Known caveat when enabled: titiler's /WebMercatorQuad/tilejson.json 500s on this
+# deployment (individual tiles are fine), so the tilejson link lands dead.
 S3_VIZ_ENABLED = os.getenv("S3_VIZ_ENABLED", "").lower() in {"1", "true", "yes"}
 
 # Base level of the gridded OLCI store. The converter reprojects the swath onto a regular
@@ -52,14 +53,40 @@ S3_VIZ_ENABLED = os.getenv("S3_VIZ_ENABLED", "").lower() in {"1", "true", "yes"}
 # swath layout the source EODC items still describe).
 _S3_OLCI_BASE_LEVEL = "r0"
 
-# OLCI false-color query: oa08 (R) / oa06 (G) / oa04 (B) radiance, rescale 0–100.
-_S3_OLCI_VIZ_QUERY = (
-    "rescale=0%2C100"
-    f"&variables=%2Fmeasurements%2F{_S3_OLCI_BASE_LEVEL}%3Aoa08_radiance"
-    f"&variables=%2Fmeasurements%2F{_S3_OLCI_BASE_LEVEL}%3Aoa06_radiance"
-    f"&variables=%2Fmeasurements%2F{_S3_OLCI_BASE_LEVEL}%3Aoa04_radiance"
-    "&bidx=1"
+# OLCI false-color composite, RGB order: oa08 (665nm) / oa06 (560nm) / oa04 (490nm).
+# Each band carries its own rescale because TOA radiance floors rise steeply towards the
+# blue (Rayleigh scattering): measured p1 is ~15 in oa08 but ~47 in oa04, so one shared
+# range cannot fix exposure and colour balance at once. Bounds are deliberately wider than
+# any single scene — they span a desert/sea scene and an ice/ocean scene, holding hi-clip
+# at 0.01% and 1.7% respectively, against 42–90% under the previous flat rescale=0,100.
+# Keep the band and its bounds in one tuple so the two can never drift out of order.
+_S3_OLCI_FALSE_COLOR_BANDS = (
+    ("oa08_radiance", (10, 300)),
+    ("oa06_radiance", (22, 345)),
+    ("oa04_radiance", (36, 390)),
 )
+
+# Same curve the S2 branch uses. Over a range this wide a linear stretch renders flat and
+# dark; the sigmoidal recovers midtone contrast without clipping the bright end.
+_S3_OLCI_COLOR_FORMULA = "gamma rgb 1.3, sigmoidal rgb 6 0.1, saturation 1.2"
+
+
+def _build_s3_olci_viz_query() -> str:
+    """Build the OLCI false-colour query — variables and rescales stay index-aligned."""
+    quote = urllib.parse.quote
+    parts = [
+        f"variables={quote(f'/measurements/{_S3_OLCI_BASE_LEVEL}:{band}', safe='')}"
+        for band, _ in _S3_OLCI_FALSE_COLOR_BANDS
+    ]
+    parts += [
+        f"rescale={quote(f'{lo},{hi}', safe='')}" for _, (lo, hi) in _S3_OLCI_FALSE_COLOR_BANDS
+    ]
+    parts.append(f"color_formula={quote(_S3_OLCI_COLOR_FORMULA, safe='')}")
+    parts.append("bidx=1")
+    return "&".join(parts)
+
+
+_S3_OLCI_VIZ_QUERY = _build_s3_olci_viz_query()
 
 
 # === Utilities ===
