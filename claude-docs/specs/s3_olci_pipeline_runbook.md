@@ -12,9 +12,12 @@ with prod**, and the `-fra` bucket is shared too; collection scoping is the only
 This branch (`feat/s3-olci-pipeline`) builds a **dedicated S3-only RC image**:
 `data-pipeline:v1.15.0-s3olci-rc1`. It is **not mergeable to main as-is**:
 
-- The eopf-geozarr pin `5ea5662` (data-model OLCI PR #212) provides
+- The eopf-geozarr pin `547981de` (head of data-model OLCI PR #212, re-pinned
+  2026-07-28 from `5ea5662` to pick up the gridded converter) provides
   `s3_olci_optimization.olci_converter` but **drops the `eopf_geozarr.stac` package**
-  (S1-RTC support). No data-model ref has both (checked all branches 2026-07-21).
+  (S1-RTC support). No data-model ref has both (re-checked at the new head).
+  The SHA lives on the contributor fork but resolves from the EOPF-Explorer URL via
+  `refs/pull/212/head`, which GitHub keeps on the base repo while the PR is open.
 - Consequence: the S1-RTC test surface cannot run on this branch **by design**. A
   guard in `tests/unit/conftest.py` excludes those modules from collection (they
   would abort the whole suite at import) and skips two S1-only cases with an
@@ -33,9 +36,9 @@ data-pipeline (this repo, tag `v1.15.0-s3olci-rc1`):
 |---|---|
 | `scripts/query_stac.py` | `discover --max-items N` cap (N ≥ 1 enforced) |
 | `scripts/convert_v1_s3.py` | OLCI conversion entry point — `convert_olci_optimized`, `--min-dimension` stops overview generation |
-| `scripts/register_v1.py` | Sentinel-3 branches; viz/thumbnail links gated by `S3_VIZ_ENABLED` (default **off**) |
+| `scripts/register_v1.py` | Sentinel-3 branches; `remap_olci_measurement_paths` repoints band assets at the `r0` base level; viz/thumbnail links gated by `S3_VIZ_ENABLED` (default **off**) |
 | `scripts/s3_item_cleanup.py` | shared S3-deletion helpers used by the cleanup cron |
-| `stac/sentinel-3-olci-l1-efr-staging.json` | collection template — 21 Oa radiance bands, deliberately **not a datacube** (swath, no native CRS) |
+| `stac/sentinel-3-olci-l1-efr-staging.json` | collection template — 21 Oa radiance bands, **not a datacube**. Rationale was "swath, no native CRS"; the gridded converter removes that reason, so revisit once the rc4 E2E confirms the layout |
 
 platform-deploy (merged via #340, Flux-reconciled into `devseed-staging`,
 all under `workspaces/devseed-staging/data-pipeline/`):
@@ -69,26 +72,25 @@ moved to `tests-output/` by platform-deploy #342), https gateway hrefs resolve
    `s3-olci-staging/` is what made `/info` 500 with `"No group found in store …
    prefix='tests-output/'"`. Fixed by platform-deploy #342 (output prefix →
    `tests-output`); the pre-flip scene needs one webhook re-run.
-2. **DataTree alignment (converter gap, data-model) — current first blocker,
-   verified live 2026-07-22 after the prefix fix.** `/info` now opens the store and
-   fails with `group '/measurements/r2' is not aligned with its parents`: the
-   converter writes the base arrays + coords directly in `measurements/` with
-   `r2/r4/r8` nested beneath, so children share dim names (`rows`/`columns`) at
-   different sizes and inherit the parent's 2-D coords — xarray DataTree rejects
-   that. S2 stores avoid it by keeping every resolution in its own leaf group with
-   no arrays in the parent.
-3. **No CRS in the store (converter gap, data-model).** The output has CF swath
-   geolocation (2-D lat/lon + `coordinates` attrs at every level) but **no
-   `grid_mapping` attribute and no CRS variable** — `ds.rio.crs` is `None`, the exact
-   S1 failure mode fixed by data-model #176/#201. Will hit once alignment is fixed.
-   Reported on data-model PR #212.
-4. **Swath tiling (open design question).** Even with a datum declared, the grid is
-   curvilinear (no affine transform); current GeoZarr readers don't tile that.
-   Either titiler gains geolocation-array reprojection or the converter emits a
-   gridded variant.
+2. **DataTree alignment — FIXED upstream, not yet verified live.** `/info` used to
+   fail with `group '/measurements/r2' is not aligned with its parents`: the old
+   converter wrote base arrays + coords directly in `measurements/` with `r2/r4/r8`
+   nested beneath, so children shared dim names at different sizes and inherited the
+   parent's 2-D coords. The gridded converter (data-model #212, pinned at
+   `547981de`) gives every level its own leaf group — `measurements/r0`, `r2`, … with
+   no arrays in the parent — matching the S2 shape.
+3. **CRS in the store — FIXED upstream, not yet verified live.** Each level now
+   carries a `spatial_ref` variable with `crs_wkt`, a `grid_mapping` attribute on
+   every band, and group-level `proj:code` / `spatial:transform` / `spatial:bbox`.
+4. **Swath tiling — ANSWERED by gridding.** The converter now reprojects the
+   curvilinear swath onto a regular grid (default `EPSG:4326`, `--target-crs` to
+   override) with 1-D `x`/`y` coords and an affine transform, so a standard
+   affine-only reader can tile it. The per-pixel `latitude`/`longitude` arrays are
+   gone from `measurements/*` as a result.
 
-Flip the gate only after a titiler reader-open smoke test passes against a real
-OLCI store.
+All three converter-side blockers are addressed in the pinned SHA, but **none has
+been confirmed against a real store yet** — that is the point of the rc4 E2E re-run.
+Flip the gate only after `/info` **and** a real tile render both succeed.
 
 ## Operations
 

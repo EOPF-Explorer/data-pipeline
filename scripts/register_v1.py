@@ -39,19 +39,25 @@ for lib in ["botocore", "s3fs", "aiobotocore", "urllib3", "httpx", "httpcore"]:
 
 EXPLORER_BASE = os.getenv("EXPLORER_BASE_URL", "https://explorer.eopf.copernicus.eu")
 
-# Sentinel-3 OLCI visualization gate. Ships OFF: titiler-eopf cannot open the OLCI swath
-# store today (no `proj:` convention — affine-only readers), so any oa08/oa06/oa04 tile
-# link would dead-link every item. The links are written but suppressed until the Phase D
-# reader-open smoke test passes; flip to True (or set S3_VIZ_ENABLED=1) only then.
+# Sentinel-3 OLCI visualization gate. Ships OFF. The gridded converter (data-model #212)
+# removed the two structural blockers — the store is now a regular EPSG:4326 grid with
+# per-level spatial_ref/grid_mapping — but titiler-eopf has not yet been smoke-tested
+# against it, so tile links would dead-link every item if wrong. Flip to True (or set
+# S3_VIZ_ENABLED=1) only after /info and a real tile render both succeed.
 S3_VIZ_ENABLED = os.getenv("S3_VIZ_ENABLED", "").lower() in {"1", "true", "yes"}
 
+# Base level of the gridded OLCI store. The converter reprojects the swath onto a regular
+# grid and writes it as a multiscale pyramid: measurements/r0 (native) plus r2/r4/...
+# overviews. Bands sit under the level, not directly under measurements (unlike the flat
+# swath layout the source EODC items still describe).
+_S3_OLCI_BASE_LEVEL = "r0"
+
 # OLCI false-color query: oa08 (R) / oa06 (G) / oa04 (B) radiance, rescale 0–100.
-# Bands live directly under /measurements (no reflectance subgroup, unlike S2).
 _S3_OLCI_VIZ_QUERY = (
     "rescale=0%2C100"
-    "&variables=%2Fmeasurements%3Aoa08_radiance"
-    "&variables=%2Fmeasurements%3Aoa06_radiance"
-    "&variables=%2Fmeasurements%3Aoa04_radiance"
+    f"&variables=%2Fmeasurements%2F{_S3_OLCI_BASE_LEVEL}%3Aoa08_radiance"
+    f"&variables=%2Fmeasurements%2F{_S3_OLCI_BASE_LEVEL}%3Aoa06_radiance"
+    f"&variables=%2Fmeasurements%2F{_S3_OLCI_BASE_LEVEL}%3Aoa04_radiance"
     "&bidx=1"
 )
 
@@ -138,6 +144,39 @@ def rewrite_asset_hrefs(item: Item, old_base: str, new_base: str) -> None:
                 new_href = s3_to_https(new_href)
             logger.debug(f"  {key}: {asset.href} -> {new_href}")
             asset.href = new_href
+
+
+# Groups that sit alongside the level pyramid under measurements/ and are NOT reprojected.
+_S3_OLCI_MEASUREMENT_SIBLINGS = frozenset({"orphans"})
+
+
+def _is_olci_level(segment: str) -> bool:
+    """True for a multiscale level directory name (r0, r2, r4, ...)."""
+    return segment.startswith("r") and segment[1:].isdigit()
+
+
+def remap_olci_measurement_paths(item: Item) -> None:
+    """Repoint OLCI measurement assets at the base level of the gridded store (in place).
+
+    Source EODC items describe the flat swath layout (``measurements/<band>``). The
+    gridded converter (data-model #212) reprojects onto a regular grid and writes a
+    multiscale pyramid, so the same band now lives at ``measurements/r0/<band>``.
+    rewrite_asset_hrefs only swaps the store base, leaving the in-store path untouched —
+    without this remap every band asset would 404. Idempotent, and leaves sibling groups
+    (orphans/) and already-remapped hrefs alone.
+    """
+    marker = ".zarr/measurements"
+    for key, asset in item.assets.items():
+        if not asset.href or marker not in asset.href:
+            continue
+        base, _, suffix = asset.href.partition(marker)
+        suffix = suffix.strip("/")
+        head = suffix.split("/", 1)[0]
+        if head and (head in _S3_OLCI_MEASUREMENT_SIBLINGS or _is_olci_level(head)):
+            continue
+        new_href = "/".join(filter(None, (f"{base}{marker}", _S3_OLCI_BASE_LEVEL, suffix)))
+        logger.debug(f"  {key}: {asset.href} -> {new_href}")
+        asset.href = new_href
 
 
 # === Registration ===
@@ -934,6 +973,13 @@ def run_registration(
         rewrite_asset_hrefs(item, source_zarr_base, geozarr_url)
     else:
         logger.warning("   ⚠️  No source zarr found - assets not rewritten")
+
+    # 2.5 Sentinel-3 only: the gridded converter nests bands one level deeper than the
+    #     source item describes (measurements/<band> -> measurements/r0/<band>). Must run
+    #     before add_alternate_s3_assets, which derives the s3:// alternates from hrefs.
+    if collection.lower().startswith(("sentinel-3", "sentinel3")):
+        remap_olci_measurement_paths(item)
+        logger.info("   🗺️  Remapped OLCI measurement assets to the r0 base level")
 
     # 3. Fix zarr asset media types and remove zipped_product source asset
     fix_zarr_asset_media_types(item)

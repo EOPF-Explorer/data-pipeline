@@ -22,6 +22,7 @@ from register_v1 import (  # noqa: E402
     add_thumbnail_asset,
     add_visualization_links,
     consolidate_reflectance_assets,
+    remap_olci_measurement_paths,
     resolve_exclude_ids,
     resolve_retention_days,
     upsert_item,
@@ -364,7 +365,8 @@ class TestSentinel3VisualizationGatedOn:
         assert xyz.title == "Sentinel-3 OLCI False Color"
         assert xyz.media_type == "image/png"
         for band in ("oa08_radiance", "oa06_radiance", "oa04_radiance"):
-            assert band in xyz.href
+            # r0 = base level of the gridded store (data-model #212), not bare measurements
+            assert f"%2Fmeasurements%2Fr0%3A{band}" in xyz.href
         assert "rescale=0%2C100" in xyz.href
         assert any(link.rel == "tilejson" for link in item.links)
 
@@ -388,6 +390,72 @@ class TestConsolidationGatedForSentinel2Only:
         # and the original radiance assets are untouched.
         assert "reflectance" not in item.assets
         assert set(item.assets) == {"oa04_radiance", "oa06_radiance", "oa08_radiance"}
+
+
+class TestRemapOlciMeasurementPaths:
+    """Band assets must follow measurements/<band> -> measurements/r0/<band>.
+
+    Source EODC items describe the flat swath layout; the gridded converter
+    (data-model #212) nests the reprojected base level under r0/. rewrite_asset_hrefs
+    only swaps the store base, so without this remap every band asset dead-links.
+    """
+
+    @staticmethod
+    def _item() -> Item:
+        item = Item(
+            id="S3A_OL_1_EFR_test",
+            geometry=None,
+            bbox=None,
+            datetime=_dt.datetime(2026, 7, 14, tzinfo=_dt.UTC),
+            properties={},
+        )
+        base = "https://s3.example.com/bucket/prefix/S3A_OL_1_EFR_test.zarr"
+        item.add_asset("radianceData", Asset(href=f"{base}/measurements", roles=["data"]))
+        item.add_asset(
+            "Oa01_radianceData",
+            Asset(href=f"{base}/measurements/oa01_radiance", roles=["data"]),
+        )
+        item.add_asset(
+            "Oa21_radianceData",
+            Asset(href=f"{base}/measurements/oa21_radiance", roles=["data"]),
+        )
+        item.add_asset("product_metadata", Asset(href=f"{base}/.zmetadata"))
+        item.add_asset("product", Asset(href="https://objects.eodc.eu/source/product.zarr"))
+        return item
+
+    def test_band_assets_move_to_r0(self):
+        item = self._item()
+        remap_olci_measurement_paths(item)
+        assert item.assets["Oa01_radianceData"].href.endswith("/measurements/r0/oa01_radiance")
+        assert item.assets["Oa21_radianceData"].href.endswith("/measurements/r0/oa21_radiance")
+
+    def test_measurements_group_asset_moves_to_r0(self):
+        item = self._item()
+        remap_olci_measurement_paths(item)
+        assert item.assets["radianceData"].href.endswith("/measurements/r0")
+
+    def test_non_measurement_assets_untouched(self):
+        item = self._item()
+        before = {k: item.assets[k].href for k in ("product_metadata", "product")}
+        remap_olci_measurement_paths(item)
+        for key, href in before.items():
+            assert item.assets[key].href == href
+
+    def test_idempotent(self):
+        """Re-registering an already-remapped item must not produce measurements/r0/r0."""
+        item = self._item()
+        remap_olci_measurement_paths(item)
+        once = {k: a.href for k, a in item.assets.items()}
+        remap_olci_measurement_paths(item)
+        assert {k: a.href for k, a in item.assets.items()} == once
+
+    def test_orphans_group_not_remapped(self):
+        """measurements/orphans/ is a sibling of r0, not a child — leave it alone."""
+        item = self._item()
+        href = "https://s3.example.com/b/p/x.zarr/measurements/orphans/oa01_radiance"
+        item.add_asset("orphans", Asset(href=href, roles=["data"]))
+        remap_olci_measurement_paths(item)
+        assert item.assets["orphans"].href == href
 
 
 # === expires stamping (coordination#183, Task 2) ===
