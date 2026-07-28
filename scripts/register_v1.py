@@ -43,8 +43,9 @@ EXPLORER_BASE = os.getenv("EXPLORER_BASE_URL", "https://explorer.eopf.copernicus
 # structural blockers, and rc2 verified live on 2026-07-28 that titiler opens the store
 # (/info 200) and renders real tiles. Still env-gated so the flip stays a deliberate,
 # revertible deployment step: set S3_VIZ_ENABLED=1 to add xyz/tilejson/thumbnail links.
-# Known caveat when enabled: titiler's /WebMercatorQuad/tilejson.json 500s on this
-# deployment (individual tiles are fine), so the tilejson link lands dead.
+# Separate known gap, NOT fixed by this gate: the `viewer` link below is written
+# unconditionally and its map builds layers from tilejson without zoom params, so it stays
+# blank for OLCI until titiler can derive zoom bounds for this store.
 S3_VIZ_ENABLED = os.getenv("S3_VIZ_ENABLED", "").lower() in {"1", "true", "yes"}
 
 # Base level of the gridded OLCI store. The converter reprojects the swath onto a regular
@@ -57,8 +58,16 @@ _S3_OLCI_BASE_LEVEL = "r0"
 # Each band carries its own rescale because TOA radiance floors rise steeply towards the
 # blue (Rayleigh scattering): measured p1 is ~15 in oa08 but ~47 in oa04, so one shared
 # range cannot fix exposure and colour balance at once. Bounds are deliberately wider than
-# any single scene — they span a desert/sea scene and an ice/ocean scene, holding hi-clip
-# at 0.01% and 1.7% respectively, against 42–90% under the previous flat rescale=0,100.
+# any single scene — they span a desert/sea scene and an ice/ocean scene:
+#   Levant    hi-clip 0.01%  lo-clip 0.00%   (stable r4 -> r2)
+#   Greenland hi-clip 1.69%  lo-clip 0.88%   at r8, rising to 1.87% / 0.99% at r4
+# against 42-90% hi-clip under the previous flat rescale=0,100. Caveat on those figures:
+# they are measured on OVERVIEW levels, whose averaging contracts the distribution tails,
+# while the query renders r0 — the Greenland trend shows they grow towards native, so
+# treat them as lower bounds (r0 is plausibly ~2%). The bright end is ice and is expected
+# to saturate. Known unmodelled regime: these are ABSOLUTE radiances, not sun-normalised
+# reflectance like the S2 query, so dark water at high solar zenith clips to black; no
+# scene in the sample covers a low-sun winter acquisition.
 # Keep the band and its bounds in one tuple so the two can never drift out of order.
 _S3_OLCI_FALSE_COLOR_BANDS = (
     ("oa08_radiance", (10, 300)),
@@ -69,6 +78,15 @@ _S3_OLCI_FALSE_COLOR_BANDS = (
 # Same curve the S2 branch uses. Over a range this wide a linear stretch renders flat and
 # dark; the sigmoidal recovers midtone contrast without clipping the bright end.
 _S3_OLCI_COLOR_FORMULA = "gamma rgb 1.3, sigmoidal rgb 6 0.1, saturation 1.2"
+
+# titiler cannot derive default zoom bounds for this store and answers /tilejson.json with
+# a 500 unless both are supplied (verified live 2026-07-28: neither param -> 500, minzoom
+# alone -> 500, both -> 200). OLCI EFR is a fixed 300 m GSD = WebMercator z9.03 at the
+# equator, so z11 leaves two levels of inspection overzoom; minzoom 0 keeps the layer
+# visible when zoomed out. These describe the tile matrix, not the render, so they belong
+# on the tilejson link alone — never folded into _S3_OLCI_VIZ_QUERY, which is shared with
+# /preview and /tiles where they are meaningless.
+_S3_OLCI_TILEJSON_ZOOM = "minzoom=0&maxzoom=11"
 
 
 def _build_s3_olci_viz_query() -> str:
@@ -413,10 +431,9 @@ def add_visualization_links(
             )
         )
     elif coll_lower.startswith(("sentinel-3", "sentinel3")) and S3_VIZ_ENABLED:
-        # S3 OLCI: false color from radiance bands (oa08/oa06/oa04). GATED OFF by default
-        # (S3_VIZ_ENABLED) — titiler can't open the swath store yet, so these would
-        # dead-link. When off, S3 falls through with no xyz/tilejson (only the bare viewer
-        # + explorer link above), matching the pre-existing OLCI behaviour.
+        # S3 OLCI: false color from radiance bands (oa08/oa06/oa04), gated by S3_VIZ_ENABLED.
+        # When off, S3 falls through with no xyz/tilejson (only the bare viewer + explorer
+        # link above), matching the pre-existing OLCI behaviour.
         item.add_link(
             Link(
                 "xyz",
@@ -428,7 +445,8 @@ def add_visualization_links(
         item.add_link(
             Link(
                 "tilejson",
-                f"{base_url}/WebMercatorQuad/tilejson.json?{_S3_OLCI_VIZ_QUERY}",
+                f"{base_url}/WebMercatorQuad/tilejson.json"
+                f"?{_S3_OLCI_VIZ_QUERY}&{_S3_OLCI_TILEJSON_ZOOM}",
                 "application/json",
                 f"TileJSON for {item.id}",
             )

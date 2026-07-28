@@ -1,7 +1,8 @@
 # Sentinel-3 OLCI L1 EFR pipeline — runbook
 
-Status as of 2026-07-21: **E2E validated in devseed-staging** (Checkpoint C green).
-Crons deployed **suspended**; visualization **gated off**. Staging only.
+Status as of 2026-07-28: **E2E re-validated in devseed-staging on the gridded converter**
+(rc2). Crons remain **suspended**. Visualization is **verified working** and enabled via
+`S3_VIZ_ENABLED=1` in platform-deploy; the code default stays off. Staging only.
 
 Collection: `sentinel-3-olci-l1-efr-staging` on `https://api.explorer.eopf.copernicus.eu/stac`
 (⚠️ staging isolation is by the `-staging` collection-id suffix — the API **host is shared
@@ -10,7 +11,7 @@ with prod**, and the `-fra` bucket is shared too; collection scoping is the only
 ## Image / branch model (read this first)
 
 This branch (`feat/s3-olci-pipeline`) builds a **dedicated S3-only RC image**:
-`data-pipeline:v1.15.0-s3olci-rc1`. It is **not mergeable to main as-is**:
+`data-pipeline:v1.15.0-s3olci-rc4`. It is **not mergeable to main as-is**:
 
 - The eopf-geozarr pin `547981de` (head of data-model OLCI PR #212, re-pinned
   2026-07-28 from `5ea5662` to pick up the gridded converter) provides
@@ -30,13 +31,13 @@ This branch (`feat/s3-olci-pipeline`) builds a **dedicated S3-only RC image**:
 
 ## Components
 
-data-pipeline (this repo, tag `v1.15.0-s3olci-rc1`):
+data-pipeline (this repo, tag `v1.15.0-s3olci-rc4`):
 
 | Piece | What |
 |---|---|
 | `scripts/query_stac.py` | `discover --max-items N` cap (N ≥ 1 enforced) |
 | `scripts/convert_v1_s3.py` | OLCI conversion entry point — `convert_olci_optimized`, `--min-dimension` stops overview generation |
-| `scripts/register_v1.py` | Sentinel-3 branches; `remap_olci_measurement_paths` repoints band assets at the `r0` base level; viz/thumbnail links gated by `S3_VIZ_ENABLED` (default **off**) |
+| `scripts/register_v1.py` | Sentinel-3 branches; `remap_olci_measurement_paths` repoints band assets at the `r0` base level; viz/thumbnail links gated by `S3_VIZ_ENABLED` (code default **off**, set to `1` in platform-deploy); tilejson link carries explicit zoom bounds |
 | `scripts/s3_item_cleanup.py` | shared S3-deletion helpers used by the cleanup cron |
 | `stac/sentinel-3-olci-l1-efr-staging.json` | collection template — 21 Oa radiance bands, **not a datacube**. Rationale was "swath, no native CRS"; the gridded converter removes that reason, so revisit once the rc4 E2E confirms the layout |
 
@@ -61,9 +62,10 @@ SUCCEEDED, all 7 steps, ~34 min. Verified: `staged==true` on prestage
 moved to `tests-output/` by platform-deploy #342), https gateway hrefs resolve
 (`zarr.json` 200), `alternate.s3` present, `expires` stamped (+183 d), no viz links.
 
-## Why visualization is OFF
+## Converter-side blockers (all resolved upstream)
 
-`S3_VIZ_ENABLED` defaults off. Three layers, in dependency order (updated 2026-07-22):
+These four gated visualization off until 2026-07-28. Kept for context on why the store
+looks the way it does; see the verification section below for current state.
 
 1. **Store location — RESOLVED, was ours not titiler's.** The deployed titiler
    reconstructs store paths as `{TITILER_EOPF_STORE_URL}/{collection}/{item_id}.zarr`
@@ -72,14 +74,14 @@ moved to `tests-output/` by platform-deploy #342), https gateway hrefs resolve
    `s3-olci-staging/` is what made `/info` 500 with `"No group found in store …
    prefix='tests-output/'"`. Fixed by platform-deploy #342 (output prefix →
    `tests-output`); the pre-flip scene needs one webhook re-run.
-2. **DataTree alignment — FIXED upstream, not yet verified live.** `/info` used to
+2. **DataTree alignment — FIXED upstream, verified live 2026-07-28.** `/info` used to
    fail with `group '/measurements/r2' is not aligned with its parents`: the old
    converter wrote base arrays + coords directly in `measurements/` with `r2/r4/r8`
    nested beneath, so children shared dim names at different sizes and inherited the
    parent's 2-D coords. The gridded converter (data-model #212, pinned at
    `547981de`) gives every level its own leaf group — `measurements/r0`, `r2`, … with
    no arrays in the parent — matching the S2 shape.
-3. **CRS in the store — FIXED upstream, not yet verified live.** Each level now
+3. **CRS in the store — FIXED upstream, verified live 2026-07-28.** Each level now
    carries a `spatial_ref` variable with `crs_wkt`, a `grid_mapping` attribute on
    every band, and group-level `proj:code` / `spatial:transform` / `spatial:bbox`.
 4. **Swath tiling — ANSWERED by gridding.** The converter now reprojects the
@@ -88,9 +90,31 @@ moved to `tests-output/` by platform-deploy #342), https gateway hrefs resolve
    affine-only reader can tile it. The per-pixel `latitude`/`longitude` arrays are
    gone from `measurements/*` as a result.
 
-All three converter-side blockers are addressed in the pinned SHA, but **none has
-been confirmed against a real store yet** — that is the point of the rc4 E2E re-run.
-Flip the gate only after `/info` **and** a real tile render both succeed.
+## Visualization — VERIFIED WORKING 2026-07-28 (rc2 E2E)
+
+All four items above were confirmed against a real store, workflow
+`eopf-explorer-convert-v1-s3-prestage-kvm8b` (Succeeded 7/7) on scene
+`S3B_OL_1_EFR____20260728T073033_…`:
+
+- `/info` → **200**, the `not aligned with its parents` error is gone; 21 bands,
+  EPSG:4326, 4717×6201, `grid_mapping=spatial_ref`.
+- `preview` and XYZ tiles → **200**, and visually confirmed as correctly georeferenced
+  natural-colour imagery (Cyprus, Levant coast, Euphrates), not a blank 200.
+- Item hrefs and their s3 alternates all land on `measurements/r0/…`.
+
+Two gotchas worth keeping:
+
+- **The variable path that works is `/measurements/r0:<band>`.** titiler's own `/info`
+  response advertises the variables as `/measurements:<band>`, but that form returns 500
+  on render. Do not "correct" `_S3_OLCI_VIZ_QUERY` to match the `/info` keys.
+- **`tilejson.json` needs explicit `minzoom`+`maxzoom`.** titiler cannot derive them for
+  this store and 500s without both (minzoom alone still 500s). `register_v1` appends
+  `_S3_OLCI_TILEJSON_ZOOM` to the tilejson link only — they describe the tile matrix, not
+  the render, and the same query is shared with `/preview` and `/tiles`.
+
+Still open: the unconditional `viewer` link builds its layers from tilejson **without**
+zoom params, so its map stays blank for OLCI until titiler can derive zoom bounds. That
+link predates this work and is not gated by `S3_VIZ_ENABLED`.
 
 ## Operations
 

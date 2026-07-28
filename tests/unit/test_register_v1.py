@@ -4,6 +4,7 @@ import contextlib
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest import mock
 from unittest.mock import MagicMock, Mock
 
 import pytest
@@ -377,7 +378,44 @@ class TestSentinel3VisualizationGatedOn:
         thumb = item.assets["thumbnail"]
         assert thumb.href.startswith(f"{RASTER_BASE}/collections/{S3_COLLECTION}/")
         assert "format=png" in thumb.href
-        assert "oa08_radiance" in thumb.href
+        # Assert the *encoded r0* form, not a bare band substring: the bare name also
+        # appears in the /measurements:<band> spelling, which renders 500.
+        for band in ("oa08_radiance", "oa06_radiance", "oa04_radiance"):
+            assert f"%2Fmeasurements%2Fr0%3A{band}" in thumb.href
+        # Without rescale the thumbnail reverts to the 42-90% wash-out.
+        assert "rescale=" in thumb.href
+
+    def test_tilejson_link_carries_explicit_zoom_bounds(self, monkeypatch):
+        """titiler 500s deriving default zooms for this store, so the link must supply them.
+
+        Verified live 2026-07-28: tilejson.json without minzoom+maxzoom -> 500, with both
+        -> 200. Both are required; minzoom alone still 500s.
+        """
+        monkeypatch.setattr("register_v1.S3_VIZ_ENABLED", True)
+        item = _s3_item()
+        add_visualization_links(item, RASTER_BASE, S3_COLLECTION)
+        tilejson = next(link for link in item.links if link.rel == "tilejson")
+        assert "minzoom=" in tilejson.href
+        assert "maxzoom=" in tilejson.href
+
+    def test_zoom_bounds_stay_out_of_the_shared_render_query(self, monkeypatch):
+        """Zoom bounds describe the tile matrix, not the render — keep them off xyz/thumbnail."""
+        monkeypatch.setattr("register_v1.S3_VIZ_ENABLED", True)
+        item = _s3_item()
+        add_visualization_links(item, RASTER_BASE, S3_COLLECTION)
+        add_thumbnail_asset(item, RASTER_BASE, S3_COLLECTION)
+        xyz = next(link for link in item.links if link.rel == "xyz")
+        assert "minzoom=" not in xyz.href
+        assert "minzoom=" not in item.assets["thumbnail"].href
+        assert "minzoom=" not in register_v1._S3_OLCI_VIZ_QUERY
+
+    def test_xyz_query_carries_rescale(self, monkeypatch):
+        """Guards the wash-out fix: stripping rescale must fail the suite."""
+        monkeypatch.setattr("register_v1.S3_VIZ_ENABLED", True)
+        item = _s3_item()
+        add_visualization_links(item, RASTER_BASE, S3_COLLECTION)
+        xyz = next(link for link in item.links if link.rel == "xyz")
+        assert xyz.href.count("rescale=") == len(register_v1._S3_OLCI_FALSE_COLOR_BANDS)
 
 
 class TestConsolidationGatedForSentinel2Only:
@@ -429,8 +467,100 @@ class TestOlciFalseColorQuery:
         assert len(set(bounds)) == len(bounds)
         assert "rescale=0%2C100" not in register_v1._S3_OLCI_VIZ_QUERY
 
+    def test_bounds_are_pinned_to_their_band(self):
+        """Pin the literals. The index-alignment test above re-derives its expectation from
+        this same tuple, so it cannot catch the bounds being swapped between bands — which
+        would apply the blue stretch to the red channel on every tile and thumbnail."""
+        assert register_v1._S3_OLCI_FALSE_COLOR_BANDS == (
+            ("oa08_radiance", (10, 300)),
+            ("oa06_radiance", (22, 345)),
+            ("oa04_radiance", (36, 390)),
+        )
+
+    def test_floors_rise_towards_the_blue(self):
+        """The physical invariant behind the per-band bounds: Rayleigh scattering lifts the
+        TOA radiance floor as wavelength drops, so oa08 < oa06 < oa04. Any future retune
+        that inverts this has almost certainly mismatched a band to its bounds."""
+        floors = [lo for _, (lo, _) in register_v1._S3_OLCI_FALSE_COLOR_BANDS]
+        assert floors == sorted(floors), f"expected ascending floors R<G<B, got {floors}"
+
     def test_color_formula_present(self):
         assert self._params("color_formula") == [register_v1._S3_OLCI_COLOR_FORMULA]
+
+
+class TestRunRegistrationOlciWiring:
+    """The remap must fire for Sentinel-3 ONLY, and before the s3 alternates are derived.
+
+    Both are load-bearing and neither is observable from remap_olci_measurement_paths in
+    isolation: widening the collection gate silently rewrites every S2 reflectance href,
+    and running the remap after add_alternate_s3_assets leaves every alternate.s3.href
+    pointing at the flat swath path that no longer exists.
+    """
+
+    @staticmethod
+    def _run(collection: str, asset_href: str) -> dict:
+        """Drive run_registration with all network and S3 side effects stubbed out.
+
+        Returns the asset href as it stood WHEN add_alternate_s3_assets was invoked, which
+        is what pins the ordering, plus the final href.
+        """
+        source = {
+            "type": "Feature",
+            "stac_version": "1.0.0",
+            "id": "SRC_ITEM",
+            "geometry": None,
+            "bbox": None,
+            "properties": {"datetime": "2026-07-28T00:00:00Z"},
+            "links": [],
+            "assets": {"data": {"href": asset_href}},
+        }
+        resp = Mock()
+        resp.json.return_value = source
+        resp.raise_for_status.return_value = None
+        http = MagicMock()
+        http.get.return_value = resp
+        http_cm = MagicMock()
+        http_cm.__enter__.return_value = http
+
+        seen: dict = {}
+
+        def capture_alternates(item, _endpoint):
+            seen["at_alternates"] = item.assets["data"].href
+
+        with (
+            mock.patch("register_v1.httpx.Client", return_value=http_cm),
+            mock.patch("register_v1.add_alternate_s3_assets", side_effect=capture_alternates),
+            mock.patch("register_v1.add_thumbnail_asset"),
+            mock.patch("register_v1.warm_thumbnail_cache"),
+            mock.patch("register_v1.add_projection_from_zarr"),
+            mock.patch("register_v1.stac_auth.open_client"),
+            mock.patch("register_v1.upsert_item"),
+            mock.patch("register_v1.resolve_retention_days", return_value=0),
+            mock.patch("register_v1.resolve_exclude_ids", return_value=set()),
+        ):
+            register_v1.run_registration(
+                "https://src/SRC_ITEM.json",
+                collection,
+                "https://api.test/stac",
+                "https://raster.test",
+                "https://s3.test",
+                "bucket",
+                "prefix",
+            )
+        return seen
+
+    def test_sentinel3_assets_are_remapped_before_alternates_are_derived(self):
+        """add_alternate_s3_assets copies hrefs, so it must see the r0 form already."""
+        seen = self._run(
+            "sentinel-3-olci-l1-efr-staging", "https://src/SRC_ITEM.zarr/measurements/oa08_radiance"
+        )
+        assert seen["at_alternates"].endswith("/measurements/r0/oa08_radiance")
+
+    def test_sentinel2_assets_are_left_alone(self):
+        """Widening the gate would rewrite every S2 band and its alternate to a dead path."""
+        seen = self._run("sentinel-2-l2a", "https://src/SRC_ITEM.zarr/measurements/reflectance/b04")
+        assert seen["at_alternates"].endswith("/measurements/reflectance/b04")
+        assert "/r0/" not in seen["at_alternates"]
 
 
 class TestRemapOlciMeasurementPaths:
