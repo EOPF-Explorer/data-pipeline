@@ -58,6 +58,23 @@ def _optional_float(value: str) -> float | None:
     return float(value)
 
 
+def _optional_int(value: str) -> int | None:
+    """argparse type for an int flag that may arrive blank.
+
+    Same reuse constraint as ``_optional_float``: a shared WorkflowTemplate cannot omit an
+    arg, only pass it empty. Treat empty/whitespace as ``None`` (cap disabled); otherwise
+    parse as an int.
+    """
+    if value.strip() == "":
+        return None
+    n = int(value)
+    if n < 1:
+        # A safety cap that silently inverts is worse than none: --max-items -5 would slice
+        # items[:-5] (keeping the OLDEST, dropping the 5 newest) and 0 would empty the queue.
+        raise argparse.ArgumentTypeError(f"--max-items must be >= 1, got {n}")
+    return n
+
+
 def _validate_bbox(bbox: object) -> None:
     """Raise SystemExit if bbox is not a list of exactly 4 floats."""
     if not isinstance(bbox, list) or len(bbox) != 4:
@@ -259,6 +276,14 @@ def discover(args: argparse.Namespace) -> None:
     # items lacking a datetime sort last.
     items_to_process.sort(key=_acquisition_sort_key, reverse=True)
 
+    # Tool-native cap: a cron must be able to bound its own run size (operating rule —
+    # limits live inside the tool, not an external watcher). Truncate to the N newest here,
+    # AFTER the sort and BEFORE count/num_batches, so the fan-out reflects the cap. Omitted
+    # or blank ⇒ no cap (backward compatible).
+    if args.max_items is not None:
+        items_to_process = items_to_process[: args.max_items]
+        logger.info(f"🔢 Capped to the {len(items_to_process)} newest (--max-items={args.max_items})")
+
     # Write the full list as files: items.json becomes an Argo output artifact; count
     # and num_batches drive the workflow's batch fan-out. Nothing large goes to stdout,
     # so we never hit Argo's ~256 KB result cap regardless of how many items match.
@@ -313,6 +338,13 @@ def main() -> None:
         default=None,
         help="Optical filter: keep only items with eo:cloud_cover strictly below this "
         "percentage, in (0, 100]. Omit or pass blank for no cloud-cover filter (default).",
+    )
+    d.add_argument(
+        "--max-items",
+        type=_optional_int,
+        default=None,
+        help="Cap the queue at the N newest items after the newest-first sort. Omit or pass "
+        "blank for no cap (default). Bounds a cron run from inside the tool.",
     )
     d.set_defaults(func=discover)
 

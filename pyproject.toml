@@ -34,13 +34,24 @@ dependencies = [
     "tenacity==9.1.4",
     "morecantile==7.0.3",
     "cf-xarray==0.11.3",
-    # data-model branch s1-tiling-v0.10.2 = data-model#216 (S1 RTC support, head
-    # b0d31be) merged with v0.10.2, which ships data-model#220 (concurrent-safe
-    # source caching, fixes the fsspec simplecache race behind data-pipeline#339).
-    # This branch needs BOTH: S1 registration/ingest and open_source_datatree.
-    # Chunk-alignment was split out to data-model#221, so quality/atmosphere
-    # aot/wvp ship unsharded until that lands.
-    "eopf-geozarr @ git+https://github.com/EOPF-Explorer/data-model.git@9ede8c34dfe534727e93d80e278ad4390f5656d0",
+    # Pinned by SHA (not tag) to the head of data-model PR #212, which adds the
+    # Sentinel-3 OLCI L1 optimization path
+    # (eopf_geozarr.s3_olci_optimization.olci_converter.convert_olci_optimized).
+    # The commit lives on the contributor fork (d-v-b/data-model), but GitHub keeps
+    # it as refs/pull/212/head on the EOPF-Explorer base repo, so this URL resolves
+    # for as long as the PR is open. Pin by SHA only — the branch gets force-pushed.
+    # ⚠️ The converter's grid parameter is `output_grid` (renamed from `target_crs` at
+    # e8236b0d) and its default is "native" — the instrument swath, with no CRS, which
+    # titiler cannot tile. scripts/convert_v1_s3.py pins EPSG:4326 explicitly; never rely
+    # on the library default here. tests/unit/test_eopf_geozarr_contract.py snapshots the
+    # signature and the output shape so the next change of this kind fails loudly.
+    # f9567fb1 additionally fixes overview edge-alignment (levels now share r0's origin;
+    # before, level l was off by (2^l-1)/2 base pixels) and unpacks CF-packed geolocation
+    # before warping. Stores written by rc2-rc5 carry the misaligned overview metadata.
+    # ⚠️ Still cut from a v0.10.2 base that predates the S1-RTC work: eopf_geozarr.stac
+    # is absent (re-verified at f9567fb1), so S1-RTC breaks by design on this branch (see
+    # tests/unit/conftest.py guard + the S3-OLCI runbook). Re-pin when S1+S3 merge lands.
+    "eopf-geozarr @ git+https://github.com/EOPF-Explorer/data-model.git@f9567fb10d7867cf9d3500f5e528b06e9cbfe35f",
     "mgrs==1.5.4",
     "requests==2.34.2",
 ]

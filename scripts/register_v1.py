@@ -39,6 +39,84 @@ for lib in ["botocore", "s3fs", "aiobotocore", "urllib3", "httpx", "httpcore"]:
 
 EXPLORER_BASE = os.getenv("EXPLORER_BASE_URL", "https://explorer.eopf.copernicus.eu")
 
+# Sentinel-3 OLCI visualization gate. The gridded converter (data-model #212) cleared the
+# structural blockers, and rc2 verified live on 2026-07-28 that titiler opens the store
+# (/info 200) and renders real tiles. Still env-gated so the flip stays a deliberate,
+# revertible deployment step: set S3_VIZ_ENABLED=1 to add xyz/tilejson/thumbnail links.
+# ⚠️ Those blockers are cleared only for stores written with a PROJECTED grid, which
+# scripts/convert_v1_s3.py requests explicitly (output_grid=EPSG:4326). The converter's own
+# default is "native": the instrument swath, no CRS, untileable. Everything below assumes
+# the projected output; enabling this gate over native stores publishes dead tile links.
+# Separate known gap, NOT fixed by this gate: the `viewer` link below is written
+# unconditionally and points at the bare /viewer endpoint, which builds its own tilejson
+# URL from the UI fields only — it cannot be passed the zoom bounds, so it 500s and the map
+# renders blank for OLCI. This is an endpoint choice on our side, NOT a titiler limitation:
+# /WebMercatorQuad/map.html forwards minzoom/maxzoom through to its tilejson fetch and
+# renders fine with the same query. Fixing it means making that unconditional link
+# mission-aware; tracked separately.
+S3_VIZ_ENABLED = os.getenv("S3_VIZ_ENABLED", "").lower() in {"1", "true", "yes"}
+
+# Base level of the OLCI multiscale pyramid: measurements/r0 (native resolution) plus
+# r2/r4/... overview siblings. Bands sit under the level, not directly under measurements
+# (unlike the flat swath layout the source EODC items still describe).
+# The pyramid layout is written in BOTH grid modes, so this constant and the remap below
+# are grid-agnostic — only the CRS and the coordinate variables differ between them.
+_S3_OLCI_BASE_LEVEL = "r0"
+
+# OLCI false-color composite, RGB order: oa08 (665nm) / oa06 (560nm) / oa04 (490nm).
+# Each band carries its own rescale because TOA radiance floors rise steeply towards the
+# blue (Rayleigh scattering): measured p1 is ~15 in oa08 but ~47 in oa04, so one shared
+# range cannot fix exposure and colour balance at once. Bounds are deliberately wider than
+# any single scene — they span a desert/sea scene and an ice/ocean scene:
+#   Levant    hi-clip 0.01%  lo-clip 0.00%   (stable r4 -> r2)
+#   Greenland hi-clip 1.69%  lo-clip 0.88%   at r8, rising to 1.87% / 0.99% at r4
+# against 42-90% hi-clip under the previous flat rescale=0,100. Caveat on those figures:
+# they are measured on OVERVIEW levels, whose averaging contracts the distribution tails,
+# while the query renders r0 — the Greenland trend shows they grow towards native, so
+# treat them as lower bounds (r0 is plausibly ~2%). The bright end is ice and is expected
+# to saturate. Known unmodelled regime: these are ABSOLUTE radiances, not sun-normalised
+# reflectance like the S2 query, so dark water at high solar zenith clips to black; no
+# scene in the sample covers a low-sun winter acquisition.
+# Keep the band and its bounds in one tuple so the two can never drift out of order.
+_S3_OLCI_FALSE_COLOR_BANDS = (
+    ("oa08_radiance", (10, 300)),
+    ("oa06_radiance", (22, 345)),
+    ("oa04_radiance", (36, 390)),
+)
+
+# Same curve the S2 branch uses. Over a range this wide a linear stretch renders flat and
+# dark; the sigmoidal recovers midtone contrast without clipping the bright end.
+_S3_OLCI_COLOR_FORMULA = "gamma rgb 1.3, sigmoidal rgb 6 0.1, saturation 1.2"
+
+# titiler cannot derive default zoom bounds for this projected store and answers
+# /tilejson.json with a 500 unless both are supplied (verified live 2026-07-28: neither
+# param -> 500, minzoom alone -> 500, both -> 200). OLCI EFR is a fixed 300 m GSD, which
+# is WebMercator z9.03 in a 256 px tile matrix (z8.03 in the 512 px one the tilejson
+# response actually advertises), so maxzoom 11 leaves two to three levels of inspection
+# overzoom; minzoom 0 keeps the layer visible when zoomed out, at the cost of titiler
+# publishing a TileJSON `center` zoom of 0. These describe the tile matrix, not the render,
+# so they belong on the tilejson link alone — never folded into _S3_OLCI_VIZ_QUERY, which
+# is shared with /preview and /tiles where they are meaningless.
+_S3_OLCI_TILEJSON_ZOOM = "minzoom=0&maxzoom=11"
+
+
+def _build_s3_olci_viz_query() -> str:
+    """Build the OLCI false-colour query — variables and rescales stay index-aligned."""
+    quote = urllib.parse.quote
+    parts = [
+        f"variables={quote(f'/measurements/{_S3_OLCI_BASE_LEVEL}:{band}', safe='')}"
+        for band, _ in _S3_OLCI_FALSE_COLOR_BANDS
+    ]
+    parts += [
+        f"rescale={quote(f'{lo},{hi}', safe='')}" for _, (lo, hi) in _S3_OLCI_FALSE_COLOR_BANDS
+    ]
+    parts.append(f"color_formula={quote(_S3_OLCI_COLOR_FORMULA, safe='')}")
+    parts.append("bidx=1")
+    return "&".join(parts)
+
+
+_S3_OLCI_VIZ_QUERY = _build_s3_olci_viz_query()
+
 
 # === Utilities ===
 
@@ -122,6 +200,41 @@ def rewrite_asset_hrefs(item: Item, old_base: str, new_base: str) -> None:
                 new_href = s3_to_https(new_href)
             logger.debug(f"  {key}: {asset.href} -> {new_href}")
             asset.href = new_href
+
+
+# Groups that sit alongside the level pyramid under measurements/ and are NOT multiscale
+# levels, so the remap must leave their paths alone.
+_S3_OLCI_MEASUREMENT_SIBLINGS = frozenset({"orphans"})
+
+
+def _is_olci_level(segment: str) -> bool:
+    """True for a multiscale level directory name (r0, r2, r4, ...)."""
+    return segment.startswith("r") and segment[1:].isdigit()
+
+
+def remap_olci_measurement_paths(item: Item) -> None:
+    """Repoint OLCI measurement assets at the base level of the gridded store (in place).
+
+    Source EODC items describe the flat swath layout (``measurements/<band>``). The
+    converter (data-model #212) writes a multiscale pyramid instead, so the same band now
+    lives at ``measurements/r0/<band>``. The pyramid is written in both grid modes, so this
+    remap is grid-agnostic.
+    rewrite_asset_hrefs only swaps the store base, leaving the in-store path untouched —
+    without this remap every band asset would 404. Idempotent, and leaves sibling groups
+    (orphans/) and already-remapped hrefs alone.
+    """
+    marker = ".zarr/measurements"
+    for key, asset in item.assets.items():
+        if not asset.href or marker not in asset.href:
+            continue
+        base, _, suffix = asset.href.partition(marker)
+        suffix = suffix.strip("/")
+        head = suffix.split("/", 1)[0]
+        if head and (head in _S3_OLCI_MEASUREMENT_SIBLINGS or _is_olci_level(head)):
+            continue
+        new_href = "/".join(filter(None, (f"{base}{marker}", _S3_OLCI_BASE_LEVEL, suffix)))
+        logger.debug(f"  {key}: {asset.href} -> {new_href}")
+        asset.href = new_href
 
 
 # === Registration ===
@@ -330,6 +443,27 @@ def add_visualization_links(
                 f"TileJSON for {item.id}",
             )
         )
+    elif coll_lower.startswith(("sentinel-3", "sentinel3")) and S3_VIZ_ENABLED:
+        # S3 OLCI: false color from radiance bands (oa08/oa06/oa04), gated by S3_VIZ_ENABLED.
+        # When off, S3 falls through with no xyz/tilejson (only the bare viewer + explorer
+        # link above), matching the pre-existing OLCI behaviour.
+        item.add_link(
+            Link(
+                "xyz",
+                f"{base_url}/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png?{_S3_OLCI_VIZ_QUERY}",
+                "image/png",
+                "Sentinel-3 OLCI False Color",
+            )
+        )
+        item.add_link(
+            Link(
+                "tilejson",
+                f"{base_url}/WebMercatorQuad/tilejson.json"
+                f"?{_S3_OLCI_VIZ_QUERY}&{_S3_OLCI_TILEJSON_ZOOM}",
+                "application/json",
+                f"TileJSON for {item.id}",
+            )
+        )
 
     _add_explorer_link(item, collection_id)
 
@@ -391,6 +525,14 @@ def add_thumbnail_asset(
         else:
             logger.debug("No VH asset found for S-1 thumbnail")
             return
+    elif coll_lower.startswith(("sentinel-3", "sentinel3")):
+        # S3 OLCI false-color preview — GATED OFF by default (S3_VIZ_ENABLED). When off,
+        # no thumbnail is added (avoids a dead preview until titiler can open the store).
+        if not S3_VIZ_ENABLED:
+            logger.debug("S3 OLCI thumbnail gated off (S3_VIZ_ENABLED)")
+            return
+        params = "format=png&" + _S3_OLCI_VIZ_QUERY
+        title = "Sentinel-3 OLCI False Color Preview"
     else:
         logger.debug(f"Unknown mission for thumbnail: {collection_id}")
         return
@@ -890,14 +1032,24 @@ def run_registration(
     else:
         logger.warning("   ⚠️  No source zarr found - assets not rewritten")
 
+    # 2.5 Sentinel-3 only: the gridded converter nests bands one level deeper than the
+    #     source item describes (measurements/<band> -> measurements/r0/<band>). Must run
+    #     before add_alternate_s3_assets, which derives the s3:// alternates from hrefs.
+    if collection.lower().startswith(("sentinel-3", "sentinel3")):
+        remap_olci_measurement_paths(item)
+        logger.info("   🗺️  Remapped OLCI measurement assets to the r0 base level")
+
     # 3. Fix zarr asset media types and remove zipped_product source asset
     fix_zarr_asset_media_types(item)
 
     # 4. Add store link to root Zarr location (best practice)
     add_store_link(item, geozarr_url)
 
-    # 5. Consolidate reflectance assets into single asset with bands/cube metadata
-    consolidate_reflectance_assets(item, geozarr_url)
+    # 5. Consolidate reflectance assets into single asset with bands/cube metadata.
+    #    Sentinel-2 only: it keys on S2 SR_*/B* asset names, so it silently no-ops on
+    #    OLCI radiance groups / S1 — gate it explicitly so only S2 items are touched.
+    if collection.lower().startswith(("sentinel-2", "sentinel2")):
+        consolidate_reflectance_assets(item, geozarr_url)
 
     # 6. Add projection metadata from zarr
     add_projection_from_zarr(item)

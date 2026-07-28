@@ -4,6 +4,7 @@ import contextlib
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest import mock
 from unittest.mock import MagicMock, Mock
 
 import pytest
@@ -14,6 +15,7 @@ from pystac import Asset, Item
 scripts_dir = Path(__file__).parent.parent.parent / "scripts"
 sys.path.insert(0, str(scripts_dir))
 
+import register_v1  # noqa: E402
 from register_v1 import (  # noqa: E402
     TIMESTAMPS_EXTENSION,
     _render_to_query,
@@ -21,6 +23,8 @@ from register_v1 import (  # noqa: E402
     add_expires,
     add_thumbnail_asset,
     add_visualization_links,
+    consolidate_reflectance_assets,
+    remap_olci_measurement_paths,
     resolve_exclude_ids,
     resolve_retention_days,
     upsert_item,
@@ -304,6 +308,335 @@ class TestSelTimePinsSlice:
         assert all("sel=time" not in h for h in hrefs)
 
 
+# =============================================================================
+# Sentinel-3 OLCI branches (viz gated off by default) — Task A4
+# =============================================================================
+
+S3_COLLECTION = "sentinel-3-olci-l1-efr-staging"
+
+
+def _s3_item(item_id: str = "S3A_OL_1_EFR_test") -> Item:
+    """A real pystac OLCI item (no renders) with oaNN_radiance-style data assets."""
+    item = Item(
+        id=item_id,
+        geometry=None,
+        bbox=None,
+        datetime=_dt.datetime(2026, 7, 14, tzinfo=_dt.UTC),
+        properties={},
+    )
+    href = f"s3://bucket/{item_id}.zarr/measurements"
+    for band in ("oa04_radiance", "oa06_radiance", "oa08_radiance"):
+        item.add_asset(band, Asset(href=href, roles=["data"]))
+    return item
+
+
+class TestSentinel3VisualizationGatedOff:
+    """With S3_VIZ_ENABLED off (default), OLCI items carry no xyz/tilejson/thumbnail."""
+
+    def test_no_xyz_or_tilejson_when_gate_off(self, monkeypatch):
+        monkeypatch.setattr("register_v1.S3_VIZ_ENABLED", False)
+        item = _s3_item()
+        add_visualization_links(item, RASTER_BASE, S3_COLLECTION)
+        rels = {link.rel for link in item.links}
+        assert "xyz" not in rels
+        assert "tilejson" not in rels
+
+    def test_no_thumbnail_when_gate_off(self, monkeypatch):
+        monkeypatch.setattr("register_v1.S3_VIZ_ENABLED", False)
+        item = _s3_item()
+        add_thumbnail_asset(item, RASTER_BASE, S3_COLLECTION)
+        assert "thumbnail" not in item.assets
+
+    def test_s2_links_unaffected_by_s3_branch(self, monkeypatch):
+        """The S3 elif must not alter S2's hardcoded true-color xyz (no-regression)."""
+        monkeypatch.setattr("register_v1.S3_VIZ_ENABLED", False)
+        item = _real_item()
+        add_visualization_links(item, RASTER_BASE, "sentinel-2-l2a")
+        xyz = next(link for link in item.links if link.rel == "xyz")
+        assert xyz.title == "Sentinel-2 L2A True Color"
+
+
+class TestSentinel3VisualizationGatedOn:
+    """With S3_VIZ_ENABLED on (test-only), OLCI items get oa08/oa06/oa04 links."""
+
+    def test_xyz_and_tilejson_use_olci_bands(self, monkeypatch):
+        monkeypatch.setattr("register_v1.S3_VIZ_ENABLED", True)
+        item = _s3_item()
+        add_visualization_links(item, RASTER_BASE, S3_COLLECTION)
+        xyz = next(link for link in item.links if link.rel == "xyz")
+        assert xyz.title == "Sentinel-3 OLCI False Color"
+        assert xyz.media_type == "image/png"
+        for band in ("oa08_radiance", "oa06_radiance", "oa04_radiance"):
+            # r0 = base level of the gridded store (data-model #212), not bare measurements
+            assert f"%2Fmeasurements%2Fr0%3A{band}" in xyz.href
+        assert any(link.rel == "tilejson" for link in item.links)
+
+    def test_thumbnail_uses_olci_bands(self, monkeypatch):
+        monkeypatch.setattr("register_v1.S3_VIZ_ENABLED", True)
+        item = _s3_item()
+        add_thumbnail_asset(item, RASTER_BASE, S3_COLLECTION)
+        thumb = item.assets["thumbnail"]
+        assert thumb.href.startswith(f"{RASTER_BASE}/collections/{S3_COLLECTION}/")
+        assert "format=png" in thumb.href
+        # Assert the *encoded r0* form, not a bare band substring: the bare name also
+        # appears in the /measurements:<band> spelling, which renders 500.
+        for band in ("oa08_radiance", "oa06_radiance", "oa04_radiance"):
+            assert f"%2Fmeasurements%2Fr0%3A{band}" in thumb.href
+        # Without rescale the thumbnail reverts to the 42-90% wash-out.
+        assert "rescale=" in thumb.href
+
+    def test_tilejson_link_carries_explicit_zoom_bounds(self, monkeypatch):
+        """titiler 500s deriving default zooms for this store, so the link must supply them.
+
+        Verified live 2026-07-28: tilejson.json without minzoom+maxzoom -> 500, with both
+        -> 200. Both are required; minzoom alone still 500s.
+        """
+        monkeypatch.setattr("register_v1.S3_VIZ_ENABLED", True)
+        from urllib.parse import parse_qs, urlparse
+
+        item = _s3_item()
+        add_visualization_links(item, RASTER_BASE, S3_COLLECTION)
+        tilejson = next(link for link in item.links if link.rel == "tilejson")
+        params = parse_qs(urlparse(tilejson.href).query)
+        # Assert the VALUES, not just the parameter names: an empty pair renders the link
+        # a 422 (int_parsing) and an inverted pair yields a 200 whose declared zoom range
+        # is empty, so clients draw nothing. Both are silent without this.
+        minzoom, maxzoom = int(params["minzoom"][0]), int(params["maxzoom"][0])
+        assert 0 <= minzoom < maxzoom, f"degenerate zoom range {minzoom}..{maxzoom}"
+
+    def test_zoom_bounds_stay_out_of_the_shared_render_query(self, monkeypatch):
+        """Zoom bounds describe the tile matrix, not the render — keep them off xyz/thumbnail."""
+        monkeypatch.setattr("register_v1.S3_VIZ_ENABLED", True)
+        item = _s3_item()
+        add_visualization_links(item, RASTER_BASE, S3_COLLECTION)
+        add_thumbnail_asset(item, RASTER_BASE, S3_COLLECTION)
+        xyz = next(link for link in item.links if link.rel == "xyz")
+        # Check BOTH spellings — asserting only "minzoom" let a leaked "maxzoom" through.
+        for param in ("minzoom=", "maxzoom="):
+            assert param not in xyz.href
+            assert param not in item.assets["thumbnail"].href
+            assert param not in register_v1._S3_OLCI_VIZ_QUERY
+
+    def test_xyz_query_carries_rescale(self, monkeypatch):
+        """Guards the wash-out fix: stripping rescale must fail the suite."""
+        monkeypatch.setattr("register_v1.S3_VIZ_ENABLED", True)
+        item = _s3_item()
+        add_visualization_links(item, RASTER_BASE, S3_COLLECTION)
+        xyz = next(link for link in item.links if link.rel == "xyz")
+        assert xyz.href.count("rescale=") == len(register_v1._S3_OLCI_FALSE_COLOR_BANDS)
+
+
+class TestConsolidationGatedForSentinel2Only:
+    """consolidate_reflectance_assets is a no-op on OLCI assets (register gates it to S2)."""
+
+    def test_no_reflectance_asset_created_for_olci(self):
+        item = _s3_item()
+        consolidate_reflectance_assets(item, "s3://bucket/S3A_OL_1_EFR_test.zarr")
+        # OLCI has no SR_*/B* assets to fold, so no synthetic reflectance asset appears
+        # and the original radiance assets are untouched.
+        assert "reflectance" not in item.assets
+        assert set(item.assets) == {"oa04_radiance", "oa06_radiance", "oa08_radiance"}
+
+
+class TestOlciFalseColorQuery:
+    """The false-colour query must keep variables and rescales index-aligned.
+
+    titiler pairs the Nth `variables` with the Nth `rescale`, so a drift between the two
+    lists silently swaps colour channels or applies the blue stretch to the red band —
+    it renders 200 and merely looks wrong, which no HTTP check would catch.
+    """
+
+    @staticmethod
+    def _params(name: str) -> list[str]:
+        from urllib.parse import parse_qsl
+
+        return [v for k, v in parse_qsl(register_v1._S3_OLCI_VIZ_QUERY) if k == name]
+
+    def test_variables_and_rescales_are_index_aligned(self):
+        variables, rescales = self._params("variables"), self._params("rescale")
+        assert len(variables) == len(rescales) == len(register_v1._S3_OLCI_FALSE_COLOR_BANDS)
+        for (band, (lo, hi)), var, res in zip(
+            register_v1._S3_OLCI_FALSE_COLOR_BANDS, variables, rescales, strict=True
+        ):
+            assert var == f"/measurements/r0:{band}"
+            assert res == f"{lo},{hi}"
+
+    def test_rgb_order_is_oa08_oa06_oa04(self):
+        """Red=665nm, green=560nm, blue=490nm — reordering these silently recolours."""
+        assert [b for b, _ in register_v1._S3_OLCI_FALSE_COLOR_BANDS] == [
+            "oa08_radiance",
+            "oa06_radiance",
+            "oa04_radiance",
+        ]
+
+    def test_per_band_rescale_not_a_shared_range(self):
+        """A single shared range blew out 42-90% of pixels; bounds must differ per band."""
+        bounds = [b for _, b in register_v1._S3_OLCI_FALSE_COLOR_BANDS]
+        assert len(set(bounds)) == len(bounds)
+        assert "rescale=0%2C100" not in register_v1._S3_OLCI_VIZ_QUERY
+
+    def test_bounds_are_pinned_to_their_band(self):
+        """Pin the literals. The index-alignment test above re-derives its expectation from
+        this same tuple, so it cannot catch the bounds being swapped between bands — which
+        would apply the blue stretch to the red channel on every tile and thumbnail."""
+        assert register_v1._S3_OLCI_FALSE_COLOR_BANDS == (
+            ("oa08_radiance", (10, 300)),
+            ("oa06_radiance", (22, 345)),
+            ("oa04_radiance", (36, 390)),
+        )
+
+    def test_floors_rise_towards_the_blue(self):
+        """The physical invariant behind the per-band bounds: Rayleigh scattering lifts the
+        TOA radiance floor as wavelength drops, so oa08 < oa06 < oa04. Any future retune
+        that inverts this has almost certainly mismatched a band to its bounds."""
+        floors = [lo for _, (lo, _) in register_v1._S3_OLCI_FALSE_COLOR_BANDS]
+        assert floors == sorted(floors), f"expected ascending floors R<G<B, got {floors}"
+
+    def test_color_formula_present(self):
+        assert self._params("color_formula") == [register_v1._S3_OLCI_COLOR_FORMULA]
+
+
+class TestRunRegistrationOlciWiring:
+    """The remap must fire for Sentinel-3 ONLY, and before the s3 alternates are derived.
+
+    Both are load-bearing and neither is observable from remap_olci_measurement_paths in
+    isolation: widening the collection gate silently rewrites every S2 reflectance href,
+    and running the remap after add_alternate_s3_assets leaves every alternate.s3.href
+    pointing at the flat swath path that no longer exists.
+    """
+
+    @staticmethod
+    def _run(collection: str, asset_href: str) -> dict:
+        """Drive run_registration with all network and S3 side effects stubbed out.
+
+        Returns the asset href as it stood WHEN add_alternate_s3_assets was invoked, which
+        is what pins the ordering, plus the final href.
+        """
+        source = {
+            "type": "Feature",
+            "stac_version": "1.0.0",
+            "id": "SRC_ITEM",
+            "geometry": None,
+            "bbox": None,
+            "properties": {"datetime": "2026-07-28T00:00:00Z"},
+            "links": [],
+            "assets": {"data": {"href": asset_href}},
+        }
+        resp = Mock()
+        resp.json.return_value = source
+        resp.raise_for_status.return_value = None
+        http = MagicMock()
+        http.get.return_value = resp
+        http_cm = MagicMock()
+        http_cm.__enter__.return_value = http
+
+        seen: dict = {}
+
+        def capture_alternates(item, _endpoint):
+            seen["at_alternates"] = item.assets["data"].href
+
+        with (
+            mock.patch("register_v1.httpx.Client", return_value=http_cm),
+            mock.patch("register_v1.add_alternate_s3_assets", side_effect=capture_alternates),
+            mock.patch("register_v1.add_thumbnail_asset"),
+            mock.patch("register_v1.warm_thumbnail_cache"),
+            mock.patch("register_v1.add_projection_from_zarr"),
+            mock.patch("register_v1.stac_auth.open_client"),
+            mock.patch("register_v1.upsert_item"),
+            mock.patch("register_v1.resolve_retention_days", return_value=0),
+            mock.patch("register_v1.resolve_exclude_ids", return_value=set()),
+        ):
+            register_v1.run_registration(
+                "https://src/SRC_ITEM.json",
+                collection,
+                "https://api.test/stac",
+                "https://raster.test",
+                "https://s3.test",
+                "bucket",
+                "prefix",
+            )
+        return seen
+
+    def test_sentinel3_assets_are_remapped_before_alternates_are_derived(self):
+        """add_alternate_s3_assets copies hrefs, so it must see the r0 form already."""
+        seen = self._run(
+            "sentinel-3-olci-l1-efr-staging", "https://src/SRC_ITEM.zarr/measurements/oa08_radiance"
+        )
+        assert seen["at_alternates"].endswith("/measurements/r0/oa08_radiance")
+
+    def test_sentinel2_assets_are_left_alone(self):
+        """Widening the gate would rewrite every S2 band and its alternate to a dead path."""
+        seen = self._run("sentinel-2-l2a", "https://src/SRC_ITEM.zarr/measurements/reflectance/b04")
+        assert seen["at_alternates"].endswith("/measurements/reflectance/b04")
+        assert "/r0/" not in seen["at_alternates"]
+
+
+class TestRemapOlciMeasurementPaths:
+    """Band assets must follow measurements/<band> -> measurements/r0/<band>.
+
+    Source EODC items describe the flat swath layout; the gridded converter
+    (data-model #212) nests the reprojected base level under r0/. rewrite_asset_hrefs
+    only swaps the store base, so without this remap every band asset dead-links.
+    """
+
+    @staticmethod
+    def _item() -> Item:
+        item = Item(
+            id="S3A_OL_1_EFR_test",
+            geometry=None,
+            bbox=None,
+            datetime=_dt.datetime(2026, 7, 14, tzinfo=_dt.UTC),
+            properties={},
+        )
+        base = "https://s3.example.com/bucket/prefix/S3A_OL_1_EFR_test.zarr"
+        item.add_asset("radianceData", Asset(href=f"{base}/measurements", roles=["data"]))
+        item.add_asset(
+            "Oa01_radianceData",
+            Asset(href=f"{base}/measurements/oa01_radiance", roles=["data"]),
+        )
+        item.add_asset(
+            "Oa21_radianceData",
+            Asset(href=f"{base}/measurements/oa21_radiance", roles=["data"]),
+        )
+        item.add_asset("product_metadata", Asset(href=f"{base}/.zmetadata"))
+        item.add_asset("product", Asset(href="https://objects.eodc.eu/source/product.zarr"))
+        return item
+
+    def test_band_assets_move_to_r0(self):
+        item = self._item()
+        remap_olci_measurement_paths(item)
+        assert item.assets["Oa01_radianceData"].href.endswith("/measurements/r0/oa01_radiance")
+        assert item.assets["Oa21_radianceData"].href.endswith("/measurements/r0/oa21_radiance")
+
+    def test_measurements_group_asset_moves_to_r0(self):
+        item = self._item()
+        remap_olci_measurement_paths(item)
+        assert item.assets["radianceData"].href.endswith("/measurements/r0")
+
+    def test_non_measurement_assets_untouched(self):
+        item = self._item()
+        before = {k: item.assets[k].href for k in ("product_metadata", "product")}
+        remap_olci_measurement_paths(item)
+        for key, href in before.items():
+            assert item.assets[key].href == href
+
+    def test_idempotent(self):
+        """Re-registering an already-remapped item must not produce measurements/r0/r0."""
+        item = self._item()
+        remap_olci_measurement_paths(item)
+        once = {k: a.href for k, a in item.assets.items()}
+        remap_olci_measurement_paths(item)
+        assert {k: a.href for k, a in item.assets.items()} == once
+
+    def test_orphans_group_not_remapped(self):
+        """measurements/orphans/ is a sibling of r0, not a child — leave it alone."""
+        item = self._item()
+        href = "https://s3.example.com/b/p/x.zarr/measurements/orphans/oa01_radiance"
+        item.add_asset("orphans", Asset(href=href, roles=["data"]))
+        remap_olci_measurement_paths(item)
+        assert item.assets["orphans"].href == href
+
+
 # === expires stamping (coordination#183, Task 2) ===
 
 
@@ -343,6 +676,14 @@ class TestAddExpires:
         add_expires(item, 183)
         add_expires(item, 183)  # re-stamp must not duplicate the extension URL
         assert item.stac_extensions.count(TIMESTAMPS_EXTENSION) == 1
+
+    def test_stamps_expires_on_sentinel3_item(self) -> None:
+        # add_expires is mission-agnostic: OLCI items must get expires (+retention)
+        # so the cleanup cron can drain them, exactly like S2/S1.
+        item = _expires_item("S3A_OL_1_EFR_test")
+        add_expires(item, 183)
+        assert "expires" in item.properties
+        assert TIMESTAMPS_EXTENSION in item.stac_extensions
 
     def test_zero_retention_is_a_noop(self) -> None:
         item = _expires_item()
