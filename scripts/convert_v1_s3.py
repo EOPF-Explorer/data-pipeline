@@ -43,11 +43,53 @@ DEFAULT_ENABLE_SHARDING = False
 DEFAULT_MIN_DIMENSION = 256
 DEFAULT_DASK_CLUSTER = True
 
+# Output grid. The converter's OWN default is "native" — the instrument swath, with
+# per-pixel 2-D lat/lon and no CRS, which titiler cannot tile. The visualization stack
+# (register_v1's xyz/tilejson/thumbnail links) requires a regular projected grid, so the
+# pipeline requests one EXPLICITLY and never inherits the library default. Passed as a
+# plain str, deliberately not via the `arg or DEFAULT` idiom used for the numeric knobs
+# below: `"" or DEFAULT` would silently coerce an empty value and mask a wiring bug.
+DEFAULT_OUTPUT_GRID = "EPSG:4326"
+
+# Native-resolution level of the multiscale pyramid the converter writes (r0, then r2/r4/…
+# overview siblings). Duplicated from register_v1._S3_OLCI_BASE_LEVEL rather than imported:
+# importing register_v1 here would pull pystac + its module-level env reads into the convert
+# pod for one string. tests/unit/test_eopf_geozarr_contract.py asserts the two agree.
+BASE_LEVEL = "r0"
+
 # Cap simultaneous aiohttp connections to the HTTPS source per pod (override via env).
 DEFAULT_SOURCE_HTTP_MAX_CONNECTIONS = 10
 
 
 # === Conversion Workflow ===
+
+
+class OutputContractError(RuntimeError):
+    """The converted store does not carry the CRS the visualization stack requires."""
+
+
+def assert_gridded_output(dt_output: object, output_url: str, output_grid: str) -> None:
+    """Fail the conversion if a projected grid was requested but the store has no CRS.
+
+    Without this the failure is invisible until someone opens a map: register_v1's
+    ``add_projection_from_zarr`` swallows every exception at DEBUG, so a CRS-less store is
+    registered with working-looking links that render blank tiles.
+
+    Checks the ``spatial_ref`` coordinate and its ``crs_wkt`` attribute rather than
+    ``.rio.crs`` — rioxarray is only a transitive dependency here, and importing it in
+    scripts/ would add an undeclared one. Metadata reads only; the tree is already open.
+    """
+    base = f"measurements/{BASE_LEVEL}"
+    try:
+        level = dt_output[base].ds  # type: ignore[index]
+        crs_wkt = level.coords["spatial_ref"].attrs["crs_wkt"]
+    except Exception as exc:
+        raise OutputContractError(
+            f"requested output_grid={output_grid} but {output_url}/{base} declares no CRS "
+            f"({type(exc).__name__}: {exc}). The store is written but NOT registered — "
+            "delete it manually before re-running (the bucket has no versioning)."
+        ) from exc
+    logger.info(f"   ✅ Output grid verified: {base} declares a CRS ({crs_wkt[:40]}…)")
 
 
 def run_conversion(
@@ -62,6 +104,7 @@ def run_conversion(
     use_dask_cluster: bool = DEFAULT_DASK_CLUSTER,
     n_workers: int = 3,
     memory_limit: str = "8GB",
+    output_grid: str = DEFAULT_OUTPUT_GRID,
 ) -> str:
     """Run S3 OLCI Optimized GeoZarr conversion workflow.
 
@@ -96,8 +139,15 @@ def run_conversion(
 
     logger.info(
         f"   Parameters: chunk={spatial_chunk}, compression={compression_level}, "
-        f"sharding={enable_sharding}, min_dimension={min_dimension}, dask={use_dask_cluster}"
+        f"sharding={enable_sharding}, min_dimension={min_dimension}, dask={use_dask_cluster}, "
+        f"output_grid={output_grid}"
     )
+    if output_grid != DEFAULT_OUTPUT_GRID:
+        logger.warning(
+            f"   ⚠️  output_grid={output_grid} is not the pipeline default "
+            f"({DEFAULT_OUTPUT_GRID}). 'native' produces a swath store with no CRS, which "
+            "titiler cannot tile — visualization links on the registered item will not work."
+        )
 
     # Construct output path and clean existing
     output_url = f"s3://{s3_output_bucket}/{s3_output_prefix}/{collection}/{item_id}.zarr"
@@ -164,7 +214,7 @@ def run_conversion(
     )
 
     try:
-        convert_olci_optimized(
+        dt_output = convert_olci_optimized(
             dt_input=dt_input,
             output_path=output_url,
             spatial_chunk=spatial_chunk,
@@ -172,7 +222,10 @@ def run_conversion(
             enable_sharding=enable_sharding,
             min_dimension=min_dimension,
             keep_scale_offset=False,
+            output_grid=output_grid,
         )
+        if output_grid != "native":
+            assert_gridded_output(dt_output, output_url, output_grid)
     finally:
         if client is not None:
             client.close()
@@ -220,6 +273,16 @@ def main(argv: list[str] | None = None) -> int:
         help=f"Stop overview generation below this spatial size (default: {DEFAULT_MIN_DIMENSION})",
     )
     parser.add_argument(
+        "--output-grid",
+        default=DEFAULT_OUTPUT_GRID,
+        help=(
+            f"Output grid: a CRS such as {DEFAULT_OUTPUT_GRID} (reprojects the swath onto a "
+            "regular grid, required for titiler tiling) or 'native' to keep the instrument "
+            f"swath with per-pixel lat/lon and no CRS (default: {DEFAULT_OUTPUT_GRID}; note "
+            "the converter's own default is 'native')"
+        ),
+    )
+    parser.add_argument(
         "--dask-cluster",
         action=argparse.BooleanOptionalAction,
         default=DEFAULT_DASK_CLUSTER,
@@ -260,10 +323,14 @@ def main(argv: list[str] | None = None) -> int:
             use_dask_cluster=args.dask_cluster,
             n_workers=args.n_workers,
             memory_limit=args.memory_limit,
+            output_grid=args.output_grid,
         )
     except zarr.errors.GroupNotFoundError as e:
         logger.error(f"Source dataset not found: {args.source_url} - {e}")
         return 2
+    except OutputContractError as e:
+        logger.error(f"Output contract violated: {e}")
+        return 3
 
     return 0
 

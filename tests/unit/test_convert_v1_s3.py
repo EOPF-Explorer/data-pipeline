@@ -1,9 +1,10 @@
 """Unit tests for convert_v1_s3.py — Dask client lifecycle and source-URL handling."""
 
 import contextlib
+import inspect
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, create_autospec, patch
 
 import pytest
 
@@ -34,8 +35,17 @@ _BASE_ARGS = {
 
 
 def _run_with_mocks(mock_client, convert_side_effect=None, **arg_overrides):
-    """Call run_conversion with all I/O mocked out. Returns the output URL."""
-    mock_convert = MagicMock(side_effect=convert_side_effect)
+    """Call run_conversion with all I/O mocked out. Returns the output URL.
+
+    The converter is autospec'd against the REAL pinned function, so a call that no longer
+    binds to its signature (an upstream rename or removal) fails here instead of passing
+    against a permissive MagicMock — which is exactly how the target_crs -> output_grid
+    rename slipped through. Autospec validates binding only, not defaults: see
+    tests/unit/test_eopf_geozarr_contract.py for the default/output-shape guards.
+    """
+    mock_convert = create_autospec(
+        convert_v1_s3.convert_olci_optimized, side_effect=convert_side_effect
+    )
     mock_fs = MagicMock()
     mock_fs.rm.side_effect = FileNotFoundError  # no existing output to clean
     output_url = None
@@ -66,8 +76,28 @@ def _run_with_mocks(mock_client, convert_side_effect=None, **arg_overrides):
 # ---------------------------------------------------------------------------
 
 
+# Every converter parameter whose value changes the bytes we write. The pipeline passes
+# all of them explicitly and inherits no upstream default — #212 flipping the grid default
+# from EPSG:4326 to "native" under a pinned SHA is why.
+_LOAD_BEARING_CONVERTER_PARAMS = frozenset(
+    {
+        "output_path",
+        "spatial_chunk",
+        "compression_level",
+        "enable_sharding",
+        "min_dimension",
+        "keep_scale_offset",
+        "output_grid",
+    }
+)
+
+
 def test_invokes_olci_converter_with_expected_kwargs():
-    """run_conversion calls convert_olci_optimized with the OLCI parameter set."""
+    """WIRING test: CLI/run_conversion arguments reach the converter unchanged.
+
+    Not a contract test — it asserts against a mock. The pinned library's real signature
+    and output shape are covered by tests/unit/test_eopf_geozarr_contract.py.
+    """
     _, mock_convert = _run_with_mocks(MagicMock(), spatial_chunk=512, min_dimension=128)
 
     mock_convert.assert_called_once()
@@ -77,9 +107,35 @@ def test_invokes_olci_converter_with_expected_kwargs():
     assert kwargs["enable_sharding"] is False
     assert kwargs["keep_scale_offset"] is False
     assert kwargs["output_path"].endswith(f"{S3_OLCI_ITEM_ID}.zarr")
-    # OLCI converter has no validate_output / experimental codec params.
+    # OLCI converter has no validate_output / experimental codec params. Autospec now
+    # enforces this structurally too, but the explicit assertions document the intent.
     assert "validate_output" not in kwargs
     assert "experimental_scale_offset_codec" not in kwargs
+
+
+def test_pins_output_grid_explicitly_rather_than_inheriting_the_library_default():
+    """The regression guard: the library default is 'native' (swath, no CRS, untileable)."""
+    _, mock_convert = _run_with_mocks(MagicMock())
+
+    kwargs = mock_convert.call_args.kwargs
+    assert "output_grid" in kwargs, "must be passed explicitly, never inherited"
+    assert kwargs["output_grid"] == "EPSG:4326"
+    assert convert_v1_s3.DEFAULT_OUTPUT_GRID == "EPSG:4326"
+
+
+def test_every_load_bearing_parameter_is_passed_explicitly():
+    """Generalises the above: we never inherit a default for anything that changes bytes."""
+    _, mock_convert = _run_with_mocks(MagicMock())
+
+    assert set(mock_convert.call_args.kwargs) >= _LOAD_BEARING_CONVERTER_PARAMS
+
+
+def test_load_bearing_parameters_still_exist_upstream():
+    """An upstream rename fails here with a readable message, not a runtime TypeError."""
+    upstream = set(inspect.signature(convert_v1_s3.convert_olci_optimized).parameters)
+
+    missing = _LOAD_BEARING_CONVERTER_PARAMS - upstream
+    assert not missing, f"converter no longer accepts {sorted(missing)}; it was renamed or removed"
 
 
 def test_client_closed_on_successful_conversion():
@@ -149,6 +205,78 @@ def test_cli_parses_same_core_args_as_s2():
     assert kwargs["spatial_chunk"] == 512
     assert kwargs["min_dimension"] == 128
     assert kwargs["enable_sharding"] is False
+
+
+def _cli_args(*extra: str) -> list[str]:
+    return [
+        "--source-url",
+        _BASE_ARGS["source_url"],
+        "--collection",
+        "sentinel-3-olci-l1-efr-staging",
+        "--s3-output-bucket",
+        "out",
+        "--s3-output-prefix",
+        "tests-output",
+        *extra,
+    ]
+
+
+def test_cli_defaults_to_the_tileable_grid():
+    """Deployment passes no --output-grid, so the default is what production writes."""
+    with patch.object(convert_v1_s3, "run_conversion") as mock_run:
+        rc = convert_v1_s3.main(_cli_args())
+
+    assert rc == 0
+    assert mock_run.call_args.kwargs["output_grid"] == "EPSG:4326"
+
+
+def test_cli_can_request_the_native_swath_grid():
+    """Escape hatch for isolating a regrid problem without rebuilding the image."""
+    with patch.object(convert_v1_s3, "run_conversion") as mock_run:
+        rc = convert_v1_s3.main(_cli_args("--output-grid", "native"))
+
+    assert rc == 0
+    assert mock_run.call_args.kwargs["output_grid"] == "native"
+
+
+class TestOutputContractCheck:
+    """A store written without the requested CRS must fail the step, not register."""
+
+    def test_exit_3_when_the_store_declares_no_crs(self):
+        with patch.object(
+            convert_v1_s3, "run_conversion", side_effect=convert_v1_s3.OutputContractError("no CRS")
+        ):
+            assert convert_v1_s3.main(_cli_args()) == 3
+
+    def test_contract_error_is_distinct_from_missing_source(self):
+        """Exit 2 already means 'source not found'; the codes must not collide."""
+        import zarr
+
+        with patch.object(
+            convert_v1_s3, "run_conversion", side_effect=zarr.errors.GroupNotFoundError("x")
+        ):
+            assert convert_v1_s3.main(_cli_args()) == 2
+
+    def test_check_is_skipped_for_native_output(self):
+        """`native` legitimately has no CRS, so the check must not fire for it."""
+        mock_dt = MagicMock()
+        mock_dt.__getitem__.side_effect = KeyError("measurements/r0")
+        with patch.object(convert_v1_s3, "assert_gridded_output") as mock_assert:
+            _run_with_mocks(MagicMock(), output_grid="native")
+        mock_assert.assert_not_called()
+
+    def test_check_runs_for_a_projected_grid(self):
+        with patch.object(convert_v1_s3, "assert_gridded_output") as mock_assert:
+            _run_with_mocks(MagicMock())
+        mock_assert.assert_called_once()
+
+    def test_assert_gridded_output_raises_without_crs(self):
+        """The real check, against a tree whose base level has no spatial_ref."""
+        import xarray as xr
+
+        dt = xr.DataTree.from_dict({f"/measurements/{convert_v1_s3.BASE_LEVEL}": xr.Dataset()})
+        with pytest.raises(convert_v1_s3.OutputContractError, match="declares no CRS"):
+            convert_v1_s3.assert_gridded_output(dt, "s3://b/out.zarr", "EPSG:4326")
 
 
 @pytest.mark.parametrize(
