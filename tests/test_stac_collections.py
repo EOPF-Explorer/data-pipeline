@@ -177,7 +177,9 @@ def test_s3_olci_collection_valid() -> None:
     assert set(item_assets.keys()) == {"measurements"}
     assert len(item_assets["measurements"]["bands"]) == 21
 
-    # Deliberately NOT a datacube: OLCI L1 EFR is swath data with no native CRS,
+    # Deliberately NOT a datacube. The instrument acquires swath data; the pipeline
+    # reprojects it to EPSG:4326, but the collection template has never declared cube
+    # dimensions and changing that is a separate, deliberate decision.
     # so the datacube extension / cube:dimensions must stay absent.
     assert not any("datacube" in ext for ext in col.stac_extensions)
     assert "cube:dimensions" not in json.dumps(col.to_dict())

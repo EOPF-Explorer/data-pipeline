@@ -16,7 +16,7 @@ sys.path.insert(0, str(scripts_dir))
 
 import stac_auth  # noqa: E402
 
-# The dedicated Sentinel-3 OLCI RC image pins a data-model SHA (547981de) that predates the
+# The dedicated Sentinel-3 OLCI RC image pins a data-model SHA (e8236b0d) that predates the
 # S1-RTC work, so eopf_geozarr.stac is absent there (see coordination S3-OLCI plan A1).
 # Without a guard, the S1-RTC test modules fail at IMPORT and pytest aborts collection for
 # the WHOLE suite — CI would run zero tests and go red. Skip only the S1-RTC surface when

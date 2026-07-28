@@ -1,11 +1,17 @@
 # Sentinel-3 OLCI L1 EFR pipeline — runbook
 
-Status as of 2026-07-28: **E2E re-validated in devseed-staging on the gridded converter**
-(rc2). Crons remain **suspended**. Visualization is **verified working against a live
-store** but is **NOT yet enabled** — the deployed image is still rc2 and carries no
-`S3_VIZ_ENABLED`, so registered items currently have no viz links. Enabling it is
-**pending a platform-deploy PR** (branch `feat/s3olci-enable-viz`, sets `S3_VIZ_ENABLED=1`
-and pins rc4). The code default stays off. Staging only.
+Status as of 2026-07-28. Crons remain **suspended**. Staging only.
+
+- **Deployed:** rc2. It carries no `S3_VIZ_ENABLED`, so registered items currently have
+  **no viz links**.
+- **Visualization:** verified working against a live store on the rc2 E2E (`/info` 200,
+  tiles render real imagery). Enabling it is **pending a platform-deploy PR** — branch
+  `feat/s3olci-enable-viz`, which sets `S3_VIZ_ENABLED=1`. The code default stays off.
+- **rc5** re-pins the converter to `e8236b0d` and pins `output_grid=EPSG:4326` explicitly
+  (see "Output grid" below). ⚠️ **Not yet E2E'd** — the EPSG:4326 output is *expected* to be
+  byte-identical to the rc2-verified store, because the library's golden snapshot for that
+  mode changed `+0/-0` across the re-pin, but that is an expectation about the library's
+  fixture, not a measurement of our output. The rc5 E2E is what confirms it.
 
 Collection: `sentinel-3-olci-l1-efr-staging` on `https://api.explorer.eopf.copernicus.eu/stac`
 (⚠️ staging isolation is by the `-staging` collection-id suffix — the API **host is shared
@@ -14,10 +20,10 @@ with prod**, and the `-fra` bucket is shared too; collection scoping is the only
 ## Image / branch model (read this first)
 
 This branch (`feat/s3-olci-pipeline`) builds a **dedicated S3-only RC image**:
-`data-pipeline:v1.15.0-s3olci-rc4`. It is **not mergeable to main as-is**:
+`data-pipeline:v1.15.0-s3olci-rc5`. It is **not mergeable to main as-is**:
 
-- The eopf-geozarr pin `547981de` (head of data-model OLCI PR #212, re-pinned
-  2026-07-28 from `5ea5662` to pick up the gridded converter) provides
+- The eopf-geozarr pin `e8236b0d` (head of data-model OLCI PR #212; re-pinned twice on
+  2026-07-28, `5ea5662` -> `547981de` -> `e8236b0d`) provides
   `s3_olci_optimization.olci_converter` but **drops the `eopf_geozarr.stac` package**
   (S1-RTC support). No data-model ref has both (re-checked at the new head).
   The SHA lives on the contributor fork but resolves from the EOPF-Explorer URL via
@@ -34,7 +40,7 @@ This branch (`feat/s3-olci-pipeline`) builds a **dedicated S3-only RC image**:
 
 ## Components
 
-data-pipeline (this repo, tag `v1.15.0-s3olci-rc4`):
+data-pipeline (this repo, tag `v1.15.0-s3olci-rc5`):
 
 | Piece | What |
 |---|---|
@@ -84,14 +90,18 @@ looks the way it does; see the verification section below for current state.
    parent's 2-D coords. The gridded converter (data-model #212, pinned at
    `547981de`) gives every level its own leaf group — `measurements/r0`, `r2`, … with
    no arrays in the parent — matching the S2 shape.
-3. **CRS in the store — FIXED upstream, verified live 2026-07-28.** Each level now
-   carries a `spatial_ref` variable with `crs_wkt`, a `grid_mapping` attribute on
-   every band, and group-level `proj:code` / `spatial:transform` / `spatial:bbox`.
-4. **Swath tiling — ANSWERED by gridding.** The converter now reprojects the
-   curvilinear swath onto a regular grid (default `EPSG:4326`, `--target-crs` to
-   override) with 1-D `x`/`y` coords and an affine transform, so a standard
-   affine-only reader can tile it. The per-pixel `latitude`/`longitude` arrays are
-   gone from `measurements/*` as a result.
+3. **CRS in the store — FIXED upstream, verified live 2026-07-28.** In **EPSG:4326
+   mode** each level carries a `spatial_ref` variable with `crs_wkt`, a `grid_mapping`
+   attribute on every band, and group-level `proj:code` / `spatial:transform` /
+   `spatial:bbox`. A `native` store has none of these.
+4. **Swath tiling — ANSWERED by gridding, but it is now OPT-IN.** The converter can
+   reproject the curvilinear swath onto a regular grid with 1-D `x`/`y` coords and an
+   affine transform, so a standard affine-only reader can tile it. As of `e8236b0d` the
+   pipeline must **request** that: the parameter is `output_grid` (renamed from
+   `target_crs`) and its default is `native` — the instrument swath, with per-pixel 2-D
+   `latitude`/`longitude` and per-row `time_stamp` inside `r0`, and no CRS at all.
+   `scripts/convert_v1_s3.py` pins `EPSG:4326` explicitly. The per-pixel `latitude`/
+   `longitude` arrays are gone from the levels **in EPSG:4326 mode only**.
 
 ## Visualization — VERIFIED WORKING 2026-07-28 (rc2 E2E)
 
@@ -123,6 +133,37 @@ tilejson fetch and renders correctly with the same query (verified 2026-07-28). 
 means making that unconditional link mission-aware. The link predates this work and is not
 gated by `S3_VIZ_ENABLED`; STAC Browser's image comes from the thumbnail asset, which does
 render.
+
+## Output grid — why the pipeline passes it explicitly
+
+As of `e8236b0d` the converter defaults to `output_grid="native"`: the instrument swath,
+per-pixel 2-D `latitude`/`longitude`, per-row `time_stamp`, **no CRS**. titiler cannot tile
+that, so the whole visualization stack would silently stop working.
+
+`scripts/convert_v1_s3.py` therefore pins `DEFAULT_OUTPUT_GRID = "EPSG:4326"` and passes it
+explicitly on every call — the pipeline inherits **no** upstream default for anything that
+changes the bytes we write. `--output-grid` is exposed so a regrid problem can be isolated
+(`--output-grid native`) without rebuilding the image.
+
+**Deliberately NOT an Argo template parameter.** A cron able to select `native` is a cron
+able to register a whole discovery window of items whose viz links 500, and
+`register_v1.add_projection_from_zarr` swallows the evidence at DEBUG. Overriding requires
+editing the WorkflowTemplate args, which is the friction we want. If a native product is
+ever wanted, it needs its own collection and its own register branch.
+
+**Conversion hard-fails (exit 3) if a projected grid was requested but the store declares no
+CRS** — `assert_gridded_output`. Exit codes: `0` ok, `1` bad `--source-url` scheme, `2`
+source dataset not found, `3` output contract violated. Verified the convert step carries no
+`continueOn`, so a non-zero exit stops the workflow before register. On failure the store is
+left in place and unregistered: **delete it manually**, the `-fra` bucket has no versioning.
+
+**Guarding the pin.** `tests/unit/test_eopf_geozarr_contract.py` snapshots the converter's
+full signature (defaults included) and converts a 64×64 synthetic product to assert the real
+output shape — `r0` present, bands `("y","x")` with `grid_mapping`/`crs_wkt`, no per-pixel
+lat/lon, store reopens as a DataTree, siblings parse as levels. It exists because a version
+assertion is useless here (`importlib.metadata` reports `0.10.2` for every SHA) and because
+this dependency has now changed shape under us twice: first the `measurements/r0` move, then
+this default flip. Both times the pre-existing suite stayed green. Runs in ~0.2 s, no network.
 
 ## Operations
 

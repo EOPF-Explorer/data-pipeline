@@ -43,6 +43,10 @@ EXPLORER_BASE = os.getenv("EXPLORER_BASE_URL", "https://explorer.eopf.copernicus
 # structural blockers, and rc2 verified live on 2026-07-28 that titiler opens the store
 # (/info 200) and renders real tiles. Still env-gated so the flip stays a deliberate,
 # revertible deployment step: set S3_VIZ_ENABLED=1 to add xyz/tilejson/thumbnail links.
+# ⚠️ Those blockers are cleared only for stores written with a PROJECTED grid, which
+# scripts/convert_v1_s3.py requests explicitly (output_grid=EPSG:4326). The converter's own
+# default is "native": the instrument swath, no CRS, untileable. Everything below assumes
+# the projected output; enabling this gate over native stores publishes dead tile links.
 # Separate known gap, NOT fixed by this gate: the `viewer` link below is written
 # unconditionally and points at the bare /viewer endpoint, which builds its own tilejson
 # URL from the UI fields only — it cannot be passed the zoom bounds, so it 500s and the map
@@ -52,10 +56,11 @@ EXPLORER_BASE = os.getenv("EXPLORER_BASE_URL", "https://explorer.eopf.copernicus
 # mission-aware; tracked separately.
 S3_VIZ_ENABLED = os.getenv("S3_VIZ_ENABLED", "").lower() in {"1", "true", "yes"}
 
-# Base level of the gridded OLCI store. The converter reprojects the swath onto a regular
-# grid and writes it as a multiscale pyramid: measurements/r0 (native) plus r2/r4/...
-# overviews. Bands sit under the level, not directly under measurements (unlike the flat
-# swath layout the source EODC items still describe).
+# Base level of the OLCI multiscale pyramid: measurements/r0 (native resolution) plus
+# r2/r4/... overview siblings. Bands sit under the level, not directly under measurements
+# (unlike the flat swath layout the source EODC items still describe).
+# The pyramid layout is written in BOTH grid modes, so this constant and the remap below
+# are grid-agnostic — only the CRS and the coordinate variables differ between them.
 _S3_OLCI_BASE_LEVEL = "r0"
 
 # OLCI false-color composite, RGB order: oa08 (665nm) / oa06 (560nm) / oa04 (490nm).
@@ -83,13 +88,15 @@ _S3_OLCI_FALSE_COLOR_BANDS = (
 # dark; the sigmoidal recovers midtone contrast without clipping the bright end.
 _S3_OLCI_COLOR_FORMULA = "gamma rgb 1.3, sigmoidal rgb 6 0.1, saturation 1.2"
 
-# titiler cannot derive default zoom bounds for this store and answers /tilejson.json with
-# a 500 unless both are supplied (verified live 2026-07-28: neither param -> 500, minzoom
-# alone -> 500, both -> 200). OLCI EFR is a fixed 300 m GSD = WebMercator z9.03 at the
-# equator, so z11 leaves two levels of inspection overzoom; minzoom 0 keeps the layer
-# visible when zoomed out. These describe the tile matrix, not the render, so they belong
-# on the tilejson link alone — never folded into _S3_OLCI_VIZ_QUERY, which is shared with
-# /preview and /tiles where they are meaningless.
+# titiler cannot derive default zoom bounds for this projected store and answers
+# /tilejson.json with a 500 unless both are supplied (verified live 2026-07-28: neither
+# param -> 500, minzoom alone -> 500, both -> 200). OLCI EFR is a fixed 300 m GSD, which
+# is WebMercator z9.03 in a 256 px tile matrix (z8.03 in the 512 px one the tilejson
+# response actually advertises), so maxzoom 11 leaves two to three levels of inspection
+# overzoom; minzoom 0 keeps the layer visible when zoomed out, at the cost of titiler
+# publishing a TileJSON `center` zoom of 0. These describe the tile matrix, not the render,
+# so they belong on the tilejson link alone — never folded into _S3_OLCI_VIZ_QUERY, which
+# is shared with /preview and /tiles where they are meaningless.
 _S3_OLCI_TILEJSON_ZOOM = "minzoom=0&maxzoom=11"
 
 
@@ -195,7 +202,8 @@ def rewrite_asset_hrefs(item: Item, old_base: str, new_base: str) -> None:
             asset.href = new_href
 
 
-# Groups that sit alongside the level pyramid under measurements/ and are NOT reprojected.
+# Groups that sit alongside the level pyramid under measurements/ and are NOT multiscale
+# levels, so the remap must leave their paths alone.
 _S3_OLCI_MEASUREMENT_SIBLINGS = frozenset({"orphans"})
 
 
@@ -208,8 +216,9 @@ def remap_olci_measurement_paths(item: Item) -> None:
     """Repoint OLCI measurement assets at the base level of the gridded store (in place).
 
     Source EODC items describe the flat swath layout (``measurements/<band>``). The
-    gridded converter (data-model #212) reprojects onto a regular grid and writes a
-    multiscale pyramid, so the same band now lives at ``measurements/r0/<band>``.
+    converter (data-model #212) writes a multiscale pyramid instead, so the same band now
+    lives at ``measurements/r0/<band>``. The pyramid is written in both grid modes, so this
+    remap is grid-agnostic.
     rewrite_asset_hrefs only swaps the store base, leaving the in-store path untouched —
     without this remap every band asset would 404. Idempotent, and leaves sibling groups
     (orphans/) and already-remapped hrefs alone.
