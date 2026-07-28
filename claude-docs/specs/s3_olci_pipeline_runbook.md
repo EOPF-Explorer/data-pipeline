@@ -7,11 +7,14 @@ Status as of 2026-07-28. Crons remain **suspended**. Staging only.
 - **Visualization:** verified working against a live store on the rc2 E2E (`/info` 200,
   tiles render real imagery). Enabling it is **pending a platform-deploy PR** — branch
   `feat/s3olci-enable-viz`, which sets `S3_VIZ_ENABLED=1`. The code default stays off.
-- **rc5** re-pins the converter to `e8236b0d` and pins `output_grid=EPSG:4326` explicitly
-  (see "Output grid" below). ⚠️ **Not yet E2E'd** — the EPSG:4326 output is *expected* to be
-  byte-identical to the rc2-verified store, because the library's golden snapshot for that
-  mode changed `+0/-0` across the re-pin, but that is an expectation about the library's
-  fixture, not a measurement of our output. The rc5 E2E is what confirms it.
+- **rc5** pinned `e8236b0d` + `output_grid=EPSG:4326`. **E2E PASSED** on a fresh North
+  Atlantic scene: store carries `proj:code=EPSG:4326` / `grid_mapping` / `spatial_ref` with
+  no per-pixel lat/lon, item hrefs and s3 alternates on `measurements/r0`, `/info` and
+  tilejson 200, preview renders real imagery. Its bbox matched the source item's, which is
+  what proves the geolocation was right.
+- **rc6** re-pins to `f9567fb1`, picking up four upstream fixes (see "Output grid" below).
+  ⚠️ **Not yet E2E'd.** No pipeline code change was needed — the signature and the asserted
+  output shape are unchanged.
 
 Collection: `sentinel-3-olci-l1-efr-staging` on `https://api.explorer.eopf.copernicus.eu/stac`
 (⚠️ staging isolation is by the `-staging` collection-id suffix — the API **host is shared
@@ -20,10 +23,10 @@ with prod**, and the `-fra` bucket is shared too; collection scoping is the only
 ## Image / branch model (read this first)
 
 This branch (`feat/s3-olci-pipeline`) builds a **dedicated S3-only RC image**:
-`data-pipeline:v1.15.0-s3olci-rc5`. It is **not mergeable to main as-is**:
+`data-pipeline:v1.15.0-s3olci-rc6`. It is **not mergeable to main as-is**:
 
-- The eopf-geozarr pin `e8236b0d` (head of data-model OLCI PR #212; re-pinned twice on
-  2026-07-28, `5ea5662` -> `547981de` -> `e8236b0d`) provides
+- The eopf-geozarr pin `f9567fb1` (head of data-model OLCI PR #212; re-pinned on
+  2026-07-28, `5ea5662` -> `547981de` -> `e8236b0d` -> `f9567fb1`) provides
   `s3_olci_optimization.olci_converter` but **drops the `eopf_geozarr.stac` package**
   (S1-RTC support). No data-model ref has both (re-checked at the new head).
   The SHA lives on the contributor fork but resolves from the EOPF-Explorer URL via
@@ -40,7 +43,7 @@ This branch (`feat/s3-olci-pipeline`) builds a **dedicated S3-only RC image**:
 
 ## Components
 
-data-pipeline (this repo, tag `v1.15.0-s3olci-rc5`):
+data-pipeline (this repo, tag `v1.15.0-s3olci-rc6`):
 
 | Piece | What |
 |---|---|
@@ -48,7 +51,7 @@ data-pipeline (this repo, tag `v1.15.0-s3olci-rc5`):
 | `scripts/convert_v1_s3.py` | OLCI conversion entry point — `convert_olci_optimized`, `--min-dimension` stops overview generation |
 | `scripts/register_v1.py` | Sentinel-3 branches; `remap_olci_measurement_paths` repoints band assets at the `r0` base level; viz/thumbnail links gated by `S3_VIZ_ENABLED` (code default **off**, set to `1` in platform-deploy); tilejson link carries explicit zoom bounds |
 | `scripts/s3_item_cleanup.py` | shared S3-deletion helpers used by the cleanup cron |
-| `stac/sentinel-3-olci-l1-efr-staging.json` | collection template — 21 Oa radiance bands, **not a datacube**. Rationale was "swath, no native CRS"; the gridded converter removes that reason, so revisit once the rc4 E2E confirms the layout |
+| `stac/sentinel-3-olci-l1-efr-staging.json` | collection template — 21 Oa radiance bands, **not a datacube**. Rationale was "swath, no native CRS"; the gridded converter removes that reason (in EPSG:4326 mode), so this is worth revisiting |
 
 platform-deploy (merged via #340, Flux-reconciled into `devseed-staging`,
 all under `workspaces/devseed-staging/data-pipeline/`):
@@ -157,10 +160,25 @@ source dataset not found, `3` output contract violated. Verified the convert ste
 `continueOn`, so a non-zero exit stops the workflow before register. On failure the store is
 left in place and unregistered: **delete it manually**, the `-fra` bucket has no versioning.
 
+**Upstream fixes picked up at `f9567fb1`** (all found by adversarial review upstream):
+`3641c723` unpacks CF-packed geolocation before warping — real OLCI stores lat/lon as int32
+microdegrees, and feeding those raw georeferences the output 1e6 off. **Our path was not
+affected**: `open_source_datatree` decodes before the converter sees it, and the rc5 store's
+bbox matched the source item's. `95b7121f` warps transposed `(columns, rows)` bands instead
+of dropping them — not hit either, our stores carry all 21 bands. `806292c2` rejects
+`min_dimension < 1`, which used to hang the converter after truncating the store; we pass
+256. `cc2e7958` edge-aligns overview georeferencing with the r0 grid — **this one did hit
+us**: stores written by rc2–rc5 have their level-*l* origin shifted by (2^*l*−1)/2 base
+pixels, measured live as 0.5 px at r2 and 1.5 px at r4. Rendered tiles were unaffected
+because the viz query pins `/measurements/r0:`, but the overview metadata is wrong for any
+multiscale-aware reader. Existing items would need reconversion to correct it.
+
 **Guarding the pin.** `tests/unit/test_eopf_geozarr_contract.py` snapshots the converter's
 full signature (defaults included) and converts a 64×64 synthetic product to assert the real
 output shape — `r0` present, bands `("y","x")` with `grid_mapping`/`crs_wkt`, no per-pixel
-lat/lon, store reopens as a DataTree, siblings parse as levels. It exists because a version
+lat/lon, store reopens as a DataTree, siblings parse as levels, **overviews edge-aligned
+with r0**, and the bbox in degree range. The last two were added at the `f9567fb1` re-pin
+and were verified to fail against the pre-fix pin (`r2 x origin shifted -0.5 px`). It exists because a version
 assertion is useless here (`importlib.metadata` reports `0.10.2` for every SHA) and because
 this dependency has now changed shape under us twice: first the `measurements/r0` move, then
 this default flip. Both times the pre-existing suite stayed green. Runs in ~0.2 s, no network.

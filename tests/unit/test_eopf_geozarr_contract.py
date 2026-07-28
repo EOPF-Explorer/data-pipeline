@@ -181,6 +181,41 @@ class TestConverterOutputContract:
         for band, _ in register_v1._S3_OLCI_FALSE_COLOR_BANDS:
             assert band in OLCI_BANDS
 
+    def test_overviews_are_edge_aligned_with_the_base_level(self, converted_store):
+        """Every level must share r0's origin, with the pixel size doubling per level.
+
+        Stride-decimating the 1-D coords instead shifts level l by (2^l - 1)/2 base pixels
+        and contradicts the multiscales layout's {scale: [2,2], translation: [0,0]}. Fixed
+        upstream at cc2e7958; the stores written before it are off by 0.5 px at r2 and
+        1.5 px at r4. Our tile query pins r0 so rendering was unaffected, but the overview
+        metadata was wrong for any multiscale-aware reader.
+        """
+        levels = sorted(
+            (c for c in converted_store["measurements"].children if register_v1._is_olci_level(c)),
+            key=lambda c: int(c[1:]),
+        )
+        base = converted_store[f"measurements/{levels[0]}"].attrs["spatial:transform"]
+        for level in levels[1:]:
+            transform = converted_store[f"measurements/{level}"].attrs["spatial:transform"]
+            offset_x = (transform[2] - base[2]) / base[0]
+            offset_y = (transform[5] - base[5]) / base[0]
+            assert offset_x == pytest.approx(0, abs=1e-6), f"{level} x origin shifted {offset_x} px"
+            assert offset_y == pytest.approx(0, abs=1e-6), f"{level} y origin shifted {offset_y} px"
+
+    def test_bbox_is_in_degrees_not_raw_packed_units(self, converted_store):
+        """Guards the 1e6 class: OLCI stores geolocation as int32 microdegrees.
+
+        Feeding those raw to the warp georeferences the output a factor of 1e6 off (fixed
+        upstream at 3641c723). Our pipeline decodes before the converter sees it — the
+        rc5 store's bbox matched the source item's — but nothing asserted it.
+        """
+        bbox = converted_store[f"measurements/{register_v1._S3_OLCI_BASE_LEVEL}"].attrs[
+            "spatial:bbox"
+        ]
+        west, south, east, north = bbox
+        assert -180 <= west < east <= 180, f"longitudes out of degree range: {bbox}"
+        assert -90 <= south < north <= 90, f"latitudes out of degree range: {bbox}"
+
     def test_base_level_constant_agrees_across_scripts(self):
         """convert_v1_s3 duplicates the level name instead of importing register_v1.
 
