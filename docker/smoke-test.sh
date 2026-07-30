@@ -35,6 +35,23 @@ print("py", __import__("sys").version.split()[0], "| GDAL", rasterio.__gdal_vers
       "| PROJ", pyproj.proj_version_str, "| zarr", zarr.__version__,
       "| crc32c", google_crc32c.implementation)'
 
+# 1b. Exercise GDAL and PROJ for real: an import succeeds even when PROJ's proj.db or a GDAL driver
+#     is missing, which is exactly how a source-built rasterio/pyproj goes wrong.
+check "gdal+proj actually work" 0 python -c '
+import numpy, rasterio, pyproj
+from rasterio.io import MemoryFile
+from rasterio.transform import from_bounds
+t = pyproj.Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
+x, y = t.transform(2.35, 48.85)
+assert 260000 < x < 263000 and 6249000 < y < 6252000, (x, y)
+with MemoryFile() as m:
+    with m.open(driver="GTiff", width=8, height=8, count=1, dtype="uint16",
+                crs="EPSG:3857", transform=from_bounds(0, 0, 8, 8, 8, 8)) as dst:
+        dst.write(numpy.arange(64, dtype="uint16").reshape(1, 8, 8))
+    with m.open() as src:
+        assert src.crs.to_epsg() == 3857 and int(src.read(1).max()) == 63
+print("proj transform + GTiff roundtrip ok")'
+
 # 2. GDAL Python bindings are deliberately absent: nothing in the closure imports osgeo, and no
 #    script shells out to a gdal CLI. This check fails loudly if that assumption ever changes.
 check "osgeo absent (expected failure)" 1 python -c 'import osgeo'
