@@ -43,7 +43,10 @@ repos:
     rev: v2.12.0
     hooks:
       - id: hadolint-docker
-        args: ["--ignore", "DL3008", "--ignore", "DL3018"]  # Allow unpinned apt/apk (GDAL version tied to OS release)
+        # Allow unpinned apt/apk. Wolfi rolls forward and garbage-collects old package versions, so
+        # pinning `=<version>` breaks builds; the version-scoped package *names* (python-3.14,
+        # geos-3.14) are the guardrail instead, and the base image itself is digest-pinned.
+        args: ["--ignore", "DL3008", "--ignore", "DL3018"]
 
   - repo: local
     hooks:

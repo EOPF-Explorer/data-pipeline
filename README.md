@@ -92,10 +92,25 @@ docker build -f docker/Dockerfile --network host -t w9mllyot.c1.de1.container-re
 
 
 
+- Check the image still satisfies the runtime contract Argo depends on (Python entrypoints, `sh` and
+  `bash` script steps, uid 1000, working GDAL/PROJ). CI runs this on every build:
+```bash
+./docker/smoke-test.sh w9mllyot.c1.de1.container-registry.ovh.net/eopf-sentinel-zarr-explorer/data-pipeline:v1-staging
+```
+
 - Push to container registry:
 ```bash
 docker push w9mllyot.c1.de1.container-registry.ovh.net/eopf-sentinel-zarr-explorer/data-pipeline:v1-staging
 ```
+
+#### Base image
+
+The image is built on [Chainguard's Wolfi](https://github.com/wolfi-dev/os) (`cgr.dev/chainguard/wolfi-base`,
+digest-pinned — `:latest` is the only free tag, so the digest is what makes builds reproducible, and
+Dependabot bumps it). `rasterio` and `pyproj` are compiled against Wolfi's own GDAL and PROJ instead
+of installed as manylinux wheels: a GDAL/PROJ CVE is then fixed by bumping the base image, and both
+libraries stay visible to Trivy and to generated SBOMs rather than being vendored inside a wheel.
+Local development still uses wheels — the source build is a Dockerfile-only flag.
 
 - Once the new image is pushed, run the example [Notebook](operator-tools/submit_stac_items_notebook.ipynb) and verify that workflows are running in [Argo Workflows](https://argo-workflows.hub-eopf-explorer.eox.at/workflows/devseed-staging)
 
