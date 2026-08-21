@@ -69,12 +69,33 @@ def test_align_cube_drops_platform_and_processing_level() -> None:
     # extent (spatial bbox + temporal) is derived from the live items, not a fixed frame
     assert c["extent"]["spatial"]["bbox"] == EXTENT["spatial"]["bbox"]
     assert c["extent"]["temporal"] == EXTENT["temporal"]
-    assert "rgb" in c["renders"]
     assert c["title"] == "keep me"  # good fields preserved
     assert c["providers"] == [{"name": "ESA"}]
     # only the extensions the collection object uses
     assert any("sar" in e for e in c["stac_extensions"])
-    assert any("render" in e for e in c["stac_extensions"])
+
+
+def test_align_cube_declares_no_collection_render() -> None:
+    """A cube item exposes BOTH orbit groups, so no collection-level expression is true for it.
+
+    `sat:orbit_state` on a cube item is only the orbit of the pinned preview slice, so a
+    collection-level `/ascending:...` expression mis-states the collection for every item pinned
+    the other way. Items carry their own correct per-orbit `renders`; nothing reads the
+    collection-level block. Dropping it also drops the render extension, which nothing else uses.
+    """
+    live = _live(True)
+    live["renders"] = {"rgb": {"expression": "/ascending:vv"}}  # legacy block on the live cube
+    c = b.align_collection(live, is_cube=True, extent=EXTENT)
+    assert "renders" not in c
+    assert not any("render" in e for e in c["stac_extensions"])
+    assert c["stac_extensions"] == [b.SAR_EXT, b.SAT_EXT]
+
+
+def test_align_acq_keeps_the_collection_render() -> None:
+    """Per-acquisition items are single-orbit by construction, so the informational render stays."""
+    c = b.align_collection(_live(False), is_cube=False, extent=EXTENT)
+    assert "rgb" in c["renders"]
+    assert b.RENDER_EXT in c["stac_extensions"]
 
 
 def test_align_acq_sets_normalized_platform() -> None:

@@ -53,6 +53,143 @@ def test_s1_rtc_collection_valid(collection_id: str, required_data_assets: set[s
     assert sar_ext in col.stac_extensions
 
 
+# --- S1 RTC cube collection vs. what its items actually carry ----------------
+
+# `manage_collections.py create --update` PUTs this template wholesale over the live
+# collection, so every field here is an assertion about the 170 live cube items. The values
+# below were read off those items (GET /collections/sentinel-1-grd-rtc-staging/items), not
+# copied from the file, and are pinned exactly so a hand edit or a regeneration cannot
+# reintroduce the legacy `vv`/`vh` model or a value the items contradict.
+S1_CUBE = "sentinel-1-grd-rtc-staging.json"
+
+GAMMA0_BANDS = [
+    {
+        "name": "vv",
+        "description": "γ⁰ RTC backscatter, VV polarization",
+        "data_type": "float32",
+        "nodata": "nan",
+        "unit": "gamma0 (linear power)",
+    },
+    {
+        "name": "vh",
+        "description": "γ⁰ RTC backscatter, VH polarization",
+        "data_type": "float32",
+        "nodata": "nan",
+        "unit": "gamma0 (linear power)",
+    },
+]
+BORDER_MASK_BANDS = [
+    {
+        "name": "border_mask",
+        "description": "Valid-data mask (0 = border/no-data, non-zero = valid)",
+        "data_type": "uint8",
+        "nodata": 0,
+    }
+]
+ZARR_TYPE = "application/vnd.zarr; version=3"
+
+
+def _gamma0_asset(orbit: str) -> dict[str, Any]:
+    return {
+        "type": ZARR_TYPE,
+        "roles": ["data"],
+        "title": f"γ⁰ RTC backscatter ({orbit})",
+        "bands": GAMMA0_BANDS,
+        "data_type": "float32",
+        "nodata": "nan",
+        "unit": "gamma0 (linear power)",
+        "gsd": 10,
+    }
+
+
+def _border_mask_asset(orbit: str) -> dict[str, Any]:
+    return {
+        "type": ZARR_TYPE,
+        "roles": ["data"],
+        "title": f"Valid-data mask ({orbit})",
+        "bands": BORDER_MASK_BANDS,
+        "gsd": 10,
+    }
+
+
+EXPECTED_CUBE_ITEM_ASSETS = {
+    "zarr-store": {
+        "type": ZARR_TYPE,
+        "roles": ["data"],
+        "title": "Sentinel-1 GRD RTC Zarr store",
+    },
+    "gamma0-rtc-backscatter-asc": _gamma0_asset("ascending"),
+    "border-mask-asc": _border_mask_asset("ascending"),
+    "gamma0-rtc-backscatter-desc": _gamma0_asset("descending"),
+    "border-mask-desc": _border_mask_asset("descending"),
+    "thumbnail": {
+        "type": "image/png",
+        "roles": ["thumbnail"],
+        "title": "Sentinel-1 GRD RGB composite preview",
+    },
+}
+
+# Every value below appears on all 170 live items. `platform` and `processing:level` are
+# absent on purpose: the items carry neither (a cube mixes platforms and no processing
+# metadata is emitted yet), and build_s1_rtc_collections.align_collection pops both for the
+# cube — adding either here would be reverted on the next regeneration *and* be false.
+EXPECTED_CUBE_SUMMARIES = {
+    "gsd": [10],
+    "instruments": ["c-sar"],
+    "constellation": ["sentinel-1"],
+    "sar:instrument_mode": ["IW"],
+    "sar:frequency_band": ["C"],
+    "sar:center_frequency": [5.405],
+    "sar:polarizations": [["VV", "VH"]],
+    "sar:product_type": ["GRD"],
+    "sat:orbit_state": ["ascending", "descending"],
+}
+
+
+def test_s1_cube_item_assets_match_the_items() -> None:
+    """The asc/desc asset model, band-for-band — not just the key names.
+
+    Cube items carry the superset {zarr-store, thumbnail, gamma0-rtc-backscatter-{asc,desc},
+    border-mask-{asc,desc}}; 164 of 170 carry all six, the remaining 6 are single-orbit and
+    carry one orbit's pair. The legacy `vv`/`vh` keys the live collection still advertises
+    exist on no item.
+    """
+    item_assets = _load(S1_CUBE)["item_assets"]
+    assert item_assets == EXPECTED_CUBE_ITEM_ASSETS
+    assert "vv" not in item_assets and "vh" not in item_assets
+
+
+def test_s1_cube_summaries_match_the_items() -> None:
+    assert _load(S1_CUBE)["summaries"] == EXPECTED_CUBE_SUMMARIES
+
+
+def test_s1_cube_declares_no_collection_render() -> None:
+    """A cube item exposes BOTH orbit groups, so no single expression describes the collection.
+
+    `sat:orbit_state` on a cube item is only the orbit of the slice `_pin_preview_to_best_recent`
+    pinned (113 of 170 ascending, 57 descending); the other orbit's assets are still there. The
+    block this replaces claimed `/ascending:vv;/ascending:vh;(/ascending:vv)/(/ascending:vh)` with
+    a single `rescale` pair for a three-band expression — wrong orbit for a third of the items and
+    the wrong number of stretches for all of them (items use [[0.0,0.4],[0.0,0.1],[1.0,15.0]]).
+    Every item carries its own correct per-orbit `renders`, and every consumer reads *that*, so the
+    collection declares none — and therefore must not declare the render extension either. Same
+    reasoning as test_rasterform_absent_everywhere_else below.
+    """
+    data = _load(S1_CUBE)
+    assert "renders" not in data
+    assert data["stac_extensions"] == [
+        "https://stac-extensions.github.io/sar/v1.0.0/schema.json",
+        "https://stac-extensions.github.io/sat/v1.0.0/schema.json",
+    ]
+
+
+def test_s1_cube_description_does_not_claim_one_orbit_per_tile() -> None:
+    """Pre-#279 the cube was one store per (tile, orbit); it is now one store per tile, both."""
+    description = _load(S1_CUBE)["description"]
+    assert "orbit direction" not in description
+    assert "ascending and descending" in description
+
+
 # --- S1 RTC template/live link reconciliation (issue #348) -------------------
 
 # `manage_collections.py create --update` PUTs the template wholesale, so a link that

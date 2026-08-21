@@ -1,7 +1,7 @@
 """Generate aligned S1 RTC collection templates from the live collections + the data-model asset model.
 
 Patches the *stale* fields of each live collection (``item_assets``, ``summaries`` platform /
-processing:level, ``stac_extensions``, ``extent``, ``renders``) so the collection metadata matches the
+processing:level, ``stac_extensions``, ``extent``, ``renders`` — dropped on the dual-orbit cube) so the collection metadata matches the
 migrated new-model items, while preserving the good fields (title/description/keywords/providers/license/
 links). ``item_assets`` is derived from ``eopf_geozarr.stac.s1_rtc`` so it cannot drift from the builder;
 the ``extent`` is derived from the live items so re-running after new ingests keeps it aligned.
@@ -96,7 +96,12 @@ def item_assets() -> dict[str, Any]:
 
 
 def _collection_render() -> dict[str, Any]:
-    """Orbit-generic, informational render (titiler renders from the per-item ``renders``)."""
+    """Informational render for the *per-acquisition* collection (titiler renders per item).
+
+    Not emitted for the cube collection: a cube item exposes both the ``/ascending`` and the
+    ``/descending`` group, so no single collection-level ``expression`` is true for it — see
+    ``align_collection``.
+    """
     vv, vh = "/ascending:vv", "/ascending:vh"
     return {
         "rgb": {
@@ -125,7 +130,18 @@ def align_collection(
         "spatial": extent.get("spatial") or c.get("extent", {}).get("spatial"),
         "temporal": extent["temporal"],
     }
-    c["renders"] = _collection_render()
+    # A cube item carries BOTH orbit groups (`/ascending` and `/descending`) and its
+    # `sat:orbit_state` is only the orbit of the preview slice that `_pin_preview_to_best_recent`
+    # chose — 113 of the 170 live cube items say "ascending", 57 "descending". A collection-level
+    # `expression` has to name one group, so any value here is false for the other half of the
+    # collection. Every item already carries its own correct per-orbit `renders`, and nothing reads
+    # the collection-level block (all consumers read `item.properties.renders`), so the cube simply
+    # does not declare one. Same reasoning as the deliberately absent `eodash:rasterform`, pinned by
+    # tests/test_stac_collections.py::test_rasterform_absent_everywhere_else.
+    if is_cube:
+        c.pop("renders", None)
+    else:
+        c["renders"] = _collection_render()
 
     summaries = dict(c.get("summaries", {}))
     summaries.pop("processing:level", None)  # items carry no processing:level (deferred)
@@ -135,9 +151,10 @@ def align_collection(
         summaries["platform"] = ["sentinel-1a", "sentinel-1c"]  # normalized; S1B is decommissioned
     c["summaries"] = summaries
 
-    # Extensions the collection object itself uses: sar/sat summaries + the renders field.
-    # (item_assets + bands are STAC 1.1 core; gsd/constellation/instruments are common metadata.)
-    c["stac_extensions"] = [SAR_EXT, SAT_EXT, RENDER_EXT]
+    # Extensions the collection object itself uses: sar/sat summaries, plus render only where a
+    # `renders` field is actually emitted. (item_assets + bands are STAC 1.1 core;
+    # gsd/constellation/instruments are common metadata.)
+    c["stac_extensions"] = [SAR_EXT, SAT_EXT] if is_cube else [SAR_EXT, SAT_EXT, RENDER_EXT]
     return c
 
 
