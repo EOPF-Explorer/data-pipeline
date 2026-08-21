@@ -84,17 +84,17 @@
     "spatial": {
       "bbox": [
         [
-          -5.2,
-          42.0,
-          9.2,
-          49.0
+          -18.1,
+          24.3,
+          57.1,
+          65.9
         ]
       ]
     },
     "temporal": {
       "interval": [
         [
-          "2025-02-05T06:01:10Z",
+          "2014-04-03T00:00:00Z",
           null
         ]
       ]
@@ -129,12 +129,44 @@
       ]
     },
     {
-      "url": "https://zarr.eopf.copernicus.eu/",
-      "name": "EOPF Sentinel Zarr Samples Service",
+      "url": "https://api.explorer.eopf.copernicus.eu/",
+      "name": "EOPF Explorer",
       "roles": [
         "host",
         "processor"
       ]
+    },
+    {
+      "url": "https://dataspace.copernicus.eu/",
+      "name": "Copernicus Data Space Ecosystem (CDSE)",
+      "roles": [
+        "producer"
+      ],
+      "description": "Source of Sentinel-1 GRD Level-1 input products, downloaded via EODAG."
+    },
+    {
+      "url": "https://spacedata.copernicus.eu/collections/copernicus-digital-elevation-model",
+      "name": "Copernicus DEM GLO-30",
+      "roles": [
+        "producer"
+      ],
+      "description": "Global 30 m Digital Elevation Model used for terrain correction and orthorectification."
+    },
+    {
+      "url": "https://gitlab.orfeo-toolbox.org/s1-tiling/s1tiling",
+      "name": "S1Tiling",
+      "roles": [
+        "processor"
+      ],
+      "description": "Open-source Sentinel-1 tiling and RTC processing pipeline (v1.4.x) orchestrating download, orthorectification and gamma-naught RTC calibration."
+    },
+    {
+      "url": "https://www.orfeo-toolbox.org/",
+      "name": "Orfeo ToolBox (OTB) + DiapOTB",
+      "roles": [
+        "processor"
+      ],
+      "description": "Remote sensing image processing library (v9.1.1) used for SAR orthorectification and gamma-area RTC via the DiapOTB extension."
     }
   ],
   "summaries": {
@@ -168,6 +200,13 @@
     "sat:orbit_state": [
       "ascending",
       "descending"
+    ],
+    "platform": [
+      "Sentinel-1A",
+      "Sentinel-1B"
+    ],
+    "processing:level": [
+      "L1"
     ]
   },
   "description": "Sentinel-1 Ground Range Detected (GRD) data processed to Radiometric Terrain Correction (RTC), stored as analysis-ready Zarr V3 tiles. Each tile aggregates all acquisitions for a given MGRS tile and orbit direction into a time-stacked Zarr store.",
@@ -275,9 +314,10 @@
   },
   "stac_version": "1.1.0",
   "stac_extensions": [
+    "https://stac-extensions.github.io/projection/v2.0.0/schema.json",
+    "https://stac-extensions.github.io/render/v1.0.0/schema.json",
     "https://stac-extensions.github.io/sar/v1.0.0/schema.json",
-    "https://stac-extensions.github.io/sat/v1.0.0/schema.json",
-    "https://stac-extensions.github.io/render/v1.0.0/schema.json"
+    "https://stac-extensions.github.io/sat/v1.0.0/schema.json"
   ],
   "renders": {
     "rgb": {

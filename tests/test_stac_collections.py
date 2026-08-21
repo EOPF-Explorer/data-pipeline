@@ -218,3 +218,40 @@ def test_pre_aggregation_links_are_last(filename: str) -> None:
     """
     rels = [link["rel"] for link in _load(filename)["links"]]
     assert rels[-2:] == ["pre-aggregation", "pre-aggregation"]
+
+
+# --- eodash:rasterform (issue #348) -------------------------------------------
+
+# The bands form eodash builds its TiTiler parameter picker from. S1 uses a single
+# orbit-agnostic form: its `${properties.sat:orbit_state}` placeholders are resolved
+# against each item at render time (eodash/eodash#424), so one collection-level
+# declaration serves both orbits and no per-item field is needed.
+RASTERFORM_BASE = (
+    "https://raw.githubusercontent.com/EOPF-Explorer/eodash-assets/refs/heads/main/forms/"
+)
+
+EXPECTED_RASTERFORMS = {
+    "sentinel-2-l2a.json": RASTERFORM_BASE + "bandsform.json",
+    "sentinel-2-l2a-staging.json": RASTERFORM_BASE + "bandsform.json",
+    "sentinel-1-grd-rtc-acquisitions-staging.json": RASTERFORM_BASE + "s1-bandsform.json",
+}
+
+
+@pytest.mark.parametrize("filename", sorted(EXPECTED_RASTERFORMS))
+def test_rasterform_points_at_expected_form(filename: str) -> None:
+    assert _load(filename).get("eodash:rasterform") == EXPECTED_RASTERFORMS[filename]
+
+
+def test_rasterform_absent_everywhere_else() -> None:
+    """No other template declares a form — the S1 cube collection least of all.
+
+    Cube items are dual-orbit; their `sat:orbit_state` is only the orbit of the slice
+    `_pin_preview_to_best_recent` pinned, and it does not follow the time slider. A
+    collection-level form there would substitute an orbit the displayed slice may not
+    have. Only the per-acquisition items are single-orbit by construction.
+    """
+    for path in STAC_DIR.glob("*.json"):
+        if path.name in EXPECTED_RASTERFORMS:
+            continue
+        data = json.loads(path.read_text())
+        assert "eodash:rasterform" not in data, f"unexpected rasterform in {path.name}"

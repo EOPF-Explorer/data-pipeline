@@ -88,10 +88,10 @@
     "spatial": {
       "bbox": [
         [
-          -5.2,
-          42.0,
-          9.2,
-          49.0
+          -18.1,
+          24.3,
+          57.1,
+          65.9
         ]
       ]
     },
@@ -153,12 +153,44 @@
       ]
     },
     {
-      "url": "https://zarr.eopf.copernicus.eu/",
-      "name": "EOPF Sentinel Zarr Samples Service",
+      "url": "https://api.explorer.eopf.copernicus.eu/",
+      "name": "EOPF Explorer",
       "roles": [
         "host",
         "processor"
       ]
+    },
+    {
+      "url": "https://dataspace.copernicus.eu/",
+      "name": "Copernicus Data Space Ecosystem (CDSE)",
+      "roles": [
+        "producer"
+      ],
+      "description": "Source of Sentinel-1 GRD Level-1 input products, downloaded via EODAG."
+    },
+    {
+      "url": "https://spacedata.copernicus.eu/collections/copernicus-digital-elevation-model",
+      "name": "Copernicus DEM GLO-30",
+      "roles": [
+        "producer"
+      ],
+      "description": "Global 30 m Digital Elevation Model used for terrain correction and orthorectification."
+    },
+    {
+      "url": "https://gitlab.orfeo-toolbox.org/s1-tiling/s1tiling",
+      "name": "S1Tiling",
+      "roles": [
+        "processor"
+      ],
+      "description": "Open-source Sentinel-1 tiling and RTC processing pipeline (v1.4.x) orchestrating download, orthorectification and gamma-naught RTC calibration."
+    },
+    {
+      "url": "https://www.orfeo-toolbox.org/",
+      "name": "Orfeo ToolBox (OTB) + DiapOTB",
+      "roles": [
+        "processor"
+      ],
+      "description": "Remote sensing image processing library (v9.1.1) used for SAR orthorectification and gamma-area RTC via the DiapOTB extension."
     }
   ],
   "summaries": {
@@ -316,5 +348,6 @@
       ],
       "title": "Sentinel-1 GRD RTC per-acquisition thumbnail"
     }
-  }
+  },
+  "eodash:rasterform": "https://raw.githubusercontent.com/EOPF-Explorer/eodash-assets/refs/heads/main/forms/s1-bandsform.json"
 }
