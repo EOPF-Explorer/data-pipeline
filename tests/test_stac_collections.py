@@ -99,11 +99,67 @@ def test_s1_templates_carry_no_api_managed_links() -> None:
 # is invisible. So the contract is pinned once here instead, and the data is repeated.
 # Attribution strings are issue #270's, verbatim; issue #348 restates them identically
 # for the S1 collections, so the two families cannot drift.
+#
+# `href` and `attribution` are pinned, not just id/type/roles. Without them a link can
+# claim id "terrain-light" while serving OSM tiles, or carry a one-character attribution,
+# and still pass — both were demonstrated against the id/type/roles-only version. EOX and
+# OpenStreetMap require these credits on these tiles, so the exact string is the contract.
+ATTRIBUTION_OSM = (
+    '{ OSM: Data &copy; <a href="http://www.openstreetmap.org/copyright" '
+    'target="_blank">OpenStreetMap</a> contributors and '
+    '<a href="https://maps.eox.at/#data" target="_blank">others</a>, '
+    'Rendering &copy; <a href="http://eox.at" target="_blank">EOX</a> }'
+)
+ATTRIBUTION_OVERLAY = (
+    '{ Overlay: Data &copy; <a href="http://www.openstreetmap.org/copyright" '
+    'target="_blank">OpenStreetMap</a> contributors, Made with Natural Earth, '
+    'Rendering &copy; <a href="https://eox.at" target="_blank">EOX</a> }'
+)
+ATTRIBUTION_CLOUDLESS = (
+    '{ EOxCloudless 2024: <a xmlns:dct="http://purl.org/dc/terms/" '
+    'href="https://s2maps.eu" target="_blank" property="dct:title">'
+    "Sentinel-2 cloudless - s2maps.eu</a> by "
+    '<a xmlns:cc="http://creativecommons.org/ns#" href="https://eox.at" '
+    'target="_blank" property="cc:attributionName" rel="cc:attributionURL">'
+    "EOX IT Services GmbH</a> (Contains modified Copernicus Sentinel data 2024) }"
+)
+
+_TILES = "https://s2maps-tiles.eu/wmts/1.0.0"
+
+# (id, title, type, roles, href, attribution)
 EXPECTED_BASELAYERS = [
-    ("OSM", "image/jpeg", ["baselayer", "invisible"]),
-    ("terrain-light", "image/jpeg", ["baselayer", "visible"]),
-    ("overlay_bright", "image/png", ["overlay", "visible"]),
-    ("cloudless-2024", "image/jpeg", ["baselayer", "invisible"]),
+    (
+        "OSM",
+        "OSM Background",
+        "image/jpeg",
+        ["baselayer", "invisible"],
+        f"{_TILES}/osm_3857/default/g/{{z}}/{{y}}/{{x}}.jpeg",
+        ATTRIBUTION_OSM,
+    ),
+    (
+        "terrain-light",
+        "Terrain Light",
+        "image/jpeg",
+        ["baselayer", "visible"],
+        f"{_TILES}/terrain-light_3857/default/g/{{z}}/{{y}}/{{x}}.jpeg",
+        ATTRIBUTION_OSM,
+    ),
+    (
+        "overlay_bright",
+        "Overlay labels",
+        "image/png",
+        ["overlay", "visible"],
+        f"{_TILES}/overlay_base_bright_3857/default/g/{{z}}/{{y}}/{{x}}.png",
+        ATTRIBUTION_OVERLAY,
+    ),
+    (
+        "cloudless-2024",
+        "EOxCloudless 2024",
+        "image/jpeg",
+        ["baselayer", "invisible"],
+        f"{_TILES}/s2cloudless-2024_3857/default/g/{{z}}/{{y}}/{{x}}.jpeg",
+        ATTRIBUTION_CLOUDLESS,
+    ),
 ]
 
 BASELAYER_COLLECTIONS = [
@@ -121,7 +177,17 @@ def _xyz_links(filename: str) -> list[dict[str, Any]]:
 @pytest.mark.parametrize("filename", BASELAYER_COLLECTIONS)
 def test_baselayers_present_in_order(filename: str) -> None:
     """Every eodash collection offers the same four basemaps, in the same order."""
-    actual = [(lk.get("id"), lk.get("type"), lk.get("roles")) for lk in _xyz_links(filename)]
+    actual = [
+        (
+            lk.get("id"),
+            lk.get("title"),
+            lk.get("type"),
+            lk.get("roles"),
+            lk.get("href"),
+            lk.get("attribution"),
+        )
+        for lk in _xyz_links(filename)
+    ]
     assert actual == EXPECTED_BASELAYERS
 
 
