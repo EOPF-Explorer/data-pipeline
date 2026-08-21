@@ -238,6 +238,8 @@ class TestUpdateCollectionLinks:
                 {"rel": "self", "href": "https://api.test/collections/test"},
                 {"rel": "pre-aggregation", "href": "https://old/daily.json"},
                 {"rel": "root", "href": "https://api.test"},
+                {"rel": "license", "href": "https://example.invalid/licence"},
+                {"rel": "related", "href": "https://example.invalid/related"},
             ],
         }
 
@@ -278,10 +280,11 @@ class TestUpdateCollectionLinks:
         assert pre_agg_links[0]["aggregation:interval"] == "daily"
         assert pre_agg_links[1]["aggregation:interval"] == "monthly"
 
-        # Other links preserved
+        # Our own links preserved; the API-generated ones dropped rather than persisted
+        # (see TestApiManagedLinksAreNotPersisted for why re-storing them accumulated).
         assert len(other_links) == 2
         rels = {lk["rel"] for lk in other_links}
-        assert rels == {"self", "root"}
+        assert rels == {"license", "related"}
 
     def test_link_hrefs(self):
         collection_data = {"id": "s2", "links": []}
@@ -390,32 +393,7 @@ class TestTemplateSurvivesAggregation:
     """
 
     def _capture_put(self, collection_id: str, collection_data: dict) -> dict:
-        get_resp = MagicMock()
-        get_resp.json.return_value = collection_data
-        get_resp.raise_for_status = MagicMock()
-        put_resp = MagicMock()
-        put_resp.raise_for_status = MagicMock()
-        captured: dict = {}
-
-        def mock_put(url, json=None, headers=None):  # noqa: ARG001
-            captured["json"] = json
-            return put_resp
-
-        client = MagicMock()
-        client.__enter__ = MagicMock(return_value=client)
-        client.__exit__ = MagicMock(return_value=False)
-        client.get.return_value = get_resp
-        client.put = mock_put
-
-        with patch("scripts.aggregate_items.httpx.Client", return_value=client):
-            update_collection_links(
-                "https://api.explorer.eopf.copernicus.eu/stac",
-                collection_id,
-                "https://s3.explorer.eopf.copernicus.eu",  # s3_gateway_url
-                "esa-zarr-sentinel-explorer-fra",  # s3_bucket
-                "aggregations",  # s3_prefix
-            )
-        return captured["json"]
+        return _capture_put(collection_id, collection_data)
 
     @pytest.mark.parametrize("collection_id", ["sentinel-2-l2a", "sentinel-2-l2a-staging"])
     def test_aggregation_rewrite_is_a_no_op_on_the_committed_template(self, collection_id):
@@ -424,3 +402,86 @@ class TestTemplateSurvivesAggregation:
         )
         put_body = self._capture_put(collection_id, json.loads(json.dumps(template)))
         assert put_body["links"] == template["links"]
+
+
+def _capture_put(collection_id: str, collection_data: dict) -> dict:
+    """Run update_collection_links against a mocked API and return the body it PUT."""
+    get_resp = MagicMock()
+    get_resp.json.return_value = collection_data
+    get_resp.raise_for_status = MagicMock()
+    put_resp = MagicMock()
+    put_resp.raise_for_status = MagicMock()
+    captured: dict = {}
+
+    def mock_put(url, json=None, headers=None):  # noqa: ARG001
+        captured["json"] = json
+        return put_resp
+
+    client = MagicMock()
+    client.__enter__ = MagicMock(return_value=client)
+    client.__exit__ = MagicMock(return_value=False)
+    client.get.return_value = get_resp
+    client.put = mock_put
+
+    with patch("scripts.aggregate_items.httpx.Client", return_value=client):
+        update_collection_links(
+            "https://api.explorer.eopf.copernicus.eu/stac",
+            collection_id,
+            "https://s3.explorer.eopf.copernicus.eu",  # s3_gateway_url
+            "esa-zarr-sentinel-explorer-fra",  # s3_bucket
+            "aggregations",  # s3_prefix
+        )
+    return captured["json"]
+
+
+QUERYABLES_REL = "http://www.opengis.net/def/rel/ogc/1.0/queryables"
+
+
+class TestApiManagedLinksAreNotPersisted:
+    """The GET carries links the API generates; PUTting them back stores a copy.
+
+    The API then generates a fresh one on the next read, so each run added another.
+    `queryables` is the one that accumulated — its full-URI rel escapes whatever dedup
+    the API applies to `self`/`root`/`parent`/`items` — reaching 32 identical links on
+    sentinel-1-grd-rtc-acquisitions-staging by 2026-08-21 (one per daily cron run) while
+    the never-aggregated cube collection stayed at 1.
+    """
+
+    def _live_like(self) -> dict:
+        return {
+            "id": "sentinel-1-grd-rtc-acquisitions-staging",
+            "links": [
+                {"rel": "self", "href": "https://api/collections/c"},
+                {"rel": "root", "href": "https://api/"},
+                {"rel": "parent", "href": "https://api/"},
+                {"rel": "items", "href": "https://api/collections/c/items"},
+                {"rel": "license", "href": "https://example.invalid/licence"},
+                {"rel": QUERYABLES_REL, "href": "https://api/collections/c/queryables"},
+                {"rel": QUERYABLES_REL, "href": "https://api/collections/c/queryables"},
+                {"rel": "pre-aggregation", "href": "https://old/daily.json"},
+            ],
+        }
+
+    def test_api_managed_links_are_stripped_before_put(self):
+        put_body = _capture_put("sentinel-1-grd-rtc-acquisitions-staging", self._live_like())
+        rels = [link["rel"] for link in put_body["links"]]
+        assert QUERYABLES_REL not in rels
+        for rel in ("self", "root", "parent", "items"):
+            assert rel not in rels
+        assert rels == ["license", "pre-aggregation", "pre-aggregation"]
+
+    def test_repeated_runs_do_not_accumulate_links(self):
+        """The bug: each run PUT one more queryables link than the last."""
+        collection = self._live_like()
+        for _ in range(3):
+            put_body = _capture_put("sentinel-1-grd-rtc-acquisitions-staging", collection)
+            # The API re-injects its generated links on the next read.
+            collection = json.loads(json.dumps(put_body))
+            collection["links"].insert(0, {"rel": "self", "href": "https://api/collections/c"})
+            collection["links"].append(
+                {"rel": QUERYABLES_REL, "href": "https://api/collections/c/queryables"}
+            )
+        rels = [link["rel"] for link in put_body["links"]]
+        assert rels.count(QUERYABLES_REL) == 0
+        assert rels.count("pre-aggregation") == 2
+        assert rels == ["license", "pre-aggregation", "pre-aggregation"]

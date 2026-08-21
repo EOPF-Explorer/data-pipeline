@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import sys
+from typing import Any
 
 import boto3
 import httpx
@@ -138,6 +139,16 @@ def upload_to_s3(data: dict, bucket: str, key: str, s3_endpoint: str | None = No
     logger.info(f"Uploaded s3://{bucket}/{key} ({size_kb:.1f} KB)")
 
 
+# Kept in step with operator-tools/build_s1_rtc_collections.py::_API_LINK_RELS, which
+# applies the same rule when it derives a template from a live collection.
+_API_LINK_RELS = frozenset({"self", "root", "parent", "child", "items", "data", "queryables"})
+
+
+def _is_api_managed(link: dict[str, Any]) -> bool:
+    rel = str(link.get("rel", ""))
+    return rel in _API_LINK_RELS or "queryables" in rel
+
+
 def update_collection_links(
     stac_api_url: str,
     collection_id: str,
@@ -154,11 +165,17 @@ def update_collection_links(
         resp.raise_for_status()
         collection_data = resp.json()
 
-        # Remove existing pre-aggregation links
+        # Remove existing pre-aggregation links, and the navigation/queryables links the
+        # API generates at read time. Those arrive in the GET but are not ours to store:
+        # PUTting them back persists a copy, and the API then generates a fresh one on the
+        # next read, so every run added one more. `queryables` accumulated that way (its
+        # full-URI rel escapes the API's own dedup) — 32 identical links on
+        # sentinel-1-grd-rtc-acquisitions-staging by 2026-08-21, one per daily cron run,
+        # while the never-aggregated cube collection sat at 1.
         links = [
             link
             for link in collection_data.get("links", [])
-            if link.get("rel") != "pre-aggregation"
+            if link.get("rel") != "pre-aggregation" and not _is_api_managed(link)
         ]
 
         # Add new pre-aggregation links
