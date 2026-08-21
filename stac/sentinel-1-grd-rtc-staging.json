@@ -209,7 +209,7 @@
       "L1"
     ]
   },
-  "description": "Sentinel-1 Ground Range Detected (GRD) data processed to Radiometric Terrain Correction (RTC), stored as analysis-ready Zarr V3 tiles. Each tile aggregates all acquisitions for a given MGRS tile and orbit direction into a time-stacked Zarr store.",
+  "description": "Sentinel-1 GRD data processed to Radiometric Terrain Correction (RTC) using S1Tiling + OTB/DiapOTB with Copernicus DEM GLO-30 and EGM2008 geoid, stored as analysis-ready Zarr V3 tiles. Each tile aggregates all acquisitions for a given MGRS tile and orbit direction into a time-stacked Zarr store.",
   "item_assets": {
     "zarr-store": {
       "type": "application/vnd.zarr; version=3",
