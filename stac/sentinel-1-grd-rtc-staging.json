@@ -200,13 +200,6 @@
     "sat:orbit_state": [
       "ascending",
       "descending"
-    ],
-    "platform": [
-      "Sentinel-1A",
-      "Sentinel-1B"
-    ],
-    "processing:level": [
-      "L1"
     ]
   },
   "description": "Sentinel-1 GRD data processed to Radiometric Terrain Correction (RTC) using S1Tiling + OTB/DiapOTB with Copernicus DEM GLO-30 and EGM2008 geoid, stored as analysis-ready Zarr V3 tiles. Each tile aggregates all acquisitions for a given MGRS tile and orbit direction into a time-stacked Zarr store.",
@@ -314,7 +307,6 @@
   },
   "stac_version": "1.1.0",
   "stac_extensions": [
-    "https://stac-extensions.github.io/projection/v2.0.0/schema.json",
     "https://stac-extensions.github.io/render/v1.0.0/schema.json",
     "https://stac-extensions.github.io/sar/v1.0.0/schema.json",
     "https://stac-extensions.github.io/sat/v1.0.0/schema.json"
