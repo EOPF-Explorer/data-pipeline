@@ -166,3 +166,32 @@ def test_align_preserves_eodash_and_reconciled_links() -> None:
     ]
     out = b.align_collection(live, is_cube=True, extent=EXTENT)
     assert out["links"] == live["links"]
+
+
+def test_collection_render_tracks_the_builder():
+    """The collection fallback must BE the builder's recipe, not a copy that can fall behind.
+
+    A hand-copied duplicate is how this block kept `rescale: [[0.0, 0.2]]` for two months after
+    eopf_geozarr had already diagnosed that single shared pair as a rendering bug and moved every
+    item to one stretch per band. Comparing against the builder means an upstream change either
+    flows through or fails here.
+    """
+    from eopf_geozarr.stac.s1_rtc import _rgb_render
+
+    rgb = b._collection_render()["rgb"]
+    upstream = _rgb_render(b._COLLECTION_RENDER_ORBIT)
+    # `assets` is collection-only (items carry real assets); every other key is upstream's.
+    assert {k: v for k, v in rgb.items() if k != "assets"} == upstream
+    assert rgb["assets"] == ["gamma0-rtc-backscatter-asc", "gamma0-rtc-backscatter-desc"]
+    # One stretch per band: titiler applies a lone pair to all three, saturating the VV/VH ratio.
+    assert len(rgb["rescale"]) == len(rgb["expression"].split(";"))
+
+
+def test_committed_acq_template_render_matches_the_generator():
+    """The shipped template is what gets PUT, so it must equal what a regeneration would emit."""
+    import json
+
+    template = json.loads(
+        (Path(__file__).parent.parent.parent / "stac" / f"{b.ACQ_COLLECTION}.json").read_text()
+    )
+    assert template["renders"] == b._collection_render()

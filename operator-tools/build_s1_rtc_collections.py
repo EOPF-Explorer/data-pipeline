@@ -32,6 +32,7 @@ from eopf_geozarr.stac.s1_rtc import (
     SAR_EXT,
     SAT_EXT,
     ZARR_MEDIA_TYPE,
+    _rgb_render,
 )
 
 DEFAULT_STAC = "https://api.explorer.eopf.copernicus.eu/stac"
@@ -95,35 +96,36 @@ def item_assets() -> dict[str, Any]:
     return assets
 
 
+# The orbit the collection-level fallback names. Items are single-orbit and carry their own
+# correct render, so this only ever applies to a client that has no item in hand.
+_COLLECTION_RENDER_ORBIT = "ascending"
+
+
 def _collection_render() -> dict[str, Any]:
-    """Informational render for the *per-acquisition* collection (titiler renders per item).
+    """Fallback render for the *per-acquisition* collection, taken from the builder.
 
     Not emitted for the cube collection: a cube item exposes both the ``/ascending`` and the
     ``/descending`` group, so no single collection-level ``expression`` is true for it — see
     ``align_collection``.
 
-    ``rescale`` carries one stretch per band. A single pair is NOT equivalent: titiler applies
-    it to all three, and the third band is a VV/VH ratio spanning ~1-15, so a 0-0.2 stretch
-    saturates it and the composite comes out a flat purple. These are the values every live
-    acquisition item emits.
+    Derived from ``eopf_geozarr.stac.s1_rtc._rgb_render`` rather than restated, because a
+    hand-copied duplicate is exactly how this block came to carry ``rescale: [[0.0, 0.2]]`` for
+    two months after upstream had already diagnosed that single shared pair as a rendering bug
+    (it saturates the VV/VH ratio band to a flat purple) and moved every item to one stretch per
+    band. Importing the private helper is deliberate: if upstream renames it this fails loudly at
+    import, which is the failure mode we want over silently serving a stale recipe.
 
-    ``expression`` is illustrative. Each acquisition item is single-orbit and carries its own
-    correct ``renders`` (``/descending:`` for 683 of the 1420 live items), and every consumer
-    in this repo reads the item's, not the collection's.
+    ⚠️ eodash resolves ``config renders > collection STAC renders > item renders``
+    (``createLayers.js``), so this block OUTRANKS each item's own. It names one orbit and is
+    therefore wrong for the 683 of 1420 live items that are descending — kept deliberately as a
+    fallback for clients holding no item. Pinned against drift by
+    ``tests/unit/test_build_s1_rtc_collections.py::test_collection_render_tracks_the_builder``.
     """
-    vv, vh = "/ascending:vv", "/ascending:vh"
-    return {
-        "rgb": {
-            "title": "VV, VH, VV/VH composite",
-            # `assets` is required by the render extension — the γ⁰ backscatter assets this render draws
-            # from (VV/VH are bands within them).
-            "assets": ["gamma0-rtc-backscatter-asc", "gamma0-rtc-backscatter-desc"],
-            "expression": f"{vv};{vh};({vv})/({vh})",
-            "rescale": [[0.0, 0.4], [0.0, 0.1], [1.0, 15.0]],
-            "bidx": [1],
-            "tilesize": 256,
-        }
-    }
+    render = dict(_rgb_render(_COLLECTION_RENDER_ORBIT))
+    # `assets` is required by the render extension at collection level — the γ⁰ backscatter assets
+    # this render draws from (VV/VH are bands within them). Items omit it; they have real assets.
+    render["assets"] = [f"gamma0-rtc-backscatter-{short}" for short, _ in _ORBITS]
+    return {"rgb": render}
 
 
 def align_collection(
