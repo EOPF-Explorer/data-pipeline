@@ -190,6 +190,23 @@ def test_s1_cube_description_does_not_claim_one_orbit_per_tile() -> None:
     assert "ascending and descending" in description
 
 
+# One stretch per band, read off the live acquisition items. A single pair is not a shorthand
+# for "same stretch everywhere": titiler applies it to all three bands, and band 3 is a VV/VH
+# ratio spanning ~1-15, so a 0-0.2 stretch saturates it flat (the "purple wash").
+EXPECTED_RGB_RESCALE = [[0.0, 0.4], [0.0, 0.1], [1.0, 15.0]]
+
+
+def test_s1_acq_collection_render_matches_the_items() -> None:
+    """The collection's default recipe must agree with what every item actually emits."""
+    rgb = _load("sentinel-1-grd-rtc-acquisitions-staging.json")["renders"]["rgb"]
+    assert rgb["rescale"] == EXPECTED_RGB_RESCALE
+    assert rgb["bidx"] == [1]
+    assert rgb["tilesize"] == 256
+    assert rgb["title"] == "VV, VH, VV/VH composite"
+    # Three band slots in the expression, three stretches.
+    assert len(rgb["expression"].split(";")) == len(rgb["rescale"])
+
+
 # --- S1 RTC template/live link reconciliation (issue #348) -------------------
 
 # `manage_collections.py create --update` PUTs the template wholesale, so a link that

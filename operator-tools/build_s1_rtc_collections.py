@@ -101,6 +101,15 @@ def _collection_render() -> dict[str, Any]:
     Not emitted for the cube collection: a cube item exposes both the ``/ascending`` and the
     ``/descending`` group, so no single collection-level ``expression`` is true for it — see
     ``align_collection``.
+
+    ``rescale`` carries one stretch per band. A single pair is NOT equivalent: titiler applies
+    it to all three, and the third band is a VV/VH ratio spanning ~1-15, so a 0-0.2 stretch
+    saturates it and the composite comes out a flat purple. These are the values every live
+    acquisition item emits.
+
+    ``expression`` is illustrative. Each acquisition item is single-orbit and carries its own
+    correct ``renders`` (``/descending:`` for 683 of the 1420 live items), and every consumer
+    in this repo reads the item's, not the collection's.
     """
     vv, vh = "/ascending:vv", "/ascending:vh"
     return {
@@ -110,7 +119,7 @@ def _collection_render() -> dict[str, Any]:
             # from (VV/VH are bands within them).
             "assets": ["gamma0-rtc-backscatter-asc", "gamma0-rtc-backscatter-desc"],
             "expression": f"{vv};{vh};({vv})/({vh})",
-            "rescale": [[0.0, 0.2]],
+            "rescale": [[0.0, 0.4], [0.0, 0.1], [1.0, 15.0]],
             "bidx": [1],
             "tilesize": 256,
         }
