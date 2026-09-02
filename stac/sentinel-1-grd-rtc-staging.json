@@ -7,6 +7,66 @@
       "href": "https://sentinel.esa.int/documents/247904/690755/Sentinel_Data_Legal_Notice",
       "type": "application/pdf",
       "title": "Legal notice on the use of Copernicus Sentinel Data and Service Information"
+    },
+    {
+      "rel": "related",
+      "href": "https://earth-info.nga.mil/index.php?dir=wgs84&action=wgs84#tab_egm2008",
+      "type": "text/html",
+      "title": "EGM2008 geoid model (NGA) — height reference used in orthorectification"
+    },
+    {
+      "rel": "related",
+      "href": "https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-1-grd-rtc-acquisitions-staging",
+      "type": "application/json",
+      "title": "Sentinel-1 GRD RTC — per-acquisition slices [V1 staging]"
+    },
+    {
+      "rel": "xyz",
+      "href": "https://s2maps-tiles.eu/wmts/1.0.0/osm_3857/default/g/{z}/{y}/{x}.jpeg",
+      "type": "image/jpeg",
+      "title": "OSM Background",
+      "roles": [
+        "baselayer",
+        "invisible"
+      ],
+      "id": "OSM",
+      "attribution": "{ OSM: Data &copy; <a href=\"http://www.openstreetmap.org/copyright\" target=\"_blank\">OpenStreetMap</a> contributors and <a href=\"https://maps.eox.at/#data\" target=\"_blank\">others</a>, Rendering &copy; <a href=\"http://eox.at\" target=\"_blank\">EOX</a> }"
+    },
+    {
+      "rel": "xyz",
+      "href": "https://s2maps-tiles.eu/wmts/1.0.0/terrain-light_3857/default/g/{z}/{y}/{x}.jpeg",
+      "type": "image/jpeg",
+      "title": "Terrain Light",
+      "roles": [
+        "baselayer",
+        "visible"
+      ],
+      "id": "terrain-light",
+      "attribution": "{ OSM: Data &copy; <a href=\"http://www.openstreetmap.org/copyright\" target=\"_blank\">OpenStreetMap</a> contributors and <a href=\"https://maps.eox.at/#data\" target=\"_blank\">others</a>, Rendering &copy; <a href=\"http://eox.at\" target=\"_blank\">EOX</a> }"
+    },
+    {
+      "rel": "xyz",
+      "href": "https://s2maps-tiles.eu/wmts/1.0.0/overlay_base_bright_3857/default/g/{z}/{y}/{x}.png",
+      "type": "image/png",
+      "title": "Overlay labels",
+      "roles": [
+        "overlay",
+        "visible"
+      ],
+      "id": "overlay_bright",
+      "attribution": "{ Overlay: Data &copy; <a href=\"http://www.openstreetmap.org/copyright\" target=\"_blank\">OpenStreetMap</a> contributors, Made with Natural Earth, Rendering &copy; <a href=\"https://eox.at\" target=\"_blank\">EOX</a> }"
+    },
+    {
+      "rel": "xyz",
+      "href": "https://s2maps-tiles.eu/wmts/1.0.0/s2cloudless-2024_3857/default/g/{z}/{y}/{x}.jpeg",
+      "type": "image/jpeg",
+      "title": "EOxCloudless 2024",
+      "roles": [
+        "baselayer",
+        "invisible"
+      ],
+      "id": "cloudless-2024",
+      "attribution": "{ EOxCloudless 2024: <a xmlns:dct=\"http://purl.org/dc/terms/\" href=\"https://s2maps.eu\" target=\"_blank\" property=\"dct:title\">Sentinel-2 cloudless - s2maps.eu</a> by <a xmlns:cc=\"http://creativecommons.org/ns#\" href=\"https://eox.at\" target=\"_blank\" property=\"cc:attributionName\" rel=\"cc:attributionURL\">EOX IT Services GmbH</a> (Contains modified Copernicus Sentinel data 2024) }"
     }
   ],
   "title": "Sentinel-1 GRD RTC [V1 staging]",
@@ -24,17 +84,17 @@
     "spatial": {
       "bbox": [
         [
-          -5.2,
-          42.0,
-          9.2,
-          49.0
+          -18.0763,
+          24.3219,
+          57.0985,
+          65.8216
         ]
       ]
     },
     "temporal": {
       "interval": [
         [
-          "2025-02-05T06:01:10Z",
+          "2021-09-10T07:10:38Z",
           null
         ]
       ]
@@ -69,12 +129,44 @@
       ]
     },
     {
-      "url": "https://zarr.eopf.copernicus.eu/",
-      "name": "EOPF Sentinel Zarr Samples Service",
+      "url": "https://api.explorer.eopf.copernicus.eu/",
+      "name": "EOPF Explorer",
       "roles": [
         "host",
         "processor"
       ]
+    },
+    {
+      "url": "https://dataspace.copernicus.eu/",
+      "name": "Copernicus Data Space Ecosystem (CDSE)",
+      "roles": [
+        "producer"
+      ],
+      "description": "Source of Sentinel-1 GRD Level-1 input products, downloaded via EODAG."
+    },
+    {
+      "url": "https://spacedata.copernicus.eu/collections/copernicus-digital-elevation-model",
+      "name": "Copernicus DEM GLO-30",
+      "roles": [
+        "producer"
+      ],
+      "description": "Global 30 m Digital Elevation Model used for terrain correction and orthorectification."
+    },
+    {
+      "url": "https://gitlab.orfeo-toolbox.org/s1-tiling/s1tiling",
+      "name": "S1Tiling",
+      "roles": [
+        "processor"
+      ],
+      "description": "Open-source Sentinel-1 tiling and RTC processing pipeline (v1.4.x) orchestrating download, orthorectification and gamma-naught RTC calibration."
+    },
+    {
+      "url": "https://www.orfeo-toolbox.org/",
+      "name": "Orfeo ToolBox (OTB) + DiapOTB",
+      "roles": [
+        "processor"
+      ],
+      "description": "Remote sensing image processing library (v9.1.1) used for SAR orthorectification and gamma-area RTC via the DiapOTB extension."
     }
   ],
   "summaries": {
@@ -110,7 +202,7 @@
       "descending"
     ]
   },
-  "description": "Sentinel-1 Ground Range Detected (GRD) data processed to Radiometric Terrain Correction (RTC), stored as analysis-ready Zarr V3 tiles. Each tile aggregates all acquisitions for a given MGRS tile and orbit direction into a time-stacked Zarr store.",
+  "description": "Sentinel-1 GRD data processed to Radiometric Terrain Correction (RTC) using S1Tiling + OTB/DiapOTB with Copernicus DEM GLO-30 and EGM2008 geoid, stored as analysis-ready Zarr V3 tiles. Each item is one MGRS tile: a single Zarr store time-stacking every acquisition over that tile, with the ascending and descending passes kept as separate groups within the store and exposed as separate assets. Per-acquisition time slices are published as items of 'sentinel-1-grd-rtc-acquisitions-staging'.",
   "item_assets": {
     "zarr-store": {
       "type": "application/vnd.zarr; version=3",
@@ -216,27 +308,6 @@
   "stac_version": "1.1.0",
   "stac_extensions": [
     "https://stac-extensions.github.io/sar/v1.0.0/schema.json",
-    "https://stac-extensions.github.io/sat/v1.0.0/schema.json",
-    "https://stac-extensions.github.io/render/v1.0.0/schema.json"
-  ],
-  "renders": {
-    "rgb": {
-      "title": "VV, VH, VV/VH composite",
-      "assets": [
-        "gamma0-rtc-backscatter-asc",
-        "gamma0-rtc-backscatter-desc"
-      ],
-      "expression": "/ascending:vv;/ascending:vh;(/ascending:vv)/(/ascending:vh)",
-      "rescale": [
-        [
-          0.0,
-          0.2
-        ]
-      ],
-      "bidx": [
-        1
-      ],
-      "tilesize": 256
-    }
-  }
+    "https://stac-extensions.github.io/sat/v1.0.0/schema.json"
+  ]
 }

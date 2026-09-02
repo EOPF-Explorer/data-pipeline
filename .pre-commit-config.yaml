@@ -43,6 +43,11 @@ repos:
     rev: v2.12.0
     hooks:
       - id: hadolint-docker
+        # Upstream's entry is untagged (`ghcr.io/hadolint/hadolint`), so Docker
+        # resolves it to :latest and `rev` above pins nothing -- a new rule in a
+        # freshly pushed image breaks CI on unmodified Dockerfiles. Pin the image
+        # to the same version as `rev` so the hook is actually reproducible.
+        entry: ghcr.io/hadolint/hadolint:v2.12.0 hadolint
         args: ["--ignore", "DL3008", "--ignore", "DL3018"]  # Allow unpinned apt/apk (GDAL version tied to OS release)
 
   - repo: local

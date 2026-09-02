@@ -1,7 +1,7 @@
 """Generate aligned S1 RTC collection templates from the live collections + the data-model asset model.
 
 Patches the *stale* fields of each live collection (``item_assets``, ``summaries`` platform /
-processing:level, ``stac_extensions``, ``extent``, ``renders``) so the collection metadata matches the
+processing:level, ``stac_extensions``, ``extent``, ``renders`` — dropped on the dual-orbit cube) so the collection metadata matches the
 migrated new-model items, while preserving the good fields (title/description/keywords/providers/license/
 links). ``item_assets`` is derived from ``eopf_geozarr.stac.s1_rtc`` so it cannot drift from the builder;
 the ``extent`` is derived from the live items so re-running after new ingests keeps it aligned.
@@ -32,6 +32,7 @@ from eopf_geozarr.stac.s1_rtc import (
     SAR_EXT,
     SAT_EXT,
     ZARR_MEDIA_TYPE,
+    _rgb_render,
 )
 
 DEFAULT_STAC = "https://api.explorer.eopf.copernicus.eu/stac"
@@ -95,21 +96,36 @@ def item_assets() -> dict[str, Any]:
     return assets
 
 
+# The orbit the collection-level fallback names. Items are single-orbit and carry their own
+# correct render, so this only ever applies to a client that has no item in hand.
+_COLLECTION_RENDER_ORBIT = "ascending"
+
+
 def _collection_render() -> dict[str, Any]:
-    """Orbit-generic, informational render (titiler renders from the per-item ``renders``)."""
-    vv, vh = "/ascending:vv", "/ascending:vh"
-    return {
-        "rgb": {
-            "title": "VV, VH, VV/VH composite",
-            # `assets` is required by the render extension — the γ⁰ backscatter assets this render draws
-            # from (VV/VH are bands within them).
-            "assets": ["gamma0-rtc-backscatter-asc", "gamma0-rtc-backscatter-desc"],
-            "expression": f"{vv};{vh};({vv})/({vh})",
-            "rescale": [[0.0, 0.2]],
-            "bidx": [1],
-            "tilesize": 256,
-        }
-    }
+    """Fallback render for the *per-acquisition* collection, taken from the builder.
+
+    Not emitted for the cube collection: a cube item exposes both the ``/ascending`` and the
+    ``/descending`` group, so no single collection-level ``expression`` is true for it — see
+    ``align_collection``.
+
+    Derived from ``eopf_geozarr.stac.s1_rtc._rgb_render`` rather than restated, because a
+    hand-copied duplicate is exactly how this block came to carry ``rescale: [[0.0, 0.2]]`` for
+    two months after upstream had already diagnosed that single shared pair as a rendering bug
+    (it saturates the VV/VH ratio band to a flat purple) and moved every item to one stretch per
+    band. Importing the private helper is deliberate: if upstream renames it this fails loudly at
+    import, which is the failure mode we want over silently serving a stale recipe.
+
+    ⚠️ eodash resolves ``config renders > collection STAC renders > item renders``
+    (``createLayers.js``), so this block OUTRANKS each item's own. It names one orbit and is
+    therefore wrong for the 683 of 1420 live items that are descending — kept deliberately as a
+    fallback for clients holding no item. Pinned against drift by
+    ``tests/unit/test_build_s1_rtc_collections.py::test_collection_render_tracks_the_builder``.
+    """
+    render = dict(_rgb_render(_COLLECTION_RENDER_ORBIT))
+    # `assets` is required by the render extension at collection level — the γ⁰ backscatter assets
+    # this render draws from (VV/VH are bands within them). Items omit it; they have real assets.
+    render["assets"] = [f"gamma0-rtc-backscatter-{short}" for short, _ in _ORBITS]
+    return {"rgb": render}
 
 
 def align_collection(
@@ -125,7 +141,18 @@ def align_collection(
         "spatial": extent.get("spatial") or c.get("extent", {}).get("spatial"),
         "temporal": extent["temporal"],
     }
-    c["renders"] = _collection_render()
+    # A cube item carries BOTH orbit groups (`/ascending` and `/descending`) and its
+    # `sat:orbit_state` is only the orbit of the preview slice that `_pin_preview_to_best_recent`
+    # chose — 113 of the 170 live cube items say "ascending", 57 "descending". A collection-level
+    # `expression` has to name one group, so any value here is false for the other half of the
+    # collection. Every item already carries its own correct per-orbit `renders`, and nothing reads
+    # the collection-level block (all consumers read `item.properties.renders`), so the cube simply
+    # does not declare one. Same reasoning as the deliberately absent `eodash:rasterform`, pinned by
+    # tests/test_stac_collections.py::test_rasterform_absent_everywhere_else.
+    if is_cube:
+        c.pop("renders", None)
+    else:
+        c["renders"] = _collection_render()
 
     summaries = dict(c.get("summaries", {}))
     summaries.pop("processing:level", None)  # items carry no processing:level (deferred)
@@ -135,9 +162,10 @@ def align_collection(
         summaries["platform"] = ["sentinel-1a", "sentinel-1c"]  # normalized; S1B is decommissioned
     c["summaries"] = summaries
 
-    # Extensions the collection object itself uses: sar/sat summaries + the renders field.
-    # (item_assets + bands are STAC 1.1 core; gsd/constellation/instruments are common metadata.)
-    c["stac_extensions"] = [SAR_EXT, SAT_EXT, RENDER_EXT]
+    # Extensions the collection object itself uses: sar/sat summaries, plus render only where a
+    # `renders` field is actually emitted. (item_assets + bands are STAC 1.1 core;
+    # gsd/constellation/instruments are common metadata.)
+    c["stac_extensions"] = [SAR_EXT, SAT_EXT] if is_cube else [SAR_EXT, SAT_EXT, RENDER_EXT]
     return c
 
 
