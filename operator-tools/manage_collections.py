@@ -16,6 +16,7 @@ This tool uses manage_item.py for all item-level operations.
 import json
 import os
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -26,10 +27,12 @@ import requests
 # Import item management functionality
 from manage_item import (
     STACItemManager,
+    check_urls_confined,
     count_s3_objects_for_item,
     extract_s3_object_counts,
     extract_s3_urls_from_item,
     extract_stac_object_counts,
+    parse_s3_prefix,
 )
 from pystac import Collection, Item
 from pystac_client import Client
@@ -41,6 +44,45 @@ if str(scripts_dir) not in sys.path:
 
 import stac_auth  # noqa: E402
 from storage_tier_utils import get_s3_storage_info  # noqa: E402
+
+
+def _report_confinement_sweep(
+    items: list[dict[str, Any]],
+    confinement: Sequence[tuple[str, str]],
+) -> None:
+    """Assert every item's S3 URLs sit inside ``confinement``; abort if not.
+
+    Raises:
+        click.ClickException: if any item has an out-of-bounds or store-orphaning
+            URL. Aborting is the point — a purge that "skips the bad ones" hides
+            exactly the items whose hrefs are wrong.
+    """
+    click.echo(f"\n🔒 Confinement: {len(confinement)} allowed prefix(es)")
+    for bucket, prefix in confinement:
+        click.echo(f"    • s3://{bucket}/{prefix}")
+
+    offenders: list[tuple[str, str, str]] = []
+    checked = 0
+    for item in items:
+        urls = extract_s3_urls_from_item(item)
+        checked += len(urls)
+        for url, reason in check_urls_confined(urls, confinement):
+            offenders.append((item["id"], url, reason))
+
+    if not offenders:
+        click.echo(f"    ✅ {checked:,} asset URLs across {len(items):,} items are all in bounds")
+        return
+
+    click.echo(f"\n⛔ {len(offenders)} asset URL(s) outside the confinement:", err=True)
+    for item_id, url, reason in offenders[:20]:
+        click.echo(f"    {item_id}: {url}  [{reason}]", err=True)
+    if len(offenders) > 20:
+        click.echo(f"    ... and {len(offenders) - 20} more", err=True)
+    raise click.ClickException(
+        "Refusing to clean: the items above reference S3 data outside the declared "
+        "confinement. Widen --confine-to only if every path listed is genuinely "
+        "yours to delete."
+    )
 
 
 class STACCollectionManager:
@@ -92,6 +134,8 @@ class STACCollectionManager:
         dry_run: bool = False,
         clean_s3: bool = False,
         s3_client: Any = None,
+        confinement: Sequence[tuple[str, str]] | None = None,
+        max_items: int | None = None,
     ) -> tuple[int, int, int]:
         """
         Remove all items from a collection, optionally cleaning S3 data.
@@ -101,6 +145,12 @@ class STACCollectionManager:
             dry_run: If True, only show what would be deleted
             clean_s3: If True, also delete S3 data
             s3_client: Boto3 S3 client (required if clean_s3=True)
+            confinement: (bucket, prefix) pairs the S3 deletes may touch
+                (required if clean_s3=True)
+            max_items: stop after this many items. The confinement sweep still
+                covers the WHOLE collection — the bound limits what is deleted,
+                never what is checked. Re-running converges, so a large purge is
+                a series of bounded runs rather than one unbounded one.
 
         Returns:
             Tuple of (items_deleted, s3_objects_deleted, s3_objects_failed)
@@ -115,6 +165,26 @@ class STACCollectionManager:
             click.echo("✅ Collection is already empty")
             return 0, 0, 0
 
+        if clean_s3:
+            if confinement is None:
+                raise ValueError("clean_collection(clean_s3=True) requires an explicit confinement")
+            # Sweep EVERY item before touching anything. The per-item guard in
+            # delete_s3_objects_for_item already fails closed, but on its own it
+            # would abort a 15-40h purge partway through on a rogue href found
+            # at item 20,000. Checking up front turns that into a 2-minute
+            # answer, and the report names every offender at once.
+            _report_confinement_sweep(items, confinement)
+
+        # Bound AFTER the sweep: the sweep must see every item, or a rogue href
+        # outside this batch stays hidden until the run that reaches it.
+        total_in_collection = len(items)
+        if max_items is not None and max_items < total_in_collection:
+            items = items[:max_items]
+            click.echo(
+                f"\n🔢 Bounded run: {len(items):,} of {total_in_collection:,} items "
+                "(re-run to continue; the clean converges)"
+            )
+
         if dry_run:
             click.echo(f"\nWould delete {len(items)} STAC items:")
             for item in items[:10]:
@@ -126,7 +196,10 @@ class STACCollectionManager:
                 click.echo(
                     f"\nS3 data that would be deleted (sampling {min(5, len(items))} of {len(items)} items for preview):"
                 )
-                click.echo("NOTE: Actual deletion will process ALL items in the collection")
+                # Say what THIS run would do. "ALL items in the collection" was
+                # true before --max-items existed and now contradicts the bound
+                # printed just above it.
+                click.echo(f"NOTE: Actual deletion will process all {len(items):,} items above")
 
                 # Sample a few items to show S3 paths and count objects
                 total_preview_objects = 0
@@ -147,7 +220,7 @@ class STACCollectionManager:
                             click.echo(f"      ... and {len(s3_urls) - 5} more")
 
                 if sample_size > 0 and total_preview_objects > 0:
-                    click.echo(f"\n  {'─'*60}")
+                    click.echo(f"\n  {'─' * 60}")
                     click.echo(
                         f"  Sample total: {total_preview_objects:,} S3 objects from {sample_size} items"
                     )
@@ -159,7 +232,7 @@ class STACCollectionManager:
                         click.echo(
                             f"  Estimated total for ALL {len(items)} items: ~{estimated_total:,} S3 objects"
                         )
-                        click.echo(f"  {'─'*60}")
+                        click.echo(f"  {'─' * 60}")
                         click.echo(
                             f"\n  ⚠️  IMPORTANT: Actual deletion will process ALL {len(items)} items"
                         )
@@ -199,6 +272,7 @@ class STACCollectionManager:
                     s3_client=s3_client,
                     item_dict=item,
                     validate_s3=True,
+                    confinement=confinement,
                 )
 
                 if success:
@@ -595,6 +669,26 @@ def cli(ctx: click.Context, api_url: str) -> None:
     "--s3-endpoint",
     help="S3 endpoint URL (optional, uses AWS_ENDPOINT_URL env var if not specified)",
 )
+@click.option(
+    "--confine-to",
+    "confine_to",
+    multiple=True,
+    metavar="S3_URL",
+    help=(
+        "Restrict S3 deletion to this s3://bucket/prefix/ (repeatable). "
+        "REQUIRED with --clean-s3. Prefixes are matched with a trailing slash, "
+        "so s3://b/foo/ never matches s3://b/foo-staging/."
+    ),
+)
+@click.option(
+    "--max-items",
+    type=click.IntRange(min=1),
+    default=None,
+    help=(
+        "Delete at most this many items, then stop. The confinement sweep still "
+        "covers the whole collection. Re-run to continue — the clean converges."
+    ),
+)
 @click.pass_context
 def clean(
     ctx: click.Context,
@@ -603,6 +697,8 @@ def clean(
     yes: bool,
     clean_s3: bool,
     s3_endpoint: str | None,
+    confine_to: tuple[str, ...],
+    max_items: int | None,
 ) -> None:
     """
     Remove all items from a collection.
@@ -610,13 +706,28 @@ def clean(
     Example:
         manage_collections.py clean sentinel-2-l2a-staging --dry-run
         manage_collections.py clean sentinel-2-l2a-staging
-        manage_collections.py clean sentinel-2-l2a-staging --clean-s3
+        manage_collections.py clean sentinel-2-l2a-staging --clean-s3 \\
+            --confine-to s3://my-bucket/tests-output/sentinel-2-l2a-staging/
     """
     manager: STACCollectionManager = ctx.obj["manager"]
 
+    confinement = None
+    if clean_s3:
+        if not confine_to:
+            raise click.UsageError(
+                "--clean-s3 requires at least one --confine-to s3://bucket/prefix/ .\n"
+                "Recursive S3 deletion is unbounded without it, and prod data can sit "
+                "under a sibling prefix in the same bucket."
+            )
+        try:
+            confinement = [parse_s3_prefix(spec) for spec in confine_to]
+        except ValueError as exc:
+            raise click.UsageError(str(exc)) from exc
+
     # Confirmation prompt
     if not dry_run and not yes:
-        warning = f"⚠️  This will delete ALL items from collection '{collection_id}'."
+        scope = "ALL items" if max_items is None else f"up to {max_items} items"
+        warning = f"⚠️  This will delete {scope} from collection '{collection_id}'."
         if clean_s3:
             warning += (
                 "\n⚠️  This will also DELETE ALL S3 DATA (Zarr stores) referenced by these items!"
@@ -645,7 +756,12 @@ def clean(
             )
 
         manager.clean_collection(
-            collection_id, dry_run=dry_run, clean_s3=clean_s3, s3_client=s3_client
+            collection_id,
+            dry_run=dry_run,
+            clean_s3=clean_s3,
+            s3_client=s3_client,
+            confinement=confinement,
+            max_items=max_items,
         )
 
     except Exception as e:
@@ -731,7 +847,7 @@ def batch_create(ctx: click.Context, directory: Path, update: bool) -> None:
     fail_count = 0
 
     for json_file in json_files:
-        click.echo(f"\n{'='*60}")
+        click.echo(f"\n{'=' * 60}")
         click.echo(f"Processing: {json_file.name}")
 
         collection_data = manager.load_collection_from_template(json_file)
@@ -747,7 +863,7 @@ def batch_create(ctx: click.Context, directory: Path, update: bool) -> None:
         else:
             fail_count += 1
 
-    click.echo(f"\n{'='*60}")
+    click.echo(f"\n{'=' * 60}")
     click.echo(f"✅ Success: {success_count}")
     if fail_count > 0:
         click.echo(f"❌ Failed: {fail_count}")
@@ -843,7 +959,7 @@ def info(
         catalog = Client.open(api_url)
         collection = catalog.get_collection(collection_id)
 
-        click.echo(f"\n{'='*60}")
+        click.echo(f"\n{'=' * 60}")
         click.echo(f"Collection: {collection.id}")
         click.echo(f"Title: {collection.title}")
         click.echo(f"Description: {collection.description[:200]}...")
@@ -860,7 +976,7 @@ def info(
 
         # Storage tier statistics from STAC metadata
         if s3_stac_info and items:
-            click.echo(f"\n{'─'*60}")
+            click.echo(f"\n{'─' * 60}")
             click.echo("Storage Tier Statistics (from STAC metadata):")
 
             # Aggregate statistics across all items
@@ -948,7 +1064,7 @@ def info(
 
         # S3 storage statistics
         if s3_stats and items:
-            click.echo(f"\n{'─'*60}")
+            click.echo(f"\n{'─' * 60}")
             click.echo("S3 Storage Statistics:")
 
             # Initialize S3 client
@@ -1028,7 +1144,7 @@ def info(
             except Exception as e:
                 click.echo(f"  ⚠️  Could not fetch S3 statistics: {e}", err=True)
 
-        click.echo(f"{'='*60}\n")
+        click.echo(f"{'=' * 60}\n")
 
     except Exception as e:
         click.echo(f"❌ Error fetching collection info: {e}", err=True)
@@ -1130,9 +1246,9 @@ def sync_storage_tiers(
         total_stac_objects = sum(stac_object_counts.values())
 
         if total_s3_objects > 0 or total_stac_objects > 0:
-            click.echo(f"\n{'─'*60}")
+            click.echo(f"\n{'─' * 60}")
             click.echo("OBJECT-LEVEL STATISTICS")
-            click.echo(f"{'─'*60}")
+            click.echo(f"{'─' * 60}")
 
             # S3 object counts
             if s3_object_counts:
@@ -1161,9 +1277,9 @@ def sync_storage_tiers(
 
         # Display problems (mismatches)
         if stats["problems"]:
-            click.echo(f"\n{'─'*60}")
+            click.echo(f"\n{'─' * 60}")
             click.echo(f"🔍 MISMATCHES FOUND: {len(stats['problems'])} item(s)")
-            click.echo(f"{'─'*60}")
+            click.echo(f"{'─' * 60}")
             for problem in stats["problems"]:
                 item_id = problem["item_id"]
                 click.echo(f"\n  Item: {item_id}")
@@ -1189,9 +1305,9 @@ def sync_storage_tiers(
 
         # Display corrections
         if stats["corrections"]:
-            click.echo(f"\n{'─'*60}")
+            click.echo(f"\n{'─' * 60}")
             click.echo(f"✅ CORRECTIONS MADE: {len(stats['corrections'])} item(s) updated")
-            click.echo(f"{'─'*60}")
+            click.echo(f"{'─' * 60}")
             for correction in stats["corrections"][:10]:  # Show first 10
                 item_id = correction["item_id"]
                 assets_updated = correction["assets_updated"]
@@ -1204,9 +1320,9 @@ def sync_storage_tiers(
                 click.echo(f"  ... and {len(stats['corrections']) - 10} more item(s)")
 
         if dry_run:
-            click.echo(f"\n{'─'*60}")
+            click.echo(f"\n{'─' * 60}")
             click.echo("DRY RUN - No changes were made")
-            click.echo(f"{'─'*60}")
+            click.echo(f"{'─' * 60}")
 
         click.echo("=" * 60)
 
@@ -1387,10 +1503,10 @@ def change_storage_tier(
 
                             # Use DELETE then POST (pgstac doesn't support PUT)
                             delete_url = (
-                                f"{manager.api_url}" f"/collections/{collection_id}/items/{item_id}"
+                                f"{manager.api_url}/collections/{collection_id}/items/{item_id}"
                             )
                             manager.session.delete(delete_url, timeout=30)
-                            create_url = f"{manager.api_url}" f"/collections/{collection_id}/items"
+                            create_url = f"{manager.api_url}/collections/{collection_id}/items"
                             manager.session.post(
                                 create_url,
                                 json=pystac_item.to_dict(),
@@ -1416,9 +1532,9 @@ def change_storage_tier(
                 click.echo(f"  - {fid}")
 
         if dry_run:
-            click.echo(f"\n{'─'*60}")
+            click.echo(f"\n{'─' * 60}")
             click.echo("DRY RUN - No changes were made")
-            click.echo(f"{'─'*60}")
+            click.echo(f"{'─' * 60}")
 
         click.echo("=" * 60)
 

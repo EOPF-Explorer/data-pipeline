@@ -17,6 +17,7 @@ Behaviour preserved from the original:
 import logging
 import os
 from collections import defaultdict
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -193,9 +194,105 @@ def _collect_keys_by_bucket(
     return keys_by_bucket
 
 
+# === Delete confinement (prefix guard) ===
+#
+# `extract_s3_urls_from_item` trusts whatever `s3://` href an item carries, and
+# `_partition_by_bucket` will happily expand it into a recursive delete. That is
+# safe only while every item is well-formed. It is NOT safe for a bulk purge:
+# one item in `sentinel-2-l2a-staging` whose asset href points at the ADJACENT
+# prod prefix `tests-output/sentinel-2-l2a/` would permanently delete prod data
+# (same bucket, no object versioning).
+#
+# A bucket-level check cannot catch that — prod and staging share a bucket — so
+# confinement is expressed as (bucket, prefix) pairs and the caller must declare
+# them. There is deliberately no default: the bound is a property of the tool,
+# not of the operator remembering to pass a flag.
+
+
+class UnconfinedS3URLError(Exception):
+    """An item's asset URL falls outside the declared delete confinement.
+
+    Carries every violation so the operator sees the full picture at once
+    rather than fixing them one re-run at a time.
+    """
+
+    def __init__(self, violations: list[tuple[str, str]], item_id: str | None = None) -> None:
+        self.violations = violations
+        self.item_id = item_id
+        where = f" for item {item_id}" if item_id else ""
+        detail = "; ".join(f"{url} ({reason})" for url, reason in violations)
+        super().__init__(f"S3 URL outside delete confinement{where}: {detail}")
+
+
+def parse_s3_prefix(spec: str) -> tuple[str, str]:
+    """Parse an ``s3://bucket/prefix/`` confinement spec into ``(bucket, prefix)``.
+
+    The prefix is normalised to a trailing slash. That normalisation is the
+    whole point: ``tests-output/sentinel-2-l2a`` would prefix-match
+    ``tests-output/sentinel-2-l2a-staging/...`` as a bare string, whereas
+    ``tests-output/sentinel-2-l2a/`` cannot. Sibling prefixes whose names share
+    a stem are the exact hazard this guard exists for.
+
+    ``s3://bucket`` and ``s3://bucket/`` both mean the whole bucket.
+    """
+    parsed = urlparse(spec)
+    if parsed.scheme != "s3":
+        raise ValueError(f"confinement must be an s3:// URL, got: {spec!r}")
+    bucket = parsed.netloc
+    if not bucket:
+        raise ValueError(f"confinement is missing a bucket: {spec!r}")
+    prefix = parsed.path.lstrip("/")
+    if prefix and not prefix.endswith("/"):
+        prefix += "/"
+    return bucket, prefix
+
+
+def check_urls_confined(
+    s3_urls: set[str],
+    allowed: Sequence[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    """Return ``[(url, reason)]`` for every URL not provably safe to delete.
+
+    Reasons:
+    - ``outside_confinement`` — the URL is in another bucket, or under a prefix
+      the caller did not declare. An empty ``allowed`` puts every URL here, so
+      an unconfigured caller deletes nothing rather than everything.
+    - ``bare_zarr_store`` — an href ending in ``.zarr`` with no trailing slash.
+      `_partition_by_bucket` treats it as a single object key, so the delete
+      removes ~nothing, validation then counts 0 remaining, and the STAC item is
+      dropped while the whole store lives on. Silent orphaning; refuse instead.
+    """
+    violations: list[tuple[str, str]] = []
+    for url in sorted(s3_urls):
+        parsed = urlparse(url)
+        key = parsed.path.lstrip("/")
+        if key.endswith(".zarr"):
+            violations.append((url, "bare_zarr_store"))
+            continue
+        if not any(
+            parsed.netloc == bucket and key.startswith(prefix) for bucket, prefix in allowed
+        ):
+            violations.append((url, "outside_confinement"))
+    return violations
+
+
+def assert_urls_confined(
+    s3_urls: set[str],
+    allowed: Sequence[tuple[str, str]],
+    *,
+    item_id: str | None = None,
+) -> None:
+    """Raise :class:`UnconfinedS3URLError` unless every URL is safe to delete."""
+    violations = check_urls_confined(s3_urls, allowed)
+    if violations:
+        raise UnconfinedS3URLError(violations, item_id=item_id)
+
+
 def delete_s3_objects_for_item(
     s3_client: Any,
     s3_urls: set[str],
+    *,
+    confinement: Sequence[tuple[str, str]],
 ) -> tuple[int, int]:
     """Delete all S3 objects referenced by a STAC item's assets.
 
@@ -204,10 +301,19 @@ def delete_s3_objects_for_item(
     Args:
         s3_client: Boto3 S3 client
         s3_urls: Set of S3 URLs from the item's assets
+        confinement: ``(bucket, prefix)`` pairs this delete may touch, from
+            :func:`parse_s3_prefix`. Keyword-only and without a default on
+            purpose — every caller states its blast radius, and an empty
+            sequence deletes nothing. Raises :class:`UnconfinedS3URLError`
+            before issuing any delete if a URL escapes it.
 
     Returns:
         Tuple of (deleted_count, failed_count)
     """
+    # Check every URL before deleting any of them: a per-URL check would leave
+    # a half-deleted item behind when the second href is the rogue one.
+    assert_urls_confined(s3_urls, confinement)
+
     deleted = 0
     failed = 0
 

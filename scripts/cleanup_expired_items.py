@@ -36,6 +36,7 @@ import stac_auth
 from botocore.exceptions import ClientError
 from pystac_client import Client
 from s3_item_cleanup import (
+    UnconfinedS3URLError,
     count_s3_objects_for_item,
     delete_s3_objects_for_item,
     extract_s3_urls_from_item,
@@ -57,7 +58,9 @@ DEFAULT_MAX_ITEMS = 100
 
 # Per-item statuses that make the run exit non-zero. `already_gone` is NOT here
 # (idempotent success); `stac_delete_http_*` is matched separately by prefix.
-FAILURE_STATUSES = frozenset({"s3_validation_failed", "auth_required", "refetch_failed"})
+FAILURE_STATUSES = frozenset(
+    {"s3_validation_failed", "auth_required", "refetch_failed", "stac_delete_error"}
+)
 
 
 def _now() -> datetime:
@@ -191,7 +194,13 @@ def process_item(
             would_delete = count_s3_objects_for_item(s3_client, s3_urls)
             return _audit(item, dry_run, "dry_run", s3_remaining=would_delete)
 
-        deleted, failed = delete_s3_objects_for_item(s3_client, s3_urls)
+        # Bucket-wide confinement reproduces the `wrong_bucket` guard above at
+        # the delete itself, so the bound survives any future refactor that
+        # reorders the guards. The empty prefix is deliberate: this cron sweeps
+        # a whole bucket by design, unlike the operator purge tools.
+        deleted, failed = delete_s3_objects_for_item(
+            s3_client, s3_urls, confinement=[(allowed_bucket, "")]
+        )
         if failed > 0:
             return _audit(
                 item,
@@ -202,6 +211,12 @@ def process_item(
             )
 
         remaining = count_s3_objects_for_item(s3_client, s3_urls)
+    except UnconfinedS3URLError as exc:
+        # Reachable via `bare_zarr_store`: an href ending `.zarr` with no
+        # trailing slash would delete one key, validate "0 remaining" and drop
+        # the STAC item while the store survives. Retain and surface it.
+        logger.warning("Refusing unconfined delete for %s: %s", item.get("id"), exc)
+        return _audit(item, dry_run, "unconfined_s3_url")
     except ClientError as exc:
         logger.warning("S3 error validating %s: %s — retaining STAC item", item.get("id"), exc)
         return _audit(item, dry_run, "s3_validation_failed")
@@ -289,16 +304,33 @@ def run_cleanup(args: argparse.Namespace) -> int:
         elif outcome != "ok" or fresh is None:
             record = _audit(stale, dry_run, "refetch_failed")
         else:
-            record = process_item(
-                fresh,
-                now=now,
-                exclude_ids=exclude_ids,
-                allowed_bucket=args.allowed_bucket,
-                s3_client=s3_client,
-                session=session,
-                stac_base_url=stac_base_url,
-                dry_run=dry_run,
-            )
+            try:
+                record = process_item(
+                    fresh,
+                    now=now,
+                    exclude_ids=exclude_ids,
+                    allowed_bucket=args.allowed_bucket,
+                    s3_client=s3_client,
+                    session=session,
+                    stac_base_url=stac_base_url,
+                    dry_run=dry_run,
+                )
+            except requests.exceptions.RequestException as exc:
+                # The STAC DELETE is the one call in process_item that can still
+                # raise: _fetch_item guards its own transport and the S3 paths
+                # are caught inside. Without this, a single ReadTimeout ends the
+                # whole run — and the larger the batch, the more of it is lost.
+                #
+                # Retaining the item is safe either way. If the DELETE actually
+                # landed server-side, the next run re-fetches it as "gone"; if it
+                # did not, the S3 data is already deleted, so the recount finds 0
+                # remaining and the retry deletes the item. Both converge.
+                logger.warning(
+                    "STAC delete transport error for %s: %s — retaining STAC item",
+                    fresh.get("id"),
+                    exc,
+                )
+                record = _audit(fresh, dry_run, "stac_delete_error")
         print(json.dumps(record), flush=True)
         counts[record["status"]] = counts.get(record["status"], 0) + 1
         processed += 1
