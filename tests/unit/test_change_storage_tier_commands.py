@@ -9,8 +9,9 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, Mock, patch
 
+import requests
 from click.testing import CliRunner
 
 # ---------------------------------------------------------------------------
@@ -28,6 +29,10 @@ for _p in (str(SCRIPTS_DIR), str(OPERATOR_TOOLS)):
 
 
 def _load(module_name: str, file_path: Path):
+    # Reuse an already-loaded instance: replacing sys.modules[module_name] would
+    # break patch() targets in other test modules that loaded the same file.
+    if module_name in sys.modules:
+        return sys.modules[module_name]
     spec = importlib.util.spec_from_file_location(module_name, file_path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
@@ -71,6 +76,18 @@ S3_ZERO_STATS = {"processed": 0, "succeeded": 0, "failed": 0}
 BASE_ARGS = ["--api-url", API_URL, "change-storage-tier"]
 ITEM_BASE_ARGS = BASE_ARGS + [COLLECTION_ID, ITEM_ID]
 COLL_BASE_ARGS = BASE_ARGS + [COLLECTION_ID]
+
+
+def _make_response(status_code: int) -> Mock:
+    resp = Mock(spec=requests.Response)
+    resp.status_code = status_code
+    if status_code >= 400:
+        resp.raise_for_status.side_effect = requests.HTTPError(
+            f"{status_code} Error", response=resp
+        )
+    else:
+        resp.raise_for_status.return_value = None
+    return resp
 
 
 def _fake_pystac_item(item_id: str) -> MagicMock:
@@ -174,11 +191,12 @@ class TestManageItemChangeStorageTier:
         assert mock_psi.call_args.args[2] is True  # dry_run positional argument
 
     def test_dry_run_skips_stac_update(self):
-        """In dry-run mode, STAC DELETE+POST must not be called."""
+        """In dry-run mode, no STAC write (PUT or otherwise) may be issued."""
         runner = CliRunner()
         with (
             patch("change_storage_tier.process_stac_item", return_value=S3_SUCCESS_STATS),
             patch("update_stac_storage_tier.update_item_storage_tiers") as mock_update,
+            patch("requests.Session.put") as mock_put,
             patch("requests.Session.delete") as mock_delete,
             patch("requests.Session.post") as mock_post,
         ):
@@ -194,18 +212,20 @@ class TestManageItemChangeStorageTier:
                 ],
             )
         mock_update.assert_not_called()
+        mock_put.assert_not_called()
         mock_delete.assert_not_called()
         mock_post.assert_not_called()
 
     def test_success_calls_update_stac_metadata(self):
-        """When S3 succeeds (failed=0), update_item_storage_tiers must be called."""
+        """When S3 succeeds (failed=0), the item is written back with a single PUT."""
         runner = CliRunner()
         with (
             patch("change_storage_tier.process_stac_item", return_value=S3_SUCCESS_STATS),
             patch("manage_item.STACItemManager.get_item", return_value=FAKE_ITEM_DICT),
             patch("update_stac_storage_tier.update_item_storage_tiers") as mock_update,
-            patch("requests.Session.delete", return_value=MagicMock(status_code=200)),
-            patch("requests.Session.post", return_value=MagicMock(status_code=201)),
+            patch("requests.Session.put", return_value=_make_response(200)) as mock_put,
+            patch("requests.Session.delete") as mock_delete,
+            patch("requests.Session.post") as mock_post,
         ):
             result = runner.invoke(
                 item_cli,
@@ -220,6 +240,35 @@ class TestManageItemChangeStorageTier:
             )
         mock_update.assert_called_once()
         assert result.exit_code == 0
+        mock_put.assert_called_once()
+        assert mock_put.call_args.args[0] == (
+            f"{API_URL}/collections/{COLLECTION_ID}/items/{ITEM_ID}"
+        )
+        mock_delete.assert_not_called()
+        mock_post.assert_not_called()
+
+    def test_stac_write_failure_aborts(self):
+        """An HTTP error on the PUT write-back must abort, not print success."""
+        runner = CliRunner()
+        with (
+            patch("change_storage_tier.process_stac_item", return_value=S3_SUCCESS_STATS),
+            patch("manage_item.STACItemManager.get_item", return_value=FAKE_ITEM_DICT),
+            patch("update_stac_storage_tier.update_item_storage_tiers"),
+            patch("requests.Session.put", return_value=_make_response(500)),
+        ):
+            result = runner.invoke(
+                item_cli,
+                ITEM_BASE_ARGS
+                + [
+                    "--storage-class",
+                    "STANDARD_IA",
+                    "--s3-endpoint",
+                    S3_ENDPOINT,
+                    "-y",
+                ],
+            )
+        assert result.exit_code != 0
+        assert "Failed to update STAC item" in result.output
 
     def test_s3_failure_skips_stac_update(self):
         """When S3 has failures (failed>0), update_item_storage_tiers must NOT be called."""
@@ -404,7 +453,7 @@ class TestManageCollectionsChangeStorageTier:
         assert "2024-03-31T23:59:59Z" in args_str
 
     def test_dry_run_no_stac_update(self):
-        """In dry-run mode, STAC DELETE+POST must not be called for any item."""
+        """In dry-run mode, no STAC write (PUT or otherwise) may be issued for any item."""
         runner = CliRunner()
         items = [_fake_pystac_item(f"item-{i:03d}") for i in range(3)]
         mock_catalog = _mock_catalog(items)
@@ -412,6 +461,7 @@ class TestManageCollectionsChangeStorageTier:
             patch("pystac_client.Client.open", return_value=mock_catalog),
             patch("change_storage_tier.process_stac_item", return_value=S3_SUCCESS_STATS),
             patch("update_stac_storage_tier.update_item_storage_tiers") as mock_update,
+            patch("requests.Session.put") as mock_put,
             patch("requests.Session.delete") as mock_delete,
             patch("requests.Session.post") as mock_post,
         ):
@@ -428,6 +478,7 @@ class TestManageCollectionsChangeStorageTier:
                 ],
             )
         mock_update.assert_not_called()
+        mock_put.assert_not_called()
         mock_delete.assert_not_called()
         mock_post.assert_not_called()
 
@@ -445,8 +496,9 @@ class TestManageCollectionsChangeStorageTier:
             patch("change_storage_tier.process_stac_item", side_effect=_psi_side_effect),
             patch("manage_item.STACItemManager.get_item", return_value=FAKE_ITEM_DICT),
             patch("update_stac_storage_tier.update_item_storage_tiers"),
-            patch("requests.Session.delete", return_value=MagicMock()),
-            patch("requests.Session.post", return_value=MagicMock()),
+            patch("requests.Session.put", return_value=_make_response(200)) as mock_put,
+            patch("requests.Session.delete") as mock_delete,
+            patch("requests.Session.post") as mock_post,
         ):
             result = runner.invoke(
                 collection_cli,
@@ -459,6 +511,50 @@ class TestManageCollectionsChangeStorageTier:
                     "-y",
                 ],
             )
+        assert "Items failed: 1" in result.output
+        assert "item-000" in result.output
+        assert "Items changed: 2" in result.output
+        assert mock_put.call_count == 2  # only the two S3-successful items are written
+        mock_delete.assert_not_called()
+        mock_post.assert_not_called()
+
+    def test_stac_put_failure_marks_item_failed_and_continues(self):
+        """A failing PUT write-back fails that item only — the bulk run continues.
+
+        Guards the per-item try/except at the write-back: without it, one bad
+        write aborts the whole batch AFTER earlier items' S3 tiers were already
+        changed, and the summary/failed-item list is never printed.
+        """
+        runner = CliRunner()
+        items = [_fake_pystac_item(f"item-{i:03d}") for i in range(3)]
+        mock_catalog = _mock_catalog(items)
+
+        def _put_side_effect(url, *args, **kwargs):
+            return _make_response(500 if "item-000" in url else 200)
+
+        def _get_item_side_effect(collection_id, item_id):
+            return {**FAKE_ITEM_DICT, "id": item_id}
+
+        with (
+            patch("pystac_client.Client.open", return_value=mock_catalog),
+            patch("change_storage_tier.process_stac_item", return_value=S3_SUCCESS_STATS),
+            patch("manage_item.STACItemManager.get_item", side_effect=_get_item_side_effect),
+            patch("update_stac_storage_tier.update_item_storage_tiers"),
+            patch("requests.Session.put", side_effect=_put_side_effect) as mock_put,
+        ):
+            result = runner.invoke(
+                collection_cli,
+                COLL_BASE_ARGS
+                + [
+                    "--storage-class",
+                    "STANDARD_IA",
+                    "--s3-endpoint",
+                    S3_ENDPOINT,
+                    "-y",
+                ],
+            )
+        assert result.exit_code == 0
+        assert mock_put.call_count == 3  # the failing item does not stop the loop
         assert "Items failed: 1" in result.output
         assert "item-000" in result.output
         assert "Items changed: 2" in result.output

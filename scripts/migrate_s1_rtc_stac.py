@@ -5,7 +5,7 @@ For each cube item in ``--cube-collection`` this:
   2. for each orbit group present in its store, re-registers the **per-acquisition** items via
      ``register_per_acquisition.py --reregister-all`` into ``--acq-collection``.
 
-The register scripts DELETE-then-POST, so the migration is **idempotent and resumable** — re-running
+The register scripts upsert (POST, on 409 PUT-replace, #352), so the migration is **idempotent and resumable** — re-running
 re-registers cleanly, and a failure part-way can simply be re-run. Staging-only by default.
 
 ``--dry-run`` prints the commands without running (safe verification). ``--tile`` / ``--limit`` scope a
