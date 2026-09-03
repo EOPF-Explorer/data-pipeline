@@ -28,8 +28,19 @@
 #        ... -p max_items=2000 -p dry_run=false
 #
 # pipeline_image_version MUST be a build containing operator-tools/ (added alongside
-# --max-items; earlier images ship scripts/ only). Verify:
-#   docker run --rm <image> python3 /app/operator-tools/manage_collections.py clean --help
+# --max-items; earlier images ship scripts/ only).
+#
+# TAG GOTCHA: a push to a non-main branch BUILDS but does not PUSH (build.yml gates the
+# push step on main/tags/PR). Only the pull_request run publishes, and it tags with the
+# PR MERGE commit — so the pullable tags are `pr-<N>` and `sha-<merge-sha>`, never the
+# branch-head sha you just pushed. Prefer the immutable `sha-<merge-sha>`: `pr-<N>`
+# moves under you on the next push to the PR.
+#
+# Verify the tool is really in the image before pointing it at data:
+#   kubectl -n devseed run purge-tool-smoke --restart=Never \
+#     --image=<registry>/data-pipeline:<tag> \
+#     --overrides='{"spec":{"serviceAccountName":"operate-workflow-sa"}}' \
+#     --command -- python3 /app/operator-tools/manage_collections.py clean --help
 #
 # Deliberately does NOT take the `cron-cleanup-limit` semaphore that the
 # historical-cleanup cron uses: sharing it would stall the hourly prod drain for the
