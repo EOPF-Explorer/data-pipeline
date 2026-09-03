@@ -42,8 +42,15 @@ RUN adduser -D -h /home/appuser -s /bin/sh appuser
 WORKDIR /app
 
 COPY scripts/ /app/scripts/
+# The operator CLIs ship too so bulk deletes can run as an in-cluster Argo
+# workflow instead of a many-hour laptop session: in-region S3, credentials and
+# the stac-writer OIDC secret already mounted, and no dependency on a desk
+# machine staying awake. They import from /app/scripts via a relative path, so
+# the two directories must stay siblings.
+COPY operator-tools/ /app/operator-tools/
 # Remove test helpers (no purpose in production) and set ownership in one layer
-RUN find /app/scripts -name 'test_*.py' -delete \
+RUN find /app/scripts /app/operator-tools -name 'test_*.py' -delete \
+    && rm -f /app/operator-tools/example_usage.py \
     && chown -R appuser:appuser /app
 
 USER appuser

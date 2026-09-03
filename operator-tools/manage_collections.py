@@ -135,6 +135,7 @@ class STACCollectionManager:
         clean_s3: bool = False,
         s3_client: Any = None,
         confinement: Sequence[tuple[str, str]] | None = None,
+        max_items: int | None = None,
     ) -> tuple[int, int, int]:
         """
         Remove all items from a collection, optionally cleaning S3 data.
@@ -146,6 +147,10 @@ class STACCollectionManager:
             s3_client: Boto3 S3 client (required if clean_s3=True)
             confinement: (bucket, prefix) pairs the S3 deletes may touch
                 (required if clean_s3=True)
+            max_items: stop after this many items. The confinement sweep still
+                covers the WHOLE collection — the bound limits what is deleted,
+                never what is checked. Re-running converges, so a large purge is
+                a series of bounded runs rather than one unbounded one.
 
         Returns:
             Tuple of (items_deleted, s3_objects_deleted, s3_objects_failed)
@@ -169,6 +174,16 @@ class STACCollectionManager:
             # at item 20,000. Checking up front turns that into a 2-minute
             # answer, and the report names every offender at once.
             _report_confinement_sweep(items, confinement)
+
+        # Bound AFTER the sweep: the sweep must see every item, or a rogue href
+        # outside this batch stays hidden until the run that reaches it.
+        total_in_collection = len(items)
+        if max_items is not None and max_items < total_in_collection:
+            items = items[:max_items]
+            click.echo(
+                f"\n🔢 Bounded run: {len(items):,} of {total_in_collection:,} items "
+                "(re-run to continue; the clean converges)"
+            )
 
         if dry_run:
             click.echo(f"\nWould delete {len(items)} STAC items:")
@@ -662,6 +677,15 @@ def cli(ctx: click.Context, api_url: str) -> None:
         "so s3://b/foo/ never matches s3://b/foo-staging/."
     ),
 )
+@click.option(
+    "--max-items",
+    type=click.IntRange(min=1),
+    default=None,
+    help=(
+        "Delete at most this many items, then stop. The confinement sweep still "
+        "covers the whole collection. Re-run to continue — the clean converges."
+    ),
+)
 @click.pass_context
 def clean(
     ctx: click.Context,
@@ -671,6 +695,7 @@ def clean(
     clean_s3: bool,
     s3_endpoint: str | None,
     confine_to: tuple[str, ...],
+    max_items: int | None,
 ) -> None:
     """
     Remove all items from a collection.
@@ -698,7 +723,8 @@ def clean(
 
     # Confirmation prompt
     if not dry_run and not yes:
-        warning = f"⚠️  This will delete ALL items from collection '{collection_id}'."
+        scope = "ALL items" if max_items is None else f"up to {max_items} items"
+        warning = f"⚠️  This will delete {scope} from collection '{collection_id}'."
         if clean_s3:
             warning += (
                 "\n⚠️  This will also DELETE ALL S3 DATA (Zarr stores) referenced by these items!"
@@ -732,6 +758,7 @@ def clean(
             clean_s3=clean_s3,
             s3_client=s3_client,
             confinement=confinement,
+            max_items=max_items,
         )
 
     except Exception as e:
