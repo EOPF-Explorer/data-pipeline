@@ -13,7 +13,13 @@ There are two ways it lands on an item:
 
 1. **At registration** — `register_v1.py` stamps `expires = now + EXPIRES_RETENTION_DAYS`.
    - `EXPIRES_RETENTION_DAYS` defaults to **183** (6 months), shared from
-     `s3_item_cleanup.DEFAULT_RETENTION_DAYS`.
+     `s3_item_cleanup.DEFAULT_RETENTION_DAYS`. **The default is not the S2
+     policy**: the retention actually in force is set per manifest, on the
+     workflow templates in platform-deploy
+     ([coordination#178](https://github.com/EOPF-Explorer/coordination/issues/178)).
+     The code default stays at 183 because other collections (S3 OLCI staging)
+     still rely on it — read the manifest, not this constant, to know what a
+     collection keeps.
    - **`EXPIRES_RETENTION_DAYS=0` disables stamping** for a whole run.
    - **`EXPIRES_EXCLUDE_FILE` protects specific ids.** `register_v1` reads the
      **same demo denylist** the cleanup honors, and never stamps `expires` on an
@@ -24,6 +30,10 @@ There are two ways it lands on an item:
    (`expires = datetime + retention`, keyed off acquisition age; items acquired
    before its `EXPIRES_MIN_DATETIME` floor are left unstamped). See
    [operator-tools/README_MIGRATIONS.md](../operator-tools/README_MIGRATIONS.md).
+3. **Policy change** — the `restamp_expires` migration **shortens** an existing
+   `expires` when the retention window is reduced. It writes only when the
+   recomputed value is earlier (never extends) and never stamps an item that has
+   no `expires`. Same doc as above.
 
 ## Demo-scene protection (do demo items get an `expires`?)
 

@@ -17,6 +17,7 @@ is shown when the API supports `numberMatched`.
 | `align_visualization_links` | Align viewer/tilejson/xyz link titles + order to the canonical cube form (render title for viewer/xyz, `TileJSON for {id}`, order store→viewer→tilejson→xyz). No-op on already-canonical cube items and on S2 (no render config). Compose with `add_xyz_link` to backfill the xyz link too. |
 | `add_acquisitions_filter_link` | Add the sibling-collection `Per-acquisition items (filter by tile grid:code)` related link to acquisition items, giving `related` ≥2 entries so STAC Browser renders the grouped "Additional Resources" categories. Scoped to acquisition items (identified by their `Parent tile datacube` link); no-op on cube/S2. |
 | `stamp_expires` | Backfill `properties.expires = datetime (acquisition) + retention` (timestamps ext); skips already-stamped, excluded, and items acquired before the floor. See [stamp_expires](#stamp_expires-backfill-retention-expiry) below |
+| `restamp_expires` | **Shorten** an existing `properties.expires` to `datetime (acquisition) + retention`. Writes only when the new value is **earlier** — never extends; skips excluded and unstamped items. Use when the retention policy changes. See [restamp_expires](#restamp_expires-shortening-the-retention-window) below |
 
 ## `stamp_expires` (backfill retention expiry)
 
@@ -81,6 +82,64 @@ uv run operator-tools/migrate_catalog.py run --migration stamp_expires \
 uv run operator-tools/migrate_catalog.py verify --migration stamp_expires \
   sentinel-2-l2a-staging
 ```
+
+## `restamp_expires` (shortening the retention window)
+
+`stamp_expires` skips `already_stamped` items by design, so it cannot express a
+**policy change**. When the retention window shrinks
+([coordination#178](https://github.com/EOPF-Explorer/coordination/issues/178) —
+S2 moving off 183 days), every item already carrying the old `expires` would age
+out on the old schedule. `restamp_expires` rewrites those.
+
+**Rule**: `expires = datetime (acquisition) + EXPIRES_RETENTION_DAYS`, written
+**only when the recomputed value is earlier than the stored one**. It never
+extends a lifetime, which makes it safe to re-run and safe to run with the wrong
+number: too *long* a retention is a no-op (`already_shorter`), not a silent
+reprieve for the whole catalogue.
+
+Same environment as `stamp_expires` (`EXPIRES_RETENTION_DAYS`,
+`EXPIRES_EXCLUDE_FILE`, `EXPIRES_MIN_DATETIME`), same acquisition basis, same
+crown-jewel demo protection (excluded ids are checked first and never written;
+the report warns when a listed id matched no item during a **complete** scan).
+
+**Set `EXPIRES_RETENTION_DAYS` explicitly.** Unset means the shared
+`DEFAULT_RETENTION_DAYS` (183) — which recomputes what the backfill already wrote,
+so the run is a no-op rather than a shortening. The S2 policy value lives in the
+platform-deploy manifests, not in this default.
+
+Outcome histogram reasons:
+
+| Reason | Meaning |
+|---|---|
+| `restamped` | Written: the new `expires` is earlier than the stored one |
+| `already_shorter` | New value is later than or equal to the stored one — never extended |
+| `excluded` | Id is in the demo denylist; checked before everything else |
+| `not_stamped` | No `expires` at all — undeletable today, and left that way. Stamping it here would be a **new deletion authorisation**; use `stamp_expires` for those |
+| `before_floor` | Acquired before `EXPIRES_MIN_DATETIME` |
+| `no_datetime` | No `properties.datetime` to measure from |
+| `bad_expires` | Stored `expires` is unparseable — skipped rather than guessed |
+
+```bash
+# 1. Full dry-run — review the histogram before anything is written.
+EXPIRES_EXCLUDE_FILE=scripts/demo_exclude_ids.txt \
+EXPIRES_RETENTION_DAYS=90 \
+uv run operator-tools/migrate_catalog.py run --migration restamp_expires \
+  sentinel-2-l2a --dry-run
+
+# 2. Bounded first chunk on prod — the limit is in the tool, not a watcher.
+EXPIRES_EXCLUDE_FILE=scripts/demo_exclude_ids.txt \
+EXPIRES_RETENTION_DAYS=90 \
+uv run operator-tools/migrate_catalog.py run --migration restamp_expires \
+  sentinel-2-l2a --yes --max-writes 2000
+
+# 3. Let one cleanup cron tick run, check its cleanup_summary, then the full run.
+```
+
+⚠️ Deletion follows from `expires`, and the bucket has **no versioning**. A wrong
+`expires` is recoverable (re-run the migration) only *until* the cleanup cron
+acts on it — so the dry-run and the bounded first chunk are the checkpoints that
+matter. Pause the cleanup cron (or rely on its own `--max-items` bound) while the
+first chunk is verified.
 
 ## Safe Migration Procedure
 
