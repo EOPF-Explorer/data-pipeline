@@ -1344,6 +1344,18 @@ class TestStampExpiresMigration:
         assert SKIP_HISTOGRAM["already_stamped"] == 1
 
 
+def test_stamp_expires_also_refuses_a_non_positive_retention(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The backfill computes the same acquisition + retention, so 0 would stamp
+    every unstamped item as already expired. Both migrations share the guard."""
+    monkeypatch.delenv("EXPIRES_EXCLUDE_FILE", raising=False)
+    monkeypatch.delenv("EXPIRES_MIN_DATETIME", raising=False)
+    monkeypatch.setenv("EXPIRES_RETENTION_DAYS", "0")
+    with pytest.raises(ValueError, match="not a usable retention"):
+        stamp_expires(_stampable_item())
+
+
 def test_expires_migrations_use_shared_format_helpers() -> None:
     """The backfill and the re-stamp must use the shared expires helpers, not
     private copies (review finding 4 — one load-bearing timestamp format), and
@@ -1366,6 +1378,7 @@ from _migrate_catalog.migrations.restamp_expires import (  # noqa: E402
 from _migrate_catalog.migrations.restamp_expires import (  # noqa: E402
     classify_and_restamp,
     restamp_expires,
+    start_run,
 )
 from _migrate_catalog.migrations.restamp_expires import (  # noqa: E402
     reset_histogram as restamp_reset_histogram,
@@ -1482,7 +1495,9 @@ class TestRestampExpiresMigration:
         m = MIGRATIONS["restamp_expires"]
         assert m.fn is restamp_expires
         assert m.reporter is not None
-        assert m.reset is restamp_reset_histogram
+        # The reset hook validates the config as well as clearing state, so a
+        # bad retention fails at run start rather than per item.
+        assert m.reset is start_run
 
     def test_retention_comes_from_the_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("EXPIRES_EXCLUDE_FILE", raising=False)
@@ -1534,6 +1549,52 @@ class TestRestampExpiresMigration:
         assert RESTAMP_HISTOGRAM["not_stamped"] == 1
         # The two migrations must not share a tally.
         assert sum(SKIP_HISTOGRAM.values()) == 0
+
+    def test_zero_retention_is_refused_not_treated_as_disable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """EXPIRES_RETENTION_DAYS=0 disables stamping at REGISTRATION
+        (register_v1.add_expires returns early) and env_int honours "0" as 0 — so
+        an operator can reasonably expect 0 to be a no-op here too. It is the
+        opposite: expires = acquisition + 0 is in the past for every item, which
+        would mark the whole collection deletable from a bucket with no
+        versioning. The never-extend rule does not catch it: 0 moves expires
+        EARLIER, which is exactly what this migration is for."""
+        monkeypatch.delenv("EXPIRES_EXCLUDE_FILE", raising=False)
+        monkeypatch.delenv("EXPIRES_MIN_DATETIME", raising=False)
+        monkeypatch.setenv("EXPIRES_RETENTION_DAYS", "0")
+        with pytest.raises(ValueError, match="not a usable retention"):
+            restamp_expires(
+                _stampable_item(datetime_str="2026-01-01T00:00:00Z", expires="2026-07-03T00:00:00Z")
+            )
+
+    def test_negative_retention_is_refused(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("EXPIRES_EXCLUDE_FILE", raising=False)
+        monkeypatch.delenv("EXPIRES_MIN_DATETIME", raising=False)
+        monkeypatch.setenv("EXPIRES_RETENTION_DAYS", "-5")
+        with pytest.raises(ValueError, match="not a usable retention"):
+            restamp_expires(_stampable_item(expires="2026-07-03T00:00:00Z"))
+
+    def test_run_start_hook_rejects_a_bad_retention_before_any_item(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The CLI calls the reset hook before the first item, so the run dies at
+        the start instead of failing 191k items one at a time."""
+        monkeypatch.delenv("EXPIRES_EXCLUDE_FILE", raising=False)
+        monkeypatch.setenv("EXPIRES_RETENTION_DAYS", "0")
+        with pytest.raises(ValueError, match="not a usable retention"):
+            start_run()
+
+    def test_classify_refuses_non_positive_retention_directly(self) -> None:
+        """Defence in depth: a caller that bypasses resolve_config still cannot
+        write an acquisition-time expires."""
+        item = _stampable_item(datetime_str="2026-01-01T00:00:00Z", expires="2026-07-03T00:00:00Z")
+        for retention in (0, -1):
+            result, reason = classify_and_restamp(
+                item, retention_days=retention, exclude_ids=set(), min_datetime=None
+            )
+            assert result is None
+            assert reason == "retention_not_positive"
 
     def test_report_warns_when_exclude_id_matched_nothing(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path

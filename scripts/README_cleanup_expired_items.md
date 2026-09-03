@@ -20,7 +20,11 @@ There are two ways it lands on an item:
      The code default stays at 183 because other collections (S3 OLCI staging)
      still rely on it — read the manifest, not this constant, to know what a
      collection keeps.
-   - **`EXPIRES_RETENTION_DAYS=0` disables stamping** for a whole run.
+   - **`EXPIRES_RETENTION_DAYS=0` disables stamping** for a whole run — **at
+     registration only**. The `stamp_expires` / `restamp_expires` migrations
+     refuse a non-positive retention instead (it would compute `expires` at
+     acquisition, i.e. past-expiry for every item); to skip a migration, do not
+     run it.
    - **`EXPIRES_EXCLUDE_FILE` protects specific ids.** `register_v1` reads the
      **same demo denylist** the cleanup honors, and never stamps `expires` on an
      id in it. So re-registering or **reconverting** a listed demo scene keeps it

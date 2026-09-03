@@ -56,8 +56,26 @@ def parse_floor(value: str) -> datetime:
 
 
 def resolve_config() -> tuple[int, set[str], datetime | None]:
-    """Read (retention_days, exclude_ids, acquisition floor) from the environment."""
+    """Read (retention_days, exclude_ids, acquisition floor) from the environment.
+
+    Raises ``ValueError`` on a non-positive retention. ``EXPIRES_RETENTION_DAYS=0``
+    means "do not stamp" at *registration* (``register_v1.add_expires`` returns
+    early), and ``env_int`` honours "0" as 0 — but here the same value would
+    compute ``expires = acquisition``, which is in the past for every item in the
+    catalogue. The documented way to disable a migration is not to run it; a
+    retention of 0 or less is always a mistake, and the consequence (the cleanup
+    cron deleting the whole collection from a bucket with no versioning) is
+    permanent, so it fails loudly instead of writing anything.
+    """
     retention_days = env_int("EXPIRES_RETENTION_DAYS", DEFAULT_RETENTION_DAYS)
+    if retention_days <= 0:
+        raise ValueError(
+            f"EXPIRES_RETENTION_DAYS={retention_days} is not a usable retention for an "
+            "expires migration: it would stamp expires at (or before) each item's "
+            "acquisition time, marking the whole collection past-expiry and deletable. "
+            "0 disables stamping at REGISTRATION only (register_v1); to skip a "
+            "migration, do not run it."
+        )
     exclude_ids = resolve_exclude_ids()
     floor_env = os.getenv("EXPIRES_MIN_DATETIME")
     min_datetime = parse_floor(floor_env) if floor_env else None

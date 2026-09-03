@@ -37,6 +37,12 @@ Bound a prod run with ``--dry-run`` first, then ``--max-writes N``; the histogra
 ``before_floor`` / ``no_datetime`` / ``bad_expires``) is what the team reviews
 before committing. Deletion follows from ``expires``, and the bucket has no
 versioning, so this dry-run is the last cheap checkpoint.
+
+One number is NOT protected by the never-extend rule: a retention that is too
+*small* legitimately moves ``expires`` earlier, and at 0 or less it lands at or
+before acquisition — past-expiry for the entire collection. ``EXPIRES_RETENTION_DAYS``
+must therefore be positive; the run refuses to start otherwise (``resolve_config``),
+because 0 means "do not stamp" only at registration.
 """
 
 import copy
@@ -73,6 +79,15 @@ def reset_histogram() -> None:
     _STATE.reset()
 
 
+def start_run() -> None:
+    """Registered as the migration's per-run reset hook, which the CLI calls
+    BEFORE the first item (cli.py). Resolving the config here turns a bad
+    retention into an error at run start rather than a per-item failure after
+    the operator has already confirmed the run."""
+    reset_histogram()
+    resolve_config()
+
+
 def report(result: MigrationResult) -> str:
     return _STATE.render_report(result)
 
@@ -90,6 +105,12 @@ def classify_and_restamp(
     framework treats that as unchanged). Never mutates the input.
     """
     props = item.get("properties", {})
+
+    # Defence in depth for a direct caller that bypasses resolve_config's check:
+    # a retention of 0 or less computes expires at (or before) acquisition, i.e.
+    # past-expiry for every item. Refuse rather than write.
+    if retention_days <= 0:
+        return None, "retention_not_positive"
 
     # Demo protection first: an excluded id is never written, whatever else is
     # true of it.
@@ -136,7 +157,7 @@ def classify_and_restamp(
     "only when the new value is EARLIER, never extends, skips excluded and "
     "unstamped items",
     reporter=report,
-    reset=reset_histogram,
+    reset=start_run,
 )
 def restamp_expires(item: dict[str, Any]) -> dict[str, Any] | None:
     """Re-stamp ``expires`` on one item. Config from the environment

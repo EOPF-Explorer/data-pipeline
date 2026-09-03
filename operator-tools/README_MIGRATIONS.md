@@ -107,6 +107,16 @@ the report warns when a listed id matched no item during a **complete** scan).
 so the run is a no-op rather than a shortening. The S2 policy value lives in the
 platform-deploy manifests, not in this default.
 
+⚠️ **A retention of `0` is refused, not treated as "disable".** `0` disables
+stamping at *registration* (`register_v1`), and it is tempting to reuse it here as
+a no-op — but `expires = acquisition + 0` is in the past for **every** item, and
+the never-extend rule does not catch it (0 moves `expires` earlier, which is what
+this migration does). Both `expires` migrations therefore refuse a non-positive
+retention at run start. To skip a migration, do not run it. The same asymmetry is
+why a typo'd `9` instead of `90` is destructive where a typo'd `900` is a no-op:
+check the number before the `--yes` run, not just the histogram, which looks the
+same either way.
+
 Outcome histogram reasons:
 
 | Reason | Meaning |
