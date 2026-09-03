@@ -1128,7 +1128,7 @@ uv run operator-tools/manage_collections.py info sentinel-2-l2a-staging --s3-sta
 ```bash
 # Step 1: Try cleaning collection
 uv run operator-tools/manage_collections.py clean test-coll --clean-s3 -y \
-    --confine-to s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-2-l2a-staging/
+    --confine-to s3://esa-zarr-sentinel-explorer-fra/tests-output/test-coll/
 
 # Output shows:
 # ⚠️  Item S2A_MSIL2A_... skipped due to S3 failures
@@ -1148,16 +1148,16 @@ uv run operator-tools/manage_item.py info test-coll S2A_MSIL2A_... --s3-stats --
 
 # Step 3: Test deletion on this single item
 uv run operator-tools/manage_item.py delete test-coll S2A_MSIL2A_... --clean-s3 --dry-run \
-    --confine-to s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-2-l2a-staging/
+    --confine-to s3://esa-zarr-sentinel-explorer-fra/tests-output/test-coll/
 
 # Step 4: Fix any issues (permissions, URLs, etc.)
 # Then delete the item
 uv run operator-tools/manage_item.py delete test-coll S2A_MSIL2A_... --clean-s3 -y \
-    --confine-to s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-2-l2a-staging/
+    --confine-to s3://esa-zarr-sentinel-explorer-fra/tests-output/test-coll/
 
 # Step 5: Re-run collection clean for remaining items
 uv run operator-tools/manage_collections.py clean test-coll --clean-s3 -y \
-    --confine-to s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-2-l2a-staging/
+    --confine-to s3://esa-zarr-sentinel-explorer-fra/tests-output/test-coll/
 ```
 
 ### Debug S3 URL Extraction (Collection Level)
@@ -1180,7 +1180,7 @@ uv run operator-tools/manage_collections.py info sentinel-2-l2a-staging --s3-sta
 ```bash
 # Attempt cleanup
 uv run operator-tools/manage_collections.py clean test-collection --clean-s3 -y \
-    --confine-to s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-2-l2a-staging/
+    --confine-to s3://esa-zarr-sentinel-explorer-fra/tests-output/test-coll/
 
 # If some items fail:
 # ⚠️  Item S2A_...: Failed to delete 3 S3 objects
@@ -1191,7 +1191,7 @@ uv run operator-tools/manage_collections.py clean test-collection --clean-s3 -y 
 # Fix the S3 access issue (permissions, connectivity, etc.)
 # Then re-run to process skipped items
 uv run operator-tools/manage_collections.py clean test-collection --clean-s3 -y \
-    --confine-to s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-2-l2a-staging/
+    --confine-to s3://esa-zarr-sentinel-explorer-fra/tests-output/test-coll/
 
 # This time should succeed:
 # ✅ Deleted 3 STAC items
