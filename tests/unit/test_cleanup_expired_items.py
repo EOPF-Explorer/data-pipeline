@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 from botocore.exceptions import ClientError
 from cleanup_expired_items import (
     build_search_kwargs,
@@ -544,3 +545,57 @@ def test_run_cleanup_paginates_fully_before_deleting(expired_item) -> None:
         run_cleanup(_args(execute=True))
 
     assert yielded == ["a", "b"]
+
+
+def test_run_cleanup_survives_a_stac_delete_timeout(expired_item, capsys) -> None:
+    """One ReadTimeout must cost one item, not the rest of the batch.
+
+    The STAC DELETE was the last unguarded call in the loop; at 300 items a run
+    it is the difference between losing one deletion and losing the run.
+    """
+    second = json.loads(json.dumps(expired_item))
+    second["id"] = f"{expired_item['id']}_SECOND"
+
+    client = MagicMock()
+    client.self_href = "https://stac.example.com"
+    client.search.return_value.items_as_dicts.return_value = iter([expired_item, second])
+
+    session = MagicMock()
+
+    def _get(url, timeout=30):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = second if url.endswith("_SECOND") else expired_item
+        return resp
+
+    session.get.side_effect = _get
+    session.delete.side_effect = [
+        requests.exceptions.ReadTimeout("timed out"),
+        MagicMock(status_code=204),
+    ]
+
+    s3 = MagicMock()
+    # Two paginate calls per item: the delete listing, then the validation recount.
+    s3.get_paginator.return_value = _paginator([["a"], [], ["b"], []])
+    s3.delete_objects.side_effect = [
+        {"Deleted": [{"Key": "a"}], "Errors": []},
+        {"Deleted": [{"Key": "b"}], "Errors": []},
+    ]
+
+    with (
+        patch("cleanup_expired_items.Client.open", return_value=client),
+        patch("cleanup_expired_items._session", return_value=session),
+        patch("cleanup_expired_items._s3_client", return_value=s3),
+    ):
+        code = run_cleanup(_args(execute=True))
+
+    records = _capture_lines(capsys)
+    items = [r for r in records if r["event"] == "cleanup_item"]
+
+    # The batch ran to completion and the summary was still emitted — a missing
+    # cleanup_summary is the operator's real-failure signal.
+    assert [r["status"] for r in items] == ["stac_delete_error", "deleted"]
+    assert records[-1]["event"] == "cleanup_summary"
+    assert records[-1]["processed"] == 2
+    assert code == 1  # the timed-out item is still counted as a failure
+    assert items[0]["stac_deleted"] is False

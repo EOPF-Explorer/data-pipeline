@@ -58,7 +58,9 @@ DEFAULT_MAX_ITEMS = 100
 
 # Per-item statuses that make the run exit non-zero. `already_gone` is NOT here
 # (idempotent success); `stac_delete_http_*` is matched separately by prefix.
-FAILURE_STATUSES = frozenset({"s3_validation_failed", "auth_required", "refetch_failed"})
+FAILURE_STATUSES = frozenset(
+    {"s3_validation_failed", "auth_required", "refetch_failed", "stac_delete_error"}
+)
 
 
 def _now() -> datetime:
@@ -302,16 +304,33 @@ def run_cleanup(args: argparse.Namespace) -> int:
         elif outcome != "ok" or fresh is None:
             record = _audit(stale, dry_run, "refetch_failed")
         else:
-            record = process_item(
-                fresh,
-                now=now,
-                exclude_ids=exclude_ids,
-                allowed_bucket=args.allowed_bucket,
-                s3_client=s3_client,
-                session=session,
-                stac_base_url=stac_base_url,
-                dry_run=dry_run,
-            )
+            try:
+                record = process_item(
+                    fresh,
+                    now=now,
+                    exclude_ids=exclude_ids,
+                    allowed_bucket=args.allowed_bucket,
+                    s3_client=s3_client,
+                    session=session,
+                    stac_base_url=stac_base_url,
+                    dry_run=dry_run,
+                )
+            except requests.exceptions.RequestException as exc:
+                # The STAC DELETE is the one call in process_item that can still
+                # raise: _fetch_item guards its own transport and the S3 paths
+                # are caught inside. Without this, a single ReadTimeout ends the
+                # whole run — and the larger the batch, the more of it is lost.
+                #
+                # Retaining the item is safe either way. If the DELETE actually
+                # landed server-side, the next run re-fetches it as "gone"; if it
+                # did not, the S3 data is already deleted, so the recount finds 0
+                # remaining and the retry deletes the item. Both converge.
+                logger.warning(
+                    "STAC delete transport error for %s: %s — retaining STAC item",
+                    fresh.get("id"),
+                    exc,
+                )
+                record = _audit(fresh, dry_run, "stac_delete_error")
         print(json.dumps(record), flush=True)
         counts[record["status"]] = counts.get(record["status"], 0) + 1
         processed += 1
