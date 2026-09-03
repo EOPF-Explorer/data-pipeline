@@ -196,7 +196,10 @@ class STACCollectionManager:
                 click.echo(
                     f"\nS3 data that would be deleted (sampling {min(5, len(items))} of {len(items)} items for preview):"
                 )
-                click.echo("NOTE: Actual deletion will process ALL items in the collection")
+                # Say what THIS run would do. "ALL items in the collection" was
+                # true before --max-items existed and now contradicts the bound
+                # printed just above it.
+                click.echo(f"NOTE: Actual deletion will process all {len(items):,} items above")
 
                 # Sample a few items to show S3 paths and count objects
                 total_preview_objects = 0
