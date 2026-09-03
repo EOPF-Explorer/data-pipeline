@@ -2,7 +2,12 @@
 .github
 tests/
 notebooks/
-operator-tools/
+# operator-tools/ is excluded except the two modules the purge CLI needs, so a
+# bulk delete can run as an in-cluster workflow without shipping the notebooks,
+# codecs, migration helpers and local tooling that live alongside them.
+operator-tools/*
+!operator-tools/manage_collections.py
+!operator-tools/manage_item.py
 tasks/
 *.ipynb
 *.md

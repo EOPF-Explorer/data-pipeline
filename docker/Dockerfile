@@ -50,7 +50,6 @@ COPY scripts/ /app/scripts/
 COPY operator-tools/ /app/operator-tools/
 # Remove test helpers (no purpose in production) and set ownership in one layer
 RUN find /app/scripts /app/operator-tools -name 'test_*.py' -delete \
-    && rm -f /app/operator-tools/example_usage.py \
     && chown -R appuser:appuser /app
 
 USER appuser
