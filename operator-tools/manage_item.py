@@ -11,6 +11,7 @@ Supports:
 
 import os
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -32,9 +33,12 @@ import stac_auth  # noqa: E402
 # the cleanup cron can share them (coordination#183). Re-imported here so this
 # module and manage_collections.py keep importing them from manage_item.
 from s3_item_cleanup import (  # noqa: E402
+    UnconfinedS3URLError,
+    check_urls_confined,
     count_s3_objects_for_item,
     delete_s3_objects_for_item,
     extract_s3_urls_from_item,
+    parse_s3_prefix,
 )
 from storage_tier_utils import StorageTierInfo, get_s3_storage_info  # noqa: E402
 
@@ -159,6 +163,7 @@ class STACItemManager:
         s3_client: Any = None,
         item_dict: dict[str, Any] | None = None,
         validate_s3: bool = True,
+        confinement: Sequence[tuple[str, str]] | None = None,
     ) -> tuple[bool, int, int]:
         """
         Delete a single item from a collection, optionally cleaning S3 data.
@@ -170,6 +175,9 @@ class STACItemManager:
             s3_client: Boto3 S3 client (required if clean_s3=True)
             item_dict: Optional pre-fetched item dictionary (to avoid re-fetching)
             validate_s3: If True, validate S3 deletion before removing STAC item
+            confinement: (bucket, prefix) pairs the S3 delete may touch. Required
+                whenever clean_s3 is set; `None` there is a programming error,
+                not "delete anywhere"
 
         Returns:
             Tuple of (success: bool, s3_deleted: int, s3_failed: int)
@@ -189,8 +197,20 @@ class STACItemManager:
             s3_urls = extract_s3_urls_from_item(item_dict)
 
             if s3_urls:
+                if confinement is None:
+                    raise ValueError(
+                        "delete_item(clean_s3=True) requires an explicit confinement; "
+                        "refusing an unbounded recursive S3 delete"
+                    )
                 click.echo(f"  Deleting S3 data for {item_id}...")
-                s3_deleted, s3_failed = delete_s3_objects_for_item(s3_client, s3_urls)
+                try:
+                    s3_deleted, s3_failed = delete_s3_objects_for_item(
+                        s3_client, s3_urls, confinement=confinement
+                    )
+                except UnconfinedS3URLError as exc:
+                    click.echo(f"  ⛔ {exc}", err=True)
+                    click.echo("  ⚠️  Keeping STAC item — its data was NOT touched")
+                    return False, 0, 0
 
                 # Validate deletion if requested
                 if validate_s3:
@@ -465,7 +485,7 @@ def info(
         if not item:
             raise click.Abort()
 
-        click.echo(f"\n{'='*60}")
+        click.echo(f"\n{'=' * 60}")
         click.echo(f"Item: {item['id']}")
         click.echo(f"Collection: {item['collection']}")
 
@@ -492,7 +512,7 @@ def info(
 
         # S3 storage statistics
         if s3_stats:
-            click.echo(f"\n{'─'*60}")
+            click.echo(f"\n{'─' * 60}")
             click.echo("S3 Storage Statistics:")
 
             # Initialize S3 client
@@ -536,7 +556,7 @@ def info(
 
         # Storage tier statistics from STAC metadata
         if s3_stac_info:
-            click.echo(f"\n{'─'*60}")
+            click.echo(f"\n{'─' * 60}")
             click.echo("Storage Tier Statistics (from STAC metadata):")
 
             try:
@@ -588,7 +608,7 @@ def info(
             except Exception as e:
                 click.echo(f"  ⚠️  Could not fetch storage tier statistics: {e}", err=True)
 
-        click.echo(f"{'='*60}\n")
+        click.echo(f"{'=' * 60}\n")
 
     except Exception as e:
         click.echo(f"❌ Error fetching item info: {e}", err=True)
@@ -618,6 +638,17 @@ def info(
     "--s3-endpoint",
     help="S3 endpoint URL (optional, uses AWS_ENDPOINT_URL env var if not specified)",
 )
+@click.option(
+    "--confine-to",
+    "confine_to",
+    multiple=True,
+    metavar="S3_URL",
+    help=(
+        "Restrict S3 deletion to this s3://bucket/prefix/ (repeatable). "
+        "REQUIRED with --clean-s3. Prefixes are matched with a trailing slash, "
+        "so s3://b/foo/ never matches s3://b/foo-staging/."
+    ),
+)
 @click.pass_context
 def delete(
     ctx: click.Context,
@@ -627,6 +658,7 @@ def delete(
     yes: bool,
     clean_s3: bool,
     s3_endpoint: str | None,
+    confine_to: tuple[str, ...],
 ) -> None:
     """
     Delete a single STAC item, optionally cleaning S3 data.
@@ -634,9 +666,23 @@ def delete(
     Example:
         manage_item.py delete sentinel-2-l2a-staging S2A_MSIL2A_20210917T115221_N0500_R123_T28RBS_20230110T165456 --dry-run
         manage_item.py delete sentinel-2-l2a-staging S2A_MSIL2A_20210917T115221_N0500_R123_T28RBS_20230110T165456
-        manage_item.py delete sentinel-2-l2a-staging S2A_MSIL2A_20210917T115221_N0500_R123_T28RBS_20230110T165456 --clean-s3 -y
+        manage_item.py delete sentinel-2-l2a-staging S2A_MSIL2A_... --clean-s3 -y \\
+            --confine-to s3://my-bucket/tests-output/sentinel-2-l2a-staging/
     """
     manager: STACItemManager = ctx.obj["manager"]
+
+    confinement = None
+    if clean_s3:
+        if not confine_to:
+            raise click.UsageError(
+                "--clean-s3 requires at least one --confine-to s3://bucket/prefix/ .\n"
+                "Recursive S3 deletion is unbounded without it, and prod data can sit "
+                "under a sibling prefix in the same bucket."
+            )
+        try:
+            confinement = [parse_s3_prefix(spec) for spec in confine_to]
+        except ValueError as exc:
+            raise click.UsageError(str(exc)) from exc
 
     # Fetch item first
     item = manager.get_item(collection_id, item_id)
@@ -661,12 +707,17 @@ def delete(
 
     # Dry run preview
     if dry_run:
-        click.echo(f"\n{'='*60}")
+        click.echo(f"\n{'=' * 60}")
         click.echo(f"DRY RUN: Would delete item {item_id}")
         click.echo(f"Collection: {collection_id}")
 
         if clean_s3 and s3_client:
             s3_urls = extract_s3_urls_from_item(item)
+            violations = check_urls_confined(s3_urls, confinement or [])
+            if violations:
+                click.echo("\n⛔ Would REFUSE — asset URLs outside the confinement:", err=True)
+                for url, reason in violations:
+                    click.echo(f"    {url}  [{reason}]", err=True)
             if s3_urls:
                 click.echo("\nS3 data that would be deleted:")
                 obj_count = count_s3_objects_for_item(s3_client, s3_urls)
@@ -679,7 +730,7 @@ def delete(
             else:
                 click.echo("\n  ⚠️  No S3 data found")
 
-        click.echo(f"{'='*60}\n")
+        click.echo(f"{'=' * 60}\n")
         return
 
     # Confirmation prompt
@@ -691,7 +742,7 @@ def delete(
         click.confirm(f"{warning}\n\nContinue?", abort=True)
 
     try:
-        click.echo(f"\n{'='*60}")
+        click.echo(f"\n{'=' * 60}")
         click.echo(f"Deleting item: {item_id}")
 
         success, s3_deleted, s3_failed = manager.delete_item(
@@ -699,13 +750,14 @@ def delete(
             item_id=item_id,
             clean_s3=clean_s3,
             s3_client=s3_client,
+            confinement=confinement,
             item_dict=item,
             validate_s3=True,
         )
 
-        click.echo(f"{'='*60}")
+        click.echo(f"{'=' * 60}")
         click.echo("\nDELETION SUMMARY:")
-        click.echo(f"{'='*60}")
+        click.echo(f"{'=' * 60}")
 
         if success:
             click.echo("✅ STAC item deleted successfully")
@@ -717,7 +769,7 @@ def delete(
             if s3_failed > 0:
                 click.echo(f"❌ S3 objects failed: {s3_failed:,}")
 
-        click.echo(f"{'='*60}\n")
+        click.echo(f"{'=' * 60}\n")
 
     except Exception as e:
         click.echo(f"❌ Operation failed: {e}", err=True)
@@ -851,9 +903,9 @@ def sync_storage_tiers(
         ) = update_item_storage_tiers(item, s3_endpoint, add_missing)
 
         # Display summary
-        click.echo(f"\n{'='*60}")
+        click.echo(f"\n{'=' * 60}")
         click.echo("SYNC SUMMARY")
-        click.echo(f"{'='*60}")
+        click.echo(f"{'=' * 60}")
 
         click.echo("\nAssets:")
         click.echo(f"  With alternate.s3: {assets_with_alternate_s3 + assets_added}")
@@ -873,9 +925,9 @@ def sync_storage_tiers(
         total_stac_objects = sum(stac_object_counts.values())
 
         if total_s3_objects > 0 or total_stac_objects > 0:
-            click.echo(f"\n{'─'*60}")
+            click.echo(f"\n{'─' * 60}")
             click.echo("OBJECT-LEVEL STATISTICS")
-            click.echo(f"{'─'*60}")
+            click.echo(f"{'─' * 60}")
 
             # S3 object counts
             if s3_object_counts:
@@ -904,9 +956,9 @@ def sync_storage_tiers(
 
         # Display problems (mismatches)
         if mismatches:
-            click.echo(f"\n{'─'*60}")
+            click.echo(f"\n{'─' * 60}")
             click.echo(f"🔍 MISMATCHES FOUND: {len(mismatches)} asset(s)")
-            click.echo(f"{'─'*60}")
+            click.echo(f"{'─' * 60}")
             for mismatch in mismatches:
                 click.echo(f"\n  Asset: {mismatch['asset']}")
                 click.echo(f"    S3 URL: {mismatch['s3_url']}")
@@ -929,9 +981,9 @@ def sync_storage_tiers(
 
         # Display corrections
         if assets_updated > 0:
-            click.echo(f"\n{'─'*60}")
+            click.echo(f"\n{'─' * 60}")
             click.echo(f"✅ CORRECTIONS MADE: {assets_updated} asset(s) updated")
-            click.echo(f"{'─'*60}")
+            click.echo(f"{'─' * 60}")
             if assets_added > 0:
                 click.echo(f"  Added alternate.s3 to {assets_added} asset(s)")
             if assets_updated > assets_added:
@@ -956,13 +1008,13 @@ def sync_storage_tiers(
                 click.echo(f"\n❌ Failed to update STAC item: {e}", err=True)
                 raise click.Abort() from e
         elif assets_updated > 0:
-            click.echo(f"\n{'─'*60}")
+            click.echo(f"\n{'─' * 60}")
             click.echo("DRY RUN - No changes were made")
-            click.echo(f"{'─'*60}")
+            click.echo(f"{'─' * 60}")
         else:
             click.echo("\n✓ No changes needed - STAC metadata is in sync with S3")
 
-        click.echo(f"{'='*60}\n")
+        click.echo(f"{'=' * 60}\n")
 
     except Exception as e:
         click.echo(f"❌ Operation failed: {e}", err=True)
@@ -1063,9 +1115,9 @@ def change_storage_tier(
             list(exclude_patterns) or None,
         )
 
-        click.echo(f"\n{'─'*60}")
+        click.echo(f"\n{'─' * 60}")
         click.echo("S3 CHANGE SUMMARY")
-        click.echo(f"{'─'*60}")
+        click.echo(f"{'─' * 60}")
         click.echo(f"Objects processed: {stats['processed']}")
         click.echo(f"✅ Objects changed: {stats['succeeded']}")
         if stats["failed"] > 0:
@@ -1098,13 +1150,13 @@ def change_storage_tier(
                 click.echo(f"\n❌ Failed to update STAC item: {e}", err=True)
                 raise click.Abort() from e
         elif dry_run:
-            click.echo(f"\n{'─'*60}")
+            click.echo(f"\n{'─' * 60}")
             click.echo("DRY RUN - No changes were made")
-            click.echo(f"{'─'*60}")
+            click.echo(f"{'─' * 60}")
         elif stats["failed"] > 0:
             click.echo("\n⚠️  Skipping STAC metadata update due to S3 failures")
 
-        click.echo(f"{'='*60}\n")
+        click.echo(f"{'=' * 60}\n")
 
     except Exception as e:
         click.echo(f"❌ Operation failed: {e}", err=True)

@@ -36,6 +36,7 @@ import stac_auth
 from botocore.exceptions import ClientError
 from pystac_client import Client
 from s3_item_cleanup import (
+    UnconfinedS3URLError,
     count_s3_objects_for_item,
     delete_s3_objects_for_item,
     extract_s3_urls_from_item,
@@ -191,7 +192,13 @@ def process_item(
             would_delete = count_s3_objects_for_item(s3_client, s3_urls)
             return _audit(item, dry_run, "dry_run", s3_remaining=would_delete)
 
-        deleted, failed = delete_s3_objects_for_item(s3_client, s3_urls)
+        # Bucket-wide confinement reproduces the `wrong_bucket` guard above at
+        # the delete itself, so the bound survives any future refactor that
+        # reorders the guards. The empty prefix is deliberate: this cron sweeps
+        # a whole bucket by design, unlike the operator purge tools.
+        deleted, failed = delete_s3_objects_for_item(
+            s3_client, s3_urls, confinement=[(allowed_bucket, "")]
+        )
         if failed > 0:
             return _audit(
                 item,
@@ -202,6 +209,12 @@ def process_item(
             )
 
         remaining = count_s3_objects_for_item(s3_client, s3_urls)
+    except UnconfinedS3URLError as exc:
+        # Reachable via `bare_zarr_store`: an href ending `.zarr` with no
+        # trailing slash would delete one key, validate "0 remaining" and drop
+        # the STAC item while the store survives. Retain and surface it.
+        logger.warning("Refusing unconfined delete for %s: %s", item.get("id"), exc)
+        return _audit(item, dry_run, "unconfined_s3_url")
     except ClientError as exc:
         logger.warning("S3 error validating %s: %s — retaining STAC item", item.get("id"), exc)
         return _audit(item, dry_run, "s3_validation_failed")
