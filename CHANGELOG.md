@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.16.0 (2026-09-07)
+
+## What's Changed
+* feat(operator-tools): add --datetime-before to clean so a drain never deletes recent items by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/400
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.15.0...v1.16.0
+
 ## 1.15.0 (2026-09-07)
 
 ## What's Changed
