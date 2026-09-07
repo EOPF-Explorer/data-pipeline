@@ -182,16 +182,25 @@ OVH (2026-07-14), single-pod and sequential by design (one coherent audit log).
 Batch size (`delete_objects` sends 1000 keys/call) doesn't move this; it's
 server-side.
 
-⚠️ **Per-item cost tracks object count, and object count is a property of the
-cohort, not of the tool** — so a rate measured on one batch does not carry to
-the next. Regression over 264 audited prod items (2026-09-04):
-`sec ≈ 0.0211 × objects − 1.43`, i.e. **~47 objects/sec**, plus ~88 s of fixed
-per-run overhead. At that rate a ~1000-object item costs **~20 s**, not 13 s,
-and per-item p90 is 30 s. Light cohorts (~450 objects) really do run at ~8 s
-an item; heavy ones (~1400) at ~24 s. **Size a run against the heavy case**: a
-single run draws from only one or two registration cohorts, so `count × mean`
-does not smooth out. This is why `--max-runtime-seconds` beats a fixed
-`--max-items` — it self-tunes to whatever cohort turns up. If a large backlog is
+⚠️ **Do not plan against any single measured rate.** Two things move it, and
+they are independent:
+
+1. *Object count per item*, a property of the expiring cohort. Regression over
+   264 audited prod items (2026-09-04): `sec ≈ 0.0211 × objects − 1.43`, i.e.
+   ~47 objects/sec, per-item p90 30 s, plus ~88 s fixed per-run overhead. One
+   run draws from only one or two registration cohorts, so `count × mean` does
+   not smooth out.
+2. *Endpoint throughput on the day.* The 2026-09-07 10:00 run deleted 130 items
+   averaging 1,191 objects each at **9.2 s/item — ~118 objects/sec**, 2.5× what
+   the regression above predicts for that weight (~24 s/item). The visible
+   difference: the 12-hourly S2 staging purge was suspended, where on 09-04 it
+   ran across the slow runs. Not proof of causation, but enough that the
+   regression is a floor-ish estimate, not a constant.
+
+So the same 1,200-object cohort has been measured at both ~24 s and ~9 s an
+item. **Size a run against the slow case** and re-measure before raising a cap.
+This is exactly why `--max-runtime-seconds` beats a fixed `--max-items` — it
+self-tunes to whatever the cohort *and* the endpoint are doing that hour. If a large backlog is
 ever too slow to drain this way, deletes parallelise ~2× at 4 concurrent workers
 (same measurement) — deliberately not implemented, to keep the delete path
 simple and auditable. Revisit only if the backlog drain becomes a real pain
