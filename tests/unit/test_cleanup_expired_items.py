@@ -785,6 +785,28 @@ def test_run_cleanup_refuses_a_budget_below_one_second(budget: int) -> None:
         run_cleanup(_args(max_runtime_seconds=budget))
 
 
+@pytest.mark.parametrize("bad", ["0", "-1"])
+def test_cli_rejects_a_budget_below_one_second_as_a_usage_error(bad: str, capsys) -> None:
+    """A typo'd bound must fail loudly at parse time, before anything is deleted.
+
+    argparse exits 2 on a bad value; the `run_cleanup` ValueError still guards
+    every non-CLI caller (see the test above).
+    """
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "--stac-api-url",
+                "https://stac.example.com",
+                "--collection",
+                "sentinel-2-l2a-staging",
+                "--max-runtime-seconds",
+                bad,
+            ]
+        )
+    assert exc.value.code == 2
+    assert "must be >= 1 second" in capsys.readouterr().err
+
+
 def test_cli_defaults_the_budget_to_off_and_parses_it_when_given() -> None:
     base = [
         "--stac-api-url",

@@ -87,6 +87,14 @@ old demo dates — and the cleanup-time skip is the backstop regardless.
   because the last DELETE landed inside the final ~800 ms. The budget clock
   starts before the discovery query, so a slow search spends it too.
 
+  ⚠️ **Sizing rule:** the budget stops the run from *starting* another item; it
+  does not cut short the one in flight. So whatever hard deadline sits outside
+  the tool (`activeDeadlineSeconds`, a shell `timeout`) must be greater than
+  `budget + worst-case single item`, or the kill lands mid-item anyway and you
+  are back where you started. That gap is the whole point of the flag. Live S2
+  sizing: budget 3000 s against a 4200 s deadline leaves 20 min for an item
+  whose p90 is 30 s.
+
 ## Flags
 
 | Flag | Default | Meaning |
@@ -127,7 +135,8 @@ ts, event, dry_run, collection, discovered, processed, by_status, failures,
 time_budget_reached
 ```
 
-`discovered - processed` is what the budget left for the next run.
+`discovered - processed` is what this run found but did not attempt. It is **not**
+the remaining backlog — `discovered` is already capped by `--max-items`.
 `time_budget_reached` is deliberately *not* a `by_status` key: `by_status`
 counts per-item outcomes, and a dashboard asserting "every status is
 `deleted`" must not trip on it. A **missing** summary line is the real

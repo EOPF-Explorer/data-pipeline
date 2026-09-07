@@ -73,6 +73,21 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
+def _budget_seconds(raw: str) -> int:
+    """argparse type for --max-runtime-seconds: a clean usage error, not a traceback.
+
+    Duplicates the rule enforced in ``run_cleanup`` on purpose — this one is for
+    the operator typing the flag, that one guards every caller. Only the second
+    is load-bearing for the bound.
+    """
+    value = int(raw)
+    if value < 1:
+        raise argparse.ArgumentTypeError(
+            f"must be >= 1 second; omit the flag for no budget (got {value})"
+        )
+    return value
+
+
 def _monotonic() -> float:
     """Elapsed-time source for the runtime budget, and the seam tests patch.
 
@@ -326,7 +341,7 @@ def run_cleanup(args: argparse.Namespace) -> int:
         if deadline is not None and _monotonic() >= deadline:
             time_budget_reached = True
             logger.warning(
-                "Runtime budget of %ds reached after %d of %d items - stopping cleanly",
+                "Runtime budget of %ds reached after %d of %d items — stopping cleanly",
                 budget,
                 processed,
                 len(stale_items),
@@ -438,7 +453,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--max-runtime-seconds",
-        type=int,
+        type=_budget_seconds,
         default=None,
         help=(
             "Stop after this many seconds, at the next item boundary. Omit for no "
