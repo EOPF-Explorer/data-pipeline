@@ -1373,12 +1373,16 @@ def test_expires_migrations_use_shared_format_helpers() -> None:
 # === restamp_expires (coordination#178, shortening the retention window) ===
 
 from _migrate_catalog.migrations.restamp_expires import (  # noqa: E402
-    SKIP_HISTOGRAM as RESTAMP_HISTOGRAM,
+    _STATE as RESTAMP_STATE,
 )
 from _migrate_catalog.migrations.restamp_expires import (  # noqa: E402
+    RESTAMP_POLICY_DAYS,
     classify_and_restamp,
     restamp_expires,
     start_run,
+)
+from _migrate_catalog.migrations.restamp_expires import (  # noqa: E402
+    SKIP_HISTOGRAM as RESTAMP_HISTOGRAM,
 )
 from _migrate_catalog.migrations.restamp_expires import (  # noqa: E402
     reset_histogram as restamp_reset_histogram,
@@ -2793,3 +2797,206 @@ class TestCliStopPaths:
         assert res.exit_code == 1  # the abort dominates
         assert "ABORTED" in res.output
         assert "bounded run" not in res.output, "an aborted run must not read as a success"
+
+
+# === T8 guards: the number, the count, and the undo ===
+#
+# The catastrophic failure mode of this migration is a wrong-but-LEGAL retention.
+# `9` and `30` are both accepted by every pre-existing check, and the outcome
+# histogram is identical for any retention shorter than the stored one — so
+# nothing downstream can tell a correct run from one that authorises permanently
+# deleting everything older than 30 days. These are the controls for that.
+
+
+class TestRetentionPolicyGuard:
+    """A1 — the run refuses any retention that is not the approved policy."""
+
+    @pytest.mark.parametrize("bad", ["9", "30", "60", "183", "900"])
+    def test_start_run_refuses_a_retention_that_is_not_the_policy(
+        self, bad: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("EXPIRES_RETENTION_DAYS", bad)
+        with pytest.raises(ValueError, match="does not match the approved policy"):
+            start_run()
+
+    def test_start_run_refuses_an_unset_retention(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The expensive silent failure: unset falls back to the shared default, so
+        the run scans ~190k items for three hours, writes nothing, and (before A4)
+        `verify` then pronounced it fully applied."""
+        monkeypatch.delenv("EXPIRES_RETENTION_DAYS", raising=False)
+        with pytest.raises(ValueError, match="does not match the approved policy"):
+            start_run()
+
+    def test_start_run_accepts_the_policy(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("EXPIRES_RETENTION_DAYS", str(RESTAMP_POLICY_DAYS))
+        monkeypatch.delenv("EXPIRES_EXCLUDE_FILE", raising=False)
+        monkeypatch.delenv("EXPIRES_MIN_DATETIME", raising=False)
+        start_run()  # does not raise
+
+    def test_the_policy_is_ninety_days(self) -> None:
+        """Pinned deliberately: changing it must be a reviewed diff, not an env var."""
+        assert RESTAMP_POLICY_DAYS == 90
+
+
+class TestDeletableNowCount:
+    """A2 — the one number that differs between a correct and a catastrophic run."""
+
+    def _run(self, monkeypatch: pytest.MonkeyPatch, acquired: str) -> None:
+        monkeypatch.setenv("EXPIRES_RETENTION_DAYS", str(RESTAMP_POLICY_DAYS))
+        monkeypatch.delenv("EXPIRES_EXCLUDE_FILE", raising=False)
+        monkeypatch.delenv("EXPIRES_MIN_DATETIME", raising=False)
+        start_run()
+        stamped_long = format_expires(_parse(acquired) + timedelta(days=DEFAULT_RETENTION_DAYS))
+        restamp_expires(_stampable_item(datetime_str=acquired, expires=stamped_long))
+
+    def test_counts_an_item_whose_new_expires_is_already_past(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        old = format_expires(datetime.now(UTC) - timedelta(days=400))
+        self._run(monkeypatch, old)
+        assert RESTAMP_STATE.deletable_now == 1
+
+    def test_does_not_count_an_item_that_stays_in_the_future(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        recent = format_expires(datetime.now(UTC) - timedelta(days=10))
+        self._run(monkeypatch, recent)
+        assert RESTAMP_STATE.deletable_now == 0
+
+    def test_report_shows_the_retention_and_the_count(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Without these two lines the report is identical at 90 and at 30."""
+        old = format_expires(datetime.now(UTC) - timedelta(days=400))
+        self._run(monkeypatch, old)
+        rendered = MIGRATIONS["restamp_expires"].reporter(
+            _result(processed=1, modified=1, skipped=0)
+        )
+        assert "retention        90 d" in rendered
+        assert "deletable now    1" in rendered
+
+
+class TestRepairMode:
+    """A3 — the undo. Extending `expires` withdraws a deletion authorisation, so
+    it is the only safe direction and the only one this migration will do."""
+
+    def test_repairs_an_item_stamped_at_the_wrong_retention(self) -> None:
+        acquired = "2026-01-01T00:00:00Z"
+        wrong = format_expires(_parse(acquired) + timedelta(days=30))
+        result, reason = classify_and_restamp(
+            _stampable_item(datetime_str=acquired, expires=wrong),
+            retention_days=90,
+            exclude_ids=set(),
+            min_datetime=None,
+            repair_from_days=30,
+        )
+        assert reason == "repaired"
+        assert result is not None
+        # Extended, which the never-extend rule forbids for every other item.
+        assert _parse(result["properties"]["expires"]) - _parse(acquired) == timedelta(days=90)
+
+    def test_leaves_an_item_not_stamped_at_the_wrong_retention(self) -> None:
+        """The match is exact, so an item some other process stamped is untouched."""
+        acquired = "2026-01-01T00:00:00Z"
+        near_miss = format_expires(_parse(acquired) + timedelta(days=31))
+        result, reason = classify_and_restamp(
+            _stampable_item(datetime_str=acquired, expires=near_miss),
+            retention_days=90,
+            exclude_ids=set(),
+            min_datetime=None,
+            repair_from_days=30,
+        )
+        assert reason == "already_shorter"
+        assert result is None
+
+    def test_never_repairs_an_excluded_id(self) -> None:
+        acquired = "2026-01-01T00:00:00Z"
+        wrong = format_expires(_parse(acquired) + timedelta(days=30))
+        item = _stampable_item(datetime_str=acquired, expires=wrong)
+        result, reason = classify_and_restamp(
+            item,
+            retention_days=90,
+            exclude_ids={item["id"]},
+            min_datetime=None,
+            repair_from_days=30,
+        )
+        assert reason == "excluded"
+        assert result is None
+
+    def test_off_by_default(self) -> None:
+        acquired = "2026-01-01T00:00:00Z"
+        wrong = format_expires(_parse(acquired) + timedelta(days=30))
+        result, reason = classify_and_restamp(
+            _stampable_item(datetime_str=acquired, expires=wrong),
+            retention_days=90,
+            exclude_ids=set(),
+            min_datetime=None,
+        )
+        assert reason == "already_shorter"
+        assert result is None
+
+    def test_repairs_are_counted_as_written_so_the_histogram_reconciles(self) -> None:
+        """ "repaired" writes, so it must count on the written side of the reconcile
+        check — otherwise every repair run prints a spurious WARNING."""
+        from _migrate_catalog.migrations._expires_common import ExpiresRunState
+
+        state = ExpiresRunState(written_reason="restamped", extra_written_reasons={"repaired"})
+        state.record("restamp_expires", "a", "repaired")
+        rendered = state.render_report(_result(processed=1, modified=1, skipped=0))
+        assert "does not reconcile" not in rendered
+
+
+class TestVerifyCanFail:
+    """A4 — `verify` is the terminal proof for a destructive migration, and it
+    used to pass in two situations where it proved nothing: every item erroring
+    (counted as failed, never as modified), and scanning nothing at all because
+    the collection id was mistyped (an unknown collection returns an empty search,
+    not a 404). A gate that cannot fail is not a gate."""
+
+    def _invoke(self, monkeypatch: pytest.MonkeyPatch, result: MigrationResult):  # noqa: ANN202
+        import importlib
+
+        from click.testing import CliRunner
+
+        climod = importlib.import_module("_migrate_catalog.cli")
+        runner_inst = MagicMock()
+        runner_inst.run_migration.return_value = result
+        monkeypatch.setattr(climod, "STACMigrationRunner", lambda *a, **k: runner_inst)
+        return CliRunner().invoke(climod.cli, ["verify", "coll", "--migration", "fix_url_encoding"])
+
+    def test_fails_when_items_errored(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        res = self._invoke(monkeypatch, _result(processed=10, modified=0, skipped=0, failed=10))
+        assert res.exit_code == 1, res.output
+        assert "not trustworthy" in res.output
+
+    def test_fails_when_nothing_was_scanned(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        res = self._invoke(monkeypatch, _result(processed=0, modified=0, skipped=0))
+        assert res.exit_code == 1, res.output
+        assert "Scanned 0 items" in res.output
+
+    def test_passes_on_a_real_clean_scan(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        res = self._invoke(monkeypatch, _result(processed=190_000, modified=0, skipped=190_000))
+        assert res.exit_code == 0, res.output
+        assert "fully applied" in res.output
+
+    def test_calls_the_migrations_reset_hook(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Without this, restamp_expires never resolves its config during verify,
+        so every item raises and the failure is invisible."""
+        import importlib
+        from dataclasses import replace
+
+        from click.testing import CliRunner
+
+        climod = importlib.import_module("_migrate_catalog.cli")
+        runner_inst = MagicMock()
+        runner_inst.run_migration.return_value = _result(processed=1, modified=0, skipped=1)
+        monkeypatch.setattr(climod, "STACMigrationRunner", lambda *a, **k: runner_inst)
+        called: list[str] = []
+        monkeypatch.setitem(
+            climod.MIGRATIONS,
+            "fix_url_encoding",
+            replace(climod.MIGRATIONS["fix_url_encoding"], reset=lambda: called.append("reset")),
+        )
+        res = CliRunner().invoke(climod.cli, ["verify", "coll", "--migration", "fix_url_encoding"])
+        assert res.exit_code == 0, res.output
+        assert called == ["reset"]

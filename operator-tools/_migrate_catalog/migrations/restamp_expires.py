@@ -47,7 +47,7 @@ because 0 means "do not stamp" only at registration.
 
 import copy
 import sys
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -64,11 +64,19 @@ if str(_scripts_dir) not in sys.path:
 
 from s3_item_cleanup import (  # noqa: E402
     TIMESTAMPS_EXTENSION,
+    env_int,
     format_expires,
     parse_stac_timestamp,
 )
 
-_STATE = ExpiresRunState(written_reason="restamped")
+# The approved retention. Changing the policy is a reviewed PR, never an
+# environment variable: a wrong-but-legal retention is this migration's one
+# catastrophic failure mode, it is invisible in the outcome histogram, and the
+# deletions it authorises are permanent (the bucket has no versioning).
+# coordination#178 / platform-deploy#350.
+RESTAMP_POLICY_DAYS = 90
+
+_STATE = ExpiresRunState(written_reason="restamped", extra_written_reasons={"repaired"})
 
 # Outcome histogram (reason -> count), including "restamped". Aliased (never
 # rebound) so importers keep seeing the live counter across resets.
@@ -85,7 +93,19 @@ def start_run() -> None:
     retention into an error at run start rather than a per-item failure after
     the operator has already confirmed the run."""
     reset_histogram()
-    resolve_config()
+    retention_days, _, _ = resolve_config()
+    if retention_days != RESTAMP_POLICY_DAYS:
+        raise ValueError(
+            f"EXPIRES_RETENTION_DAYS={retention_days} does not match the approved "
+            f"policy RESTAMP_POLICY_DAYS={RESTAMP_POLICY_DAYS}; refusing to run. "
+            "A shorter retention authorises PERMANENT deletion of everything older "
+            "than it, and the outcome histogram is identical either way, so the "
+            "number is checked here rather than trusted. An UNSET variable lands "
+            "here too: it falls back to the shared default and would spend the "
+            "whole run writing nothing. If the policy changed, change "
+            "RESTAMP_POLICY_DAYS in a reviewed PR."
+        )
+    _STATE.retention_days = retention_days
 
 
 def report(result: MigrationResult) -> str:
@@ -98,6 +118,7 @@ def classify_and_restamp(
     retention_days: int,
     exclude_ids: set[str],
     min_datetime: datetime | None,
+    repair_from_days: int | None = None,
 ) -> tuple[dict[str, Any] | None, str]:
     """Decide an item's fate and, if re-stamping, return a modified copy.
 
@@ -139,16 +160,34 @@ def classify_and_restamp(
         return None, "bad_expires"
 
     new_dt = acquired_dt + timedelta(days=retention_days)
+
+    # Repair mode: the one case where EXTENDING is correct. An item whose
+    # stored expires is exactly acquisition + the wrong retention is one this
+    # migration mis-stamped, so putting it back to the policy value withdraws a
+    # deletion authorisation that should never have existed. The match is exact,
+    # not a range, so it cannot catch an item some other process stamped; and it
+    # is deliberately file-free, because a recovery that depends on an artefact
+    # surviving is a recovery that fails exactly when the artefact does not.
+    if repair_from_days is not None and current == format_expires(
+        acquired_dt + timedelta(days=repair_from_days)
+    ):
+        return _restamped(item, new_dt), "repaired"
+
     if new_dt >= current_dt:
         # Never extend a lifetime — see the module docstring.
         return None, "already_shorter"
 
+    return _restamped(item, new_dt), "restamped"
+
+
+def _restamped(item: dict[str, Any], new_dt: datetime) -> dict[str, Any]:
+    """Copy of ``item`` with expires set and the timestamps extension declared."""
     result = copy.deepcopy(item)
     result.setdefault("properties", {})["expires"] = format_expires(new_dt)
     extensions = result.setdefault("stac_extensions", [])
     if TIMESTAMPS_EXTENSION not in extensions:
         extensions.append(TIMESTAMPS_EXTENSION)
-    return result, "restamped"
+    return result
 
 
 @migration(
@@ -170,6 +209,11 @@ def restamp_expires(item: dict[str, Any]) -> dict[str, Any] | None:
         retention_days=retention_days,
         exclude_ids=exclude_ids,
         min_datetime=min_datetime,
+        repair_from_days=env_int("EXPIRES_REPAIR_FROM_DAYS", 0) or None,
     )
     _STATE.record("restamp_expires", item_id, reason)
+    if result is not None:
+        stamped = parse_stac_timestamp(result["properties"]["expires"])
+        if stamped < datetime.now(UTC):
+            _STATE.deletable_now += 1
     return result
