@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, EndpointConnectionError
 from cleanup_expired_items import (
     build_search_kwargs,
     evaluate_guards,
@@ -962,3 +962,145 @@ def test_cli_defaults_the_budget_to_off_and_parses_it_when_given() -> None:
 
         main([*_CLI_BASE, "--max-runtime-seconds", "3000"])
         assert run.call_args.args[0].max_runtime_seconds == 3000
+
+
+# === Transport failures on the S3 side (the orphan #392 left open) ===
+#
+# botocore raises transport errors as BotoCoreError, which is NOT a ClientError
+# and NOT a requests.RequestException — so before the handler these tests cover,
+# they escaped every `except` in this module, killed the process mid-item, and
+# left the S3 objects deleted, the STAC item intact and no audit line at all.
+
+
+def _transport_error() -> EndpointConnectionError:
+    return EndpointConnectionError(endpoint_url="https://s3.example.com")
+
+
+def test_execute_retains_stac_item_when_the_recount_hits_a_transport_error(
+    expired_item,
+) -> None:
+    """The dangerous half: S3 objects are already gone when this fires."""
+    s3 = MagicMock()
+    paginator = MagicMock()
+    # First paginate() lists what to delete; the second is the validation
+    # recount, and that is where the endpoint drops.
+    paginator.paginate.side_effect = [
+        [{"Contents": [{"Key": "a"}]}],
+        _transport_error(),
+    ]
+    s3.get_paginator.return_value = paginator
+    s3.delete_objects.return_value = {"Deleted": [{"Key": "a"}], "Errors": []}
+    session = MagicMock()
+
+    record = process_item(
+        expired_item,
+        now=NOW,
+        exclude_ids=set(),
+        allowed_bucket=BUCKET,
+        s3_client=s3,
+        session=session,
+        stac_base_url="https://stac.example.com",
+        dry_run=False,
+    )
+
+    assert record["status"] == "s3_transport_error"
+    assert record["stac_deleted"] is False
+    session.delete.assert_not_called()  # the item survives to be retried
+
+
+def test_execute_reports_a_transport_error_on_the_delete_itself(expired_item) -> None:
+    s3 = MagicMock()
+    s3.get_paginator.return_value = _paginator([["a"]])
+    s3.delete_objects.side_effect = _transport_error()
+    session = MagicMock()
+
+    record = process_item(
+        expired_item,
+        now=NOW,
+        exclude_ids=set(),
+        allowed_bucket=BUCKET,
+        s3_client=s3,
+        session=session,
+        stac_base_url="https://stac.example.com",
+        dry_run=False,
+    )
+
+    assert record["status"] == "s3_transport_error"
+    session.delete.assert_not_called()
+
+
+def test_a_transport_error_costs_one_item_not_the_run(expired_item, capsys) -> None:
+    """The whole point: the run continues and still emits its summary.
+
+    Before the fix this killed the process — no `cleanup_summary`, which is the
+    signal the README calls the real failure alarm, fired for a single bad item.
+    """
+    second = json.loads(json.dumps(expired_item))
+    second["id"] = f"{expired_item['id']}_SECOND"
+
+    client = MagicMock()
+    client.self_href = "https://stac.example.com"
+    client.search.return_value.items_as_dicts.return_value = iter([expired_item, second])
+
+    session = MagicMock()
+    by_id = {expired_item["id"]: expired_item, second["id"]: second}
+
+    def _get(url, timeout=30):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = by_id[url.rsplit("/", 1)[-1]]
+        return resp
+
+    session.get.side_effect = _get
+    session.delete.return_value = MagicMock(status_code=204)
+
+    s3 = MagicMock()
+    paginator = MagicMock()
+    paginator.paginate.side_effect = [
+        [{"Contents": [{"Key": "a"}]}],  # item 1: delete listing
+        _transport_error(),  # item 1: recount -> transport error
+        [{"Contents": [{"Key": "b"}]}],  # item 2: delete listing
+        [],  # item 2: recount, clean
+    ]
+    s3.get_paginator.return_value = paginator
+    s3.delete_objects.return_value = {"Deleted": [{"Key": "a"}], "Errors": []}
+
+    with (
+        patch("cleanup_expired_items.Client.open", return_value=client),
+        patch("cleanup_expired_items._session", return_value=session),
+        patch("cleanup_expired_items._s3_client", return_value=s3),
+    ):
+        code = run_cleanup(_args(execute=True))
+
+    records = _capture_lines(capsys)
+    items = [r for r in records if r["event"] == "cleanup_item"]
+
+    assert [r["status"] for r in items] == ["s3_transport_error", "deleted"]
+    assert records[-1]["event"] == "cleanup_summary"  # the run finished
+    assert records[-1]["processed"] == 2
+    assert code == 1  # and it is loud about it
+
+
+# === --max-items: 0 is unlimited, not zero ===
+
+
+def test_run_cleanup_refuses_a_max_items_below_one() -> None:
+    """`--max-items 0` removes the cap; the tool must refuse it, not obey it."""
+    with (
+        patch("cleanup_expired_items.Client.open") as client_open,
+        patch("cleanup_expired_items._session"),
+        patch("cleanup_expired_items._s3_client"),
+        pytest.raises(ValueError, match="max_items must be >= 1"),
+    ):
+        run_cleanup(_args(max_items=0))
+    client_open.assert_not_called()
+
+
+@pytest.mark.parametrize("bad", ["0", "-5"])
+def test_cli_rejects_max_items_below_one(bad: str, capsys) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main([*_CLI_BASE, "--max-items", bad])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "UNLIMITED" in err
+    assert "_positive_int" not in err

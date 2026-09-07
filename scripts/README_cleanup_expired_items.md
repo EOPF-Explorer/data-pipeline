@@ -111,7 +111,7 @@ old demo dates — and the cleanup-time skip is the backstop regardless.
 | `--collection` | (required) | Collection to scan |
 | `--s3-endpoint` | `AWS_ENDPOINT_URL` env | S3 endpoint URL |
 | `--allowed-bucket` | `esa-zarr-sentinel-explorer-fra` | Assets outside it are skipped |
-| `--max-items` | `100` | Cap on items processed per run |
+| `--max-items` | `100` | Cap on items processed per run (must be >= 1; **`0` used to mean UNLIMITED**, not zero — pystac-client gates pagination on a falsy check) |
 | `--max-runtime-seconds` | off | Stop at the next item boundary after N seconds (1–86400; `""` means off) |
 | `--exclude-file` | `EXPIRES_EXCLUDE_FILE` env | Item-ID denylist |
 | `--execute` | off (dry-run) | Actually delete |
@@ -132,12 +132,14 @@ stac-auth-proxy enforcement lands; wire the bearer in `_session()`),
 `refetch_failed` (re-fetch errored — the item is skipped rather than acted on
 with stale data), `no_expires`, `not_expired`, `excluded`, `wrong_bucket`,
 `stac_delete_error` (the DELETE hit a transport error — item retained, run
-continues; see #392), `stac_delete_http_<code>`, `no_s3_urls` (managed assets
-but none resolve to `s3://` — fail closed rather than orphan the data), and
-`unconfined_s3_url`.
+continues; see #392), `stac_delete_http_<code>`, `s3_transport_error` (the S3
+side of the same thing — a `BotoCoreError` on the delete or the recount; item
+retained, run continues), `no_s3_urls` (managed assets but none resolve to
+`s3://` — fail closed rather than orphan the data), and `unconfined_s3_url`.
 
 Exit code is `1` if any item ended in `s3_validation_failed`, `auth_required`,
-`refetch_failed`, `stac_delete_error`, or a `stac_delete_http_*` status.
+`refetch_failed`, `stac_delete_error`, `s3_transport_error`, or a
+`stac_delete_http_*` status.
 `already_gone` is a success.
 
 A spent `--max-runtime-seconds` budget is **not itself** a failure — it does not

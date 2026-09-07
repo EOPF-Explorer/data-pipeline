@@ -39,7 +39,7 @@ from urllib.parse import urlparse
 import boto3
 import requests
 import stac_auth
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 from pystac_client import Client
 from s3_item_cleanup import (
     UnconfinedS3URLError,
@@ -65,7 +65,13 @@ DEFAULT_MAX_ITEMS = 100
 # Per-item statuses that make the run exit non-zero. `already_gone` is NOT here
 # (idempotent success); `stac_delete_http_*` is matched separately by prefix.
 FAILURE_STATUSES = frozenset(
-    {"s3_validation_failed", "auth_required", "refetch_failed", "stac_delete_error"}
+    {
+        "s3_validation_failed",
+        "auth_required",
+        "refetch_failed",
+        "stac_delete_error",
+        "s3_transport_error",
+    }
 )
 
 
@@ -77,6 +83,26 @@ def _now() -> datetime:
 # not bounded, and `int("1" + "0" * 400)` parses fine then raises OverflowError
 # when added to a float deadline.
 MAX_BUDGET_SECONDS = 86_400
+
+
+def _positive_int(raw: str) -> int:
+    """argparse type for --max-items, where 0 is a trapdoor rather than a bound.
+
+    pystac-client gates pagination on a FALSY check
+    (``if self._max_items and num_items >= self._max_items``), so ``--max-items 0``
+    is indistinguishable from ``None``: it does not process zero items, it removes
+    the cap and walks the entire expired backlog. In a tool whose bucket has no
+    versioning that is not a footgun worth keeping.
+    """
+    try:
+        value = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"must be a whole number (got {raw!r})") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError(
+            f"must be >= 1 (got {value}); 0 does not mean 'no items', it means UNLIMITED"
+        )
+    return value
 
 
 def _budget_seconds(raw: str) -> int | None:
@@ -242,6 +268,7 @@ def process_item(
 
     # All S3 listing/counting is fail-closed: an unlistable prefix raises rather
     # than reporting 0, so an S3 outage mid-run keeps the STAC item (F2).
+    deleted = 0
     try:
         if dry_run:
             would_delete = count_s3_objects_for_item(s3_client, s3_urls)
@@ -273,6 +300,18 @@ def process_item(
     except ClientError as exc:
         logger.warning("S3 error validating %s: %s — retaining STAC item", item.get("id"), exc)
         return _audit(item, dry_run, "s3_validation_failed")
+    except BotoCoreError as exc:
+        # botocore raises TRANSPORT failures (EndpointConnectionError,
+        # ConnectTimeoutError, ReadTimeoutError, ConnectionClosedError) as
+        # BotoCoreError, which is NOT a ClientError — so before this clause they
+        # escaped every handler here and in the run loop, killed the process, and
+        # left the item with its S3 objects deleted, its STAC record intact and NO
+        # audit line at all. Orphan-shaped and invisible: the mirror of the STAC-side
+        # hole #392 closed. `deleted` is what we managed to confirm before the
+        # failure; it can undercount if the delete itself was interrupted, so the
+        # status is the signal, not the number.
+        logger.warning("S3 transport error on %s: %s — retaining STAC item", item.get("id"), exc)
+        return _audit(item, dry_run, "s3_transport_error", s3_objects_deleted=deleted)
 
     if remaining > 0:
         return _audit(
@@ -318,6 +357,11 @@ def _s3_client(s3_endpoint: str | None) -> Any:
 
 def run_cleanup(args: argparse.Namespace) -> int:
     """Discover and process expired items; emit JSONL; return exit code."""
+    if args.max_items < 1:
+        raise ValueError(
+            f"max_items must be >= 1, got {args.max_items} "
+            "(0 removes the cap entirely — see _positive_int)"
+        )
     budget = args.max_runtime_seconds
     if budget is not None and budget < 1:
         raise ValueError(f"max_runtime_seconds must be >= 1 or None, got {budget}")
@@ -484,7 +528,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--max-items",
-        type=int,
+        type=_positive_int,
         default=DEFAULT_MAX_ITEMS,
         help="Cap on items processed per run",
     )
