@@ -17,6 +17,7 @@ import json
 import os
 import sys
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +45,68 @@ if str(scripts_dir) not in sys.path:
 
 import stac_auth  # noqa: E402
 from storage_tier_utils import get_s3_storage_info  # noqa: E402
+
+
+def parse_threshold(value: str) -> datetime:
+    """Parse a --datetime-before threshold into an aware UTC datetime.
+
+    Accepts a bare date (``2026-09-01``, taken as 00:00:00 UTC) or any ISO 8601
+    timestamp; a naive timestamp is taken as UTC. Rejects anything else with a
+    message naming the offending value, so a typo fails the run instead of
+    silently protecting nothing.
+    """
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError as exc:
+        raise ValueError(
+            f"--datetime-before {value!r} is not an ISO 8601 date or timestamp "
+            "(e.g. 2026-09-01 or 2026-09-01T00:00:00Z)"
+        ) from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _item_datetime(item: dict[str, Any]) -> datetime | None:
+    """The item's acquisition time as an aware UTC datetime, or None if it has none.
+
+    ``properties.datetime`` first; ``start_datetime`` for range-only items. An
+    unparseable value counts as missing — the caller protects such items.
+    """
+    props = item.get("properties") or {}
+    raw = props.get("datetime") or props.get("start_datetime")
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(raw))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _protect_recent(
+    items: list[dict[str, Any]], datetime_before: datetime
+) -> tuple[list[dict[str, Any]], int, int]:
+    """Split items into (eligible, n_recent, n_undated) around a threshold.
+
+    Eligible items are those acquired strictly BEFORE the threshold. Items at
+    or after it are protected, and so are items with no readable datetime:
+    a guard that cannot decide must fail closed, not delete.
+    """
+    eligible: list[dict[str, Any]] = []
+    n_recent = 0
+    n_undated = 0
+    for item in items:
+        acquired = _item_datetime(item)
+        if acquired is None:
+            n_undated += 1
+        elif acquired >= datetime_before:
+            n_recent += 1
+        else:
+            eligible.append(item)
+    return eligible, n_recent, n_undated
 
 
 def _report_confinement_sweep(
@@ -136,6 +199,7 @@ class STACCollectionManager:
         s3_client: Any = None,
         confinement: Sequence[tuple[str, str]] | None = None,
         max_items: int | None = None,
+        datetime_before: datetime | None = None,
     ) -> tuple[int, int, int]:
         """
         Remove all items from a collection, optionally cleaning S3 data.
@@ -151,6 +215,11 @@ class STACCollectionManager:
                 covers the WHOLE collection — the bound limits what is deleted,
                 never what is checked. Re-running converges, so a large purge is
                 a series of bounded runs rather than one unbounded one.
+            datetime_before: only delete items acquired strictly before this
+                (aware UTC) instant. Items at or after it, and items with no
+                readable datetime, are protected and reported, never deleted.
+                Applied after the sweep and before max_items, so the bound is
+                spent on eligible items only.
 
         Returns:
             Tuple of (items_deleted, s3_objects_deleted, s3_objects_failed)
@@ -174,6 +243,21 @@ class STACCollectionManager:
             # at item 20,000. Checking up front turns that into a 2-minute
             # answer, and the report names every offender at once.
             _report_confinement_sweep(items, confinement)
+
+        # Protect AFTER the sweep (the sweep still sees every item) and BEFORE
+        # the bound, so max_items counts deletions, not protected items. The
+        # API returns newest-first, so without this guard a freshly registered
+        # item would be the first thing the next run deletes.
+        if datetime_before is not None:
+            items, n_recent, n_undated = _protect_recent(items, datetime_before)
+            click.echo(
+                f"\n🛡️  Protected: {n_recent:,} items acquired at or after "
+                f"{datetime_before.isoformat()} and {n_undated:,} without a readable "
+                f"datetime; {len(items):,} eligible"
+            )
+            if not items:
+                click.echo("✅ Nothing eligible below the threshold; nothing deleted")
+                return 0, 0, 0
 
         # Bound AFTER the sweep: the sweep must see every item, or a rogue href
         # outside this batch stays hidden until the run that reaches it.
@@ -689,6 +773,17 @@ def cli(ctx: click.Context, api_url: str) -> None:
         "covers the whole collection. Re-run to continue — the clean converges."
     ),
 )
+@click.option(
+    "--datetime-before",
+    "datetime_before",
+    default=None,
+    metavar="ISO8601",
+    help=(
+        "Only delete items acquired strictly before this instant (a bare date is "
+        "00:00:00 UTC). Items at or after it, and items with no readable datetime, "
+        "are never deleted. Protects anything registered during a long drain."
+    ),
+)
 @click.pass_context
 def clean(
     ctx: click.Context,
@@ -699,6 +794,7 @@ def clean(
     s3_endpoint: str | None,
     confine_to: tuple[str, ...],
     max_items: int | None,
+    datetime_before: str | None,
 ) -> None:
     """
     Remove all items from a collection.
@@ -707,7 +803,8 @@ def clean(
         manage_collections.py clean sentinel-2-l2a-staging --dry-run
         manage_collections.py clean sentinel-2-l2a-staging
         manage_collections.py clean sentinel-2-l2a-staging --clean-s3 \\
-            --confine-to s3://my-bucket/tests-output/sentinel-2-l2a-staging/
+            --confine-to s3://my-bucket/tests-output/sentinel-2-l2a-staging/ \\
+            --max-items 2000 --datetime-before 2026-09-01
     """
     manager: STACCollectionManager = ctx.obj["manager"]
 
@@ -724,9 +821,18 @@ def clean(
         except ValueError as exc:
             raise click.UsageError(str(exc)) from exc
 
+    threshold: datetime | None = None
+    if datetime_before is not None:
+        try:
+            threshold = parse_threshold(datetime_before)
+        except ValueError as exc:
+            raise click.UsageError(str(exc)) from exc
+
     # Confirmation prompt
     if not dry_run and not yes:
         scope = "ALL items" if max_items is None else f"up to {max_items} items"
+        if threshold is not None:
+            scope += f" acquired before {threshold.isoformat()}"
         warning = f"⚠️  This will delete {scope} from collection '{collection_id}'."
         if clean_s3:
             warning += (
@@ -762,6 +868,7 @@ def clean(
             s3_client=s3_client,
             confinement=confinement,
             max_items=max_items,
+            datetime_before=threshold,
         )
 
     except Exception as e:
