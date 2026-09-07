@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.15.0 (2026-09-07)
+
+## What's Changed
+* feat(cleanup): bound a run with an in-tool time budget, and close two orphan footguns by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/396
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.14.0...v1.15.0
+
 ## 1.14.0 (2026-09-03)
 
 ## What's Changed
