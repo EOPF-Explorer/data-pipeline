@@ -73,17 +73,40 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
-def _budget_seconds(raw: str) -> int:
+# A day. Not a policy — a typo fence. A cleanup run bounded by more than this is
+# not bounded, and `int("1" + "0" * 400)` parses fine then raises OverflowError
+# when added to a float deadline.
+MAX_BUDGET_SECONDS = 86_400
+
+
+def _budget_seconds(raw: str) -> int | None:
     """argparse type for --max-runtime-seconds: a clean usage error, not a traceback.
 
     Duplicates the rule enforced in ``run_cleanup`` on purpose — this one is for
     the operator typing the flag, that one guards every caller. Only the second
     is load-bearing for the bound.
+
+    An empty string maps to "no budget" because that is how this fleet's Argo
+    templates spell an unset optional parameter (`value: ""` spliced
+    unconditionally into argv). Without it, wiring the flag the conventional way
+    would hard-fail the pod at parse time on every tick.
     """
-    value = int(raw)
+    if raw.strip() == "":
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"must be a whole number of seconds (got {raw!r})"
+        ) from None
     if value < 1:
         raise argparse.ArgumentTypeError(
             f"must be >= 1 second; omit the flag for no budget (got {value})"
+        )
+    if value > MAX_BUDGET_SECONDS:
+        raise argparse.ArgumentTypeError(
+            f"must be <= {MAX_BUDGET_SECONDS} seconds (got {value}); "
+            "a budget larger than a day is a typo, not a bound"
         )
     return value
 
@@ -302,6 +325,9 @@ def run_cleanup(args: argparse.Namespace) -> int:
     # and grows as the collection does, so the budget must absorb it.
     deadline = _monotonic() + budget if budget is not None else None
 
+    def budget_spent() -> bool:
+        return deadline is not None and _monotonic() >= deadline
+
     now = _now()
     exclude_ids = resolve_exclude_ids(args.exclude_file)
     dry_run = not args.execute
@@ -332,13 +358,24 @@ def run_cleanup(args: argparse.Namespace) -> int:
     counts: dict[str, int] = {}
     failures = 0
     processed = 0
-    time_budget_reached = False
+    # Checked here as well as in the loop: discovery alone can spend the budget,
+    # and when it also returns zero rows the loop never runs. Without this, that
+    # case reports `time_budget_reached: false` — byte-identical to a healthy
+    # quiet hour — which is precisely the run an operator most needs to see.
+    time_budget_reached = budget_spent()
+    if time_budget_reached:
+        logger.warning(
+            "Runtime budget of %ds was already spent by discovery (%d items found) "
+            "— processing none of them",
+            budget,
+            len(stale_items),
+        )
     for stale in stale_items:
         # Checked at the TOP of the loop only. Stopping here leaves the previous
         # item fully done and audited, and the next one entirely untouched; the
         # items we skip are simply re-discovered by the next run (oldest-expiry
         # first, so nothing starves).
-        if deadline is not None and _monotonic() >= deadline:
+        if budget_spent():
             time_budget_reached = True
             logger.warning(
                 "Runtime budget of %ds reached after %d of %d items — stopping cleanly",

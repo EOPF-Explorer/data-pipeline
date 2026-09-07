@@ -91,9 +91,17 @@ old demo dates — and the cleanup-time skip is the backstop regardless.
   does not cut short the one in flight. So whatever hard deadline sits outside
   the tool (`activeDeadlineSeconds`, a shell `timeout`) must be greater than
   `budget + worst-case single item`, or the kill lands mid-item anyway and you
-  are back where you started. That gap is the whole point of the flag. Live S2
-  sizing: budget 3000 s against a 4200 s deadline leaves 20 min for an item
-  whose p90 is 30 s.
+  are back where you started. That gap is the whole point of the flag.
+
+  **Proposed** S2 sizing (not deployed as of 2026-09-07 — nothing in this repo
+  or in platform-deploy passes the flag yet): budget 3000 s against a 4200 s
+  deadline, leaving 20 min for an item whose p90 is 30 s.
+
+  ⚠️ **Requires image `>= v1.15.0`.** The flag is unreleased at the time of
+  writing (`main` is v1.14.0). Adding it to a manifest without bumping
+  `pipeline_image_version` gives `unrecognized arguments`, exit 2, every tick.
+  Pass `--max-runtime-seconds ""` to mean "no budget", so an Argo template can
+  splice an empty parameter unconditionally.
 
 ## Flags
 
@@ -104,7 +112,7 @@ old demo dates — and the cleanup-time skip is the backstop regardless.
 | `--s3-endpoint` | `AWS_ENDPOINT_URL` env | S3 endpoint URL |
 | `--allowed-bucket` | `esa-zarr-sentinel-explorer-fra` | Assets outside it are skipped |
 | `--max-items` | `100` | Cap on items processed per run |
-| `--max-runtime-seconds` | off | Stop at the next item boundary after N seconds |
+| `--max-runtime-seconds` | off | Stop at the next item boundary after N seconds (1–86400; `""` means off) |
 | `--exclude-file` | `EXPIRES_EXCLUDE_FILE` env | Item-ID denylist |
 | `--execute` | off (dry-run) | Actually delete |
 
@@ -122,11 +130,25 @@ s3_objects_deleted, s3_objects_failed, s3_remaining, stac_deleted, status
 stac-auth-proxy enforcement lands; wire the bearer in `_session()`),
 `already_gone` (re-fetch got 404 — already deleted, idempotent success),
 `refetch_failed` (re-fetch errored — the item is skipped rather than acted on
-with stale data), `no_expires`, `not_expired`, `excluded`, `wrong_bucket`.
+with stale data), `no_expires`, `not_expired`, `excluded`, `wrong_bucket`,
+`stac_delete_error` (the DELETE hit a transport error — item retained, run
+continues; see #392), `stac_delete_http_<code>`, `no_s3_urls` (managed assets
+but none resolve to `s3://` — fail closed rather than orphan the data), and
+`unconfined_s3_url`.
 
 Exit code is `1` if any item ended in `s3_validation_failed`, `auth_required`,
-`refetch_failed`, or a `stac_delete_http_*` status. `already_gone` is a success.
-A spent `--max-runtime-seconds` budget is **not** a failure — it exits `0`.
+`refetch_failed`, `stac_delete_error`, or a `stac_delete_http_*` status.
+`already_gone` is a success.
+
+A spent `--max-runtime-seconds` budget is **not itself** a failure — it does not
+raise the exit code. But the two are independent: a run that fails two items and
+*then* spends its budget emits `time_budget_reached: true` **and exits `1`**. So
+a red cleanup workflow can coincide with a spent budget; read `failures`, not the
+flag, to know why.
+
+A **configuration** error (a bad `--max-runtime-seconds` value) exits `2` at parse
+time, before anything is read or deleted, and writes no summary. That is the one
+case where a missing summary line is harmless — the run never started.
 
 The final `cleanup_summary` line carries:
 
@@ -208,8 +230,21 @@ they are independent:
 
 So the same 1,200-object cohort has been measured at both ~24 s and ~9 s an
 item. **Size a run against the slow case** and re-measure before raising a cap.
-This is exactly why `--max-runtime-seconds` beats a fixed `--max-items` — it
-self-tunes to whatever the cohort *and* the endpoint are doing that hour. If a large backlog is
+
+`--max-runtime-seconds` is what makes that safe to do, but be precise about what
+it does: **it can only tune downward.** `--max-items` still hard-caps discovery,
+so the budget trims a batch that is running slow and does nothing at all on a
+fast day. At the live pin the crossover is `3000 / 130 = 23.1 s/item`, and both
+measurements above straddle it — on the fast day all 130 items finish in ~1,200 s
+and the budget never fires; on the slow day it trims ~9 items. The point of the
+pairing is that it lets you raise `--max-items` (which is what actually speeds a
+drain) without the run overrunning its window on a bad day.
+
+⚠️ Raising `--max-items` has its own bound to respect: `stale_items` is fully
+materialised in memory before the first delete, so the item cap is also the
+memory cap. An OOMKill is a SIGKILL — the tool cannot yield on it, and it lands
+wherever it lands, including between the S3 delete and the STAC delete. Raise the
+cap in steps and watch the pod's memory. If a large backlog is
 ever too slow to drain this way, deletes parallelise ~2× at 4 concurrent workers
 (same measurement) — deliberately not implemented, to keep the delete path
 simple and auditable. Revisit only if the backlog drain becomes a real pain

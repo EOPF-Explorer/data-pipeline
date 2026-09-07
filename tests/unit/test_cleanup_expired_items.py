@@ -616,6 +616,22 @@ def test_run_cleanup_survives_a_stac_delete_timeout(expired_item, capsys) -> Non
 # stops on, because "stops eventually" is not the property that matters.
 
 
+# `time.monotonic()` is seconds since boot — thousands on a laptop, far more on a
+# long-lived node. Fakes that start at 0 cannot tell `deadline = _monotonic() +
+# budget` from `deadline = budget`: both are "small", so the dropped-origin bug
+# looks fine in tests and stalls every run in production. Every clock here starts
+# at BOOT.
+BOOT = 10_000.0
+
+
+_CLI_BASE = [
+    "--stac-api-url",
+    "https://stac.example.com",
+    "--collection",
+    "sentinel-2-l2a-staging",
+]
+
+
 def _clock(values: list[float]):
     """Fake `_monotonic`: hands out `values` in order, then repeats the last.
 
@@ -699,7 +715,12 @@ def test_run_cleanup_stops_at_the_item_boundary_when_the_budget_is_spent(
     """
     items = _items(expired_item, 3)
     # deadline calc at 0 (-> 100), then the per-item checks.
-    code, session, _ = _run_budgeted(items, budget=100, clock_values=[0, 10, 20, 150])
+    code, session, _ = _run_budgeted(
+        items,
+        budget=100,
+        # deadline=BOOT+100 · post-discovery · item1 · item2 · item3 (spent)
+        clock_values=[BOOT, BOOT + 10, BOOT + 20, BOOT + 30, BOOT + 150],
+    )
 
     records = _capture_lines(capsys)
     summary = records[-1]
@@ -724,7 +745,13 @@ def test_run_cleanup_budget_covers_discovery_not_just_the_loop(expired_item) -> 
     """
     items = _items(expired_item, 3)
     # The search burns 200 s before the first item is even considered.
-    code, session, _ = _run_budgeted(items, budget=100, clock_values=[0, 200, 210], search_ticks=1)
+    code, session, _ = _run_budgeted(
+        items,
+        budget=100,
+        # deadline=BOOT+100 · the search burns 200 s · post-discovery (spent)
+        clock_values=[BOOT, BOOT + 200, BOOT + 210],
+        search_ticks=1,
+    )
 
     assert code == 0
     assert session.get.call_count == 0  # not one item was started
@@ -733,7 +760,7 @@ def test_run_cleanup_budget_covers_discovery_not_just_the_loop(expired_item) -> 
 def test_run_cleanup_stops_when_elapsed_exactly_equals_the_budget(expired_item) -> None:
     """The boundary is `>=`: at exactly the budget, stop."""
     items = _items(expired_item, 2)
-    code, session, _ = _run_budgeted(items, budget=100, clock_values=[0, 100])
+    code, session, _ = _run_budgeted(items, budget=100, clock_values=[BOOT, BOOT + 100])
 
     assert code == 0
     assert session.get.call_count == 0
@@ -742,7 +769,7 @@ def test_run_cleanup_stops_when_elapsed_exactly_equals_the_budget(expired_item) 
 def test_run_cleanup_without_a_budget_never_reads_the_clock(expired_item, capsys) -> None:
     """No budget must mean no behaviour change at all for existing callers."""
     items = _items(expired_item, 3)
-    tick = _clock([0])
+    tick = _clock([BOOT])
 
     client = MagicMock()
     client.self_href = "https://stac.example.com"
@@ -777,12 +804,142 @@ def test_run_cleanup_without_a_budget_never_reads_the_clock(expired_item, capsys
     monotonic.assert_not_called()
 
 
+def test_run_cleanup_flags_a_budget_spent_by_discovery_alone(expired_item, capsys) -> None:
+    """A slow search that finds nothing must NOT look like a quiet hour.
+
+    `discovered: 0, processed: 0` is exactly what an idle tick emits, so the
+    only thing separating "nothing was due" from "the query ate the whole
+    budget and we did no work" is this flag — and it used to be set inside the
+    loop, which never runs here.
+    """
+    code, session, _ = _run_budgeted(
+        [],
+        budget=100,
+        # deadline=BOOT+100 · the search burns 4000 s · post-discovery (spent)
+        clock_values=[BOOT, BOOT + 4000, BOOT + 4010],
+        search_ticks=1,
+    )
+
+    summary = _capture_lines(capsys)[-1]
+    assert code == 0
+    assert summary["discovered"] == 0
+    assert summary["processed"] == 0
+    assert summary["time_budget_reached"] is True
+    assert session.get.call_count == 0
+
+
+def test_budget_boundary_leaves_no_item_half_deleted(expired_item, capsys) -> None:
+    """The atomicity claim, exercised with --execute through the real delete path.
+
+    Every other budget test runs dry, where `process_item` returns before it
+    touches S3 or STAC — so none of them can see a stop that lands between the
+    S3 delete and the STAC delete. This one asserts the invariant that matters:
+    item 1 is deleted in BOTH stores, item 2 in neither.
+    """
+    items = _items(expired_item, 2)
+    tick = _clock([BOOT, BOOT + 10, BOOT + 20, BOOT + 150])
+
+    client = MagicMock()
+    client.self_href = "https://stac.example.com"
+    client.search.return_value.items_as_dicts.return_value = iter(items)
+
+    session = MagicMock()
+    by_id = {i["id"]: i for i in items}
+
+    def _get(url, timeout=30):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = by_id[url.rsplit("/", 1)[-1]]
+        return resp
+
+    session.get.side_effect = _get
+    session.delete.return_value = MagicMock(status_code=204)
+
+    s3 = MagicMock()
+    # Two paginate calls per item: the delete listing, then the validation recount.
+    s3.get_paginator.return_value = _paginator([["a"], [], ["b"], []])
+    s3.delete_objects.return_value = {"Deleted": [{"Key": "a"}], "Errors": []}
+
+    with (
+        patch("cleanup_expired_items.Client.open", return_value=client),
+        patch("cleanup_expired_items._session", return_value=session),
+        patch("cleanup_expired_items._s3_client", return_value=s3),
+        patch("cleanup_expired_items._monotonic", side_effect=tick),
+    ):
+        code = run_cleanup(_args(execute=True, max_runtime_seconds=100))
+
+    records = _capture_lines(capsys)
+    audited = [r for r in records if r["event"] == "cleanup_item"]
+    summary = records[-1]
+
+    assert code == 0
+    assert summary["processed"] == 1 and summary["discovered"] == 2
+    assert summary["time_budget_reached"] is True
+
+    # Item 1: both halves done, and audited as such.
+    assert [r["item_id"] for r in audited] == [items[0]["id"]]
+    assert audited[0]["status"] == "deleted"
+    assert audited[0]["stac_deleted"] is True
+    assert audited[0]["s3_remaining"] == 0
+
+    # Item 2: neither half. One S3 delete, one STAC delete, for item 1 only —
+    # a stop inside the per-item unit would show 2 and 1, or 1 and 0 with the
+    # second item audited.
+    assert s3.delete_objects.call_count == 1
+    assert session.delete.call_count == 1
+    assert items[1]["id"] not in {r["item_id"] for r in audited}
+
+
 @pytest.mark.parametrize("budget", [0, -1])
 def test_run_cleanup_refuses_a_budget_below_one_second(budget: int) -> None:
     """A budget of 0 must not read as "no budget" — that would silently remove
     the bound on a prod run."""
-    with pytest.raises(ValueError, match="max_runtime_seconds"):
+    # Patched even though the guard should raise first: without this, a
+    # regression in the guard turns this unit test into a live HTTPS call to
+    # stac.example.com (5 urllib3 retries, ~4.5 s) and reports as a timeout
+    # rather than an assertion failure. The file's contract is "no network".
+    with (
+        patch("cleanup_expired_items.Client.open") as client_open,
+        patch("cleanup_expired_items._session"),
+        patch("cleanup_expired_items._s3_client"),
+        pytest.raises(ValueError, match="max_runtime_seconds"),
+    ):
         run_cleanup(_args(max_runtime_seconds=budget))
+    client_open.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("bad", "expected"),
+    [
+        ("abc", "whole number of seconds"),
+        ("3000s", "whole number of seconds"),
+        ("5.5", "whole number of seconds"),
+        ("1" + "0" * 400, "<= 86400 seconds"),  # parses as int, overflows a float deadline
+        ("90000", "<= 86400 seconds"),
+    ],
+)
+def test_cli_rejects_unusable_budget_values_with_a_readable_message(
+    bad: str, expected: str, capsys
+) -> None:
+    """The message must name the problem, not leak the private callable's name."""
+    with pytest.raises(SystemExit) as exc:
+        main([*_CLI_BASE, "--max-runtime-seconds", bad])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert expected in err
+    assert "_budget_seconds" not in err
+
+
+def test_cli_treats_an_empty_budget_as_off() -> None:
+    """`value: ""` is how this fleet's Argo templates spell an unset optional.
+
+    The parameter is spliced into argv unconditionally, so an empty string has
+    to mean "no budget" — otherwise the conventional wiring hard-fails the pod
+    at parse time on every tick.
+    """
+    with patch("cleanup_expired_items.run_cleanup", return_value=0) as run:
+        main([*_CLI_BASE, "--max-runtime-seconds", ""])
+    assert run.call_args.args[0].max_runtime_seconds is None
 
 
 @pytest.mark.parametrize("bad", ["0", "-1"])
@@ -793,30 +950,15 @@ def test_cli_rejects_a_budget_below_one_second_as_a_usage_error(bad: str, capsys
     every non-CLI caller (see the test above).
     """
     with pytest.raises(SystemExit) as exc:
-        main(
-            [
-                "--stac-api-url",
-                "https://stac.example.com",
-                "--collection",
-                "sentinel-2-l2a-staging",
-                "--max-runtime-seconds",
-                bad,
-            ]
-        )
+        main([*_CLI_BASE, "--max-runtime-seconds", bad])
     assert exc.value.code == 2
     assert "must be >= 1 second" in capsys.readouterr().err
 
 
 def test_cli_defaults_the_budget_to_off_and_parses_it_when_given() -> None:
-    base = [
-        "--stac-api-url",
-        "https://stac.example.com",
-        "--collection",
-        "sentinel-2-l2a-staging",
-    ]
     with patch("cleanup_expired_items.run_cleanup", return_value=0) as run:
-        main(base)
+        main(_CLI_BASE)
         assert run.call_args.args[0].max_runtime_seconds is None
 
-        main([*base, "--max-runtime-seconds", "3000"])
+        main([*_CLI_BASE, "--max-runtime-seconds", "3000"])
         assert run.call_args.args[0].max_runtime_seconds == 3000
