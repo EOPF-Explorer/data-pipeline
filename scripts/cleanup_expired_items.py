@@ -84,8 +84,16 @@ def _now() -> datetime:
 # when added to a float deadline.
 MAX_BUDGET_SECONDS = 86_400
 
+# The item cap is also the MEMORY cap: `stale_items` is fully materialised before
+# the first delete, at roughly 45 KB per S2 L2A item dict. At a 4Gi pod limit the
+# real ceiling is ~90k, so this fences the plausible typo (100000 for 10000)
+# without constraining any real run — the live cron uses 130. An OOMKill is a
+# SIGKILL, which lands wherever it lands, including between the S3 delete and the
+# STAC delete: exactly the tear --max-runtime-seconds exists to prevent.
+MAX_ITEMS_CEILING = 10_000
 
-def _positive_int(raw: str) -> int:
+
+def _item_cap(raw: str) -> int:
     """argparse type for --max-items, where 0 is a trapdoor rather than a bound.
 
     pystac-client gates pagination on a FALSY check
@@ -102,6 +110,11 @@ def _positive_int(raw: str) -> int:
         raise argparse.ArgumentTypeError(
             f"must be >= 1 (got {value}); 0 does not mean 'no items', it means UNLIMITED"
         )
+    if value > MAX_ITEMS_CEILING:
+        raise argparse.ArgumentTypeError(
+            f"must be <= {MAX_ITEMS_CEILING} (got {value}); the item cap is also the "
+            "memory cap — see MAX_ITEMS_CEILING"
+        )
     return value
 
 
@@ -109,8 +122,9 @@ def _budget_seconds(raw: str) -> int | None:
     """argparse type for --max-runtime-seconds: a clean usage error, not a traceback.
 
     Duplicates the rule enforced in ``run_cleanup`` on purpose — this one is for
-    the operator typing the flag, that one guards every caller. Only the second
-    is load-bearing for the bound.
+    the operator typing the flag, that one guards every caller. Both enforce the
+    same 1..MAX_BUDGET_SECONDS range: a ceiling that existed only here would not
+    be a bound, just a CLI convenience.
 
     An empty string maps to "no budget" because that is how this fleet's Argo
     templates spell an unset optional parameter (`value: ""` spliced
@@ -187,6 +201,16 @@ def evaluate_guards(
         if urlparse(url).netloc != allowed_bucket:
             return False, "wrong_bucket"
     return True, "ok"
+
+
+# An S3 exception unwinds `delete_s3_objects_for_item` and takes its per-batch
+# tally with it (it counts internally and only returns on the happy path), so on
+# these paths we do not know how many objects were deleted or remain. `_audit`
+# defaults both to 0, and 0 is a claim — `s3_remaining: 0` is the field the
+# validate-before-delete gate is named after, so emitting it for an item that may
+# have just lost a thousand objects turns the audit log into a false negative.
+# null says what is true: unknown.
+_UNKNOWN_S3_COUNTS: dict[str, Any] = {"s3_objects_deleted": None, "s3_remaining": None}
 
 
 def _audit(item: dict[str, Any], dry_run: bool, status: str, **fields: Any) -> dict[str, Any]:
@@ -268,7 +292,6 @@ def process_item(
 
     # All S3 listing/counting is fail-closed: an unlistable prefix raises rather
     # than reporting 0, so an S3 outage mid-run keeps the STAC item (F2).
-    deleted = 0
     try:
         if dry_run:
             would_delete = count_s3_objects_for_item(s3_client, s3_urls)
@@ -299,9 +322,9 @@ def process_item(
         return _audit(item, dry_run, "unconfined_s3_url")
     except ClientError as exc:
         logger.warning("S3 error validating %s: %s — retaining STAC item", item.get("id"), exc)
-        return _audit(item, dry_run, "s3_validation_failed")
+        return _audit(item, dry_run, "s3_validation_failed", **_UNKNOWN_S3_COUNTS)
     except BotoCoreError as exc:
-        # botocore raises TRANSPORT failures (EndpointConnectionError,
+        # botocore raises transport AND configuration failures (EndpointConnectionError,
         # ConnectTimeoutError, ReadTimeoutError, ConnectionClosedError) as
         # BotoCoreError, which is NOT a ClientError — so before this clause they
         # escaped every handler here and in the run loop, killed the process, and
@@ -309,9 +332,9 @@ def process_item(
         # audit line at all. Orphan-shaped and invisible: the mirror of the STAC-side
         # hole #392 closed. `deleted` is what we managed to confirm before the
         # failure; it can undercount if the delete itself was interrupted, so the
-        # status is the signal, not the number.
+        # counts are unknown, not zero — see _UNKNOWN_S3_COUNTS.
         logger.warning("S3 transport error on %s: %s — retaining STAC item", item.get("id"), exc)
-        return _audit(item, dry_run, "s3_transport_error", s3_objects_deleted=deleted)
+        return _audit(item, dry_run, "s3_transport_error", **_UNKNOWN_S3_COUNTS)
 
     if remaining > 0:
         return _audit(
@@ -357,14 +380,16 @@ def _s3_client(s3_endpoint: str | None) -> Any:
 
 def run_cleanup(args: argparse.Namespace) -> int:
     """Discover and process expired items; emit JSONL; return exit code."""
-    if args.max_items < 1:
+    if not 1 <= args.max_items <= MAX_ITEMS_CEILING:
         raise ValueError(
-            f"max_items must be >= 1, got {args.max_items} "
-            "(0 removes the cap entirely — see _positive_int)"
+            f"max_items must be 1..{MAX_ITEMS_CEILING}, got {args.max_items} "
+            "(0 removes the cap entirely; above the ceiling risks an OOMKill)"
         )
     budget = args.max_runtime_seconds
-    if budget is not None and budget < 1:
-        raise ValueError(f"max_runtime_seconds must be >= 1 or None, got {budget}")
+    if budget is not None and not 1 <= budget <= MAX_BUDGET_SECONDS:
+        raise ValueError(
+            f"max_runtime_seconds must be 1..{MAX_BUDGET_SECONDS} or None, got {budget}"
+        )
     # Started before discovery on purpose: the search is part of the run's cost
     # and grows as the collection does, so the budget must absorb it.
     deadline = _monotonic() + budget if budget is not None else None
@@ -407,7 +432,9 @@ def run_cleanup(args: argparse.Namespace) -> int:
     # case reports `time_budget_reached: false` — byte-identical to a healthy
     # quiet hour — which is precisely the run an operator most needs to see.
     time_budget_reached = budget_spent()
-    if time_budget_reached:
+    # Only logged when the loop cannot: with items in hand the loop's own warning
+    # says the same thing with more detail.
+    if time_budget_reached and not stale_items:
         logger.warning(
             "Runtime budget of %ds was already spent by discovery (%d items found) "
             "— processing none of them",
@@ -528,7 +555,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--max-items",
-        type=_positive_int,
+        type=_item_cap,
         default=DEFAULT_MAX_ITEMS,
         help="Cap on items processed per run",
     )

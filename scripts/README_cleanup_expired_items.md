@@ -100,6 +100,11 @@ old demo dates — and the cleanup-time skip is the backstop regardless.
   ⚠️ **Requires image `>= v1.15.0`.** The flag is unreleased at the time of
   writing (`main` is v1.14.0). Adding it to a manifest without bumping
   `pipeline_image_version` gives `unrecognized arguments`, exit 2, every tick.
+
+  ⚠️ **v1.15.0 is also breaking for `--max-items`**, which now refuses `0` and
+  anything above 10000. `0` previously ran *unbounded*; any manifest passing it
+  will start failing at parse time. Checked 2026-09-07: no manifest in
+  platform-deploy passes `0` (all pass `100`), but re-check at the pin bump.
   Pass `--max-runtime-seconds ""` to mean "no budget", so an Argo template can
   splice an empty parameter unconditionally.
 
@@ -111,7 +116,7 @@ old demo dates — and the cleanup-time skip is the backstop regardless.
 | `--collection` | (required) | Collection to scan |
 | `--s3-endpoint` | `AWS_ENDPOINT_URL` env | S3 endpoint URL |
 | `--allowed-bucket` | `esa-zarr-sentinel-explorer-fra` | Assets outside it are skipped |
-| `--max-items` | `100` | Cap on items processed per run (must be >= 1; **`0` used to mean UNLIMITED**, not zero — pystac-client gates pagination on a falsy check) |
+| `--max-items` | `100` | Cap on items processed per run (1–10000; **`0` used to mean UNLIMITED**, not zero — pystac-client gates pagination on a falsy check) |
 | `--max-runtime-seconds` | off | Stop at the next item boundary after N seconds (1–86400; `""` means off) |
 | `--exclude-file` | `EXPIRES_EXCLUDE_FILE` env | Item-ID denylist |
 | `--execute` | off (dry-run) | Actually delete |
@@ -132,10 +137,18 @@ stac-auth-proxy enforcement lands; wire the bearer in `_session()`),
 `refetch_failed` (re-fetch errored — the item is skipped rather than acted on
 with stale data), `no_expires`, `not_expired`, `excluded`, `wrong_bucket`,
 `stac_delete_error` (the DELETE hit a transport error — item retained, run
-continues; see #392), `stac_delete_http_<code>`, `s3_transport_error` (the S3
-side of the same thing — a `BotoCoreError` on the delete or the recount; item
-retained, run continues), `no_s3_urls` (managed assets but none resolve to
-`s3://` — fail closed rather than orphan the data), and `unconfined_s3_url`.
+continues; see #392), `stac_delete_http_<code>`, `s3_transport_error` (**any**
+`BotoCoreError` from the delete, the recount or the dry-run count — that covers
+endpoint/timeout failures but also `NoCredentialsError`, `EndpointResolutionError`
+and `ParamValidationError`, so a misconfigured pod emits one per item rather than
+dying on the first; item retained, run continues), `no_s3_urls` (managed assets
+but none resolve to `s3://` — fail closed rather than orphan the data), and
+`unconfined_s3_url`.
+
+⚠️ On `s3_transport_error` and on an exception-driven `s3_validation_failed`, the
+`s3_objects_deleted` and `s3_remaining` fields are **`null`, not `0`**: the helper
+unwinds with its tally, so the counts are genuinely unknown and an item may have
+lost objects. Treat `null` as "inspect this prefix", never as "nothing happened".
 
 Exit code is `1` if any item ended in `s3_validation_failed`, `auth_required`,
 `refetch_failed`, `stac_delete_error`, `s3_transport_error`, or a
@@ -147,6 +160,12 @@ raise the exit code. But the two are independent: a run that fails two items and
 *then* spends its budget emits `time_budget_reached: true` **and exits `1`**. So
 a red cleanup workflow can coincide with a spent budget; read `failures`, not the
 flag, to know why.
+
+The inverse needs watching too: `time_budget_reached: true` **with**
+`processed: 0` is a run that succeeded, exited `0` and drained nothing — discovery
+alone spent the budget. Sustained, that is a permanently stalled cron wearing a
+green tick, and no exit code will tell you. **That pair is the condition to alert
+on.**
 
 A **configuration** error (a bad `--max-runtime-seconds` value) exits `2` at parse
 time, before anything is read or deleted, and writes no summary. That is the one

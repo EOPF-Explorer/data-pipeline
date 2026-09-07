@@ -8,6 +8,7 @@ boto3 and the STAC session are mocked — no network.
 """
 
 import json
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +18,9 @@ import pytest
 import requests
 from botocore.exceptions import ClientError, EndpointConnectionError
 from cleanup_expired_items import (
+    MAX_BUDGET_SECONDS,
+    MAX_ITEMS_CEILING,
+    _monotonic,
     build_search_kwargs,
     evaluate_guards,
     main,
@@ -698,10 +702,10 @@ def _run_budgeted(stale_items, *, budget, clock_values, search_ticks=0):
         patch("cleanup_expired_items.Client.open", return_value=client),
         patch("cleanup_expired_items._session", return_value=session),
         patch("cleanup_expired_items._s3_client", return_value=s3),
-        patch("cleanup_expired_items._monotonic", side_effect=tick) as monotonic,
+        patch("cleanup_expired_items._monotonic", side_effect=tick),
     ):
         code = run_cleanup(_args(max_runtime_seconds=budget))
-    return code, session, monotonic
+    return code, session
 
 
 def test_run_cleanup_stops_at_the_item_boundary_when_the_budget_is_spent(
@@ -715,7 +719,7 @@ def test_run_cleanup_stops_at_the_item_boundary_when_the_budget_is_spent(
     """
     items = _items(expired_item, 3)
     # deadline calc at 0 (-> 100), then the per-item checks.
-    code, session, _ = _run_budgeted(
+    code, session = _run_budgeted(
         items,
         budget=100,
         # deadline=BOOT+100 · post-discovery · item1 · item2 · item3 (spent)
@@ -745,7 +749,7 @@ def test_run_cleanup_budget_covers_discovery_not_just_the_loop(expired_item) -> 
     """
     items = _items(expired_item, 3)
     # The search burns 200 s before the first item is even considered.
-    code, session, _ = _run_budgeted(
+    code, session = _run_budgeted(
         items,
         budget=100,
         # deadline=BOOT+100 · the search burns 200 s · post-discovery (spent)
@@ -760,7 +764,7 @@ def test_run_cleanup_budget_covers_discovery_not_just_the_loop(expired_item) -> 
 def test_run_cleanup_stops_when_elapsed_exactly_equals_the_budget(expired_item) -> None:
     """The boundary is `>=`: at exactly the budget, stop."""
     items = _items(expired_item, 2)
-    code, session, _ = _run_budgeted(items, budget=100, clock_values=[BOOT, BOOT + 100])
+    code, session = _run_budgeted(items, budget=100, clock_values=[BOOT, BOOT + 100])
 
     assert code == 0
     assert session.get.call_count == 0
@@ -812,7 +816,7 @@ def test_run_cleanup_flags_a_budget_spent_by_discovery_alone(expired_item, capsy
     budget and we did no work" is this flag — and it used to be set inside the
     loop, which never runs here.
     """
-    code, session, _ = _run_budgeted(
+    code, session = _run_budgeted(
         [],
         budget=100,
         # deadline=BOOT+100 · the search burns 4000 s · post-discovery (spent)
@@ -1007,6 +1011,15 @@ def test_execute_retains_stac_item_when_the_recount_hits_a_transport_error(
     assert record["stac_deleted"] is False
     session.delete.assert_not_called()  # the item survives to be retried
 
+    # The counts must be null, NOT 0. The helper unwinds with its per-batch tally,
+    # so we do not know how many of this item's objects are gone — and `_audit`
+    # defaults `s3_remaining` to 0, which is the field the validate-before-delete
+    # gate is named after. Reporting 0 here would say "nothing happened" about an
+    # item that may have just lost a thousand objects from a bucket with no
+    # versioning.
+    assert record["s3_objects_deleted"] is None
+    assert record["s3_remaining"] is None
+
 
 def test_execute_reports_a_transport_error_on_the_delete_itself(expired_item) -> None:
     s3 = MagicMock()
@@ -1090,7 +1103,7 @@ def test_run_cleanup_refuses_a_max_items_below_one() -> None:
         patch("cleanup_expired_items.Client.open") as client_open,
         patch("cleanup_expired_items._session"),
         patch("cleanup_expired_items._s3_client"),
-        pytest.raises(ValueError, match="max_items must be >= 1"),
+        pytest.raises(ValueError, match=r"max_items must be 1\.\."),
     ):
         run_cleanup(_args(max_items=0))
     client_open.assert_not_called()
@@ -1104,3 +1117,66 @@ def test_cli_rejects_max_items_below_one(bad: str, capsys) -> None:
     err = capsys.readouterr().err
     assert "UNLIMITED" in err
     assert "_positive_int" not in err
+
+
+# === Bounds live in the tool, not only at the CLI ===
+
+
+def test_monotonic_really_is_monotonic() -> None:
+    """The seam must wrap `time.monotonic`, not `time.time`.
+
+    Every other budget test patches `_monotonic`, so nothing else in this file
+    can tell the two apart — and the difference is the whole documented reason
+    the seam exists: a wall clock lets an NTP step extend or truncate a live
+    budget. (Their absolute values differ by decades, so this is not a close
+    call.)
+    """
+    assert abs(_monotonic() - time.monotonic()) < 1.0
+
+
+def test_run_cleanup_enforces_the_budget_ceiling_not_just_the_cli() -> None:
+    """A ceiling that exists only in argparse is a convenience, not a bound.
+
+    Reachable in production only via a library caller, but the value that
+    motivated the ceiling — a huge integer — raises OverflowError deep inside
+    the deadline arithmetic rather than at the guard, which is exactly the
+    failure the ceiling is documented to prevent.
+    """
+    with (
+        patch("cleanup_expired_items.Client.open") as client_open,
+        patch("cleanup_expired_items._session"),
+        patch("cleanup_expired_items._s3_client"),
+        pytest.raises(ValueError, match=r"max_runtime_seconds must be 1\.\."),
+    ):
+        run_cleanup(_args(max_runtime_seconds=MAX_BUDGET_SECONDS + 1))
+    client_open.assert_not_called()
+
+    with (
+        patch("cleanup_expired_items.Client.open"),
+        patch("cleanup_expired_items._session"),
+        patch("cleanup_expired_items._s3_client"),
+        pytest.raises(ValueError),
+    ):
+        run_cleanup(_args(max_runtime_seconds=int("1" + "0" * 400)))
+
+
+def test_run_cleanup_enforces_the_item_ceiling() -> None:
+    """The item cap is also the memory cap; an OOMKill cannot be yielded on."""
+    with (
+        patch("cleanup_expired_items.Client.open") as client_open,
+        patch("cleanup_expired_items._session"),
+        patch("cleanup_expired_items._s3_client"),
+        pytest.raises(ValueError, match=r"max_items must be 1\.\."),
+    ):
+        run_cleanup(_args(max_items=MAX_ITEMS_CEILING + 1))
+    client_open.assert_not_called()
+
+
+def test_cli_rejects_an_item_cap_above_the_ceiling(capsys) -> None:
+    """`100000` is a plausible typo for `10000` and would materialise ~4.5 GB."""
+    with pytest.raises(SystemExit) as exc:
+        main([*_CLI_BASE, "--max-items", "100000"])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "memory cap" in err
+    assert "_item_cap" not in err
