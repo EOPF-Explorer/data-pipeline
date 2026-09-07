@@ -14,6 +14,11 @@ Safety model (a destructive tool, so the defaults are conservative):
 - S3 deletion is validated (0 objects remain) before the STAC item is removed.
 - Optional ``--exclude-file`` denylist of item IDs is always skipped.
 - One JSON line per item is written to stdout (audit trail), plus a summary.
+- Optional ``--max-runtime-seconds`` stops the run at an item boundary. The
+  bound lives in the tool on purpose: the per-item unit (S3 delete -> recount
+  -> STAC delete -> audit line) is not atomic, so an external kill
+  (``activeDeadlineSeconds``, SIGTERM) can tear an item in half and orphan its
+  data. Yielding at the top of the loop cannot.
 
 Modelled on the single-pod frame-cache-evict cron: one coherent JSONL log, no
 fan-out; concurrency is bounded by the CronWorkflow semaphore.
@@ -26,6 +31,7 @@ import json
 import logging
 import os
 import sys
+import time
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
@@ -65,6 +71,15 @@ FAILURE_STATUSES = frozenset(
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def _monotonic() -> float:
+    """Elapsed-time source for the runtime budget, and the seam tests patch.
+
+    Monotonic, not wall clock: an NTP step must not silently extend or
+    truncate the budget mid-run.
+    """
+    return time.monotonic()
 
 
 def build_search_kwargs(collection: str, now: datetime, max_items: int) -> dict[str, Any]:
@@ -265,6 +280,13 @@ def _s3_client(s3_endpoint: str | None) -> Any:
 
 def run_cleanup(args: argparse.Namespace) -> int:
     """Discover and process expired items; emit JSONL; return exit code."""
+    budget = args.max_runtime_seconds
+    if budget is not None and budget < 1:
+        raise ValueError(f"max_runtime_seconds must be >= 1 or None, got {budget}")
+    # Started before discovery on purpose: the search is part of the run's cost
+    # and grows as the collection does, so the budget must absorb it.
+    deadline = _monotonic() + budget if budget is not None else None
+
     now = _now()
     exclude_ids = resolve_exclude_ids(args.exclude_file)
     dry_run = not args.execute
@@ -275,11 +297,13 @@ def run_cleanup(args: argparse.Namespace) -> int:
     stac_base_url = str(client.self_href).rstrip("/")
 
     logger.info(
-        "Cleanup start: collection=%s dry_run=%s max_items=%d allowed_bucket=%s",
+        "Cleanup start: collection=%s dry_run=%s max_items=%d allowed_bucket=%s "
+        "max_runtime_seconds=%s",
         args.collection,
         dry_run,
         args.max_items,
         args.allowed_bucket,
+        budget,
     )
 
     search = client.search(**build_search_kwargs(args.collection, now, args.max_items))
@@ -293,7 +317,21 @@ def run_cleanup(args: argparse.Namespace) -> int:
     counts: dict[str, int] = {}
     failures = 0
     processed = 0
+    time_budget_reached = False
     for stale in stale_items:
+        # Checked at the TOP of the loop only. Stopping here leaves the previous
+        # item fully done and audited, and the next one entirely untouched; the
+        # items we skip are simply re-discovered by the next run (oldest-expiry
+        # first, so nothing starves).
+        if deadline is not None and _monotonic() >= deadline:
+            time_budget_reached = True
+            logger.warning(
+                "Runtime budget of %ds reached after %d of %d items - stopping cleanly",
+                budget,
+                processed,
+                len(stale_items),
+            )
+            break
         # Re-fetch fresh: the search index can lag the catalogue. On any fetch
         # problem we must NOT fall back to the stale snapshot for a destructive
         # delete — a 404 means the item is already gone (idempotent success),
@@ -342,9 +380,11 @@ def run_cleanup(args: argparse.Namespace) -> int:
         "event": "cleanup_summary",
         "dry_run": dry_run,
         "collection": args.collection,
+        "discovered": len(stale_items),
         "processed": processed,
         "by_status": counts,
         "failures": failures,
+        "time_budget_reached": time_budget_reached,
     }
     print(json.dumps(summary), flush=True)
     return 1 if failures else 0
@@ -395,6 +435,15 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=DEFAULT_MAX_ITEMS,
         help="Cap on items processed per run",
+    )
+    parser.add_argument(
+        "--max-runtime-seconds",
+        type=int,
+        default=None,
+        help=(
+            "Stop after this many seconds, at the next item boundary. Omit for no "
+            "budget. Prefer this over an external kill: it cannot tear an item."
+        ),
     )
     parser.add_argument(
         "--exclude-file",

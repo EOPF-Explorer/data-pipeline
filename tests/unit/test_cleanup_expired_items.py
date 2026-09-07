@@ -19,6 +19,7 @@ from botocore.exceptions import ClientError
 from cleanup_expired_items import (
     build_search_kwargs,
     evaluate_guards,
+    main,
     process_item,
     run_cleanup,
 )
@@ -239,7 +240,7 @@ def _https_only(key: str = "data") -> dict:
     return {
         key: {
             "href": (
-                "https://s3.example.com/esa-zarr-sentinel-explorer-fra/" "tests-output/x.zarr/data"
+                "https://s3.example.com/esa-zarr-sentinel-explorer-fra/tests-output/x.zarr/data"
             ),
             "type": "application/vnd+zarr",
             "roles": ["data"],
@@ -404,13 +405,18 @@ def test_audit_record_is_json_serialisable(expired_item: dict) -> None:
 # === run_cleanup orchestration (review finding 2) ===
 
 
-def _args(execute: bool = False, max_items: int = 100) -> SimpleNamespace:
+def _args(
+    execute: bool = False,
+    max_items: int = 100,
+    max_runtime_seconds: int | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
         stac_api_url="https://stac.example.com",
         collection="sentinel-2-l2a-staging",
         s3_endpoint=None,
         allowed_bucket=BUCKET,
         max_items=max_items,
+        max_runtime_seconds=max_runtime_seconds,
         exclude_file=None,
         execute=execute,
     )
@@ -599,3 +605,196 @@ def test_run_cleanup_survives_a_stac_delete_timeout(expired_item, capsys) -> Non
     assert records[-1]["processed"] == 2
     assert code == 1  # the timed-out item is still counted as a failure
     assert items[0]["stac_deleted"] is False
+
+
+# === --max-runtime-seconds: the bound that lives in the tool ===
+#
+# `activeDeadlineSeconds` kills the pod mid-item, and the per-item unit (S3
+# delete -> recount -> STAC delete -> audit line) is not atomic: a kill between
+# the S3 delete and the STAC delete leaves an item pointing at data that is
+# gone. These tests pin the in-tool alternative down to the exact boundary it
+# stops on, because "stops eventually" is not the property that matters.
+
+
+def _clock(values: list[float]):
+    """Fake `_monotonic`: hands out `values` in order, then repeats the last.
+
+    Repeating rather than raising keeps the tests from asserting on a call
+    count, which is an implementation detail; what each test pins is how many
+    ITEMS were processed.
+    """
+    remaining = list(values)
+    last = [values[-1]]
+
+    def _tick() -> float:
+        if remaining:
+            last[0] = remaining.pop(0)
+        return last[0]
+
+    return _tick
+
+
+def _items(expired_item: dict, n: int) -> list[dict]:
+    out = []
+    for i in range(n):
+        copy = json.loads(json.dumps(expired_item))
+        copy["id"] = f"{expired_item['id']}_{i}"
+        out.append(copy)
+    return out
+
+
+def _run_budgeted(stale_items, *, budget, clock_values, search_ticks=0):
+    """Drive a dry-run `run_cleanup` against a fake clock.
+
+    search_ticks: how many times the discovery search itself consumes the
+    clock — i.e. how slow the query is. Used to prove the budget covers
+    discovery and not just the loop.
+    """
+    tick = _clock(clock_values)
+
+    client = MagicMock()
+    client.self_href = "https://stac.example.com"
+    search = MagicMock()
+    search.items_as_dicts.return_value = iter(stale_items)
+
+    def _search(**_kwargs):
+        for _ in range(search_ticks):
+            tick()
+        return search
+
+    client.search.side_effect = _search
+
+    session = MagicMock()
+    by_id = {i["id"]: i for i in stale_items}
+
+    def _get(url, timeout=30):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = by_id[url.rsplit("/", 1)[-1]]
+        return resp
+
+    session.get.side_effect = _get
+
+    s3 = MagicMock()
+    s3.get_paginator.return_value = _paginator([["a"]] * (2 * len(stale_items)))
+
+    with (
+        patch("cleanup_expired_items.Client.open", return_value=client),
+        patch("cleanup_expired_items._session", return_value=session),
+        patch("cleanup_expired_items._s3_client", return_value=s3),
+        patch("cleanup_expired_items._monotonic", side_effect=tick) as monotonic,
+    ):
+        code = run_cleanup(_args(max_runtime_seconds=budget))
+    return code, session, monotonic
+
+
+def test_run_cleanup_stops_at_the_item_boundary_when_the_budget_is_spent(
+    expired_item, capsys
+) -> None:
+    """Two items done, the third never touched — not even re-fetched.
+
+    The assertion that matters is `processed == 2`: if the check moved to the
+    bottom of the loop, item 3 would be fully deleted before the run noticed,
+    which is the tear this flag exists to prevent.
+    """
+    items = _items(expired_item, 3)
+    # deadline calc at 0 (-> 100), then the per-item checks.
+    code, session, _ = _run_budgeted(items, budget=100, clock_values=[0, 10, 20, 150])
+
+    records = _capture_lines(capsys)
+    summary = records[-1]
+    assert code == 0  # a spent budget is a clean yield, NOT a failure
+    assert summary["event"] == "cleanup_summary"
+    assert summary["processed"] == 2
+    assert summary["discovered"] == 3
+    assert summary["time_budget_reached"] is True
+    assert [r["item_id"] for r in records[:-1]] == [items[0]["id"], items[1]["id"]]
+    # The third item was not even re-fetched: nothing about it was begun.
+    assert session.get.call_count == 2
+
+
+def test_run_cleanup_budget_covers_discovery_not_just_the_loop(expired_item) -> None:
+    """A slow search spends the budget too.
+
+    The point of a time budget over a fixed item count is that it absorbs the
+    per-run overhead — and that overhead grows: after the T8 wave the discovery
+    query scans ~112k rows instead of ~500. If the clock started after the
+    search, a query that ate the whole hour would still go on to delete a full
+    batch on top of it.
+    """
+    items = _items(expired_item, 3)
+    # The search burns 200 s before the first item is even considered.
+    code, session, _ = _run_budgeted(items, budget=100, clock_values=[0, 200, 210], search_ticks=1)
+
+    assert code == 0
+    assert session.get.call_count == 0  # not one item was started
+
+
+def test_run_cleanup_stops_when_elapsed_exactly_equals_the_budget(expired_item) -> None:
+    """The boundary is `>=`: at exactly the budget, stop."""
+    items = _items(expired_item, 2)
+    code, session, _ = _run_budgeted(items, budget=100, clock_values=[0, 100])
+
+    assert code == 0
+    assert session.get.call_count == 0
+
+
+def test_run_cleanup_without_a_budget_never_reads_the_clock(expired_item, capsys) -> None:
+    """No budget must mean no behaviour change at all for existing callers."""
+    items = _items(expired_item, 3)
+    tick = _clock([0])
+
+    client = MagicMock()
+    client.self_href = "https://stac.example.com"
+    client.search.return_value.items_as_dicts.return_value = iter(items)
+
+    session = MagicMock()
+    by_id = {i["id"]: i for i in items}
+
+    def _get(url, timeout=30):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = by_id[url.rsplit("/", 1)[-1]]
+        return resp
+
+    session.get.side_effect = _get
+
+    s3 = MagicMock()
+    s3.get_paginator.return_value = _paginator([["a"]] * 6)
+
+    with (
+        patch("cleanup_expired_items.Client.open", return_value=client),
+        patch("cleanup_expired_items._session", return_value=session),
+        patch("cleanup_expired_items._s3_client", return_value=s3),
+        patch("cleanup_expired_items._monotonic", side_effect=tick) as monotonic,
+    ):
+        code = run_cleanup(_args(max_runtime_seconds=None))
+
+    summary = _capture_lines(capsys)[-1]
+    assert code == 0
+    assert summary["processed"] == 3
+    assert summary["time_budget_reached"] is False
+    monotonic.assert_not_called()
+
+
+@pytest.mark.parametrize("budget", [0, -1])
+def test_run_cleanup_refuses_a_budget_below_one_second(budget: int) -> None:
+    """A budget of 0 must not read as "no budget" — that would silently remove
+    the bound on a prod run."""
+    with pytest.raises(ValueError, match="max_runtime_seconds"):
+        run_cleanup(_args(max_runtime_seconds=budget))
+
+
+def test_cli_defaults_the_budget_to_off_and_parses_it_when_given() -> None:
+    base = [
+        "--stac-api-url",
+        "https://stac.example.com",
+        "--collection",
+        "sentinel-2-l2a-staging",
+    ]
+    with patch("cleanup_expired_items.run_cleanup", return_value=0) as run:
+        main(base)
+        assert run.call_args.args[0].max_runtime_seconds is None
+
+        main([*base, "--max-runtime-seconds", "3000"])
+        assert run.call_args.args[0].max_runtime_seconds == 3000

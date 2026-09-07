@@ -78,6 +78,14 @@ old demo dates — and the cleanup-time skip is the backstop regardless.
   status `s3_validation_failed`.
 - **Dry-run default** — real deletion needs `--execute`. Dry-run still reports
   the S3 object count that *would* be deleted.
+- **`--max-runtime-seconds`** — stop at the next item boundary once the budget
+  is spent. Use this, not the pod's `activeDeadlineSeconds`, to bound a run:
+  the per-item unit (S3 delete → recount → STAC delete → audit line) is not
+  atomic, so an external kill can land between the S3 delete and the STAC
+  delete and leave an item pointing at data that is gone. The 2026-09-04
+  12:00 run was killed that way at 264 of 300 items; it orphaned nothing only
+  because the last DELETE landed inside the final ~800 ms. The budget clock
+  starts before the discovery query, so a slow search spends it too.
 
 ## Flags
 
@@ -88,6 +96,7 @@ old demo dates — and the cleanup-time skip is the backstop regardless.
 | `--s3-endpoint` | `AWS_ENDPOINT_URL` env | S3 endpoint URL |
 | `--allowed-bucket` | `esa-zarr-sentinel-explorer-fra` | Assets outside it are skipped |
 | `--max-items` | `100` | Cap on items processed per run |
+| `--max-runtime-seconds` | off | Stop at the next item boundary after N seconds |
 | `--exclude-file` | `EXPIRES_EXCLUDE_FILE` env | Item-ID denylist |
 | `--execute` | off (dry-run) | Actually delete |
 
@@ -109,6 +118,20 @@ with stale data), `no_expires`, `not_expired`, `excluded`, `wrong_bucket`.
 
 Exit code is `1` if any item ended in `s3_validation_failed`, `auth_required`,
 `refetch_failed`, or a `stac_delete_http_*` status. `already_gone` is a success.
+A spent `--max-runtime-seconds` budget is **not** a failure — it exits `0`.
+
+The final `cleanup_summary` line carries:
+
+```
+ts, event, dry_run, collection, discovered, processed, by_status, failures,
+time_budget_reached
+```
+
+`discovered - processed` is what the budget left for the next run.
+`time_budget_reached` is deliberately *not* a `by_status` key: `by_status`
+counts per-item outcomes, and a dashboard asserting "every status is
+`deleted`" must not trip on it. A **missing** summary line is the real
+failure signal — it means the process died mid-run.
 
 ## Notes on the discovery query (verified live 2026-07-10)
 
@@ -155,9 +178,20 @@ be complete and documented stakeholder approval on coordination#183.
 ### Throughput
 
 Deletion is bound by S3's per-object delete rate — measured ~75 objects/sec on
-OVH (2026-07-14), roughly `13 s` for a ~1000-object item, single-pod and
-sequential by design (one coherent audit log). Batch size (`delete_objects`
-sends 1000 keys/call) doesn't move this; it's server-side. If a large backlog is
+OVH (2026-07-14), single-pod and sequential by design (one coherent audit log).
+Batch size (`delete_objects` sends 1000 keys/call) doesn't move this; it's
+server-side.
+
+⚠️ **Per-item cost tracks object count, and object count is a property of the
+cohort, not of the tool** — so a rate measured on one batch does not carry to
+the next. Regression over 264 audited prod items (2026-09-04):
+`sec ≈ 0.0211 × objects − 1.43`, i.e. **~47 objects/sec**, plus ~88 s of fixed
+per-run overhead. At that rate a ~1000-object item costs **~20 s**, not 13 s,
+and per-item p90 is 30 s. Light cohorts (~450 objects) really do run at ~8 s
+an item; heavy ones (~1400) at ~24 s. **Size a run against the heavy case**: a
+single run draws from only one or two registration cohorts, so `count × mean`
+does not smooth out. This is why `--max-runtime-seconds` beats a fixed
+`--max-items` — it self-tunes to whatever cohort turns up. If a large backlog is
 ever too slow to drain this way, deletes parallelise ~2× at 4 concurrent workers
 (same measurement) — deliberately not implemented, to keep the delete path
 simple and auditable. Revisit only if the backlog drain becomes a real pain
