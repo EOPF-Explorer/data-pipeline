@@ -175,15 +175,28 @@ The final `cleanup_summary` line carries:
 
 ```
 ts, event, dry_run, collection, discovered, processed, by_status, failures,
-time_budget_reached
+time_budget_reached, [aborted]
 ```
 
 `discovered - processed` is what this run found but did not attempt. It is **not**
 the remaining backlog — `discovered` is already capped by `--max-items`.
-`time_budget_reached` is deliberately *not* a `by_status` key: `by_status`
-counts per-item outcomes, and a dashboard asserting "every status is
-`deleted`" must not trip on it. A **missing** summary line is the real
-failure signal — it means the process died mid-run.
+
+`time_budget_reached` and `aborted` are both deliberately *not* `by_status` keys:
+`by_status` counts per-item outcomes, and a dashboard asserting "every status is
+`deleted`" must not trip on either of them.
+
+`aborted: true` appears **only** on a run that died before finishing the batch —
+anything raising between opening the STAC client and the end of the item loop.
+The key is additive and absent from every healthy run, so consumers keyed on
+`event == "cleanup_summary"` are unaffected. On such a run `discovered` is
+`null` rather than `0` when discovery itself was what raised: the number is
+unknown, and `0` would be a claim. The run exits `1`.
+
+**A missing summary line still means the process died — but it is no longer the
+only way to see that.** Two cases still write no summary at all: a
+**configuration** error (exit `2` at parse time — see above) and an external
+kill (`SIGKILL`, OOM, node loss), which is precisely the failure mode
+`--max-runtime-seconds` exists to make unnecessary.
 
 ## Notes on the discovery query (verified live 2026-07-10)
 

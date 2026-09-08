@@ -241,7 +241,17 @@ def _delete_stac_item(
     """DELETE the STAC item. 404 is success (idempotent); 401/403 is a distinct
     ``auth_required`` signal (expected once stac-auth-proxy enforcement lands)."""
     url = f"{stac_base_url.rstrip('/')}/collections/{collection}/items/{item_id}"
-    resp = session.delete(url, timeout=30)
+    try:
+        resp = session.delete(url, timeout=30)
+    except RuntimeError as exc:
+        # session.auth is stac_auth.bearer_auth, so the OIDC token fetch runs
+        # *inside* this call and re-raises a failure as a bare RuntimeError --
+        # not a RequestException, so the run loop's guard does not catch it.
+        # Narrow on purpose: a RequestException here is already handled there
+        # and emits this same status. Retaining the item is safe; the next run
+        # re-fetches it and converges.
+        logger.warning("STAC delete auth error for %s: %s", item_id, exc)
+        return False, "stac_delete_error"
     if resp.status_code in (200, 202, 204, 404):
         return True, "deleted"
     if resp.status_code in (401, 403):
@@ -401,115 +411,153 @@ def run_cleanup(args: argparse.Namespace) -> int:
     exclude_ids = resolve_exclude_ids(args.exclude_file)
     dry_run = not args.execute
 
-    client = Client.open(args.stac_api_url)
-    session = _session(args.stac_api_url)
-    s3_client = _s3_client(args.s3_endpoint)
-    stac_base_url = str(client.self_href).rstrip("/")
-
-    logger.info(
-        "Cleanup start: collection=%s dry_run=%s max_items=%d allowed_bucket=%s "
-        "max_runtime_seconds=%s",
-        args.collection,
-        dry_run,
-        args.max_items,
-        args.allowed_bucket,
-        budget,
-    )
-
-    search = client.search(**build_search_kwargs(args.collection, now, args.max_items))
-
-    # Materialise the whole result set BEFORE deleting anything. The search
-    # paginates with a keyset token anchored on the last item returned; deleting
-    # items mid-iteration removes that anchor, so the next page fails with
-    # "Could not find item using token". max_items bounds this list.
-    stale_items = list(search.items_as_dicts())
-
+    # These live outside the guard below so a run that dies mid-flight can still
+    # report what it managed to do before it went.
     counts: dict[str, int] = {}
     failures = 0
     processed = 0
-    # Checked here as well as in the loop: discovery alone can spend the budget,
-    # and when it also returns zero rows the loop never runs. Without this, that
-    # case reports `time_budget_reached: false` — byte-identical to a healthy
-    # quiet hour — which is precisely the run an operator most needs to see.
-    time_budget_reached = budget_spent()
-    # Only logged when the loop cannot: with items in hand the loop's own warning
-    # says the same thing with more detail.
-    if time_budget_reached and not stale_items:
-        logger.warning(
-            "Runtime budget of %ds was already spent by discovery (%d items found) "
-            "— processing none of them",
+    discovered: int | None = None
+    time_budget_reached = False
+
+    def emit_summary(*, aborted: bool = False) -> None:
+        summary: dict[str, Any] = {
+            "ts": format_expires(_now()),
+            "event": "cleanup_summary",
+            "dry_run": dry_run,
+            "collection": args.collection,
+            # None, not 0, when discovery itself raised: we do not know how many
+            # items were out there, and 0 is a claim. Same reasoning as
+            # _UNKNOWN_S3_COUNTS.
+            "discovered": discovered,
+            "processed": processed,
+            "by_status": counts,
+            "failures": failures,
+            "time_budget_reached": time_budget_reached,
+        }
+        if aborted:
+            # ADDITIVE, and present only on an aborted run: dashboards keyed on
+            # `event == "cleanup_summary"` keep working unchanged. What changes
+            # is that a run which died before finishing the batch now says so
+            # rather than vanishing.
+            summary["aborted"] = True
+        print(json.dumps(summary), flush=True)
+
+    # Guarded from here down. Everything ABOVE -- the two config checks and
+    # resolve_exclude_ids -- is a configuration error that exits 2 and writes no
+    # summary; README_cleanup_expired_items.md documents that as the one case
+    # where a missing summary line is harmless. Everything below talks to a live
+    # endpoint and can fail at runtime, and those failures must stay visible in
+    # the audit stream instead of ending the process silently.
+    try:
+        client = Client.open(args.stac_api_url)
+        session = _session(args.stac_api_url)
+        s3_client = _s3_client(args.s3_endpoint)
+        stac_base_url = str(client.self_href).rstrip("/")
+
+        logger.info(
+            "Cleanup start: collection=%s dry_run=%s max_items=%d allowed_bucket=%s "
+            "max_runtime_seconds=%s",
+            args.collection,
+            dry_run,
+            args.max_items,
+            args.allowed_bucket,
             budget,
-            len(stale_items),
         )
-    for stale in stale_items:
-        # Checked at the TOP of the loop only. Stopping here leaves the previous
-        # item fully done and audited, and the next one entirely untouched; the
-        # items we skip are simply re-discovered by the next run (oldest-expiry
-        # first, so nothing starves).
-        if budget_spent():
-            time_budget_reached = True
+
+        search = client.search(**build_search_kwargs(args.collection, now, args.max_items))
+
+        # Materialise the whole result set BEFORE deleting anything. The search
+        # paginates with a keyset token anchored on the last item returned; deleting
+        # items mid-iteration removes that anchor, so the next page fails with
+        # "Could not find item using token". max_items bounds this list.
+        stale_items = list(search.items_as_dicts())
+        discovered = len(stale_items)
+
+        # Checked here as well as in the loop: discovery alone can spend the budget,
+        # and when it also returns zero rows the loop never runs. Without this, that
+        # case reports `time_budget_reached: false` — byte-identical to a healthy
+        # quiet hour — which is precisely the run an operator most needs to see.
+        time_budget_reached = budget_spent()
+        # Only logged when the loop cannot: with items in hand the loop's own warning
+        # says the same thing with more detail.
+        if time_budget_reached and not stale_items:
             logger.warning(
-                "Runtime budget of %ds reached after %d of %d items — stopping cleanly",
+                "Runtime budget of %ds was already spent by discovery (%d items found) "
+                "— processing none of them",
                 budget,
-                processed,
                 len(stale_items),
             )
-            break
-        # Re-fetch fresh: the search index can lag the catalogue. On any fetch
-        # problem we must NOT fall back to the stale snapshot for a destructive
-        # delete — a 404 means the item is already gone (idempotent success),
-        # and a transient error means we can't safely act, so we skip and flag.
-        fresh, outcome = _fetch_item(session, stac_base_url, args.collection, stale["id"])
-        if outcome == "gone":
-            record = _audit(stale, dry_run, "already_gone")
-        elif outcome != "ok" or fresh is None:
-            record = _audit(stale, dry_run, "refetch_failed")
-        else:
-            try:
-                record = process_item(
-                    fresh,
-                    now=now,
-                    exclude_ids=exclude_ids,
-                    allowed_bucket=args.allowed_bucket,
-                    s3_client=s3_client,
-                    session=session,
-                    stac_base_url=stac_base_url,
-                    dry_run=dry_run,
-                )
-            except requests.exceptions.RequestException as exc:
-                # The STAC DELETE is the one call in process_item that can still
-                # raise: _fetch_item guards its own transport and the S3 paths
-                # are caught inside. Without this, a single ReadTimeout ends the
-                # whole run — and the larger the batch, the more of it is lost.
-                #
-                # Retaining the item is safe either way. If the DELETE actually
-                # landed server-side, the next run re-fetches it as "gone"; if it
-                # did not, the S3 data is already deleted, so the recount finds 0
-                # remaining and the retry deletes the item. Both converge.
+        for stale in stale_items:
+            # Checked at the TOP of the loop only. Stopping here leaves the previous
+            # item fully done and audited, and the next one entirely untouched; the
+            # items we skip are simply re-discovered by the next run (oldest-expiry
+            # first, so nothing starves).
+            if budget_spent():
+                time_budget_reached = True
                 logger.warning(
-                    "STAC delete transport error for %s: %s — retaining STAC item",
-                    fresh.get("id"),
-                    exc,
+                    "Runtime budget of %ds reached after %d of %d items — stopping cleanly",
+                    budget,
+                    processed,
+                    len(stale_items),
                 )
-                record = _audit(fresh, dry_run, "stac_delete_error")
-        print(json.dumps(record), flush=True)
-        counts[record["status"]] = counts.get(record["status"], 0) + 1
-        processed += 1
-        if record["status"] in FAILURE_STATUSES or record["status"].startswith("stac_delete_http_"):
-            failures += 1
+                break
+            # Re-fetch fresh: the search index can lag the catalogue. On any fetch
+            # problem we must NOT fall back to the stale snapshot for a destructive
+            # delete — a 404 means the item is already gone (idempotent success),
+            # and a transient error means we can't safely act, so we skip and flag.
+            fresh, outcome = _fetch_item(session, stac_base_url, args.collection, stale["id"])
+            if outcome == "gone":
+                record = _audit(stale, dry_run, "already_gone")
+            elif outcome != "ok" or fresh is None:
+                record = _audit(stale, dry_run, "refetch_failed")
+            else:
+                try:
+                    record = process_item(
+                        fresh,
+                        now=now,
+                        exclude_ids=exclude_ids,
+                        allowed_bucket=args.allowed_bucket,
+                        s3_client=s3_client,
+                        session=session,
+                        stac_base_url=stac_base_url,
+                        dry_run=dry_run,
+                    )
+                except requests.exceptions.RequestException as exc:
+                    # The STAC DELETE is the one call in process_item that can still
+                    # raise: _fetch_item guards its own transport and the S3 paths
+                    # are caught inside. Without this, a single ReadTimeout ends the
+                    # whole run — and the larger the batch, the more of it is lost.
+                    #
+                    # Retaining the item is safe either way. If the DELETE actually
+                    # landed server-side, the next run re-fetches it as "gone"; if it
+                    # did not, the S3 data is already deleted, so the recount finds 0
+                    # remaining and the retry deletes the item. Both converge.
+                    logger.warning(
+                        "STAC delete transport error for %s: %s — retaining STAC item",
+                        fresh.get("id"),
+                        exc,
+                    )
+                    record = _audit(fresh, dry_run, "stac_delete_error")
+            print(json.dumps(record), flush=True)
+            counts[record["status"]] = counts.get(record["status"], 0) + 1
+            processed += 1
+            if record["status"] in FAILURE_STATUSES or record["status"].startswith(
+                "stac_delete_http_"
+            ):
+                failures += 1
+    except Exception:
+        # Deliberately broad, and ONLY here. The per-item guards inside
+        # process_item stay narrow and fail closed -- they retain the STAC item
+        # on purpose. This one exists so that whatever kills a run still leaves
+        # an audit trail: before it, an exception anywhere from Client.open
+        # through the loop ended the process with no cleanup_summary at all,
+        # which is indistinguishable from a pod that vanished.
+        logger.exception("Cleanup aborted before the batch completed")
+        time_budget_reached = budget_spent()
+        emit_summary(aborted=True)
+        return 1
 
-    summary = {
-        "ts": format_expires(_now()),
-        "event": "cleanup_summary",
-        "dry_run": dry_run,
-        "collection": args.collection,
-        "discovered": len(stale_items),
-        "processed": processed,
-        "by_status": counts,
-        "failures": failures,
-        "time_budget_reached": time_budget_reached,
-    }
-    print(json.dumps(summary), flush=True)
+    emit_summary()
     return 1 if failures else 0
 
 
@@ -534,7 +582,11 @@ def _fetch_item(
         if resp.status_code == 404:
             return None, "gone"
         logger.warning("Re-fetch of %s returned HTTP %d", item_id, resp.status_code)
-    except requests.RequestException as exc:
+    except (requests.RequestException, RuntimeError) as exc:
+        # RuntimeError: same auth-hook route as _delete_stac_item -- the token
+        # fetch runs inside session.get. This call sits OUTSIDE the run loop's
+        # try, and it precedes the delete for every item, so it is the route
+        # that fires first when the OIDC endpoint is unhappy.
         logger.warning("Re-fetch failed for %s: %s", item_id, exc)
     return None, "error"
 
