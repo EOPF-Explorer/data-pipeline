@@ -28,6 +28,7 @@ import requests
 # Import item management functionality
 from manage_item import (
     STACItemManager,
+    _replace_item,
     check_urls_confined,
     count_s3_objects_for_item,
     extract_s3_object_counts,
@@ -45,16 +46,6 @@ if str(scripts_dir) not in sys.path:
 
 import stac_auth  # noqa: E402
 from storage_tier_utils import get_s3_storage_info  # noqa: E402
-
-
-def _replace_item(session: requests.Session, api_url: str, collection_id: str, item: Item) -> None:
-    """Replace a STAC item in place with a single idempotent PUT."""
-    response = session.put(
-        f"{api_url}/collections/{collection_id}/items/{item.id}",
-        json=item.to_dict(),
-        timeout=30,
-    )
-    response.raise_for_status()
 
 
 def parse_threshold(value: str) -> datetime:

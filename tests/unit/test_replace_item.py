@@ -1,8 +1,9 @@
-"""Unit tests for the file-local _replace_item helpers (issue #352).
+"""Unit tests for the shared _replace_item helper (issue #352).
 
 Item updates must be a single idempotent PUT — never DELETE-then-POST, which
 leaves a window where the item exists nowhere. Covers the helper directly and
-the CLI call sites that route through it.
+the CLI call sites that route through it. The helper lives in manage_item and
+manage_collections imports it; there is no second copy.
 """
 
 from __future__ import annotations
@@ -132,31 +133,17 @@ class TestManageItemReplaceItemHelper:
 
 
 # ---------------------------------------------------------------------------
-# manage_collections._replace_item: direct helper tests
+# manage_collections re-exports the SAME helper — there is no second copy
 # ---------------------------------------------------------------------------
-class TestManageCollectionsReplaceItemHelper:
-    def test_issues_single_put_to_item_url(self):
-        session = MagicMock(spec=requests.Session)
-        session.put.return_value = _make_response(200)
-        item = _make_item()
+class TestManageCollectionsReusesTheHelper:
+    def test_is_the_same_object_as_manage_item(self):
+        """The helper is defined once, in manage_item, and imported here.
 
-        manage_collections_module._replace_item(session, API_URL, COLLECTION_ID, item)
-
-        session.put.assert_called_once_with(
-            f"{API_URL}/collections/{COLLECTION_ID}/items/{ITEM_ID}",
-            json=item.to_dict(),
-            timeout=30,
-        )
-        session.delete.assert_not_called()
-        session.post.assert_not_called()
-
-    @pytest.mark.parametrize("status_code", [404, 500])
-    def test_raises_on_http_error(self, status_code):
-        session = MagicMock(spec=requests.Session)
-        session.put.return_value = _make_response(status_code)
-
-        with pytest.raises(requests.HTTPError):
-            manage_collections_module._replace_item(session, API_URL, COLLECTION_ID, _make_item())
+        Asserting identity rather than re-testing the behaviour is the point: a
+        future re-introduction of a file-local copy would drift silently from
+        the original, which is exactly what this consolidation removed.
+        """
+        assert manage_collections_module._replace_item is manage_item_module._replace_item
 
 
 # ---------------------------------------------------------------------------

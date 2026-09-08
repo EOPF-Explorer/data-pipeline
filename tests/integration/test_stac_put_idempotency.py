@@ -15,8 +15,6 @@ Run:
         tests/integration/test_stac_put_idempotency.py
 """
 
-from __future__ import annotations
-
 import importlib.util
 import os
 import re
