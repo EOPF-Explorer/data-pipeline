@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.17.0 (2026-09-08)
+
+## What's Changed
+* feat(migrate): guard the retention, count the consequence, make the undo real by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/402
+* fix: replace DELETE-then-POST STAC item writes with idempotent PUT (7 sites) by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/357
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.16.1...v1.17.0
+
 ## 1.16.1 (2026-09-08)
 
 ## What's Changed
