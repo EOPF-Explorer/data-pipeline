@@ -88,6 +88,19 @@ class ExpiresRunState:
 
     # The histogram key meaning "written" (every other reason is a skip).
     written_reason: str
+    # Reasons that also WRITE. Separate from written_reason so the reconcile
+    # check below stays honest when a run has more than one writing outcome
+    # (restamp_expires adds "repaired").
+    extra_written_reasons: set[str] = field(default_factory=set)
+    # The retention this run resolved, and how many items it makes deletable
+    # RIGHT NOW. Nothing used to print either, which is why a correct run and
+    # a catastrophic one produced identical output: every stamped item
+    # classifies "restamped" for any retention shorter than the stored one, so
+    # the histogram cannot tell 90 from 30. This count can: it is ~114k at
+    # 90 days and ~150k at 30, and it is what the pre-flight count is
+    # compared against before any write.
+    retention_days: int | None = None
+    deletable_now: int = 0
     # reason -> count, including written_reason. A dry-run's totals are the
     # histogram the team reviews before committing.
     histogram: Counter[str] = field(default_factory=Counter)
@@ -104,6 +117,8 @@ class ExpiresRunState:
         self.histogram.clear()
         self.exclude_ids.clear()
         self.matched_exclude_ids.clear()
+        self.retention_days = None
+        self.deletable_now = 0
 
     def observe(self, item_id: str | None, exclude_ids: set[str]) -> None:
         """Record the configured exclude ids and whether this item is one of
@@ -114,9 +129,12 @@ class ExpiresRunState:
         if item_id is not None and item_id in exclude_ids:
             self.matched_exclude_ids.add(item_id)
 
+    def written_reasons(self) -> set[str]:
+        return {self.written_reason} | self.extra_written_reasons
+
     def record(self, migration_name: str, item_id: str | None, reason: str) -> None:
         self.histogram[reason] += 1
-        if reason != self.written_reason:
+        if reason not in self.written_reasons():
             logger.info("%s skip: id=%s reason=%s", migration_name, item_id, reason)
 
     def render_report(self, result: MigrationResult) -> str:
@@ -133,7 +151,13 @@ class ExpiresRunState:
         for reason in sorted(self.histogram):
             lines.append(f"  {reason:<16} {self.histogram[reason]}")
 
-        written = self.histogram.get(self.written_reason, 0)
+        if self.retention_days is not None:
+            lines.append(f"  retention        {self.retention_days} d")
+            lines.append(
+                f"  deletable now    {self.deletable_now} (new expires already in the past)"
+            )
+
+        written = sum(self.histogram.get(r, 0) for r in self.written_reasons())
         skips = sum(self.histogram.values()) - written
         reconciles = (
             written == result.items_modified + result.items_failed and skips == result.items_skipped

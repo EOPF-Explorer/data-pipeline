@@ -328,6 +328,14 @@ def verify(
         migration_fn = compose_migrations([MIGRATIONS[n].fn for n in migration_names])
 
     click.echo(f"Verifying '{migration_name}' on '{collection_id}'...")
+
+    # Mirror `run`: without the reset hook the migration never resolves its config,
+    # so a bad or unset retention raises per item, every item is tallied as failed,
+    # and a verify that looked only at items_modified would print the tick anyway.
+    reset_hook = MIGRATIONS[migration_names[0]].reset if len(migration_names) == 1 else None
+    if reset_hook is not None:
+        reset_hook()
+
     runner = STACMigrationRunner(api_url)
     result = runner.run_migration(
         collection_id, migration_fn, migration_name, dry_run=True, page_size=page_size
@@ -336,6 +344,29 @@ def verify(
     click.echo(f"  Items scanned:            {result.items_processed}")
     click.echo(f"  Items already fixed:      {result.items_skipped}")
     click.echo(f"  Items needing migration:  {result.items_modified}")
+    click.echo(f"  Items failed:             {result.items_failed}")
+
+    # A verify that cannot fail is not a verify. Two ways it used to pass while
+    # telling you nothing: every item erroring (counted as failed, not modified),
+    # and scanning nothing at all (a mistyped collection returns an empty search,
+    # not a 404).
+    if result.items_failed:
+        click.echo(
+            f"✗ {result.items_failed} item(s) errored during verification — the result is "
+            "not trustworthy. Check EXPIRES_RETENTION_DAYS and the migration's config.",
+            err=True,
+        )
+        for err in result.errors[:5]:
+            click.echo(f"    - {err['item_id']}: {err['error']}", err=True)
+        sys.exit(1)
+
+    if result.items_processed == 0:
+        click.echo(
+            f"✗ Scanned 0 items in '{collection_id}' — nothing was verified. A mistyped "
+            "collection id returns an empty result set rather than an error.",
+            err=True,
+        )
+        sys.exit(1)
 
     if result.items_modified == 0:
         click.echo(f"✓ Migration '{migration_name}' is fully applied on '{collection_id}'.")
