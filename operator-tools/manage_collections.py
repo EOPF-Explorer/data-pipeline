@@ -16,6 +16,8 @@ This tool uses manage_item.py for all item-level operations.
 import json
 import os
 import sys
+from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -26,10 +28,12 @@ import requests
 # Import item management functionality
 from manage_item import (
     STACItemManager,
+    check_urls_confined,
     count_s3_objects_for_item,
     extract_s3_object_counts,
     extract_s3_urls_from_item,
     extract_stac_object_counts,
+    parse_s3_prefix,
 )
 from pystac import Collection, Item
 from pystac_client import Client
@@ -51,6 +55,107 @@ def _replace_item(session: requests.Session, api_url: str, collection_id: str, i
         timeout=30,
     )
     response.raise_for_status()
+
+
+def parse_threshold(value: str) -> datetime:
+    """Parse a --datetime-before threshold into an aware UTC datetime.
+
+    Accepts a bare date (``2026-09-01``, taken as 00:00:00 UTC) or any ISO 8601
+    timestamp; a naive timestamp is taken as UTC. Rejects anything else with a
+    message naming the offending value, so a typo fails the run instead of
+    silently protecting nothing.
+    """
+    try:
+        parsed = datetime.fromisoformat(value.strip())
+    except ValueError as exc:
+        raise ValueError(
+            f"--datetime-before {value!r} is not an ISO 8601 date or timestamp "
+            "(e.g. 2026-09-01 or 2026-09-01T00:00:00Z)"
+        ) from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _item_datetime(item: dict[str, Any]) -> datetime | None:
+    """The item's acquisition time as an aware UTC datetime, or None if it has none.
+
+    ``properties.datetime`` first; ``start_datetime`` for range-only items. An
+    unparseable value counts as missing — the caller protects such items.
+    """
+    props = item.get("properties") or {}
+    raw = props.get("datetime") or props.get("start_datetime")
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(raw))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _protect_recent(
+    items: list[dict[str, Any]], datetime_before: datetime
+) -> tuple[list[dict[str, Any]], int, int]:
+    """Split items into (eligible, n_recent, n_undated) around a threshold.
+
+    Eligible items are those acquired strictly BEFORE the threshold. Items at
+    or after it are protected, and so are items with no readable datetime:
+    a guard that cannot decide must fail closed, not delete.
+    """
+    eligible: list[dict[str, Any]] = []
+    n_recent = 0
+    n_undated = 0
+    for item in items:
+        acquired = _item_datetime(item)
+        if acquired is None:
+            n_undated += 1
+        elif acquired >= datetime_before:
+            n_recent += 1
+        else:
+            eligible.append(item)
+    return eligible, n_recent, n_undated
+
+
+def _report_confinement_sweep(
+    items: list[dict[str, Any]],
+    confinement: Sequence[tuple[str, str]],
+) -> None:
+    """Assert every item's S3 URLs sit inside ``confinement``; abort if not.
+
+    Raises:
+        click.ClickException: if any item has an out-of-bounds or store-orphaning
+            URL. Aborting is the point — a purge that "skips the bad ones" hides
+            exactly the items whose hrefs are wrong.
+    """
+    click.echo(f"\n🔒 Confinement: {len(confinement)} allowed prefix(es)")
+    for bucket, prefix in confinement:
+        click.echo(f"    • s3://{bucket}/{prefix}")
+
+    offenders: list[tuple[str, str, str]] = []
+    checked = 0
+    for item in items:
+        urls = extract_s3_urls_from_item(item)
+        checked += len(urls)
+        for url, reason in check_urls_confined(urls, confinement):
+            offenders.append((item["id"], url, reason))
+
+    if not offenders:
+        click.echo(f"    ✅ {checked:,} asset URLs across {len(items):,} items are all in bounds")
+        return
+
+    click.echo(f"\n⛔ {len(offenders)} asset URL(s) outside the confinement:", err=True)
+    for item_id, url, reason in offenders[:20]:
+        click.echo(f"    {item_id}: {url}  [{reason}]", err=True)
+    if len(offenders) > 20:
+        click.echo(f"    ... and {len(offenders) - 20} more", err=True)
+    raise click.ClickException(
+        "Refusing to clean: the items above reference S3 data outside the declared "
+        "confinement. Widen --confine-to only if every path listed is genuinely "
+        "yours to delete."
+    )
 
 
 class STACCollectionManager:
@@ -102,6 +207,9 @@ class STACCollectionManager:
         dry_run: bool = False,
         clean_s3: bool = False,
         s3_client: Any = None,
+        confinement: Sequence[tuple[str, str]] | None = None,
+        max_items: int | None = None,
+        datetime_before: datetime | None = None,
     ) -> tuple[int, int, int]:
         """
         Remove all items from a collection, optionally cleaning S3 data.
@@ -111,6 +219,17 @@ class STACCollectionManager:
             dry_run: If True, only show what would be deleted
             clean_s3: If True, also delete S3 data
             s3_client: Boto3 S3 client (required if clean_s3=True)
+            confinement: (bucket, prefix) pairs the S3 deletes may touch
+                (required if clean_s3=True)
+            max_items: stop after this many items. The confinement sweep still
+                covers the WHOLE collection — the bound limits what is deleted,
+                never what is checked. Re-running converges, so a large purge is
+                a series of bounded runs rather than one unbounded one.
+            datetime_before: only delete items acquired strictly before this
+                (aware UTC) instant. Items at or after it, and items with no
+                readable datetime, are protected and reported, never deleted.
+                Applied after the sweep and before max_items, so the bound is
+                spent on eligible items only.
 
         Returns:
             Tuple of (items_deleted, s3_objects_deleted, s3_objects_failed)
@@ -125,6 +244,41 @@ class STACCollectionManager:
             click.echo("✅ Collection is already empty")
             return 0, 0, 0
 
+        if clean_s3:
+            if confinement is None:
+                raise ValueError("clean_collection(clean_s3=True) requires an explicit confinement")
+            # Sweep EVERY item before touching anything. The per-item guard in
+            # delete_s3_objects_for_item already fails closed, but on its own it
+            # would abort a 15-40h purge partway through on a rogue href found
+            # at item 20,000. Checking up front turns that into a 2-minute
+            # answer, and the report names every offender at once.
+            _report_confinement_sweep(items, confinement)
+
+        # Protect AFTER the sweep (the sweep still sees every item) and BEFORE
+        # the bound, so max_items counts deletions, not protected items. The
+        # API returns newest-first, so without this guard a freshly registered
+        # item would be the first thing the next run deletes.
+        if datetime_before is not None:
+            items, n_recent, n_undated = _protect_recent(items, datetime_before)
+            click.echo(
+                f"\n🛡️  Protected: {n_recent:,} items acquired at or after "
+                f"{datetime_before.isoformat()} and {n_undated:,} without a readable "
+                f"datetime; {len(items):,} eligible"
+            )
+            if not items:
+                click.echo("✅ Nothing eligible below the threshold; nothing deleted")
+                return 0, 0, 0
+
+        # Bound AFTER the sweep: the sweep must see every item, or a rogue href
+        # outside this batch stays hidden until the run that reaches it.
+        total_in_collection = len(items)
+        if max_items is not None and max_items < total_in_collection:
+            items = items[:max_items]
+            click.echo(
+                f"\n🔢 Bounded run: {len(items):,} of {total_in_collection:,} items "
+                "(re-run to continue; the clean converges)"
+            )
+
         if dry_run:
             click.echo(f"\nWould delete {len(items)} STAC items:")
             for item in items[:10]:
@@ -136,7 +290,10 @@ class STACCollectionManager:
                 click.echo(
                     f"\nS3 data that would be deleted (sampling {min(5, len(items))} of {len(items)} items for preview):"
                 )
-                click.echo("NOTE: Actual deletion will process ALL items in the collection")
+                # Say what THIS run would do. "ALL items in the collection" was
+                # true before --max-items existed and now contradicts the bound
+                # printed just above it.
+                click.echo(f"NOTE: Actual deletion will process all {len(items):,} items above")
 
                 # Sample a few items to show S3 paths and count objects
                 total_preview_objects = 0
@@ -157,7 +314,7 @@ class STACCollectionManager:
                             click.echo(f"      ... and {len(s3_urls) - 5} more")
 
                 if sample_size > 0 and total_preview_objects > 0:
-                    click.echo(f"\n  {'─'*60}")
+                    click.echo(f"\n  {'─' * 60}")
                     click.echo(
                         f"  Sample total: {total_preview_objects:,} S3 objects from {sample_size} items"
                     )
@@ -169,7 +326,7 @@ class STACCollectionManager:
                         click.echo(
                             f"  Estimated total for ALL {len(items)} items: ~{estimated_total:,} S3 objects"
                         )
-                        click.echo(f"  {'─'*60}")
+                        click.echo(f"  {'─' * 60}")
                         click.echo(
                             f"\n  ⚠️  IMPORTANT: Actual deletion will process ALL {len(items)} items"
                         )
@@ -209,6 +366,7 @@ class STACCollectionManager:
                     s3_client=s3_client,
                     item_dict=item,
                     validate_s3=True,
+                    confinement=confinement,
                 )
 
                 if success:
@@ -593,6 +751,37 @@ def cli(ctx: click.Context, api_url: str) -> None:
     "--s3-endpoint",
     help="S3 endpoint URL (optional, uses AWS_ENDPOINT_URL env var if not specified)",
 )
+@click.option(
+    "--confine-to",
+    "confine_to",
+    multiple=True,
+    metavar="S3_URL",
+    help=(
+        "Restrict S3 deletion to this s3://bucket/prefix/ (repeatable). "
+        "REQUIRED with --clean-s3. Prefixes are matched with a trailing slash, "
+        "so s3://b/foo/ never matches s3://b/foo-staging/."
+    ),
+)
+@click.option(
+    "--max-items",
+    type=click.IntRange(min=1),
+    default=None,
+    help=(
+        "Delete at most this many items, then stop. The confinement sweep still "
+        "covers the whole collection. Re-run to continue — the clean converges."
+    ),
+)
+@click.option(
+    "--datetime-before",
+    "datetime_before",
+    default=None,
+    metavar="ISO8601",
+    help=(
+        "Only delete items acquired strictly before this instant (a bare date is "
+        "00:00:00 UTC). Items at or after it, and items with no readable datetime, "
+        "are never deleted. Protects anything registered during a long drain."
+    ),
+)
 @click.pass_context
 def clean(
     ctx: click.Context,
@@ -601,6 +790,9 @@ def clean(
     yes: bool,
     clean_s3: bool,
     s3_endpoint: str | None,
+    confine_to: tuple[str, ...],
+    max_items: int | None,
+    datetime_before: str | None,
 ) -> None:
     """
     Remove all items from a collection.
@@ -608,13 +800,38 @@ def clean(
     Example:
         manage_collections.py clean sentinel-2-l2a-staging --dry-run
         manage_collections.py clean sentinel-2-l2a-staging
-        manage_collections.py clean sentinel-2-l2a-staging --clean-s3
+        manage_collections.py clean sentinel-2-l2a-staging --clean-s3 \\
+            --confine-to s3://my-bucket/tests-output/sentinel-2-l2a-staging/ \\
+            --max-items 2000 --datetime-before 2026-09-01
     """
     manager: STACCollectionManager = ctx.obj["manager"]
 
+    confinement = None
+    if clean_s3:
+        if not confine_to:
+            raise click.UsageError(
+                "--clean-s3 requires at least one --confine-to s3://bucket/prefix/ .\n"
+                "Recursive S3 deletion is unbounded without it, and prod data can sit "
+                "under a sibling prefix in the same bucket."
+            )
+        try:
+            confinement = [parse_s3_prefix(spec) for spec in confine_to]
+        except ValueError as exc:
+            raise click.UsageError(str(exc)) from exc
+
+    threshold: datetime | None = None
+    if datetime_before is not None:
+        try:
+            threshold = parse_threshold(datetime_before)
+        except ValueError as exc:
+            raise click.UsageError(str(exc)) from exc
+
     # Confirmation prompt
     if not dry_run and not yes:
-        warning = f"⚠️  This will delete ALL items from collection '{collection_id}'."
+        scope = "ALL items" if max_items is None else f"up to {max_items} items"
+        if threshold is not None:
+            scope += f" acquired before {threshold.isoformat()}"
+        warning = f"⚠️  This will delete {scope} from collection '{collection_id}'."
         if clean_s3:
             warning += (
                 "\n⚠️  This will also DELETE ALL S3 DATA (Zarr stores) referenced by these items!"
@@ -643,7 +860,13 @@ def clean(
             )
 
         manager.clean_collection(
-            collection_id, dry_run=dry_run, clean_s3=clean_s3, s3_client=s3_client
+            collection_id,
+            dry_run=dry_run,
+            clean_s3=clean_s3,
+            s3_client=s3_client,
+            confinement=confinement,
+            max_items=max_items,
+            datetime_before=threshold,
         )
 
     except Exception as e:
@@ -729,7 +952,7 @@ def batch_create(ctx: click.Context, directory: Path, update: bool) -> None:
     fail_count = 0
 
     for json_file in json_files:
-        click.echo(f"\n{'='*60}")
+        click.echo(f"\n{'=' * 60}")
         click.echo(f"Processing: {json_file.name}")
 
         collection_data = manager.load_collection_from_template(json_file)
@@ -745,7 +968,7 @@ def batch_create(ctx: click.Context, directory: Path, update: bool) -> None:
         else:
             fail_count += 1
 
-    click.echo(f"\n{'='*60}")
+    click.echo(f"\n{'=' * 60}")
     click.echo(f"✅ Success: {success_count}")
     if fail_count > 0:
         click.echo(f"❌ Failed: {fail_count}")
@@ -841,7 +1064,7 @@ def info(
         catalog = Client.open(api_url)
         collection = catalog.get_collection(collection_id)
 
-        click.echo(f"\n{'='*60}")
+        click.echo(f"\n{'=' * 60}")
         click.echo(f"Collection: {collection.id}")
         click.echo(f"Title: {collection.title}")
         click.echo(f"Description: {collection.description[:200]}...")
@@ -858,7 +1081,7 @@ def info(
 
         # Storage tier statistics from STAC metadata
         if s3_stac_info and items:
-            click.echo(f"\n{'─'*60}")
+            click.echo(f"\n{'─' * 60}")
             click.echo("Storage Tier Statistics (from STAC metadata):")
 
             # Aggregate statistics across all items
@@ -946,7 +1169,7 @@ def info(
 
         # S3 storage statistics
         if s3_stats and items:
-            click.echo(f"\n{'─'*60}")
+            click.echo(f"\n{'─' * 60}")
             click.echo("S3 Storage Statistics:")
 
             # Initialize S3 client
@@ -1026,7 +1249,7 @@ def info(
             except Exception as e:
                 click.echo(f"  ⚠️  Could not fetch S3 statistics: {e}", err=True)
 
-        click.echo(f"{'='*60}\n")
+        click.echo(f"{'=' * 60}\n")
 
     except Exception as e:
         click.echo(f"❌ Error fetching collection info: {e}", err=True)
@@ -1128,9 +1351,9 @@ def sync_storage_tiers(
         total_stac_objects = sum(stac_object_counts.values())
 
         if total_s3_objects > 0 or total_stac_objects > 0:
-            click.echo(f"\n{'─'*60}")
+            click.echo(f"\n{'─' * 60}")
             click.echo("OBJECT-LEVEL STATISTICS")
-            click.echo(f"{'─'*60}")
+            click.echo(f"{'─' * 60}")
 
             # S3 object counts
             if s3_object_counts:
@@ -1159,9 +1382,9 @@ def sync_storage_tiers(
 
         # Display problems (mismatches)
         if stats["problems"]:
-            click.echo(f"\n{'─'*60}")
+            click.echo(f"\n{'─' * 60}")
             click.echo(f"🔍 MISMATCHES FOUND: {len(stats['problems'])} item(s)")
-            click.echo(f"{'─'*60}")
+            click.echo(f"{'─' * 60}")
             for problem in stats["problems"]:
                 item_id = problem["item_id"]
                 click.echo(f"\n  Item: {item_id}")
@@ -1187,9 +1410,9 @@ def sync_storage_tiers(
 
         # Display corrections
         if stats["corrections"]:
-            click.echo(f"\n{'─'*60}")
+            click.echo(f"\n{'─' * 60}")
             click.echo(f"✅ CORRECTIONS MADE: {len(stats['corrections'])} item(s) updated")
-            click.echo(f"{'─'*60}")
+            click.echo(f"{'─' * 60}")
             for correction in stats["corrections"][:10]:  # Show first 10
                 item_id = correction["item_id"]
                 assets_updated = correction["assets_updated"]
@@ -1202,9 +1425,9 @@ def sync_storage_tiers(
                 click.echo(f"  ... and {len(stats['corrections']) - 10} more item(s)")
 
         if dry_run:
-            click.echo(f"\n{'─'*60}")
+            click.echo(f"\n{'─' * 60}")
             click.echo("DRY RUN - No changes were made")
-            click.echo(f"{'─'*60}")
+            click.echo(f"{'─' * 60}")
 
         click.echo("=" * 60)
 
@@ -1411,9 +1634,9 @@ def change_storage_tier(
                 click.echo(f"  - {fid}")
 
         if dry_run:
-            click.echo(f"\n{'─'*60}")
+            click.echo(f"\n{'─' * 60}")
             click.echo("DRY RUN - No changes were made")
-            click.echo(f"{'─'*60}")
+            click.echo(f"{'─' * 60}")
 
         click.echo("=" * 60)
 

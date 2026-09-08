@@ -1,5 +1,48 @@
 # Changelog
 
+## 1.16.1 (2026-09-08)
+
+## What's Changed
+* fix(cleanup): guard the auth hook and always emit a summary by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/403
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.16.0...v1.16.1
+
+## 1.16.0 (2026-09-07)
+
+## What's Changed
+* feat(operator-tools): add --datetime-before to clean so a drain never deletes recent items by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/400
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.15.0...v1.16.0
+
+## 1.15.0 (2026-09-07)
+
+## What's Changed
+* feat(cleanup): bound a run with an in-tool time budget, and close two orphan footguns by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/396
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.14.0...v1.15.0
+
+## 1.14.0 (2026-09-03)
+
+## What's Changed
+* feat(prestage): stage S2 source zarr to OVH S3 before conversion (fixes blosc decompression failures and timeout issues) by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/344
+* feat(stac): add collection thumbnails for S1 RTC staging collections by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/369
+* feat(operator): bounded repair tool for /stac/raster corrupted item links by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/373
+* feat(stac): eodash baseLayers, pre-aggregation links and rasterform for S1 RTC by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/385
+* build(deps): bump the minor-and-patch group across 1 directory with 14 updates by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/391
+* build(deps): bump the all group across 1 directory with 7 updates by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/387
+* feat(migrations): add restamp_expires to shorten an existing expires by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/393
+* build(deps): bump python from 3.14.6-alpine to 3.14.7-alpine in /docker in the minor-and-patch group across 1 directory by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/380
+* build(deps): bump the security group across 1 directory with 2 updates by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/367
+* feat(cleanup): confine recursive S3 deletes and guard the STAC delete by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/392
+* fix(deps): bump tornado to 6.5.8 for three advisories by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/395
+* fix(ci): let release-please stamp uv.lock, and stop cancelling its runs by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/394
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.13.2...v1.14.0
+
 ## 1.13.2 (2026-07-20)
 
 ## What's Changed

@@ -74,9 +74,9 @@ def cli(ctx: click.Context, api_url: str | None, history_file: str | None, verbo
     show_default=True,
     type=click.IntRange(0, None),
     help=(
-        "Stop the run after this many writes fail back-to-back (0 disables). A write "
-        "is DELETE-then-POST, so wholesale write failures would empty the collection; "
-        "this bounds the damage. Recover via the run's .migration_recovery_*.jsonl."
+        "Stop the run after this many writes fail back-to-back (0 disables). Wholesale "
+        "write failures mean the API is refusing writes, so this bounds a pointless "
+        "run; the run's .migration_recovery_*.jsonl records what was written."
     ),
 )
 @click.option(
@@ -85,9 +85,9 @@ def cli(ctx: click.Context, api_url: str | None, history_file: str | None, verbo
     type=click.IntRange(1, None),
     help=(
         "Stop cleanly after ATTEMPTING N writes (a bounded first run). Failed writes "
-        "count against N — their DELETE may already have landed. Skipped items do not. "
-        "Use this instead of killing the process: a write is DELETE-then-POST, so a "
-        "kill can leave items deleted-but-not-restored."
+        "count against N; skipped items do not. Use this rather than killing the "
+        "process: a kill loses the tally and the history entry (the write itself is a "
+        "single atomic PUT, so it cannot tear an item)."
     ),
 )
 @click.pass_context
@@ -204,16 +204,18 @@ def run(
         click.echo(f"Run recorded to {history_file}")
 
     if result.aborted:
-        # A DELETE that succeeded before a failing POST leaves the item out of the
-        # catalogue, where a re-run cannot find it again — so point at the recovery
-        # file rather than just suggesting another run.
+        # Writes are a single atomic PUT (runner._update_item), so a failed write
+        # left the item exactly as it was: nothing to restore, and a re-run once the
+        # API is healthy is both safe and the fix. Say so — this message used to
+        # claim the items were gone, which is the DELETE-then-POST era and would send
+        # an operator "restoring" items that were never lost.
         click.echo(
             f"\nABORTED: stopped after {max_consecutive_failures} consecutive write "
             f"failures — the API was rejecting writes, so the run did not finish.\n"
-            f"Items are DELETE-then-POST: any item whose POST failed is no longer in "
-            f"the catalogue and a re-run will NOT see it. Before re-running, restore "
-            f"them from this run's .migration_recovery_*.jsonl (the failed ids are in "
-            f"{history_file}).",
+            f"Each write is a single atomic PUT, so the failed items are UNCHANGED, not "
+            f"missing: fix the API problem and re-run — the migration is idempotent. "
+            f"The failed ids are in {history_file}, and this run's "
+            f".migration_recovery_*.jsonl records what was written.",
             err=True,
         )
         sys.exit(1)

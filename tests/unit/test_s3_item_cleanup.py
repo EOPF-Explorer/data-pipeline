@@ -21,12 +21,16 @@ from s3_item_cleanup import (
     BAKED_EXCLUDE_FILE,
     DEFAULT_RETENTION_DAYS,
     EXPIRES_TS_FORMAT,
+    UnconfinedS3URLError,
+    assert_urls_confined,
+    check_urls_confined,
     count_s3_objects_for_item,
     delete_s3_objects_for_item,
     env_int,
     extract_s3_urls_from_item,
     format_expires,
     load_exclude_ids,
+    parse_s3_prefix,
     parse_stac_timestamp,
     resolve_exclude_ids,
 )
@@ -108,7 +112,9 @@ def test_delete_expands_zarr_prefix_and_deletes_listed_objects() -> None:
         "Errors": [],
     }
 
-    deleted, failed = delete_s3_objects_for_item(client, {f"s3://{BUCKET}/item/data.zarr/B02/0.0"})
+    deleted, failed = delete_s3_objects_for_item(
+        client, {f"s3://{BUCKET}/item/data.zarr/B02/0.0"}, confinement=[(BUCKET, "item/")]
+    )
 
     assert (deleted, failed) == (3, 0)
     # Paginate was scoped to the zarr root prefix, not the single chunk.
@@ -123,7 +129,9 @@ def test_delete_batches_in_chunks_of_1000() -> None:
     client.get_paginator.return_value = _paginator_returning(keys)
     client.delete_objects.return_value = {"Deleted": [], "Errors": []}
 
-    delete_s3_objects_for_item(client, {f"s3://{BUCKET}/item/data.zarr/x"})
+    delete_s3_objects_for_item(
+        client, {f"s3://{BUCKET}/item/data.zarr/x"}, confinement=[(BUCKET, "item/")]
+    )
 
     batch_sizes = [
         len(kwargs["Delete"]["Objects"]) for _, kwargs in client.delete_objects.call_args_list
@@ -140,7 +148,9 @@ def test_delete_counts_nosuchkey_as_deleted() -> None:
         "Errors": [{"Key": "item/data.zarr/b", "Code": "NoSuchKey"}],
     }
 
-    deleted, failed = delete_s3_objects_for_item(client, {f"s3://{BUCKET}/item/data.zarr/x"})
+    deleted, failed = delete_s3_objects_for_item(
+        client, {f"s3://{BUCKET}/item/data.zarr/x"}, confinement=[(BUCKET, "item/")]
+    )
 
     assert (deleted, failed) == (2, 0)
 
@@ -154,7 +164,9 @@ def test_delete_counts_other_errors_as_failed() -> None:
         "Errors": [{"Key": "item/data.zarr/b", "Code": "AccessDenied"}],
     }
 
-    deleted, failed = delete_s3_objects_for_item(client, {f"s3://{BUCKET}/item/data.zarr/x"})
+    deleted, failed = delete_s3_objects_for_item(
+        client, {f"s3://{BUCKET}/item/data.zarr/x"}, confinement=[(BUCKET, "item/")]
+    )
 
     assert (deleted, failed) == (1, 1)
 
@@ -296,3 +308,118 @@ def test_consumers_share_one_format_helper() -> None:
     assert register_v1.format_expires is format_expires
     assert cleanup_expired_items.format_expires is format_expires
     assert cleanup_expired_items.parse_stac_timestamp is parse_stac_timestamp
+
+
+# === Delete confinement (prefix guard) ===
+
+STAGING = (BUCKET, "tests-output/sentinel-2-l2a-staging/")
+PROD = (BUCKET, "tests-output/sentinel-2-l2a/")
+
+
+def test_parse_s3_prefix_normalises_trailing_slash() -> None:
+    assert parse_s3_prefix(f"s3://{BUCKET}/tests-output/foo") == (BUCKET, "tests-output/foo/")
+    assert parse_s3_prefix(f"s3://{BUCKET}/tests-output/foo/") == (BUCKET, "tests-output/foo/")
+
+
+def test_parse_s3_prefix_bare_bucket_means_whole_bucket() -> None:
+    assert parse_s3_prefix(f"s3://{BUCKET}") == (BUCKET, "")
+    assert parse_s3_prefix(f"s3://{BUCKET}/") == (BUCKET, "")
+
+
+@pytest.mark.parametrize("spec", ["https://example.com/x", "s3://", "/tests-output/foo"])
+def test_parse_s3_prefix_rejects_non_s3(spec: str) -> None:
+    with pytest.raises(ValueError):
+        parse_s3_prefix(spec)
+
+
+def test_staging_confinement_does_not_match_adjacent_prod_prefix() -> None:
+    """The bug this guard exists for: `sentinel-2-l2a` is a string prefix of
+    `sentinel-2-l2a-staging`, and both live in one un-versioned bucket."""
+    prod_url = f"s3://{BUCKET}/tests-output/sentinel-2-l2a/item/data.zarr/B02/0.0"
+    assert check_urls_confined({prod_url}, [STAGING]) == [(prod_url, "outside_confinement")]
+
+
+def test_prod_confinement_does_not_match_staging_prefix() -> None:
+    """And the converse — confinement must not leak across the shared stem."""
+    staging_url = f"s3://{BUCKET}/tests-output/sentinel-2-l2a-staging/item/data.zarr/B02/0.0"
+    assert check_urls_confined({staging_url}, [PROD]) == [(staging_url, "outside_confinement")]
+
+
+def test_in_bounds_urls_pass() -> None:
+    urls = {
+        f"s3://{BUCKET}/tests-output/sentinel-2-l2a-staging/a/data.zarr/B02/0.0",
+        f"s3://{BUCKET}/tests-output/sentinel-2-l2a-staging/b/thumb.png",
+    }
+    assert check_urls_confined(urls, [STAGING]) == []
+
+
+def test_other_bucket_is_out_of_bounds() -> None:
+    url = "s3://some-other-bucket/tests-output/sentinel-2-l2a-staging/a/data.zarr/x"
+    assert check_urls_confined({url}, [STAGING]) == [(url, "outside_confinement")]
+
+
+def test_empty_confinement_rejects_everything() -> None:
+    """Fail closed: an unconfigured caller deletes nothing, not everything."""
+    url = f"s3://{BUCKET}/tests-output/sentinel-2-l2a-staging/a/data.zarr/x"
+    assert check_urls_confined({url}, []) == [(url, "outside_confinement")]
+
+
+def test_bare_zarr_href_is_rejected_as_orphaning() -> None:
+    """`.zarr` with no trailing slash partitions as a single key: the delete
+    removes ~nothing, validation sees 0 remaining, and the STAC item is dropped
+    while the store survives."""
+    url = f"s3://{BUCKET}/tests-output/sentinel-2-l2a-staging/a/data.zarr"
+    assert check_urls_confined({url}, [STAGING]) == [(url, "bare_zarr_store")]
+
+
+def test_multiple_confinements_are_a_union() -> None:
+    urls = {
+        f"s3://{BUCKET}/tests-output/sentinel-2-l2a-staging/a/data.zarr/x",
+        f"s3://{BUCKET}/tests-output/sentinel-2-l2a/b/data.zarr/y",
+    }
+    assert check_urls_confined(urls, [STAGING, PROD]) == []
+
+
+def test_assert_urls_confined_raises_with_all_violations() -> None:
+    urls = {
+        f"s3://{BUCKET}/tests-output/sentinel-2-l2a/one/data.zarr/x",
+        f"s3://{BUCKET}/tests-output/sentinel-2-l2a/two/data.zarr/y",
+    }
+    with pytest.raises(UnconfinedS3URLError) as exc:
+        assert_urls_confined(urls, [STAGING], item_id="ITEM_A")
+    assert len(exc.value.violations) == 2
+    assert exc.value.item_id == "ITEM_A"
+
+
+def test_delete_refuses_before_issuing_any_call() -> None:
+    """The guard runs before _collect_keys_by_bucket, so a rogue href in an
+    otherwise-valid item cannot leave a half-deleted store behind."""
+    client = MagicMock()
+    urls = {
+        f"s3://{BUCKET}/tests-output/sentinel-2-l2a-staging/ok/data.zarr/x",
+        f"s3://{BUCKET}/tests-output/sentinel-2-l2a/rogue/data.zarr/y",
+    }
+    with pytest.raises(UnconfinedS3URLError):
+        delete_s3_objects_for_item(client, urls, confinement=[STAGING])
+    client.get_paginator.assert_not_called()
+    client.delete_objects.assert_not_called()
+
+
+def test_delete_proceeds_when_confined() -> None:
+    client = MagicMock()
+    paginator = MagicMock()
+    key = "tests-output/sentinel-2-l2a-staging/a/data.zarr/B02/0.0"
+    paginator.paginate.return_value = [{"Contents": [{"Key": key}]}]
+    client.get_paginator.return_value = paginator
+    client.delete_objects.return_value = {"Deleted": [{"Key": key}]}
+
+    deleted, failed = delete_s3_objects_for_item(
+        client, {f"s3://{BUCKET}/{key}"}, confinement=[STAGING]
+    )
+    assert (deleted, failed) == (1, 0)
+
+
+def test_delete_requires_confinement_keyword() -> None:
+    """No positional fallback and no default — the bound is part of the call."""
+    with pytest.raises(TypeError):
+        delete_s3_objects_for_item(MagicMock(), set())  # type: ignore[call-arg]

@@ -98,10 +98,12 @@ uv run operator-tools/manage_item.py change-storage-tier sentinel-2-l2a-staging 
     --storage-class STANDARD_IA --s3-endpoint https://s3.de.io.cloud.ovh.net -y
 
 # Delete single item with S3 cleanup (dry run)
-uv run operator-tools/manage_item.py delete sentinel-2-l2a-staging ITEM_ID --clean-s3 --dry-run
+uv run operator-tools/manage_item.py delete sentinel-2-l2a-staging ITEM_ID --clean-s3 --dry-run \
+    --confine-to s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-2-l2a-staging/
 
 # Actually delete the item
-uv run operator-tools/manage_item.py delete sentinel-2-l2a-staging ITEM_ID --clean-s3 -y
+uv run operator-tools/manage_item.py delete sentinel-2-l2a-staging ITEM_ID --clean-s3 -y \
+    --confine-to s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-2-l2a-staging/
 ```
 
 **Key Features:**
@@ -176,8 +178,10 @@ uv run operator-tools/manage_collections.py clean sentinel-2-l2a-staging --dry-r
 uv run operator-tools/manage_collections.py clean sentinel-2-l2a-staging
 
 # Clean collection AND delete S3 data (with validation)
-uv run operator-tools/manage_collections.py clean sentinel-2-l2a-staging --clean-s3 --dry-run
-uv run operator-tools/manage_collections.py clean sentinel-2-l2a-staging --clean-s3 -y
+uv run operator-tools/manage_collections.py clean sentinel-2-l2a-staging --clean-s3 --dry-run \
+    --confine-to s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-2-l2a-staging/
+uv run operator-tools/manage_collections.py clean sentinel-2-l2a-staging --clean-s3 -y \
+    --confine-to s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-2-l2a-staging/
 
 # Create/update collection from template
 uv run operator-tools/manage_collections.py create stac/sentinel-2-l2a.json
@@ -403,7 +407,8 @@ When you encounter issues with collection operations, **always start by examinin
 
 ```bash
 # 1. Identify a problematic item from collection operation output
-uv run python manage_collections.py clean test-coll --clean-s3 -y
+uv run python manage_collections.py clean test-coll --clean-s3 -y \
+    --confine-to s3://esa-zarr-sentinel-explorer-fra/tests-output/test-coll/
 # Output shows: "⚠️  Item S2A_MSIL2A_... skipped due to S3 failures"
 
 # 2. Debug that specific item
@@ -416,10 +421,12 @@ uv run python manage_item.py info test-coll S2A_MSIL2A_... --s3-stats --debug
 # - Any extraction or access issues
 
 # 3. Test deletion on single item
-uv run python manage_item.py delete test-coll S2A_MSIL2A_... --clean-s3 --dry-run
+uv run python manage_item.py delete test-coll S2A_MSIL2A_... --clean-s3 --dry-run \
+    --confine-to s3://esa-zarr-sentinel-explorer-fra/tests-output/test-coll/
 
 # 4. If dry-run looks good, actually delete
-uv run python manage_item.py delete test-coll S2A_MSIL2A_... --clean-s3 -y
+uv run python manage_item.py delete test-coll S2A_MSIL2A_... --clean-s3 -y \
+    --confine-to s3://esa-zarr-sentinel-explorer-fra/tests-output/test-coll/
 ```
 
 ### Step 2: Scale to Collection
@@ -428,10 +435,12 @@ Once individual items work correctly, apply to the entire collection:
 
 ```bash
 # Preview collection operation
-uv run python manage_collections.py clean test-coll --clean-s3 --dry-run
+uv run python manage_collections.py clean test-coll --clean-s3 --dry-run \
+    --confine-to s3://esa-zarr-sentinel-explorer-fra/tests-output/test-coll/
 
 # Execute if preview looks good
-uv run python manage_collections.py clean test-coll --clean-s3 -y
+uv run python manage_collections.py clean test-coll --clean-s3 -y \
+    --confine-to s3://esa-zarr-sentinel-explorer-fra/tests-output/test-coll/
 ```
 
 ### When to Use Each Tool
@@ -569,10 +578,12 @@ Remove both STAC items and their associated S3 data with automatic validation:
 
 ```bash
 # Preview what would be deleted (RECOMMENDED FIRST STEP)
-uv run operator-tools/manage_collections.py clean sentinel-2-l2a-staging --clean-s3 --dry-run
+uv run operator-tools/manage_collections.py clean sentinel-2-l2a-staging --clean-s3 --dry-run \
+    --confine-to s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-2-l2a-staging/
 
 # Delete items and S3 data (with validation)
-uv run operator-tools/manage_collections.py clean sentinel-2-l2a-staging --clean-s3 -y
+uv run operator-tools/manage_collections.py clean sentinel-2-l2a-staging --clean-s3 -y \
+    --confine-to s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-2-l2a-staging/
 ```
 
 **⚠️ CRITICAL WARNING:**
@@ -600,7 +611,8 @@ uv run operator-tools/manage_collections.py clean sentinel-2-l2a-staging --clean
 uv run operator-tools/manage_collections.py info test-collection --s3-stats
 
 # 2. Preview deletion (see object counts)
-uv run operator-tools/manage_collections.py clean test-collection --clean-s3 --dry-run
+uv run operator-tools/manage_collections.py clean test-collection --clean-s3 --dry-run \
+    --confine-to s3://esa-zarr-sentinel-explorer-fra/tests-output/test-coll/
 
 # Review output:
 #   Would delete 10 items
@@ -608,7 +620,8 @@ uv run operator-tools/manage_collections.py clean test-collection --clean-s3 --d
 #   Sample URLs shown for verification
 
 # 3. Proceed if safe
-uv run operator-tools/manage_collections.py clean test-collection --clean-s3 -y
+uv run operator-tools/manage_collections.py clean test-collection --clean-s3 -y \
+    --confine-to s3://esa-zarr-sentinel-explorer-fra/tests-output/test-coll/
 
 # Output:
 #   Deleting items and S3 data  [####################################]  10/10

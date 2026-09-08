@@ -1,0 +1,136 @@
+# One-off Argo Workflow: purge the sentinel-2-l2a-staging collection (STAC items + Zarr
+# stores) for the devseed-staging wind-down. The empty collection record is KEPT —
+# `clean` never touches it.
+#
+# Runs in-cluster rather than from a laptop: in-region S3, credentials and the
+# stac-writer OIDC secret already mounted, and no dependency on a desk machine staying
+# awake for the length of the drain.
+#
+# Per item the tool is fail-closed: S3 delete -> recount -> STAC delete only if 0 remain,
+# so an interrupted run leaves no orphaned STAC entry and a re-run converges.
+#
+# TWO bounds, both enforced inside the tool, neither by a timeout or a kill:
+#   --confine-to  nothing outside this s3:// prefix can be deleted, and the sweep checks
+#                 EVERY item in the collection up front (not just this batch) so a rogue
+#                 href cannot hide in a later batch. Trailing-slash matching means
+#                 .../sentinel-2-l2a-staging/ can never match the adjacent prod prefix
+#                 .../sentinel-2-l2a/ — they share one bucket and versioning is OFF.
+#   --max-items   how many items this run deletes. The clean converges, so the full
+#                 23,394-item purge is a series of bounded runs.
+#
+# Usage:
+#   1. CANARY (default is dry_run=true — writes nothing, but does run the full sweep):
+#        argo submit -n devseed deploy/purge-s2-staging-collection-workflow.yaml \
+#          -p pipeline_image_version=<tag> -p max_items=10
+#   2. REAL canary, 10 items, verify the audit before scaling:
+#        ... -p max_items=10 -p dry_run=false
+#   3. DRAIN, repeat until the collection is empty:
+#        ... -p max_items=2000 -p dry_run=false
+#
+# pipeline_image_version MUST be a build containing operator-tools/ (added alongside
+# --max-items; earlier images ship scripts/ only).
+#
+# TAG GOTCHA: a push to a non-main branch BUILDS but does not PUSH (build.yml gates the
+# push step on main/tags/PR). Only the pull_request run publishes, and it tags with the
+# PR MERGE commit — so the pullable tags are `pr-<N>` and `sha-<merge-sha>`, never the
+# branch-head sha you just pushed. Prefer the immutable `sha-<merge-sha>`: `pr-<N>`
+# moves under you on the next push to the PR.
+#
+# Verify the tool is really in the image before pointing it at data:
+#   kubectl -n devseed run purge-tool-smoke --restart=Never \
+#     --image=<registry>/data-pipeline:<tag> \
+#     --overrides='{"spec":{"serviceAccountName":"operate-workflow-sa"}}' \
+#     --command -- python3 /app/operator-tools/manage_collections.py clean --help
+#
+# Deliberately does NOT take the `cron-cleanup-limit` semaphore that the
+# historical-cleanup cron uses: sharing it would stall the hourly prod drain for the
+# length of this purge, and the two touch different collections.
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: purge-s2-staging-
+  namespace: devseed
+  labels:
+    app: data-pipeline
+    component: s2-staging-purge
+spec:
+  serviceAccountName: operate-workflow-sa
+  entrypoint: purge
+  podGC:
+    # Match the cleanup cron: keep the pod past the controller's success bookkeeping
+    # so the audit output is still retrievable from Loki.
+    strategy: OnPodCompletion
+    deleteDelayDuration: 1800s
+  ttlStrategy:
+    secondsAfterSuccess: 604800
+    secondsAfterFailure: 604800
+  arguments:
+    parameters:
+    - name: pipeline_image_version          # REQUIRED — build containing operator-tools/
+      value: ""
+    - name: collection
+      value: sentinel-2-l2a-staging
+    - name: stac_api_url
+      value: https://api.explorer.eopf.copernicus.eu/stac
+    - name: s3_endpoint
+      value: https://s3.de.io.cloud.ovh.net
+    - name: confine_to                      # nothing outside this prefix is deletable
+      value: s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-2-l2a-staging/
+    - name: max_items                       # items deleted per run; re-run to continue
+      value: "10"
+    - name: dry_run                         # SAFE DEFAULT: sweep + report, delete nothing
+      value: "true"
+  templates:
+  - name: purge
+    # Backstop only, never the operating bound — --max-items is the bound. A kill here
+    # is NOT safe: the per-item unit (S3 delete -> recount -> STAC delete) is not
+    # atomic, so a mid-item kill can orphan an item. Sized well above a 2000-item run
+    # (~5 min to fetch and sweep 23k items, then ~4 s/item) so it fires only on a hang.
+    activeDeadlineSeconds: 14400
+    container:
+      image: w9mllyot.c1.de1.container-registry.ovh.net/eopf-sentinel-zarr-explorer/data-pipeline:{{workflow.parameters.pipeline_image_version}}
+      imagePullPolicy: IfNotPresent
+      resources:
+        requests:
+          # The tool materialises every item in the collection before deleting, so
+          # memory tracks collection size, not batch size.
+          memory: 2Gi
+          cpu: 500m
+        limits:
+          memory: 4Gi
+      env:
+      - name: PYTHONUNBUFFERED
+        value: "1"
+      - name: AWS_ACCESS_KEY_ID
+        valueFrom:
+          secretKeyRef: { name: geozarr-s3-credentials, key: AWS_ACCESS_KEY_ID }
+      - name: AWS_SECRET_ACCESS_KEY
+        valueFrom:
+          secretKeyRef: { name: geozarr-s3-credentials, key: AWS_SECRET_ACCESS_KEY }
+      # STAC write enforcement is live: without these every DELETE returns 401.
+      - name: OIDC_TOKEN_URL
+        valueFrom:
+          secretKeyRef: { name: stac-auth-oidc, key: OIDC_TOKEN_URL }
+      - name: OIDC_CLIENT_ID
+        valueFrom:
+          secretKeyRef: { name: stac-auth-oidc, key: OIDC_CLIENT_ID }
+      - name: OIDC_CLIENT_SECRET
+        valueFrom:
+          secretKeyRef: { name: stac-auth-oidc, key: OIDC_CLIENT_SECRET }
+      command: [bash, -c]
+      args:
+      - |
+        set -euo pipefail
+        if [ -z "{{workflow.parameters.pipeline_image_version}}" ]; then
+          echo "pipeline_image_version is required" >&2; exit 2
+        fi
+        MODE="--dry-run"
+        if [ "{{workflow.parameters.dry_run}}" = "false" ]; then MODE="-y"; fi
+        exec python3 /app/operator-tools/manage_collections.py \
+          --api-url "{{workflow.parameters.stac_api_url}}" \
+          clean "{{workflow.parameters.collection}}" \
+          --clean-s3 \
+          --s3-endpoint "{{workflow.parameters.s3_endpoint}}" \
+          --confine-to "{{workflow.parameters.confine_to}}" \
+          --max-items "{{workflow.parameters.max_items}}" \
+          $MODE
