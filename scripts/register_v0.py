@@ -61,30 +61,34 @@ def rewrite_asset_hrefs(item: Item, old_base: str, new_base: str, s3_endpoint: s
 
 
 def upsert_item(client: Client, collection_id: str, item: Item) -> None:
-    """Register or update STAC item using pystac-client session."""
-    # Check if exists
-    try:
-        client.get_collection(collection_id).get_item(item.id)
-        exists = True
-    except Exception:
-        exists = False
+    """Register or update a STAC item: POST, and on 409 (item exists) PUT to replace.
 
+    Letting the server report the conflict (409) is more robust than a client-side
+    existence pre-check, which can mis-read transient/conformance errors as "absent"
+    and then 409 (#186). Replacing via a single PUT (#352) means no code path can
+    leave an item deleted-but-not-recreated, unlike the previous DELETE-then-POST.
+    """
+    io = client._stac_io
+    assert io is not None  # noqa: S101  # nosec B101 -- pystac-client always sets this after open()
+    session = io.session
     # Use client's base URL directly (includes /stac if present)
     base_url = str(client.self_href).rstrip("/")
-    if exists:
-        # DELETE then POST (pgstac doesn't support PUT for items)
-        delete_url = f"{base_url}/collections/{collection_id}/items/{item.id}"
-        client._stac_io.session.delete(delete_url, timeout=30)
-        logger.info(f"Deleted existing {item.id}")
+    item_dict = item.to_dict()
+    headers = {"Content-Type": "application/json"}
 
-    # POST new/updated item
-    create_url = f"{base_url}/collections/{collection_id}/items"
-    resp = client._stac_io.session.post(
-        create_url,
-        json=item.to_dict(),
-        headers={"Content-Type": "application/json"},
+    resp = session.post(
+        f"{base_url}/collections/{collection_id}/items",
+        json=item_dict,
+        headers=headers,
         timeout=30,
     )
+    if resp.status_code == 409:
+        resp = session.put(
+            f"{base_url}/collections/{collection_id}/items/{item.id}",
+            json=item_dict,
+            headers=headers,
+            timeout=30,
+        )
     resp.raise_for_status()
     logger.info(f"✅ Registered {item.id} (HTTP {resp.status_code})")
 

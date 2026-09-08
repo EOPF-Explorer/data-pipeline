@@ -28,6 +28,7 @@ import requests
 # Import item management functionality
 from manage_item import (
     STACItemManager,
+    _replace_item,
     check_urls_confined,
     count_s3_objects_for_item,
     extract_s3_object_counts,
@@ -541,15 +542,13 @@ class STACCollectionManager:
                             }
                         )
 
-                    # Track corrections (items that were updated)
-                    if assets_updated > 0:
-                        corrections.append(
-                            {
-                                "item_id": item_id,
-                                "assets_updated": assets_updated,
-                                "assets_added": assets_added,
-                            }
-                        )
+                    # Track corrections (items that were updated); reported only if
+                    # the write-back succeeds (or would-be updated in dry-run)
+                    correction = {
+                        "item_id": item_id,
+                        "assets_updated": assets_updated,
+                        "assets_added": assets_added,
+                    }
 
                     total_assets_updated += assets_updated
                     total_assets_added += assets_added
@@ -558,26 +557,16 @@ class STACCollectionManager:
                     # Update STAC item if changes were made and not dry run
                     if assets_updated > 0 and not dry_run:
                         try:
-                            # Use DELETE then POST (pgstac doesn't support PUT)
-                            delete_url = (
-                                f"{self.api_url}/collections/{collection_id}/items/{item_id}"
-                            )
-                            self.session.delete(delete_url, timeout=30)
-
-                            create_url = f"{self.api_url}/collections/{collection_id}/items"
-                            self.session.post(
-                                create_url,
-                                json=item.to_dict(),
-                                headers={"Content-Type": "application/json"},
-                                timeout=30,
-                            )
+                            _replace_item(self.session, self.api_url, collection_id, item)
                             items_updated += 1
+                            corrections.append(correction)
                         except Exception as e:
                             click.echo(f"\n  ⚠️  Failed to update item {item_id}: {e}", err=True)
                             items_failed += 1
                     elif assets_updated > 0:
                         # Dry run - just count as would-be updated
                         items_updated += 1
+                        corrections.append(correction)
                     else:
                         items_no_changes += 1
 
@@ -1608,18 +1597,15 @@ def change_storage_tier(
                             pystac_item = Item.from_dict(item_dict)
                             update_item_storage_tiers(pystac_item, s3_endpoint)
 
-                            # Use DELETE then POST (pgstac doesn't support PUT)
-                            delete_url = (
-                                f"{manager.api_url}/collections/{collection_id}/items/{item_id}"
-                            )
-                            manager.session.delete(delete_url, timeout=30)
-                            create_url = f"{manager.api_url}/collections/{collection_id}/items"
-                            manager.session.post(
-                                create_url,
-                                json=pystac_item.to_dict(),
-                                headers={"Content-Type": "application/json"},
-                                timeout=30,
-                            )
+                            try:
+                                _replace_item(
+                                    manager.session, manager.api_url, collection_id, pystac_item
+                                )
+                            except Exception as e:
+                                click.echo(f"\n  ⚠️  Failed to update item {item_id}: {e}", err=True)
+                                items_failed += 1
+                                failed_item_ids.append(item_id)
+                                continue
                         else:
                             items_failed += 1
                             failed_item_ids.append(item_id)

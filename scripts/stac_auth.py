@@ -5,7 +5,7 @@ writing unauthenticated. When ``OIDC_TOKEN_URL`` / ``OIDC_CLIENT_ID`` /
 ``OIDC_CLIENT_SECRET`` are all set, ``get_token`` fetches (and caches) a client-credentials
 bearer that ``open_client`` wires onto the pystac-client session via
 ``session.auth = bearer_auth``. ``requests`` re-runs the auth hook on every
-``session.post/delete`` (used by ``upsert_item``), so each write carries a fresh
+``session.put/post`` (used by ``upsert_item``), so each write carries a fresh
 ``Authorization`` header — even across a batch that outlives the token.
 
 A configured-but-failing token endpoint raises rather than degrading to a silent
@@ -122,7 +122,7 @@ def open_client(url: str) -> Client:
     """Open a pystac Client whose session attaches a fresh Bearer per request.
 
     pystac-client's ``StacApiIO`` wraps a ``requests.Session``; wiring ``bearer_auth`` onto
-    it means the raw ``session.post/delete`` calls used by ``upsert_item`` carry a token
+    it means the raw ``session.put/post`` calls used by ``upsert_item`` carry a token
     that stays fresh even across a batch that outlives it. A no-op when OIDC env is unset;
     the landing-page fetch during ``Client.open`` is an unauthenticated public GET.
     """
