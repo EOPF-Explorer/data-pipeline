@@ -1180,3 +1180,146 @@ def test_cli_rejects_an_item_cap_above_the_ceiling(capsys) -> None:
     err = capsys.readouterr().err
     assert "memory cap" in err
     assert "_item_cap" not in err
+
+
+# === The auth hook raises RuntimeError, not RequestException (issue #364) ===
+#
+# `_session` sets `session.auth = stac_auth.bearer_auth`, so the OIDC token fetch
+# runs INSIDE session.get/.delete, and `stac_auth` re-raises a failed fetch as a
+# bare RuntimeError. That is not a `requests.RequestException`, so before these
+# guards it escaped every handler and killed the run mid-batch with no
+# `cleanup_summary` — the exact symptom #364 was filed for, reached by a
+# different route than the one #392 fixed.
+
+
+def test_execute_reports_stac_delete_error_on_auth_hook_failure(expired_item: dict) -> None:
+    """A token-fetch failure on the DELETE stays inside process_item."""
+    s3 = MagicMock()
+    s3.get_paginator.return_value = _paginator([["a"], []])
+    s3.delete_objects.return_value = {"Deleted": [{"Key": "a"}], "Errors": []}
+    session = MagicMock()
+    session.delete.side_effect = RuntimeError("Failed to fetch OIDC token: 503")
+
+    rec = process_item(
+        expired_item,
+        now=NOW,
+        exclude_ids=set(),
+        allowed_bucket=BUCKET,
+        s3_client=s3,
+        session=session,
+        stac_base_url="https://stac.example.com",
+        dry_run=False,
+    )
+
+    assert rec["status"] == "stac_delete_error"
+    assert rec["stac_deleted"] is False
+
+
+def test_run_cleanup_survives_an_auth_hook_failure_on_the_delete(expired_item, capsys) -> None:
+    """Witness for the delete route: per-item status, batch survives, summary emitted."""
+    s3 = MagicMock()
+    s3.get_paginator.return_value = _paginator([["a"], [], ["a"], []])
+    s3.delete_objects.return_value = {"Deleted": [{"Key": "a"}], "Errors": []}
+
+    items = _items(expired_item, 2)
+    client = MagicMock()
+    client.self_href = "https://stac.example.com"
+    client.search.return_value.items_as_dicts.return_value = iter(items)
+
+    session = MagicMock()
+    bodies = iter(items)
+
+    def _get(url, timeout=30):
+        resp = _response(200)
+        resp.json.return_value = next(bodies)  # a real item, not a bare Mock
+        return resp
+
+    session.get.side_effect = _get
+    # The first item's DELETE dies in the auth hook; the second must still run.
+    session.delete.side_effect = [
+        RuntimeError("Failed to fetch OIDC token: 503"),
+        _response(204),
+    ]
+
+    with (
+        patch("cleanup_expired_items.Client.open", return_value=client),
+        patch("cleanup_expired_items._session", return_value=session),
+        patch("cleanup_expired_items._s3_client", return_value=s3),
+    ):
+        code = run_cleanup(_args(execute=True))
+
+    summary = _capture_lines(capsys)[-1]
+    assert summary["event"] == "cleanup_summary"
+    assert summary["processed"] == 2, "the batch must not stop at the failing item"
+    assert summary["by_status"].get("stac_delete_error") == 1
+    assert code == 1
+
+
+def test_run_cleanup_survives_an_auth_hook_failure_on_the_refetch(expired_item, capsys) -> None:
+    """Witness for the re-fetch route — it fires FIRST, and its call sits outside
+    the run loop's own try, so nothing caught it at all before this guard."""
+    items = _items(expired_item, 2)
+    client = MagicMock()
+    client.self_href = "https://stac.example.com"
+    client.search.return_value.items_as_dicts.return_value = iter(items)
+
+    session = MagicMock()
+    session.get.side_effect = RuntimeError("Failed to fetch OIDC token: 503")
+
+    with (
+        patch("cleanup_expired_items.Client.open", return_value=client),
+        patch("cleanup_expired_items._session", return_value=session),
+        patch("cleanup_expired_items._s3_client", return_value=MagicMock()),
+    ):
+        code = run_cleanup(_args(execute=True))
+
+    summary = _capture_lines(capsys)[-1]
+    assert summary["event"] == "cleanup_summary"
+    assert summary["processed"] == 2
+    assert summary["by_status"].get("refetch_failed") == 2
+    assert code == 1
+    # A failed re-fetch must never fall through to a destructive delete.
+    session.delete.assert_not_called()
+
+
+# === An aborted run still emits a summary (issue #364, discovery route) ===
+
+
+def test_run_cleanup_emits_an_aborted_summary_when_discovery_raises(capsys) -> None:
+    """Discovery runs on `Client.open`, not `stac_auth.open_client`, so it is
+    unauthenticated and cannot raise the auth RuntimeError — a genuinely distinct
+    route to the same symptom. Before this guard the run died before the loop and
+    wrote no summary at all."""
+    client = MagicMock()
+    client.self_href = "https://stac.example.com"
+    client.search.return_value.items_as_dicts.side_effect = requests.ConnectionError("boom")
+
+    with (
+        patch("cleanup_expired_items.Client.open", return_value=client),
+        patch("cleanup_expired_items._session", return_value=MagicMock()),
+        patch("cleanup_expired_items._s3_client", return_value=MagicMock()),
+    ):
+        code = run_cleanup(_args(execute=True))
+
+    lines = _capture_lines(capsys)
+    assert len(lines) == 1, "no per-item records, but the summary must still be there"
+    summary = lines[0]
+    assert summary["event"] == "cleanup_summary", "dashboards key on this — it must not change"
+    assert summary["aborted"] is True
+    assert summary["discovered"] is None, "unknown, not zero — 0 would be a claim"
+    assert summary["processed"] == 0
+    assert summary["by_status"] == {}
+    assert code == 1
+
+
+def test_run_cleanup_healthy_summary_has_no_aborted_key(expired_item, capsys) -> None:
+    """`aborted` is additive: absent on a normal run, so existing consumers of the
+    summary line are untouched."""
+    s3 = MagicMock()
+    s3.get_paginator.return_value = _paginator([["a", "b"]])
+    _run_with([expired_item], get_status=200, s3=s3)
+
+    summary = _capture_lines(capsys)[-1]
+    assert summary["event"] == "cleanup_summary"
+    assert "aborted" not in summary
+    assert summary["discovered"] == 1
