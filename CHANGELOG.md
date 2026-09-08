@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.16.1 (2026-09-08)
+
+## What's Changed
+* fix(cleanup): guard the auth hook and always emit a summary by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/403
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.16.0...v1.16.1
+
 ## 1.16.0 (2026-09-07)
 
 ## What's Changed
