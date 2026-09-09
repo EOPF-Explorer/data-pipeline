@@ -112,11 +112,31 @@ def extract_s3_object_counts(
     return {}
 
 
-def _replace_item(session: requests.Session, api_url: str, collection_id: str, item: Item) -> None:
-    """Replace a STAC item in place with a single idempotent PUT."""
+def _replace_item(
+    session: requests.Session,
+    api_url: str,
+    collection_id: str,
+    item: Item,
+    raster_api_url: str | None = None,
+) -> None:
+    """Replace a STAC item in place with a single idempotent PUT.
+
+    With raster_api_url set, the document is judged before it goes out: an item
+    whose raster links were rewritten by the proxy on the read is refused rather
+    than written back (#374, #408). Every operator-tools read-modify-write funnels
+    through here, so this one check covers them all.
+
+    Raises:
+        RasterLinkMismatchError: raster_api_url is set and a raster href is corrupt
+    """
+    item_dict = item.to_dict()
+    if raster_api_url:
+        from update_stac_storage_tier import check_raster_links  # noqa: E402
+
+        check_raster_links(item_dict, raster_api_url, "before write")
     response = session.put(
         f"{api_url}/collections/{collection_id}/items/{item.id}",
-        json=item.to_dict(),
+        json=item_dict,
         timeout=30,
     )
     response.raise_for_status()
@@ -439,12 +459,21 @@ class STACItemManager:
     help="STAC API URL",
     show_default=True,
 )
+@click.option(
+    "--raster-api-url",
+    help=(
+        "Raster API base URL, e.g. https://api.example.com/raster. When set, refuse to "
+        "write back an item whose xyz/tilejson/viewer links or raster-hosted thumbnail "
+        "do not sit under it (#374). Omit to disable the guard (a warning is logged)."
+    ),
+)
 @click.pass_context
-def cli(ctx: click.Context, api_url: str) -> None:
+def cli(ctx: click.Context, api_url: str, raster_api_url: str | None) -> None:
     """STAC Item Management Tool for EOPF Explorer."""
     ctx.ensure_object(dict)
     ctx.obj["manager"] = STACItemManager(api_url)
     ctx.obj["api_url"] = api_url
+    ctx.obj["raster_api_url"] = raster_api_url
 
 
 @cli.command()
@@ -835,6 +864,11 @@ def sync_storage_tiers(
             )
             raise click.Abort()
 
+    raster_api_url: str | None = ctx.obj["raster_api_url"]
+    if not raster_api_url:
+        # Never silent: a skipped guard must be distinguishable from a passing one.
+        click.echo("⚠️  --raster-api-url unset - write-back link guard NOT active (#374)", err=True)
+
     try:
         # Fetch item
         item_dict = manager.get_item(collection_id, item_id)
@@ -1002,7 +1036,7 @@ def sync_storage_tiers(
         # Update STAC item if changes were made and not dry run
         if assets_updated > 0 and not dry_run:
             try:
-                _replace_item(manager.session, manager.api_url, collection_id, item)
+                _replace_item(manager.session, manager.api_url, collection_id, item, raster_api_url)
                 click.echo(f"\n✅ Updated STAC item {item_id}")
             except Exception as e:
                 click.echo(f"\n❌ Failed to update STAC item: {e}", err=True)
@@ -1097,6 +1131,11 @@ def change_storage_tier(
             abort=True,
         )
 
+    raster_api_url: str | None = ctx.obj["raster_api_url"]
+    if not raster_api_url:
+        # Never silent: a skipped guard must be distinguishable from a passing one.
+        click.echo("⚠️  --raster-api-url unset - write-back link guard NOT active (#374)", err=True)
+
     try:
         stac_item_url = f"{manager.api_url}/collections/{collection_id}/items/{item_id}"
         click.echo(f"\n{'DRY RUN: ' if dry_run else ''}Changing storage tier for item: {item_id}")
@@ -1135,7 +1174,7 @@ def change_storage_tier(
             update_item_storage_tiers(item, s3_endpoint)
 
             try:
-                _replace_item(manager.session, manager.api_url, collection_id, item)
+                _replace_item(manager.session, manager.api_url, collection_id, item, raster_api_url)
                 click.echo(f"\n✅ Updated STAC metadata for item {item_id}")
             except Exception as e:
                 click.echo(f"\n❌ Failed to update STAC item: {e}", err=True)

@@ -585,3 +585,73 @@ class TestManageCollectionsChangeStorageTier:
             )
         assert result.exit_code == 0
         assert "No items matched" in result.output
+
+
+# ---------------------------------------------------------------------------
+# #408: the #374 write-back raster-link guard on the change-storage-tier paths
+# ---------------------------------------------------------------------------
+RASTER_API = "https://api.example.com/raster"
+CORRUPT_RASTER = "https://api.example.com/stac/raster"  # the #343 rewrite shape
+GUARDED_ARGS = ["--api-url", API_URL, "--raster-api-url", RASTER_API, "change-storage-tier"]
+TIER_ARGS = ["--storage-class", "STANDARD_IA", "--s3-endpoint", S3_ENDPOINT, "-y"]
+
+
+def _corrupted_item_dict(item_id: str = ITEM_ID) -> dict:
+    return {
+        **FAKE_ITEM_DICT,
+        "id": item_id,
+        "links": [
+            {
+                "rel": "xyz",
+                "href": f"{CORRUPT_RASTER}/collections/{COLLECTION_ID}/items/{item_id}/tiles",
+            }
+        ],
+    }
+
+
+class TestManageItemChangeStorageTierRasterGuard:
+    def test_corrupted_item_refused_after_s3_change(self):
+        """The S3 tier has already moved; the corrupted STAC document must not follow."""
+        runner = CliRunner()
+        with (
+            patch("change_storage_tier.process_stac_item", return_value=S3_SUCCESS_STATS),
+            patch("manage_item.STACItemManager.get_item", return_value=_corrupted_item_dict()),
+            patch("update_stac_storage_tier.update_item_storage_tiers"),
+            patch("requests.Session.put", return_value=_make_response(200)) as mock_put,
+        ):
+            result = runner.invoke(item_cli, GUARDED_ARGS + [COLLECTION_ID, ITEM_ID] + TIER_ARGS)
+
+        assert result.exit_code != 0
+        assert "refusing to write" in result.output
+        mock_put.assert_not_called()
+
+
+class TestManageCollectionsChangeStorageTierRasterGuard:
+    def test_guard_fire_aborts_bulk_run(self):
+        """Contrast with test_stac_put_failure_marks_item_failed_and_continues:
+        a proxy fault corrupts every item, so the run must stop at the first
+        refusal rather than count-and-continue through the whole collection.
+        """
+        runner = CliRunner()
+        items = [_fake_pystac_item(f"item-{i:03d}") for i in range(3)]
+        mock_catalog = _mock_catalog(items)
+
+        def _get_item_side_effect(collection_id, item_id):
+            return _corrupted_item_dict(item_id)
+
+        with (
+            patch("pystac_client.Client.open", return_value=mock_catalog),
+            patch("change_storage_tier.process_stac_item", return_value=S3_SUCCESS_STATS),
+            patch(
+                "manage_item.STACItemManager.get_item", side_effect=_get_item_side_effect
+            ) as mock_get,
+            patch("update_stac_storage_tier.update_item_storage_tiers"),
+            patch("requests.Session.put", return_value=_make_response(200)) as mock_put,
+        ):
+            result = runner.invoke(collection_cli, GUARDED_ARGS + [COLLECTION_ID] + TIER_ARGS)
+
+        assert result.exit_code != 0
+        assert "Aborting" in result.output
+        assert mock_get.call_count == 1  # stopped at item-000, never fetched item-001
+        assert "Items failed" not in result.output  # no summary: the run did not finish
+        mock_put.assert_not_called()

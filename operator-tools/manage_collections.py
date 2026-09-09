@@ -399,6 +399,7 @@ class STACCollectionManager:
         s3_endpoint: str,
         add_missing: bool = False,
         dry_run: bool = False,
+        raster_api_url: str | None = None,
     ) -> dict[str, Any]:
         """
         Sync storage tier metadata for all items in a collection with S3.
@@ -408,11 +409,20 @@ class STACCollectionManager:
             s3_endpoint: S3 endpoint URL
             add_missing: If True, add alternate.s3 to assets that don't have it
             dry_run: If True, show changes without updating
+            raster_api_url: If set, refuse to write back an item whose raster links do
+                not sit under it (#374); a refusal aborts the whole run (#408)
 
         Returns:
             Dictionary with sync statistics including problems and corrections
+
+        Raises:
+            RasterLinkMismatchError: raster_api_url is set and an item's raster
+                links are corrupt; earlier items' writes stand, no later item is touched
         """
-        from update_stac_storage_tier import update_item_storage_tiers  # noqa: E402
+        from update_stac_storage_tier import (  # noqa: E402
+            RasterLinkMismatchError,
+            update_item_storage_tiers,
+        )
 
         items = self.get_collection_items(collection_id)
 
@@ -557,9 +567,13 @@ class STACCollectionManager:
                     # Update STAC item if changes were made and not dry run
                     if assets_updated > 0 and not dry_run:
                         try:
-                            _replace_item(self.session, self.api_url, collection_id, item)
+                            _replace_item(
+                                self.session, self.api_url, collection_id, item, raster_api_url
+                            )
                             items_updated += 1
                             corrections.append(correction)
+                        except RasterLinkMismatchError:
+                            raise  # not a per-item failure: the outer except aborts the run
                         except Exception as e:
                             click.echo(f"\n  ⚠️  Failed to update item {item_id}: {e}", err=True)
                             items_failed += 1
@@ -570,6 +584,16 @@ class STACCollectionManager:
                     else:
                         items_no_changes += 1
 
+                except RasterLinkMismatchError as e:
+                    # A proxy fault corrupts every item, not just this one: counting it
+                    # failed and moving on would log thousands of failures and still
+                    # exit 0. Stop the run here instead (#408).
+                    click.echo(
+                        f"\n  ❌ Aborting at item {item_id}: {e}. A proxy link-rewrite fault "
+                        "corrupts every item read, so the run stops here.",
+                        err=True,
+                    )
+                    raise
                 except Exception as e:
                     click.echo(f"\n  ⚠️  Error processing item {item_id}: {e}", err=True)
                     items_failed += 1
@@ -712,12 +736,22 @@ class STACCollectionManager:
     help="STAC API URL",
     show_default=True,
 )
+@click.option(
+    "--raster-api-url",
+    help=(
+        "Raster API base URL, e.g. https://api.example.com/raster. When set, refuse to "
+        "write back an item whose xyz/tilejson/viewer links or raster-hosted thumbnail "
+        "do not sit under it (#374); a refusal aborts a bulk run. Omit to disable the "
+        "guard (a warning is logged)."
+    ),
+)
 @click.pass_context
-def cli(ctx: click.Context, api_url: str) -> None:
+def cli(ctx: click.Context, api_url: str, raster_api_url: str | None) -> None:
     """STAC Collection Management Tool for EOPF Explorer."""
     ctx.ensure_object(dict)
     ctx.obj["manager"] = STACCollectionManager(api_url)
     ctx.obj["api_url"] = api_url
+    ctx.obj["raster_api_url"] = raster_api_url
 
 
 @cli.command()
@@ -1309,6 +1343,11 @@ def sync_storage_tiers(
         warning += "\n⚠️  This will sync STAC metadata with current S3 storage classes."
         click.confirm(f"{warning}\n\nContinue?", abort=True)
 
+    raster_api_url: str | None = ctx.obj["raster_api_url"]
+    if not raster_api_url:
+        # Never silent: a skipped guard must be distinguishable from a passing one.
+        click.echo("⚠️  --raster-api-url unset - write-back link guard NOT active (#374)", err=True)
+
     try:
         # Sync storage tiers
         stats = manager.sync_storage_tiers(
@@ -1316,6 +1355,7 @@ def sync_storage_tiers(
             s3_endpoint=s3_endpoint,
             add_missing=add_missing,
             dry_run=dry_run,
+            raster_api_url=raster_api_url,
         )
 
         # Display summary
@@ -1564,7 +1604,17 @@ def change_storage_tier(
         click.echo(f"Target storage class: {storage_class}")
 
         from change_storage_tier import process_stac_item  # noqa: E402
-        from update_stac_storage_tier import update_item_storage_tiers  # noqa: E402
+        from update_stac_storage_tier import (  # noqa: E402
+            RasterLinkMismatchError,
+            update_item_storage_tiers,
+        )
+
+        raster_api_url: str | None = ctx.obj["raster_api_url"]
+        if not raster_api_url:
+            # Never silent: a skipped guard must be distinguishable from a passing one.
+            click.echo(
+                "⚠️  --raster-api-url unset - write-back link guard NOT active (#374)", err=True
+            )
 
         items_changed = 0
         items_failed = 0
@@ -1599,8 +1649,24 @@ def change_storage_tier(
 
                             try:
                                 _replace_item(
-                                    manager.session, manager.api_url, collection_id, pystac_item
+                                    manager.session,
+                                    manager.api_url,
+                                    collection_id,
+                                    pystac_item,
+                                    raster_api_url,
                                 )
+                            except RasterLinkMismatchError as e:
+                                # A proxy fault corrupts every item, not just this one:
+                                # counting it failed and moving on would log thousands of
+                                # failures and still exit 0. Stop the run here (#408).
+                                click.echo(
+                                    f"\n  ❌ Aborting at item {item_id}: {e}. A proxy "
+                                    "link-rewrite fault corrupts every item read, so the run "
+                                    f"stops here. S3 objects of {item_id} are already "
+                                    "re-tiered; its STAC metadata was not written.",
+                                    err=True,
+                                )
+                                raise
                             except Exception as e:
                                 click.echo(f"\n  ⚠️  Failed to update item {item_id}: {e}", err=True)
                                 items_failed += 1
