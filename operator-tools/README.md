@@ -86,15 +86,18 @@ uv run operator-tools/manage_item.py info sentinel-2-l2a-staging ITEM_ID --s3-st
 uv run operator-tools/manage_item.py info sentinel-2-l2a-staging ITEM_ID --s3-stats --debug
 
 # Sync storage tier metadata for a single item (dry run)
-uv run operator-tools/manage_item.py sync-storage-tiers sentinel-2-l2a-staging ITEM_ID \
+uv run operator-tools/manage_item.py --raster-api-url https://api.explorer.eopf.copernicus.eu/raster \
+    sync-storage-tiers sentinel-2-l2a-staging ITEM_ID \
     --s3-endpoint https://s3.de.io.cloud.ovh.net --dry-run
 
 # Change storage tier for a single item (dry run - safe, no writes)
-uv run operator-tools/manage_item.py change-storage-tier sentinel-2-l2a-staging ITEM_ID \
+uv run operator-tools/manage_item.py --raster-api-url https://api.explorer.eopf.copernicus.eu/raster \
+    change-storage-tier sentinel-2-l2a-staging ITEM_ID \
     --storage-class STANDARD_IA --s3-endpoint https://s3.de.io.cloud.ovh.net --dry-run
 
 # Change storage tier for a single item (requires confirmation)
-uv run operator-tools/manage_item.py change-storage-tier sentinel-2-l2a-staging ITEM_ID \
+uv run operator-tools/manage_item.py --raster-api-url https://api.explorer.eopf.copernicus.eu/raster \
+    change-storage-tier sentinel-2-l2a-staging ITEM_ID \
     --storage-class STANDARD_IA --s3-endpoint https://s3.de.io.cloud.ovh.net -y
 
 # Delete single item with S3 cleanup (dry run)
@@ -161,16 +164,19 @@ uv run operator-tools/manage_collections.py info sentinel-2-l2a-staging --s3-sta
 uv run operator-tools/manage_collections.py info sentinel-2-l2a-staging --s3-stats --debug
 
 # Sync storage tier metadata for entire collection (dry run)
-uv run operator-tools/manage_collections.py sync-storage-tiers sentinel-2-l2a-staging \
+uv run operator-tools/manage_collections.py --raster-api-url https://api.explorer.eopf.copernicus.eu/raster \
+    sync-storage-tiers sentinel-2-l2a-staging \
     --s3-endpoint https://s3.de.io.cloud.ovh.net --dry-run
 
 # Change storage tier for items in a date range (dry run - safe, no writes)
-uv run operator-tools/manage_collections.py change-storage-tier sentinel-2-l2a-staging \
+uv run operator-tools/manage_collections.py --raster-api-url https://api.explorer.eopf.copernicus.eu/raster \
+    change-storage-tier sentinel-2-l2a-staging \
     --storage-class STANDARD_IA --start-date 2024-01-01 --end-date 2024-03-31 \
     --s3-endpoint https://s3.de.io.cloud.ovh.net --dry-run
 
 # Change storage tier for all items in a collection (requires confirmation)
-uv run operator-tools/manage_collections.py change-storage-tier sentinel-2-l2a-staging \
+uv run operator-tools/manage_collections.py --raster-api-url https://api.explorer.eopf.copernicus.eu/raster \
+    change-storage-tier sentinel-2-l2a-staging \
     --storage-class STANDARD_IA --s3-endpoint https://s3.de.io.cloud.ovh.net -y
 
 # Clean a collection (dry run first!)
@@ -526,11 +532,13 @@ Move items to a different storage class (STANDARD, STANDARD_IA, EXPRESS_ONEZONE)
 ITEM_ID="S2A_MSIL2A_20250831T103701_N0511_R008_T31TFL_20250831T145420"
 
 # 1. Single item dry run (no writes)
-uv run operator-tools/manage_item.py change-storage-tier sentinel-2-l2a-staging $ITEM_ID \
+uv run operator-tools/manage_item.py --raster-api-url https://api.explorer.eopf.copernicus.eu/raster \
+    change-storage-tier sentinel-2-l2a-staging $ITEM_ID \
     --storage-class STANDARD_IA --s3-endpoint https://s3.de.io.cloud.ovh.net --dry-run
 
 # 2. Single item live run (prompts for confirmation)
-uv run operator-tools/manage_item.py change-storage-tier sentinel-2-l2a-staging $ITEM_ID \
+uv run operator-tools/manage_item.py --raster-api-url https://api.explorer.eopf.copernicus.eu/raster \
+    change-storage-tier sentinel-2-l2a-staging $ITEM_ID \
     --storage-class STANDARD_IA --s3-endpoint https://s3.de.io.cloud.ovh.net -y
 
 # 3. Verify: storage tier info should show the new class
@@ -540,17 +548,20 @@ uv run operator-tools/manage_item.py info sentinel-2-l2a-staging $ITEM_ID --s3-s
 **Collection-level** — with optional date filtering:
 ```bash
 # Dry run for a date range
-uv run operator-tools/manage_collections.py change-storage-tier sentinel-2-l2a-staging \
+uv run operator-tools/manage_collections.py --raster-api-url https://api.explorer.eopf.copernicus.eu/raster \
+    change-storage-tier sentinel-2-l2a-staging \
     --storage-class STANDARD_IA --start-date 2024-01-01 --end-date 2024-03-31 \
     --s3-endpoint https://s3.de.io.cloud.ovh.net --dry-run
 
 # Live run (prompts for confirmation showing item count)
-uv run operator-tools/manage_collections.py change-storage-tier sentinel-2-l2a-staging \
+uv run operator-tools/manage_collections.py --raster-api-url https://api.explorer.eopf.copernicus.eu/raster \
+    change-storage-tier sentinel-2-l2a-staging \
     --storage-class STANDARD_IA --start-date 2024-01-01 --end-date 2024-03-31 \
     --s3-endpoint https://s3.de.io.cloud.ovh.net -y
 
 # All items (no date filter)
-uv run operator-tools/manage_collections.py change-storage-tier sentinel-2-l2a-staging \
+uv run operator-tools/manage_collections.py --raster-api-url https://api.explorer.eopf.copernicus.eu/raster \
+    change-storage-tier sentinel-2-l2a-staging \
     --storage-class STANDARD --s3-endpoint https://s3.de.io.cloud.ovh.net -y
 ```
 
@@ -566,11 +577,20 @@ uv run operator-tools/manage_collections.py change-storage-tier sentinel-2-l2a-s
 | `--exclude-pattern` | fnmatch pattern for objects to exclude (repeatable) |
 | `--dry-run` | Show what would change without writing anything |
 | `-y` / `--yes` | Skip confirmation prompt |
+| `--raster-api-url` | **Group option** (goes *before* the subcommand, next to `--api-url`): refuse proxy-corrupted raster links and abort the run — see below |
 
 **Safety guarantees:**
 - S3 storage class is changed first; STAC metadata is only updated if S3 succeeds
 - Items with S3 failures are tracked and reported in the final summary — STAC is not touched
 - `--dry-run` propagates to S3 operations; nothing is written in either system
+
+**Raster-link write guard (`--raster-api-url`):** both `sync-storage-tiers` and `change-storage-tier` read each item back through the STAC API and PUT the whole document. If stac-auth-proxy rewrites the item's `xyz`/`tilejson`/`viewer` links on the way out (the 2026-07-21 incident, `EOPF-Explorer/platform-deploy#343`), that read-modify-write would persist the corruption — across the whole collection on a bulk run. With `--raster-api-url` set, an item whose raster links do not sit under `<raster-api-url>/collections/` is refused, both **as read** (before any S3 object moves) and again **before write**.
+
+- It is a **group option**: put it before the subcommand, next to `--api-url`. `manage_collections.py --raster-api-url … change-storage-tier <coll>` works; appended after the subcommand it is rejected with `no such option`.
+- It is **off unless passed** — a run without it prints `--raster-api-url unset - write-back link guard NOT active`. Pass it on every real run: `https://api.explorer.eopf.copernicus.eu/raster` for production.
+- A refusal **aborts the whole run** here, unlike `scripts/update_stac_storage_tier.py` where the same guard fails a single Argo step: a proxy fault corrupts every item read, so continuing item by item would only pile up failures. The summary of what was already written is still printed, then the command exits non-zero.
+- `--dry-run` still runs the guard, and surveys every item instead of stopping at the first: each offender is listed, the count appears in the summary, and the command exits non-zero. Run it before a live change.
+- `repair_stac_raster_links.py` is deliberately outside the guard — writing such links is its purpose.
 
 ### Clean S3 Data (with Validation)
 

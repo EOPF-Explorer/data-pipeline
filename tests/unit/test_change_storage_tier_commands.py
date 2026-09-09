@@ -609,49 +609,118 @@ def _corrupted_item_dict(item_id: str = ITEM_ID) -> dict:
     }
 
 
+def _clean_item_dict(item_id: str = ITEM_ID) -> dict:
+    return {
+        **FAKE_ITEM_DICT,
+        "id": item_id,
+        "links": [
+            {
+                "rel": "xyz",
+                "href": f"{RASTER_API}/collections/{COLLECTION_ID}/items/{item_id}/tiles",
+            }
+        ],
+    }
+
+
+def _corrupted_search_item(item_id: str) -> MagicMock:
+    """A catalog.search() result whose document carries the rewritten links."""
+    item = _fake_pystac_item(item_id)
+    item.to_dict.return_value = _corrupted_item_dict(item_id)
+    return item
+
+
 class TestManageItemChangeStorageTierRasterGuard:
-    def test_corrupted_item_refused_after_s3_change(self):
-        """The S3 tier has already moved; the corrupted STAC document must not follow."""
+    def _invoke(self, get_item, *extra_args: str):
         runner = CliRunner()
         with (
-            patch("change_storage_tier.process_stac_item", return_value=S3_SUCCESS_STATS),
-            patch("manage_item.STACItemManager.get_item", return_value=_corrupted_item_dict()),
+            patch(
+                "change_storage_tier.process_stac_item", return_value=S3_SUCCESS_STATS
+            ) as mock_psi,
+            patch("manage_item.STACItemManager.get_item", side_effect=get_item),
             patch("update_stac_storage_tier.update_item_storage_tiers"),
             patch("requests.Session.put", return_value=_make_response(200)) as mock_put,
         ):
-            result = runner.invoke(item_cli, GUARDED_ARGS + [COLLECTION_ID, ITEM_ID] + TIER_ARGS)
+            result = runner.invoke(
+                item_cli, GUARDED_ARGS + [COLLECTION_ID, ITEM_ID] + TIER_ARGS + list(extra_args)
+            )
+        return result, mock_psi, mock_put
+
+    def test_corrupted_item_refused_as_read_before_s3_change(self):
+        """Judged before the S3 tier moves, so S3 and STAC cannot be left disagreeing."""
+        result, mock_psi, mock_put = self._invoke(lambda c, i: _corrupted_item_dict(i))
 
         assert result.exit_code != 0
-        assert "refusing to write" in result.output
+        assert "(as read)" in result.output
+        mock_psi.assert_not_called()
+        mock_put.assert_not_called()
+
+    def test_dry_run_still_exercises_the_guard(self):
+        result, mock_psi, _ = self._invoke(lambda c, i: _corrupted_item_dict(i), "--dry-run")
+
+        assert result.exit_code != 0
+        assert "(as read)" in result.output
+        mock_psi.assert_not_called()
+
+    def test_before_write_refusal_says_s3_already_moved(self):
+        """Clean as read, corrupt on the re-read after S3 moved: the operator must be
+        told S3 and STAC now disagree, not just 'Failed to update STAC item'."""
+        reads = iter([_clean_item_dict(), _corrupted_item_dict()])
+
+        result, mock_psi, mock_put = self._invoke(lambda c, i: next(reads))
+
+        assert result.exit_code != 0
+        mock_psi.assert_called_once()
+        assert "(before write)" in result.output
+        assert "already re-tiered" in result.output
         mock_put.assert_not_called()
 
 
 class TestManageCollectionsChangeStorageTierRasterGuard:
-    def test_guard_fire_aborts_bulk_run(self):
-        """Contrast with test_stac_put_failure_marks_item_failed_and_continues:
-        a proxy fault corrupts every item, so the run must stop at the first
-        refusal rather than count-and-continue through the whole collection.
-        """
+    def _invoke(self, items: list, *extra_args: str):
         runner = CliRunner()
-        items = [_fake_pystac_item(f"item-{i:03d}") for i in range(3)]
-        mock_catalog = _mock_catalog(items)
-
-        def _get_item_side_effect(collection_id, item_id):
-            return _corrupted_item_dict(item_id)
-
         with (
-            patch("pystac_client.Client.open", return_value=mock_catalog),
-            patch("change_storage_tier.process_stac_item", return_value=S3_SUCCESS_STATS),
+            patch("pystac_client.Client.open", return_value=_mock_catalog(items)),
             patch(
-                "manage_item.STACItemManager.get_item", side_effect=_get_item_side_effect
+                "change_storage_tier.process_stac_item", return_value=S3_SUCCESS_STATS
+            ) as mock_psi,
+            patch(
+                "manage_item.STACItemManager.get_item",
+                side_effect=lambda c, i: _corrupted_item_dict(i),
             ) as mock_get,
             patch("update_stac_storage_tier.update_item_storage_tiers"),
             patch("requests.Session.put", return_value=_make_response(200)) as mock_put,
         ):
-            result = runner.invoke(collection_cli, GUARDED_ARGS + [COLLECTION_ID] + TIER_ARGS)
+            result = runner.invoke(
+                collection_cli, GUARDED_ARGS + [COLLECTION_ID] + TIER_ARGS + list(extra_args)
+            )
+        return result, mock_psi, mock_get, mock_put
+
+    def test_guard_fire_aborts_bulk_run_before_s3_work(self):
+        """Contrast with test_stac_put_failure_marks_item_failed_and_continues:
+        a proxy fault corrupts every item, so the run must stop at the first
+        refusal rather than count-and-continue through the whole collection --
+        and stop BEFORE that item's S3 objects move, judged on the search result
+        already in hand. The summary is still printed so the operator can see what
+        was written before the abort.
+        """
+        items = [_corrupted_search_item(f"item-{i:03d}") for i in range(3)]
+
+        result, mock_psi, mock_get, mock_put = self._invoke(items)
 
         assert result.exit_code != 0
         assert "Aborting" in result.output
-        assert mock_get.call_count == 1  # stopped at item-000, never fetched item-001
-        assert "Items failed" not in result.output  # no summary: the run did not finish
+        assert "CHANGE SUMMARY" in result.output
+        mock_psi.assert_not_called()  # item-000 refused as read: its S3 tier did not move
+        mock_get.assert_not_called()  # and item-001 was never reached
+        mock_put.assert_not_called()
+
+    def test_dry_run_surveys_every_offender_and_exits_nonzero(self):
+        items = [_corrupted_search_item(f"item-{i:03d}") for i in range(3)]
+
+        result, mock_psi, _, mock_put = self._invoke(items, "--dry-run")
+
+        assert result.exit_code != 0
+        assert "CHANGE SUMMARY" in result.output
+        assert "3 item(s) with corrupted raster links" in result.output
+        mock_psi.assert_not_called()  # offenders are skipped, not surveyed on S3
         mock_put.assert_not_called()

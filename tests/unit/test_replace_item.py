@@ -336,7 +336,7 @@ class TestCollectionSyncStorageTiersRasterGuard:
     counting-and-continuing would log thousands of failures and still exit 0.
     """
 
-    def _run_sync(self, item_dicts: list[dict]):
+    def _run_sync(self, item_dicts: list[dict], dry_run: bool = False):
         manager = manage_collections_module.STACCollectionManager(API_URL)
         with (
             patch.object(manager, "get_collection_items", return_value=item_dicts),
@@ -346,23 +346,36 @@ class TestCollectionSyncStorageTiersRasterGuard:
             ) as mock_update,
             patch("requests.Session.put", return_value=_make_response(200)) as mock_put,
         ):
-            try:
-                outcome = manager.sync_storage_tiers(
-                    COLLECTION_ID, S3_ENDPOINT, raster_api_url=RASTER_API
-                )
-            except Exception as e:  # the test asserts on the type
-                outcome = e
-        return outcome, mock_update, mock_put
+            stats = manager.sync_storage_tiers(
+                COLLECTION_ID, S3_ENDPOINT, dry_run=dry_run, raster_api_url=RASTER_API
+            )
+        return stats, mock_update, mock_put
 
     def test_guard_fire_aborts_run_at_first_item(self):
-        from update_stac_storage_tier import RasterLinkMismatchError
+        """The item is judged as read, before any S3 work, and the loop stops there.
 
+        Partial stats come back rather than an exception so the command can still
+        print what was already written before the abort.
+        """
         items = [_item_with_xyz(CORRUPT_RASTER, f"item-{i:03d}") for i in range(3)]
 
-        outcome, mock_update, mock_put = self._run_sync(items)
+        stats, mock_update, mock_put = self._run_sync(items)
 
-        assert isinstance(outcome, RasterLinkMismatchError)
-        assert mock_update.call_count == 1  # the loop did not move on to item-001
+        assert stats["guard_abort"]  # names why the run stopped
+        assert "item-000" in stats["guard_abort"]
+        mock_update.assert_not_called()  # refused as read: no S3 work for item-000, none after
+        mock_put.assert_not_called()
+
+    def test_dry_run_surveys_every_offender_without_aborting(self):
+        """Dry-run is the pre-flight: it must find every corrupt item, not stop at one."""
+        items = [_item_with_xyz(CORRUPT_RASTER, f"item-{i:03d}") for i in range(3)]
+        items.append(_item_with_xyz(RASTER_API, "item-clean"))
+
+        stats, mock_update, mock_put = self._run_sync(items, dry_run=True)
+
+        assert stats["raster_link_offenders"] == 3
+        assert not stats["guard_abort"]
+        assert mock_update.call_count == 1  # only the clean item was surveyed
         mock_put.assert_not_called()
 
     def test_clean_items_still_write(self):
@@ -372,13 +385,15 @@ class TestCollectionSyncStorageTiersRasterGuard:
 
         assert stats["items_updated"] == 2
         assert stats["items_failed"] == 0
+        assert stats["raster_link_offenders"] == 0
+        assert not stats["guard_abort"]
         assert mock_put.call_count == 2
 
 
 class TestItemSyncStorageTiersRasterGuardCli:
     """manage_item.py --raster-api-url reaches the sync-storage-tiers write."""
 
-    def _invoke(self, item_dict: dict, raster_api_url: str | None):
+    def _invoke(self, item_dict: dict, raster_api_url: str | None, *extra_args: str):
         group_args = ["--api-url", API_URL]
         if raster_api_url:
             group_args += ["--raster-api-url", raster_api_url]
@@ -388,21 +403,30 @@ class TestItemSyncStorageTiersRasterGuardCli:
             patch(
                 "update_stac_storage_tier.update_item_storage_tiers",
                 return_value=TIERS_UPDATED,
-            ),
+            ) as mock_update,
             patch("requests.Session.put", return_value=_make_response(200)) as mock_put,
         ):
-            result = runner.invoke(item_cli, group_args + SYNC_ARGS[2:])
-        return result, mock_put
+            result = runner.invoke(item_cli, group_args + SYNC_ARGS[2:] + list(extra_args))
+        return result, mock_put, mock_update
 
-    def test_corrupted_item_refused_and_run_fails(self):
-        result, mock_put = self._invoke(_item_with_xyz(CORRUPT_RASTER), RASTER_API)
+    def test_corrupted_item_refused_as_read_before_any_s3_work(self):
+        result, mock_put, mock_update = self._invoke(_item_with_xyz(CORRUPT_RASTER), RASTER_API)
 
         assert result.exit_code != 0
-        assert "refusing to write" in result.output
+        assert "(as read)" in result.output
+        mock_update.assert_not_called()
+        mock_put.assert_not_called()
+
+    def test_dry_run_still_exercises_the_guard(self):
+        """A dry run during a proxy fault must fail, not report 'would update' and exit 0."""
+        result, mock_put, _ = self._invoke(_item_with_xyz(CORRUPT_RASTER), RASTER_API, "--dry-run")
+
+        assert result.exit_code != 0
+        assert "(as read)" in result.output
         mock_put.assert_not_called()
 
     def test_clean_item_written(self):
-        result, mock_put = self._invoke(_item_with_xyz(RASTER_API), RASTER_API)
+        result, mock_put, _ = self._invoke(_item_with_xyz(RASTER_API), RASTER_API)
 
         assert result.exit_code == 0
         mock_put.assert_called_once()
@@ -410,7 +434,7 @@ class TestItemSyncStorageTiersRasterGuardCli:
 
     def test_warns_once_when_raster_api_url_unset(self):
         """A skipped guard must never be mistaken for a passing one."""
-        result, mock_put = self._invoke(_item_with_xyz(CORRUPT_RASTER), None)
+        result, mock_put, _ = self._invoke(_item_with_xyz(CORRUPT_RASTER), None)
 
         assert result.exit_code == 0
         mock_put.assert_called_once()
@@ -420,7 +444,7 @@ class TestItemSyncStorageTiersRasterGuardCli:
 class TestCollectionSyncStorageTiersRasterGuardCli:
     """manage_collections.py --raster-api-url reaches the bulk sync loop."""
 
-    def _invoke(self, item_dicts: list[dict], raster_api_url: str | None):
+    def _invoke(self, item_dicts: list[dict], raster_api_url: str | None, *extra_args: str):
         group_args = ["--api-url", API_URL]
         if raster_api_url:
             group_args += ["--raster-api-url", raster_api_url]
@@ -439,18 +463,30 @@ class TestCollectionSyncStorageTiersRasterGuardCli:
             result = runner.invoke(
                 collection_cli,
                 group_args
-                + ["sync-storage-tiers", COLLECTION_ID, "--s3-endpoint", S3_ENDPOINT, "-y"],
+                + ["sync-storage-tiers", COLLECTION_ID, "--s3-endpoint", S3_ENDPOINT, "-y"]
+                + list(extra_args),
             )
         return result, mock_put
 
     def test_guard_fire_aborts_with_reason_and_nonzero_exit(self):
+        """The run stops, but the operator still gets the summary of what was written."""
         items = [_item_with_xyz(CORRUPT_RASTER, f"item-{i:03d}") for i in range(3)]
 
         result, mock_put = self._invoke(items, RASTER_API)
 
         assert result.exit_code != 0
         assert "Aborting" in result.output
-        assert "SYNC SUMMARY" not in result.output  # the run stopped, it did not finish
+        assert "SYNC SUMMARY" in result.output
+        mock_put.assert_not_called()
+
+    def test_dry_run_reports_offender_count_and_exits_nonzero(self):
+        items = [_item_with_xyz(CORRUPT_RASTER, f"item-{i:03d}") for i in range(3)]
+
+        result, mock_put = self._invoke(items, RASTER_API, "--dry-run")
+
+        assert result.exit_code != 0
+        assert "SYNC SUMMARY" in result.output
+        assert "3 item(s) with corrupted raster links" in result.output
         mock_put.assert_not_called()
 
     def test_warns_once_when_raster_api_url_unset(self):

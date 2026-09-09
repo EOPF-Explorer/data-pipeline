@@ -409,18 +409,18 @@ class STACCollectionManager:
             s3_endpoint: S3 endpoint URL
             add_missing: If True, add alternate.s3 to assets that don't have it
             dry_run: If True, show changes without updating
-            raster_api_url: If set, refuse to write back an item whose raster links do
-                not sit under it (#374); a refusal aborts the whole run (#408)
+            raster_api_url: If set, refuse an item whose raster links do not sit
+                under it (#374), judged as read and again before write. A live run
+                stops at the first refusal; a dry run surveys them all (#408)
 
         Returns:
-            Dictionary with sync statistics including problems and corrections
-
-        Raises:
-            RasterLinkMismatchError: raster_api_url is set and an item's raster
-                links are corrupt; earlier items' writes stand, no later item is touched
+            Dictionary with sync statistics including problems and corrections.
+            ``guard_abort`` names why a live run stopped early (None otherwise);
+            ``raster_link_offenders`` counts the items a dry run refused.
         """
         from update_stac_storage_tier import (  # noqa: E402
             RasterLinkMismatchError,
+            check_raster_links,
             update_item_storage_tiers,
         )
 
@@ -438,12 +438,16 @@ class STACCollectionManager:
                 "total_assets_failed": 0,
                 "problems": [],
                 "corrections": [],
+                "raster_link_offenders": 0,
+                "guard_abort": None,
             }
 
         # Statistics tracking
         items_updated = 0
         items_no_changes = 0
         items_failed = 0
+        raster_link_offenders = 0
+        guard_abort: str | None = None
         total_assets_updated = 0
         total_assets_added = 0
         total_assets_failed = 0
@@ -466,6 +470,21 @@ class STACCollectionManager:
             for item_dict in bar:
                 item_id = item_dict.get("id", "unknown")
                 try:
+                    # Judge what came back before any S3 work (#408). A live run stops
+                    # at the first refusal (the outer except below); a dry run writes
+                    # nothing, so it surveys every offender instead and the command
+                    # exits non-zero at the end -- the pre-flight must show the true
+                    # extent, not die at item 1 like the live run would.
+                    if raster_api_url:
+                        try:
+                            check_raster_links(item_dict, raster_api_url, "as read")
+                        except RasterLinkMismatchError as e:
+                            if not dry_run:
+                                raise
+                            click.echo(f"\n  ❌ {item_id}: {e}", err=True)
+                            raster_link_offenders += 1
+                            continue
+
                     # Convert dict to pystac Item
                     item = Item.from_dict(item_dict)
 
@@ -587,13 +606,15 @@ class STACCollectionManager:
                 except RasterLinkMismatchError as e:
                     # A proxy fault corrupts every item, not just this one: counting it
                     # failed and moving on would log thousands of failures and still
-                    # exit 0. Stop the run here instead (#408).
-                    click.echo(
-                        f"\n  ❌ Aborting at item {item_id}: {e}. A proxy link-rewrite fault "
-                        "corrupts every item read, so the run stops here.",
-                        err=True,
+                    # exit 0. Stop the run here instead (#408) -- but return the
+                    # partial stats rather than raise, so the caller can still report
+                    # what was written before the abort.
+                    guard_abort = (
+                        f"{e} (item {item_id}). A proxy link-rewrite fault corrupts every "
+                        "item read, so the run stopped here."
                     )
-                    raise
+                    click.echo(f"\n  ❌ Aborting at item {item_id}: {e}", err=True)
+                    break
                 except Exception as e:
                     click.echo(f"\n  ⚠️  Error processing item {item_id}: {e}", err=True)
                     items_failed += 1
@@ -603,6 +624,8 @@ class STACCollectionManager:
             "items_updated": items_updated,
             "items_no_changes": items_no_changes,
             "items_failed": items_failed,
+            "raster_link_offenders": raster_link_offenders,
+            "guard_abort": guard_abort,
             "total_assets_updated": total_assets_updated,
             "total_assets_added": total_assets_added,
             "total_assets_failed": total_assets_failed,
@@ -727,6 +750,25 @@ class STACCollectionManager:
 
 
 # === CLI Commands ===
+
+
+def _exit_if_guard_fired(guard_abort: str | None, raster_link_offenders: int) -> None:
+    """Exit non-zero after the summary when the raster-link guard fired (#408).
+
+    After the summary, not instead of it: on a 20k-item collection the operator
+    needs to see what was already written before the abort.
+    """
+    if guard_abort:
+        click.echo(f"\n❌ Run aborted: {guard_abort}", err=True)
+        raise click.Abort()
+    if raster_link_offenders:
+        click.echo(
+            f"\n❌ Dry run found {raster_link_offenders} item(s) with corrupted raster links - "
+            "a live run would abort at the first one. Check the STAC API / stac-auth-proxy "
+            "before running for real.",
+            err=True,
+        )
+        raise click.Abort()
 
 
 @click.group()
@@ -1367,6 +1409,8 @@ def sync_storage_tiers(
         click.echo(f"✓ Items with no changes: {stats['items_no_changes']}")
         if stats["items_failed"] > 0:
             click.echo(f"❌ Items failed: {stats['items_failed']}")
+        if stats["raster_link_offenders"] > 0:
+            click.echo(f"❌ Corrupted raster links (as read): {stats['raster_link_offenders']}")
 
         click.echo("\nAssets:")
         click.echo(f"  Updated: {stats['total_assets_updated']}")
@@ -1465,6 +1509,8 @@ def sync_storage_tiers(
     except Exception as e:
         click.echo(f"❌ Operation failed: {e}", err=True)
         raise click.Abort() from e
+
+    _exit_if_guard_fired(stats["guard_abort"], stats["raster_link_offenders"])
 
 
 @cli.command()
@@ -1606,6 +1652,7 @@ def change_storage_tier(
         from change_storage_tier import process_stac_item  # noqa: E402
         from update_stac_storage_tier import (  # noqa: E402
             RasterLinkMismatchError,
+            check_raster_links,
             update_item_storage_tiers,
         )
 
@@ -1619,6 +1666,8 @@ def change_storage_tier(
         items_changed = 0
         items_failed = 0
         failed_item_ids: list[str] = []
+        raster_link_offenders = 0
+        guard_abort: str | None = None
 
         with click.progressbar(
             items, label="Processing items", show_pos=True, show_percent=True
@@ -1626,6 +1675,27 @@ def change_storage_tier(
             for item in bar:
                 item_id = item.id
                 stac_item_url = f"{manager.api_url}/collections/{collection_id}/items/{item_id}"
+
+                # Judge the search result already in hand BEFORE its S3 objects move:
+                # a refusal after process_stac_item would leave S3 at the new tier and
+                # STAC claiming the old one (#408). A live run stops at the first
+                # refusal; a dry run writes nothing, so it surveys every offender
+                # instead and exits non-zero at the end -- the pre-flight must show
+                # the true extent, not die at item 1 like the live run would.
+                if raster_api_url:
+                    try:
+                        check_raster_links(item.to_dict(), raster_api_url, "as read")
+                    except RasterLinkMismatchError as e:
+                        if not dry_run:
+                            guard_abort = (
+                                f"{e} (item {item_id}). A proxy link-rewrite fault corrupts "
+                                "every item read, so the run stopped here."
+                            )
+                            click.echo(f"\n  ❌ Aborting at item {item_id}: {e}", err=True)
+                            break
+                        click.echo(f"\n  ❌ {item_id}: {e}", err=True)
+                        raster_link_offenders += 1
+                        continue
 
                 stats = process_stac_item(
                     stac_item_url,
@@ -1656,17 +1726,17 @@ def change_storage_tier(
                                     raster_api_url,
                                 )
                             except RasterLinkMismatchError as e:
-                                # A proxy fault corrupts every item, not just this one:
-                                # counting it failed and moving on would log thousands of
-                                # failures and still exit 0. Stop the run here (#408).
-                                click.echo(
-                                    f"\n  ❌ Aborting at item {item_id}: {e}. A proxy "
-                                    "link-rewrite fault corrupts every item read, so the run "
-                                    f"stops here. S3 objects of {item_id} are already "
-                                    "re-tiered; its STAC metadata was not written.",
-                                    err=True,
+                                # Clean as read, corrupt now: the proxy went bad between
+                                # the two reads. S3 already moved, so say what state the
+                                # item is left in, then stop the run (#408).
+                                guard_abort = (
+                                    f"{e} (item {item_id}). S3 objects of {item_id} are "
+                                    "already re-tiered; its STAC metadata was not written. "
+                                    "A proxy link-rewrite fault corrupts every item read, so "
+                                    "the run stopped here."
                                 )
-                                raise
+                                click.echo(f"\n  ❌ Aborting at item {item_id}: {e}", err=True)
+                                break
                             except Exception as e:
                                 click.echo(f"\n  ⚠️  Failed to update item {item_id}: {e}", err=True)
                                 items_failed += 1
@@ -1689,6 +1759,8 @@ def change_storage_tier(
             click.echo("\nFailed items:")
             for fid in failed_item_ids:
                 click.echo(f"  - {fid}")
+        if raster_link_offenders > 0:
+            click.echo(f"❌ Corrupted raster links (as read): {raster_link_offenders}")
 
         if dry_run:
             click.echo(f"\n{'─' * 60}")
@@ -1700,6 +1772,8 @@ def change_storage_tier(
     except Exception as e:
         click.echo(f"❌ Operation failed: {e}", err=True)
         raise click.Abort() from e
+
+    _exit_if_guard_fired(guard_abort, raster_link_offenders)
 
 
 if __name__ == "__main__":

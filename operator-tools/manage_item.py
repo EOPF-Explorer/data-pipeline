@@ -123,8 +123,11 @@ def _replace_item(
 
     With raster_api_url set, the document is judged before it goes out: an item
     whose raster links were rewritten by the proxy on the read is refused rather
-    than written back (#374, #408). Every operator-tools read-modify-write funnels
-    through here, so this one check covers them all.
+    than written back (#374, #408). This covers the four storage-tier call sites
+    (sync-storage-tiers / change-storage-tier in manage_item and manage_collections).
+    It does NOT cover _migrate_catalog/runner.py: its _update_item() PUT and its
+    copy-collection POST write items through their own path and stay unguarded
+    (tracked on #408).
 
     Raises:
         RasterLinkMismatchError: raster_api_url is set and a raster href is corrupt
@@ -874,6 +877,12 @@ def sync_storage_tiers(
         item_dict = manager.get_item(collection_id, item_id)
         if not item_dict:
             raise click.Abort()
+        # Judge what came back before any S3 work, and in dry-run too: the
+        # pre-flight must catch a proxy fault, not the live run (#408).
+        if raster_api_url:
+            from update_stac_storage_tier import check_raster_links  # noqa: E402
+
+            check_raster_links(item_dict, raster_api_url, "as read")
 
         click.echo(f"\n{'DRY RUN: ' if dry_run else ''}Syncing storage tiers for item: {item_id}")
         click.echo(f"Collection: {collection_id}")
@@ -1145,6 +1154,17 @@ def change_storage_tier(
         # Change S3 storage class
         from change_storage_tier import process_stac_item  # noqa: E402
 
+        # Judge the item BEFORE its S3 objects move, and in dry-run too: a refusal
+        # after process_stac_item would leave S3 at the new tier and STAC claiming
+        # the old one (#408). Costs one extra GET.
+        if raster_api_url:
+            from update_stac_storage_tier import check_raster_links  # noqa: E402
+
+            as_read = manager.get_item(collection_id, item_id)
+            if not as_read:
+                raise click.Abort()
+            check_raster_links(as_read, raster_api_url, "as read")
+
         stats = process_stac_item(
             stac_item_url,
             storage_class,
@@ -1164,7 +1184,10 @@ def change_storage_tier(
 
         # Update STAC metadata if S3 succeeded and not dry-run
         if stats["failed"] == 0 and not dry_run and stats["processed"] > 0:
-            from update_stac_storage_tier import update_item_storage_tiers  # noqa: E402
+            from update_stac_storage_tier import (  # noqa: E402
+                RasterLinkMismatchError,
+                update_item_storage_tiers,
+            )
 
             # Re-fetch item after S3 change and update storage metadata
             item_dict = manager.get_item(collection_id, item_id)
@@ -1176,6 +1199,16 @@ def change_storage_tier(
             try:
                 _replace_item(manager.session, manager.api_url, collection_id, item, raster_api_url)
                 click.echo(f"\n✅ Updated STAC metadata for item {item_id}")
+            except RasterLinkMismatchError as e:
+                # Clean as read, corrupt now: the proxy went bad between the two
+                # reads. S3 already moved, so say what state the item is left in.
+                click.echo(
+                    f"\n❌ Refusing to write STAC metadata for {item_id}: {e}. S3 objects of "
+                    f"{item_id} are already re-tiered; its STAC metadata was not written, so "
+                    "S3 and STAC disagree until sync-storage-tiers is re-run.",
+                    err=True,
+                )
+                raise click.Abort() from e
             except Exception as e:
                 click.echo(f"\n❌ Failed to update STAC item: {e}", err=True)
                 raise click.Abort() from e
