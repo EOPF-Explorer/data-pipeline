@@ -145,6 +145,17 @@ def _replace_item(
     response.raise_for_status()
 
 
+def _raster_guard_url(ctx: click.Context) -> str | None:
+    """Return the group's --raster-api-url, warning when the guard is off (#374).
+
+    Never silent: a skipped guard must be distinguishable from a passing one.
+    """
+    raster_api_url: str | None = ctx.obj["raster_api_url"]
+    if not raster_api_url:
+        click.echo("⚠️  --raster-api-url unset - write-back link guard NOT active (#374)", err=True)
+    return raster_api_url
+
+
 class STACItemManager:
     """Manager for STAC item operations."""
 
@@ -867,10 +878,7 @@ def sync_storage_tiers(
             )
             raise click.Abort()
 
-    raster_api_url: str | None = ctx.obj["raster_api_url"]
-    if not raster_api_url:
-        # Never silent: a skipped guard must be distinguishable from a passing one.
-        click.echo("⚠️  --raster-api-url unset - write-back link guard NOT active (#374)", err=True)
+    raster_api_url = _raster_guard_url(ctx)
 
     try:
         # Fetch item
@@ -1140,10 +1148,7 @@ def change_storage_tier(
             abort=True,
         )
 
-    raster_api_url: str | None = ctx.obj["raster_api_url"]
-    if not raster_api_url:
-        # Never silent: a skipped guard must be distinguishable from a passing one.
-        click.echo("⚠️  --raster-api-url unset - write-back link guard NOT active (#374)", err=True)
+    raster_api_url = _raster_guard_url(ctx)
 
     try:
         stac_item_url = f"{manager.api_url}/collections/{collection_id}/items/{item_id}"

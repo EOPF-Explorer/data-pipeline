@@ -596,28 +596,13 @@ GUARDED_ARGS = ["--api-url", API_URL, "--raster-api-url", RASTER_API, "change-st
 TIER_ARGS = ["--storage-class", "STANDARD_IA", "--s3-endpoint", S3_ENDPOINT, "-y"]
 
 
-def _corrupted_item_dict(item_id: str = ITEM_ID) -> dict:
+def _item_with_xyz(base: str, item_id: str = ITEM_ID) -> dict:
+    """FAKE_ITEM_DICT carrying one xyz link — a rel the guard judges by construction."""
     return {
         **FAKE_ITEM_DICT,
         "id": item_id,
         "links": [
-            {
-                "rel": "xyz",
-                "href": f"{CORRUPT_RASTER}/collections/{COLLECTION_ID}/items/{item_id}/tiles",
-            }
-        ],
-    }
-
-
-def _clean_item_dict(item_id: str = ITEM_ID) -> dict:
-    return {
-        **FAKE_ITEM_DICT,
-        "id": item_id,
-        "links": [
-            {
-                "rel": "xyz",
-                "href": f"{RASTER_API}/collections/{COLLECTION_ID}/items/{item_id}/tiles",
-            }
+            {"rel": "xyz", "href": f"{base}/collections/{COLLECTION_ID}/items/{item_id}/tiles"}
         ],
     }
 
@@ -625,7 +610,7 @@ def _clean_item_dict(item_id: str = ITEM_ID) -> dict:
 def _corrupted_search_item(item_id: str) -> MagicMock:
     """A catalog.search() result whose document carries the rewritten links."""
     item = _fake_pystac_item(item_id)
-    item.to_dict.return_value = _corrupted_item_dict(item_id)
+    item.to_dict.return_value = _item_with_xyz(CORRUPT_RASTER, item_id)
     return item
 
 
@@ -647,7 +632,7 @@ class TestManageItemChangeStorageTierRasterGuard:
 
     def test_corrupted_item_refused_as_read_before_s3_change(self):
         """Judged before the S3 tier moves, so S3 and STAC cannot be left disagreeing."""
-        result, mock_psi, mock_put = self._invoke(lambda c, i: _corrupted_item_dict(i))
+        result, mock_psi, mock_put = self._invoke(lambda c, i: _item_with_xyz(CORRUPT_RASTER, i))
 
         assert result.exit_code != 0
         assert "(as read)" in result.output
@@ -655,7 +640,9 @@ class TestManageItemChangeStorageTierRasterGuard:
         mock_put.assert_not_called()
 
     def test_dry_run_still_exercises_the_guard(self):
-        result, mock_psi, _ = self._invoke(lambda c, i: _corrupted_item_dict(i), "--dry-run")
+        result, mock_psi, _ = self._invoke(
+            lambda c, i: _item_with_xyz(CORRUPT_RASTER, i), "--dry-run"
+        )
 
         assert result.exit_code != 0
         assert "(as read)" in result.output
@@ -664,7 +651,7 @@ class TestManageItemChangeStorageTierRasterGuard:
     def test_before_write_refusal_says_s3_already_moved(self):
         """Clean as read, corrupt on the re-read after S3 moved: the operator must be
         told S3 and STAC now disagree, not just 'Failed to update STAC item'."""
-        reads = iter([_clean_item_dict(), _corrupted_item_dict()])
+        reads = iter([_item_with_xyz(RASTER_API), _item_with_xyz(CORRUPT_RASTER)])
 
         result, mock_psi, mock_put = self._invoke(lambda c, i: next(reads))
 
@@ -685,7 +672,7 @@ class TestManageCollectionsChangeStorageTierRasterGuard:
             ) as mock_psi,
             patch(
                 "manage_item.STACItemManager.get_item",
-                side_effect=lambda c, i: _corrupted_item_dict(i),
+                side_effect=lambda c, i: _item_with_xyz(CORRUPT_RASTER, i),
             ) as mock_get,
             patch("update_stac_storage_tier.update_item_storage_tiers"),
             patch("requests.Session.put", return_value=_make_response(200)) as mock_put,

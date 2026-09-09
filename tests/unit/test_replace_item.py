@@ -273,6 +273,12 @@ GUARD_OFF_WARNING = "write-back link guard NOT active"
 collection_cli = manage_collections_module.cli
 
 
+def _group_args(raster_api_url: str | None) -> list[str]:
+    """CLI group args, with --raster-api-url only when the guard is meant to be on."""
+    args = ["--api-url", API_URL]
+    return args + ["--raster-api-url", raster_api_url] if raster_api_url else args
+
+
 def _item_with_xyz(base: str, item_id: str = ITEM_ID) -> dict:
     """FAKE_ITEM_DICT carrying one xyz link — a rel the guard judges by construction."""
     return {
@@ -394,9 +400,7 @@ class TestItemSyncStorageTiersRasterGuardCli:
     """manage_item.py --raster-api-url reaches the sync-storage-tiers write."""
 
     def _invoke(self, item_dict: dict, raster_api_url: str | None, *extra_args: str):
-        group_args = ["--api-url", API_URL]
-        if raster_api_url:
-            group_args += ["--raster-api-url", raster_api_url]
+        group_args = _group_args(raster_api_url)
         runner = CliRunner()
         with (
             patch("manage_item.STACItemManager.get_item", return_value=item_dict),
@@ -445,9 +449,7 @@ class TestCollectionSyncStorageTiersRasterGuardCli:
     """manage_collections.py --raster-api-url reaches the bulk sync loop."""
 
     def _invoke(self, item_dicts: list[dict], raster_api_url: str | None, *extra_args: str):
-        group_args = ["--api-url", API_URL]
-        if raster_api_url:
-            group_args += ["--raster-api-url", raster_api_url]
+        group_args = _group_args(raster_api_url)
         runner = CliRunner()
         with (
             patch(

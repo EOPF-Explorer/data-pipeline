@@ -28,6 +28,7 @@ import requests
 # Import item management functionality
 from manage_item import (
     STACItemManager,
+    _raster_guard_url,
     _replace_item,
     check_urls_confined,
     count_s3_objects_for_item,
@@ -146,6 +147,25 @@ def _report_confinement_sweep(
         "Refusing to clean: the items above reference S3 data outside the declared "
         "confinement. Widen --confine-to only if every path listed is genuinely "
         "yours to delete."
+    )
+
+
+def _guard_abort(e: Exception, item_id: str, s3_moved: bool = False) -> str:
+    """Announce the abort and return the reason string for the summary (#408).
+
+    A proxy link-rewrite fault corrupts every item read, so the run stops at the
+    first refusal rather than tallying it as one bad item. With s3_moved, the item
+    was clean as read and corrupt on the re-read -- name the state it is left in.
+    """
+    click.echo(f"\n  ❌ Aborting at item {item_id}: {e}", err=True)
+    moved = (
+        f"S3 objects of {item_id} are already re-tiered; its STAC metadata was not written. "
+        if s3_moved
+        else ""
+    )
+    return (
+        f"{e} (item {item_id}). {moved}A proxy link-rewrite fault corrupts every item read, "
+        "so the run stopped here."
     )
 
 
@@ -604,16 +624,9 @@ class STACCollectionManager:
                         items_no_changes += 1
 
                 except RasterLinkMismatchError as e:
-                    # A proxy fault corrupts every item, not just this one: counting it
-                    # failed and moving on would log thousands of failures and still
-                    # exit 0. Stop the run here instead (#408) -- but return the
-                    # partial stats rather than raise, so the caller can still report
-                    # what was written before the abort.
-                    guard_abort = (
-                        f"{e} (item {item_id}). A proxy link-rewrite fault corrupts every "
-                        "item read, so the run stopped here."
-                    )
-                    click.echo(f"\n  ❌ Aborting at item {item_id}: {e}", err=True)
+                    # Return the partial stats rather than raise, so the caller can
+                    # still report what was written before the abort (#408).
+                    guard_abort = _guard_abort(e, item_id)
                     break
                 except Exception as e:
                     click.echo(f"\n  ⚠️  Error processing item {item_id}: {e}", err=True)
@@ -1385,10 +1398,7 @@ def sync_storage_tiers(
         warning += "\n⚠️  This will sync STAC metadata with current S3 storage classes."
         click.confirm(f"{warning}\n\nContinue?", abort=True)
 
-    raster_api_url: str | None = ctx.obj["raster_api_url"]
-    if not raster_api_url:
-        # Never silent: a skipped guard must be distinguishable from a passing one.
-        click.echo("⚠️  --raster-api-url unset - write-back link guard NOT active (#374)", err=True)
+    raster_api_url = _raster_guard_url(ctx)
 
     try:
         # Sync storage tiers
@@ -1656,12 +1666,7 @@ def change_storage_tier(
             update_item_storage_tiers,
         )
 
-        raster_api_url: str | None = ctx.obj["raster_api_url"]
-        if not raster_api_url:
-            # Never silent: a skipped guard must be distinguishable from a passing one.
-            click.echo(
-                "⚠️  --raster-api-url unset - write-back link guard NOT active (#374)", err=True
-            )
+        raster_api_url = _raster_guard_url(ctx)
 
         items_changed = 0
         items_failed = 0
@@ -1678,20 +1683,14 @@ def change_storage_tier(
 
                 # Judge the search result already in hand BEFORE its S3 objects move:
                 # a refusal after process_stac_item would leave S3 at the new tier and
-                # STAC claiming the old one (#408). A live run stops at the first
-                # refusal; a dry run writes nothing, so it surveys every offender
-                # instead and exits non-zero at the end -- the pre-flight must show
-                # the true extent, not die at item 1 like the live run would.
+                # STAC claiming the old one (#408). Live-vs-dry-run survey semantics:
+                # see sync_storage_tiers.
                 if raster_api_url:
                     try:
                         check_raster_links(item.to_dict(), raster_api_url, "as read")
                     except RasterLinkMismatchError as e:
                         if not dry_run:
-                            guard_abort = (
-                                f"{e} (item {item_id}). A proxy link-rewrite fault corrupts "
-                                "every item read, so the run stopped here."
-                            )
-                            click.echo(f"\n  ❌ Aborting at item {item_id}: {e}", err=True)
+                            guard_abort = _guard_abort(e, item_id)
                             break
                         click.echo(f"\n  ❌ {item_id}: {e}", err=True)
                         raster_link_offenders += 1
@@ -1727,15 +1726,8 @@ def change_storage_tier(
                                 )
                             except RasterLinkMismatchError as e:
                                 # Clean as read, corrupt now: the proxy went bad between
-                                # the two reads. S3 already moved, so say what state the
-                                # item is left in, then stop the run (#408).
-                                guard_abort = (
-                                    f"{e} (item {item_id}). S3 objects of {item_id} are "
-                                    "already re-tiered; its STAC metadata was not written. "
-                                    "A proxy link-rewrite fault corrupts every item read, so "
-                                    "the run stopped here."
-                                )
-                                click.echo(f"\n  ❌ Aborting at item {item_id}: {e}", err=True)
+                                # the two reads (#408).
+                                guard_abort = _guard_abort(e, item_id, s3_moved=True)
                                 break
                             except Exception as e:
                                 click.echo(f"\n  ⚠️  Failed to update item {item_id}: {e}", err=True)
