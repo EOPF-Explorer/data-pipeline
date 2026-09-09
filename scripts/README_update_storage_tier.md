@@ -26,11 +26,25 @@ link, plus a thumbnail asset served by the raster API, must sit under
 - Only links that exist are judged. Items with no raster links (S1, S3-OLCI) and
   thumbnails hosted on S3 or elsewhere pass untouched — a false refusal here fails a
   real workflow step.
+- A thumbnail is judged on the **shape** of its href, not its host: any href whose
+  path looks like a raster item URL (`/collections/…/items/…`) must sit under the
+  expected prefix. Keying on host would miss a rewrite that changes the host, which
+  is one of the faults this guard exists to catch.
+- A `xyz`/`tilejson`/`viewer` link with a missing or non-string href is treated as an
+  offender, not skipped — a response that drops hrefs is as corrupt as one that
+  rewrites them.
 - **Omitting the flag disables the guard** and logs
   `⚠️ --raster-api-url unset - write-back link guard NOT active (#374)`. A skipped
   guard must never be mistaken for a passing one.
-- Exit codes: **1** = the guard fired (look for `❌ raster link guard`);
-  **2** = argparse rejected the arguments, i.e. the guard never ran.
+- Exit codes: **2** = argparse rejected the arguments, so the guard never ran.
+  **1** = the run failed — but `main()` returns 1 for *any* exception (a STAC 5xx, a
+  read timeout, an S3 credential error), so **exit 1 alone does not mean the guard
+  fired**. Grep the log for `❌ raster link guard` to tell them apart; that line is
+  the only reliable discriminator.
+- The check also runs under `--dry-run`. A dry run over an item that still carries
+  persisted corruption therefore exits 1 instead of reporting drift — deliberate, but
+  worth knowing before using `--dry-run` as a survey tool. Use
+  `operator-tools/repair_stac_raster_links.py` to inspect and repair those.
 
 Tracked in #374.
 

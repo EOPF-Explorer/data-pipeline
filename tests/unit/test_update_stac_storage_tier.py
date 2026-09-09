@@ -720,3 +720,58 @@ class TestRasterGuardWiring:
             )
             == 1
         )
+
+
+class TestGuardBlindSpots:
+    """Regressions for two blind spots found in review of #406."""
+
+    def test_host_rewritten_thumbnail_is_caught(self):
+        """A rewrite that changes the HOST must not slip past on the asset side.
+
+        The guard once keyed the thumbnail check on host equality, which made it
+        blind to precisely the host-rewrite fault it exists to catch (an internal
+        read yielding svc.cluster.local, per #374).
+        """
+        from update_stac_storage_tier import RasterLinkMismatchError, check_raster_links
+
+        item = raster_item(
+            thumbnail_href=(
+                "https://titiler-eopf.eopf.svc.cluster.local:8080"
+                "/collections/c/items/item-1/preview?format=png"
+            )
+        )
+        with pytest.raises(RasterLinkMismatchError):
+            check_raster_links(item, RASTER_API, "test")
+
+    def test_external_thumbnail_without_item_path_still_passes(self):
+        """The S3/external carve-out must survive the shape-based check."""
+        from update_stac_storage_tier import check_raster_links
+
+        for href in (
+            "https://s3.example.com/bucket/thumb.png",
+            "https://cdn.example.org/previews/item-1.jpg",
+        ):
+            check_raster_links(raster_item(thumbnail_href=href), RASTER_API, "test")
+
+    @pytest.mark.parametrize(
+        "link",
+        [
+            {"rel": "xyz"},
+            {"rel": "viewer", "href": None},
+            {"rel": "tilejson", "href": 123},
+        ],
+    )
+    def test_malformed_raster_link_is_an_offender(self, link):
+        """A dropped or non-string href is malformed, not exempt - fail closed."""
+        from update_stac_storage_tier import RasterLinkMismatchError, check_raster_links
+
+        with pytest.raises(RasterLinkMismatchError):
+            check_raster_links({"links": [link]}, RASTER_API, "test")
+
+    def test_malformed_href_is_named_in_the_log(self, caplog):
+        from update_stac_storage_tier import RasterLinkMismatchError, check_raster_links
+
+        with pytest.raises(RasterLinkMismatchError):
+            check_raster_links({"links": [{"rel": "xyz", "href": None}]}, RASTER_API, "test")
+        assert "xyz" in caplog.text
+        assert "None" in caplog.text

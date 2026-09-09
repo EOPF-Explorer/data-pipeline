@@ -67,6 +67,19 @@ class RasterLinkMismatchError(RuntimeError):
     """A raster-API href does not sit under the expected --raster-api-url prefix."""
 
 
+def _is_raster_shaped(href: str) -> bool:
+    """True when an href looks like a raster-API item URL, whatever host it claims.
+
+    Shape, not host: the rewrite faults this guard exists to catch can change the
+    host (a proxy rebuilding hrefs from the forwarded host, or an internal read
+    yielding svc.cluster.local -- see #374). Keying on host equality would make the
+    guard blind to exactly that. An S3 or external thumbnail has no
+    /collections/.../items/... path and is still left alone.
+    """
+    path = urlparse(href).path
+    return "/collections/" in path and "/items/" in path
+
+
 def check_raster_links(item: dict, raster_api_url: str, where: str) -> None:
     """Raise if any raster-API href is not under ``{raster_api_url}/collections/``.
 
@@ -84,28 +97,22 @@ def check_raster_links(item: dict, raster_api_url: str, where: str) -> None:
         RasterLinkMismatchError: on any mismatch; the caller must not write.
     """
     expected = raster_api_url.rstrip("/") + "/collections/"
-    raster_host = urlparse(raster_api_url).netloc
     offenders: list[tuple[str, str]] = []
 
     for link in item.get("links") or []:
+        if link.get("rel") not in RASTER_LINK_RELS:
+            continue
         href = link.get("href")
-        if (
-            link.get("rel") in RASTER_LINK_RELS
-            and isinstance(href, str)
-            and not href.startswith(expected)
-        ):
-            offenders.append((link["rel"], href))
+        # These rels are raster-API links by construction, so a missing or
+        # non-string href is malformed, not exempt: fail closed on it too.
+        if not isinstance(href, str) or not href.startswith(expected):
+            offenders.append((link["rel"], href if isinstance(href, str) else repr(href)))
 
     for key, asset in (item.get("assets") or {}).items():
+        if "thumbnail" not in (asset.get("roles") or []):
+            continue
         href = asset.get("href")
-        # Only a thumbnail served BY the raster API is ours to judge. Thumbnails on
-        # S3 or an external host are legitimate and must not be refused.
-        if (
-            "thumbnail" in (asset.get("roles") or [])
-            and isinstance(href, str)
-            and urlparse(href).netloc == raster_host
-            and not href.startswith(expected)
-        ):
+        if isinstance(href, str) and _is_raster_shaped(href) and not href.startswith(expected):
             offenders.append((f"asset:{key}", href))
 
     if not offenders:
