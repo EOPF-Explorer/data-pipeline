@@ -8,6 +8,32 @@ Updates existing STAC items with current S3 storage metadata following the [stor
 
 **Add Missing (`--add-missing`)**: Creates `alternate.s3` structure for legacy items without it (with `storage:refs` and optional `objects_per_storage_class`).
 
+## Write-back link guard (`--raster-api-url`)
+
+This script is a read-modify-write: it GETs the item through the public STAC API,
+edits storage metadata, and writes the **whole document** back. A response-corrupting
+proxy therefore gets its corruption persisted — which is what happened during the
+stac-auth-proxy link-rewrite incident of 2026-07-21 (platform-deploy#343), repaired
+after the fact by `operator-tools/repair_stac_raster_links.py`.
+
+Pass `--raster-api-url` to make that fail closed. Every `xyz`, `tilejson` and `viewer`
+link, plus a thumbnail asset served by the raster API, must sit under
+`<raster-api-url>/collections/`. On a mismatch the script logs each offending
+`rel` + `href` and exits **1** without writing anything.
+
+- The check runs twice: once on the document as read (so a proxy fault reports early)
+  and once on the document about to be written (the actual gate).
+- Only links that exist are judged. Items with no raster links (S1, S3-OLCI) and
+  thumbnails hosted on S3 or elsewhere pass untouched — a false refusal here fails a
+  real workflow step.
+- **Omitting the flag disables the guard** and logs
+  `⚠️ --raster-api-url unset - write-back link guard NOT active (#374)`. A skipped
+  guard must never be mistaken for a passing one.
+- Exit codes: **1** = the guard fired (look for `❌ raster link guard`);
+  **2** = argparse rejected the arguments, i.e. the guard never ran.
+
+Tracked in #374.
+
 ## Output structure
 
 - **Item level** – `properties["storage:schemes"]`: defines schemes `standard`, `performance`, `glacier`, `mixed` (custom-s3, platform, bucket, region, storage_class).
@@ -87,6 +113,13 @@ uv run python scripts/update_stac_storage_tier.py \
   --stac-api-url "$STAC_API_URL" \
   --s3-endpoint "$S3_ENDPOINT" \
   --add-missing
+
+# With the write-back link guard armed (recommended; see above)
+uv run python scripts/update_stac_storage_tier.py \
+  --stac-item-url "$ITEM_URL" \
+  --stac-api-url "$STAC_API_URL" \
+  --s3-endpoint "$S3_ENDPOINT" \
+  --raster-api-url "https://api.explorer.eopf.copernicus.eu/raster"
 ```
 
 ## Output Examples
