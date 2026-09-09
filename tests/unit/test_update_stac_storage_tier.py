@@ -480,3 +480,298 @@ class TestMain:
         )
 
         assert exit_code == 1
+
+
+# --- #374: raster write-back guard --------------------------------------------
+
+RASTER_API = "https://api.explorer.eopf.copernicus.eu/raster"
+# What the stac-auth-proxy link-rewrite bug (platform-deploy#343) served back.
+CORRUPT_RASTER = "https://api.explorer.eopf.copernicus.eu/stac/raster"
+
+
+def raster_item(base: str = RASTER_API, thumbnail_href: str | None = None) -> dict:
+    """Bare STAC item dict carrying the three raster rels, plus a thumbnail asset."""
+    return {
+        "id": "item-1",
+        "links": [
+            {"rel": "self", "href": "https://api.explorer.eopf.copernicus.eu/stac/x"},
+            {"rel": "viewer", "href": f"{base}/collections/c/items/item-1/viewer"},
+            {
+                "rel": "xyz",
+                "href": f"{base}/collections/c/items/item-1/tiles/{{z}}/{{x}}/{{y}}.png",
+            },
+            {"rel": "tilejson", "href": f"{base}/collections/c/items/item-1/tilejson.json"},
+        ],
+        "assets": {
+            "thumbnail": {
+                "href": thumbnail_href or f"{base}/collections/c/items/item-1/preview.png",
+                "roles": ["thumbnail"],
+            }
+        },
+    }
+
+
+def real_item_with_raster_links(item: Item, base: str = RASTER_API) -> dict:
+    """A pystac-valid fixture item, given the raster links a registered item carries."""
+    doc = item.to_dict()
+    template = raster_item(base)
+    doc["links"] = template["links"]
+    doc["assets"]["thumbnail"] = template["assets"]["thumbnail"]
+    return doc
+
+
+class TestCheckRasterLinks:
+    """Tests for the #374 write-back guard itself."""
+
+    def test_clean_item_passes(self):
+        from update_stac_storage_tier import check_raster_links
+
+        check_raster_links(raster_item(), RASTER_API, "test")
+
+    def test_trailing_slash_on_expected_url_is_tolerated(self):
+        from update_stac_storage_tier import check_raster_links
+
+        check_raster_links(raster_item(), RASTER_API + "/", "test")
+
+    def test_corrupted_links_raise_and_name_every_offender(self, caplog):
+        from update_stac_storage_tier import RasterLinkMismatchError, check_raster_links
+
+        with pytest.raises(RasterLinkMismatchError):
+            check_raster_links(raster_item(base=CORRUPT_RASTER), RASTER_API, "test")
+
+        # V-C3 greps these lines to tell a fired guard from an argparse error.
+        for rel in ("viewer", "xyz", "tilejson", "asset:thumbnail"):
+            assert rel in caplog.text
+        assert "/stac/raster/" in caplog.text
+
+    def test_item_without_raster_links_passes(self, caplog):
+        """S1 / S3-OLCI items have no xyz/tilejson/viewer. Must not be refused."""
+        from update_stac_storage_tier import check_raster_links
+
+        check_raster_links({"id": "s1-item", "links": [], "assets": {}}, RASTER_API, "test")
+        check_raster_links({"id": "s1-item"}, RASTER_API, "test")
+        assert caplog.text == ""
+
+    def test_thumbnail_on_another_host_is_not_judged(self):
+        """A thumbnail served from S3 or elsewhere is legitimate, not corruption."""
+        from update_stac_storage_tier import check_raster_links
+
+        item = raster_item(thumbnail_href="https://s3.example.com/bucket/thumb.png")
+        check_raster_links(item, RASTER_API, "test")
+
+    def test_corrupted_thumbnail_alone_raises(self):
+        from update_stac_storage_tier import RasterLinkMismatchError, check_raster_links
+
+        item = raster_item(thumbnail_href=f"{CORRUPT_RASTER}/collections/c/items/i/preview.png")
+        with pytest.raises(RasterLinkMismatchError):
+            check_raster_links(item, RASTER_API, "test")
+
+
+class TestRasterGuardWiring:
+    """The guard, as reached through update_stac_item."""
+
+    def _mock_httpx_with(self, mock_httpx, item_dict) -> None:
+        mock_response = Mock()
+        mock_response.json.return_value = item_dict
+        mock_http_client = Mock()
+        mock_http_client.get.return_value = mock_response
+        mock_http_client.__enter__ = Mock(return_value=mock_http_client)
+        mock_http_client.__exit__ = Mock(return_value=False)
+        mock_httpx.return_value = mock_http_client
+
+    def _stac_client(self) -> tuple[Mock, Mock]:
+        mock_stac_client = Mock()
+        mock_stac_client.self_href = "https://stac.api.com"
+        mock_session = Mock()
+        mock_session.post.return_value = Mock(status_code=409)
+        mock_session.put.return_value = Mock(status_code=200)
+        mock_stac_client._stac_io.session = mock_session
+        return mock_stac_client, mock_session
+
+    @patch("update_stac_storage_tier.httpx.Client")
+    @patch("update_stac_storage_tier.update_item_storage_tiers")
+    @patch("update_stac_storage_tier.stac_auth.open_client")
+    def test_corrupted_item_is_never_written(
+        self, mock_open_client, mock_update_tiers, mock_httpx, stac_item_before
+    ):
+        """The point of #374: proxy-corrupted links must not round-trip into pgstac."""
+        from update_stac_storage_tier import RasterLinkMismatchError, update_stac_item
+
+        self._mock_httpx_with(
+            mock_httpx, real_item_with_raster_links(stac_item_before, CORRUPT_RASTER)
+        )
+        mock_update_tiers.return_value = (1, 1, 1, 0, 0, 0)
+        mock_stac_client, mock_session = self._stac_client()
+        mock_open_client.return_value = mock_stac_client
+
+        with pytest.raises(RasterLinkMismatchError):
+            update_stac_item(
+                "https://stac.api.com/collections/c/items/item-1",
+                "https://stac.api.com",
+                "https://s3.endpoint.com",
+                dry_run=False,
+                raster_api_url=RASTER_API,
+            )
+
+        mock_session.put.assert_not_called()
+        mock_session.post.assert_not_called()
+
+    @patch("update_stac_storage_tier.httpx.Client")
+    @patch("update_stac_storage_tier.update_item_storage_tiers")
+    @patch("update_stac_storage_tier.stac_auth.open_client")
+    def test_clean_item_still_writes(
+        self, mock_open_client, mock_update_tiers, mock_httpx, stac_item_before
+    ):
+        from update_stac_storage_tier import update_stac_item
+
+        self._mock_httpx_with(mock_httpx, real_item_with_raster_links(stac_item_before))
+        mock_update_tiers.return_value = (1, 1, 1, 0, 0, 0)
+        mock_stac_client, mock_session = self._stac_client()
+        mock_open_client.return_value = mock_stac_client
+
+        result = update_stac_item(
+            "https://stac.api.com/collections/c/items/item-1",
+            "https://stac.api.com",
+            "https://s3.endpoint.com",
+            dry_run=False,
+            raster_api_url=RASTER_API,
+        )
+
+        assert result["updated"] == 1
+        mock_session.put.assert_called_once()
+
+    @patch("update_stac_storage_tier.httpx.Client")
+    @patch("update_stac_storage_tier.update_item_storage_tiers")
+    @patch("update_stac_storage_tier.stac_auth.open_client")
+    def test_guard_off_writes_corrupted_item_but_warns(
+        self, mock_open_client, mock_update_tiers, mock_httpx, caplog, stac_item_before
+    ):
+        """Unset --raster-api-url keeps today's behaviour - but never silently."""
+        from update_stac_storage_tier import update_stac_item
+
+        self._mock_httpx_with(
+            mock_httpx, real_item_with_raster_links(stac_item_before, CORRUPT_RASTER)
+        )
+        mock_update_tiers.return_value = (1, 1, 1, 0, 0, 0)
+        mock_stac_client, mock_session = self._stac_client()
+        mock_open_client.return_value = mock_stac_client
+
+        update_stac_item(
+            "https://stac.api.com/collections/c/items/item-1",
+            "https://stac.api.com",
+            "https://s3.endpoint.com",
+            dry_run=False,
+        )
+
+        mock_session.put.assert_called_once()
+        assert "guard NOT active" in caplog.text
+
+    @patch("update_stac_storage_tier.update_stac_item")
+    def test_main_forwards_the_flag(self, mock_update):
+        from update_stac_storage_tier import main
+
+        mock_update.return_value = {"updated": 0, "with_tier": 0, "added": 0}
+
+        assert (
+            main(
+                [
+                    "--stac-item-url",
+                    "https://stac.api.com/collections/c/items/item-1",
+                    "--stac-api-url",
+                    "https://stac.api.com",
+                    "--s3-endpoint",
+                    "https://s3.endpoint.com",
+                    "--raster-api-url",
+                    RASTER_API,
+                ]
+            )
+            == 0
+        )
+        assert mock_update.call_args.kwargs["raster_api_url"] == RASTER_API
+
+    @patch("update_stac_storage_tier.httpx.Client")
+    @patch("update_stac_storage_tier.update_item_storage_tiers")
+    @patch("update_stac_storage_tier.stac_auth.open_client")
+    def test_a_fired_guard_exits_1_not_2(
+        self, mock_open_client, mock_update_tiers, mock_httpx, stac_item_before
+    ):
+        """V-C3 disambiguation: argparse exits 2, so a fired guard must exit 1."""
+        from update_stac_storage_tier import main
+
+        self._mock_httpx_with(
+            mock_httpx, real_item_with_raster_links(stac_item_before, CORRUPT_RASTER)
+        )
+        mock_update_tiers.return_value = (1, 1, 1, 0, 0, 0)
+        mock_stac_client, _ = self._stac_client()
+        mock_open_client.return_value = mock_stac_client
+
+        assert (
+            main(
+                [
+                    "--stac-item-url",
+                    "https://stac.api.com/collections/c/items/item-1",
+                    "--stac-api-url",
+                    "https://stac.api.com",
+                    "--s3-endpoint",
+                    "https://s3.endpoint.com",
+                    "--raster-api-url",
+                    RASTER_API,
+                ]
+            )
+            == 1
+        )
+
+
+class TestGuardBlindSpots:
+    """Regressions for two blind spots found in review of #406."""
+
+    def test_host_rewritten_thumbnail_is_caught(self):
+        """A rewrite that changes the HOST must not slip past on the asset side.
+
+        The guard once keyed the thumbnail check on host equality, which made it
+        blind to precisely the host-rewrite fault it exists to catch (an internal
+        read yielding svc.cluster.local, per #374).
+        """
+        from update_stac_storage_tier import RasterLinkMismatchError, check_raster_links
+
+        item = raster_item(
+            thumbnail_href=(
+                "https://titiler-eopf.eopf.svc.cluster.local:8080"
+                "/collections/c/items/item-1/preview?format=png"
+            )
+        )
+        with pytest.raises(RasterLinkMismatchError):
+            check_raster_links(item, RASTER_API, "test")
+
+    def test_external_thumbnail_without_item_path_still_passes(self):
+        """The S3/external carve-out must survive the shape-based check."""
+        from update_stac_storage_tier import check_raster_links
+
+        for href in (
+            "https://s3.example.com/bucket/thumb.png",
+            "https://cdn.example.org/previews/item-1.jpg",
+        ):
+            check_raster_links(raster_item(thumbnail_href=href), RASTER_API, "test")
+
+    @pytest.mark.parametrize(
+        "link",
+        [
+            {"rel": "xyz"},
+            {"rel": "viewer", "href": None},
+            {"rel": "tilejson", "href": 123},
+        ],
+    )
+    def test_malformed_raster_link_is_an_offender(self, link):
+        """A dropped or non-string href is malformed, not exempt - fail closed."""
+        from update_stac_storage_tier import RasterLinkMismatchError, check_raster_links
+
+        with pytest.raises(RasterLinkMismatchError):
+            check_raster_links({"links": [link]}, RASTER_API, "test")
+
+    def test_malformed_href_is_named_in_the_log(self, caplog):
+        from update_stac_storage_tier import RasterLinkMismatchError, check_raster_links
+
+        with pytest.raises(RasterLinkMismatchError):
+            check_raster_links({"links": [{"rel": "xyz", "href": None}]}, RASTER_API, "test")
+        assert "xyz" in caplog.text
+        assert "None" in caplog.text

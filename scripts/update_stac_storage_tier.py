@@ -15,6 +15,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 # Add scripts directory to path to import from register_v1
 scripts_dir = Path(__file__).parent
@@ -52,6 +53,76 @@ TIER_TO_SCHEME: dict[str, str] = {
     "STANDARD_IA": "glacier",
     "MIXED": "mixed",
 }
+
+
+# Link rels the raster API generates for every registered item (see register_v1).
+# A stac-auth-proxy link-rewrite bug (platform-deploy#343, repaired by
+# operator-tools/repair_stac_raster_links.py) once served these back with a
+# "/stac/raster/..." prefix, and the read-modify-write below echoed the corruption
+# straight into pgstac. The guard makes that fail closed instead. #374.
+RASTER_LINK_RELS = ("xyz", "tilejson", "viewer")
+
+
+class RasterLinkMismatchError(RuntimeError):
+    """A raster-API href does not sit under the expected --raster-api-url prefix."""
+
+
+def _is_raster_shaped(href: str) -> bool:
+    """True when an href looks like a raster-API item URL, whatever host it claims.
+
+    Shape, not host: the rewrite faults this guard exists to catch can change the
+    host (a proxy rebuilding hrefs from the forwarded host, or an internal read
+    yielding svc.cluster.local -- see #374). Keying on host equality would make the
+    guard blind to exactly that. An S3 or external thumbnail has no
+    /collections/.../items/... path and is still left alone.
+    """
+    path = urlparse(href).path
+    return "/collections/" in path and "/items/" in path
+
+
+def check_raster_links(item: dict, raster_api_url: str, where: str) -> None:
+    """Raise if any raster-API href is not under ``{raster_api_url}/collections/``.
+
+    Only hrefs that are raster-API links *by construction* are judged, so an item
+    that legitimately has no xyz/tilejson/viewer links (S1, S3-OLCI) and a thumbnail
+    served from S3 or another host passes untouched -- a false refusal here fails a
+    real workflow step.
+
+    Args:
+        item: STAC item as a plain dict (as read, or as about to be written)
+        raster_api_url: expected raster API base URL
+        where: short label naming the call site, for the log line
+
+    Raises:
+        RasterLinkMismatchError: on any mismatch; the caller must not write.
+    """
+    expected = raster_api_url.rstrip("/") + "/collections/"
+    offenders: list[tuple[str, str]] = []
+
+    for link in item.get("links") or []:
+        if link.get("rel") not in RASTER_LINK_RELS:
+            continue
+        href = link.get("href")
+        # These rels are raster-API links by construction, so a missing or
+        # non-string href is malformed, not exempt: fail closed on it too.
+        if not isinstance(href, str) or not href.startswith(expected):
+            offenders.append((link["rel"], href if isinstance(href, str) else repr(href)))
+
+    for key, asset in (item.get("assets") or {}).items():
+        if "thumbnail" not in (asset.get("roles") or []):
+            continue
+        href = asset.get("href")
+        if isinstance(href, str) and _is_raster_shaped(href) and not href.startswith(expected):
+            offenders.append((f"asset:{key}", href))
+
+    if not offenders:
+        return
+
+    for rel, href in offenders:
+        logger.error(f"  ❌ raster link guard ({where}): {rel} href not under {expected} -> {href}")
+    raise RasterLinkMismatchError(
+        f"{len(offenders)} raster href(s) outside {expected} ({where}) - refusing to write"
+    )
 
 
 def _build_storage_schemes(region: str) -> dict:
@@ -300,6 +371,7 @@ def update_stac_item(
     s3_endpoint: str,
     dry_run: bool = False,
     add_missing: bool = False,
+    raster_api_url: str | None = None,
 ) -> dict[str, int]:
     """Update storage tier metadata for a STAC item.
 
@@ -309,9 +381,14 @@ def update_stac_item(
         s3_endpoint: S3 endpoint URL
         dry_run: If True, show changes without updating
         add_missing: If True, add alternate.s3 to assets that don't have it
+        raster_api_url: If set, refuse to write back an item whose raster links do
+            not sit under it (#374). Unset disables the guard, loudly.
 
     Returns:
         Dictionary with update statistics
+
+    Raises:
+        RasterLinkMismatchError: raster_api_url is set and a raster href is corrupt
     """
     # Extract collection and item ID from URL
     # Expected format: .../collections/{collection}/items/{item_id}
@@ -326,11 +403,20 @@ def update_stac_item(
 
     logger.info(f"Processing: {item_id}")
 
+    if not raster_api_url:
+        # Never silent: a skipped guard must be distinguishable from a passing one.
+        logger.warning("  ⚠️  --raster-api-url unset - write-back link guard NOT active (#374)")
+
     # Fetch STAC item
     with httpx.Client(timeout=30.0, follow_redirects=True) as http:
         resp = http.get(stac_item_url)
         resp.raise_for_status()
-        item = Item.from_dict(resp.json())
+        item_json = resp.json()
+        # Check what came back, so a proxy fault reports at the read rather than
+        # surfacing as a mystery refusal after all the S3 work below.
+        if raster_api_url:
+            check_raster_links(item_json, raster_api_url, "as read")
+        item = Item.from_dict(item_json)
 
     # Update storage tiers
     (
@@ -395,6 +481,10 @@ def update_stac_item(
         # more robust than an existence pre-check (#186); single PUT means no
         # deleted-but-not-recreated window (#352).
         item_dict = item.to_dict()
+        # The actual gate: judge the document that is about to be written, not the
+        # one that was read.
+        if raster_api_url:
+            check_raster_links(item_dict, raster_api_url, "before write")
         headers = {"Content-Type": "application/json"}
         resp = stac_session.post(
             f"{base_url}/collections/{collection_id}/items",
@@ -431,6 +521,14 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Add alternate.s3 to assets that don't have it (for legacy items)",
     )
+    parser.add_argument(
+        "--raster-api-url",
+        help=(
+            "Raster API base URL, e.g. https://api.example.com/raster. When set, refuse to "
+            "write back an item whose xyz/tilejson/viewer links or raster-hosted thumbnail "
+            "do not sit under it (#374). Omit to disable the guard (a warning is logged)."
+        ),
+    )
 
     args = parser.parse_args(argv)
 
@@ -441,6 +539,7 @@ def main(argv: list[str] | None = None) -> int:
             args.s3_endpoint,
             args.dry_run,
             args.add_missing,
+            raster_api_url=args.raster_api_url,
         )
         return 0
     except Exception as e:
