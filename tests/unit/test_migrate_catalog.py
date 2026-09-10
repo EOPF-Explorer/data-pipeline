@@ -11,6 +11,7 @@ from _migrate_catalog.migrations.add_xyz_link import add_xyz_link
 from _migrate_catalog.migrations.align_visualization_links import align_visualization_links
 from _migrate_catalog.migrations.fix_url_encoding import fix_url_encoding
 from _migrate_catalog.migrations.fix_zarr_media_type import fix_zarr_media_type
+from _migrate_catalog.migrations.repoint_atmosphere_assets import repoint_atmosphere_assets
 from _migrate_catalog.runner import STACMigrationRunner, compose_migrations
 from _migrate_catalog.types import MigrationResult
 
@@ -176,6 +177,153 @@ class TestFixZarrMediaType:
         assert result1 is not None
         result2 = fix_zarr_media_type(result1)
         assert result2 is None
+
+
+_S2_STORE = "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-2-l2a/S2B_T32TQR.zarr"
+_S2_STORE_S3 = "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-2-l2a/S2B_T32TQR.zarr"
+
+
+def _atmosphere_item(with_alternate: bool = True) -> dict:
+    """An S2 L2A item as registered today: AOT/WVP point at the r10m arrays."""
+    assets: dict = {
+        "reflectance": {
+            "href": f"{_S2_STORE}/measurements/reflectance",
+            "type": "application/vnd.zarr; version=3; profile=multiscales",
+        },
+        "SCL_20m": {
+            "href": f"{_S2_STORE}/conditions/mask/l2a_classification/r20m/scl",
+            "type": "application/vnd.zarr; version=3",
+        },
+    }
+    for key, var in (("AOT_10m", "aot"), ("WVP_10m", "wvp")):
+        assets[key] = {
+            "href": f"{_S2_STORE}/quality/atmosphere/r10m/{var}",
+            "type": "application/vnd.zarr; version=3",
+            "gsd": 10,
+            "roles": ["data"],
+        }
+        if with_alternate:
+            assets[key]["alternate"] = {
+                "s3": {
+                    "href": f"{_S2_STORE_S3}/quality/atmosphere/r10m/{var}",
+                    "storage:scheme": {"platform": "OVHcloud", "tier": "STANDARD"},
+                }
+            }
+    return {"id": "S2B_T32TQR", "assets": assets, "links": []}
+
+
+class TestRepointAtmosphereAssets:
+    def test_rewrites_href_to_group(self):
+        result = repoint_atmosphere_assets(_atmosphere_item())
+        assert result is not None
+        for key in ("AOT_10m", "WVP_10m"):
+            assert result["assets"][key]["href"] == f"{_S2_STORE}/quality/atmosphere"
+
+    def test_rewrites_alternate_s3_href_alongside(self):
+        result = repoint_atmosphere_assets(_atmosphere_item())
+        assert result is not None
+        for key in ("AOT_10m", "WVP_10m"):
+            s3 = result["assets"][key]["alternate"]["s3"]
+            assert s3["href"] == f"{_S2_STORE_S3}/quality/atmosphere"
+            # Sibling storage fields survive the rewrite
+            assert s3["storage:scheme"]["tier"] == "STANDARD"
+
+    def test_keeps_other_asset_fields(self):
+        result = repoint_atmosphere_assets(_atmosphere_item())
+        assert result is not None
+        aot = result["assets"]["AOT_10m"]
+        assert aot["type"] == "application/vnd.zarr; version=3"
+        assert aot["gsd"] == 10
+        assert aot["roles"] == ["data"]
+
+    def test_never_touches_scl_or_reflectance(self):
+        item = _atmosphere_item()
+        result = repoint_atmosphere_assets(item)
+        assert result is not None
+        assert result["assets"]["SCL_20m"] == item["assets"]["SCL_20m"]
+        assert result["assets"]["reflectance"] == item["assets"]["reflectance"]
+
+    def test_works_without_alternate(self):
+        result = repoint_atmosphere_assets(_atmosphere_item(with_alternate=False))
+        assert result is not None
+        assert result["assets"]["AOT_10m"]["href"] == f"{_S2_STORE}/quality/atmosphere"
+        assert "alternate" not in result["assets"]["AOT_10m"]
+
+    def test_host_agnostic(self):
+        item = _atmosphere_item(with_alternate=False)
+        old_host = "https://esa-zarr-sentinel-explorer-fra.s3.de.io.cloud.ovh.net/x/y.zarr"
+        item["assets"]["AOT_10m"]["href"] = f"{old_host}/quality/atmosphere/r10m/aot"
+        result = repoint_atmosphere_assets(item)
+        assert result is not None
+        assert result["assets"]["AOT_10m"]["href"] == f"{old_host}/quality/atmosphere"
+
+    def test_returns_none_when_already_migrated(self):
+        migrated = repoint_atmosphere_assets(_atmosphere_item())
+        assert migrated is not None
+        assert repoint_atmosphere_assets(migrated) is None
+
+    def test_returns_none_without_atmosphere_assets(self):
+        # S1-shaped item: no AOT/WVP keys at all
+        item = {"id": "s1-rtc-31TCG", "assets": {"vv": {"href": f"{_S2_STORE}/descending"}}}
+        assert repoint_atmosphere_assets(item) is None
+
+    def test_does_not_mutate_input(self):
+        item = _atmosphere_item()
+        original_href = item["assets"]["AOT_10m"]["href"]
+        repoint_atmosphere_assets(item)
+        assert item["assets"]["AOT_10m"]["href"] == original_href
+
+    def test_accepts_bare_and_trailing_slash_layouts(self):
+        item = _atmosphere_item(with_alternate=False)
+        item["assets"]["AOT_10m"]["href"] = f"{_S2_STORE}/quality/atmosphere/aot"
+        item["assets"]["WVP_10m"]["href"] = f"{_S2_STORE}/quality/atmosphere/r10m/wvp/"
+        result = repoint_atmosphere_assets(item)
+        assert result is not None
+        for key in ("AOT_10m", "WVP_10m"):
+            assert result["assets"][key]["href"] == f"{_S2_STORE}/quality/atmosphere"
+
+    def test_unrecognised_href_is_skipped_and_logged(self, caplog):
+        item = _atmosphere_item(with_alternate=False)
+        item["assets"]["AOT_10m"]["href"] = f"{_S2_STORE}/quality/atmosphere/r20m/aot"
+        with caplog.at_level("WARNING"):
+            result = repoint_atmosphere_assets(item)
+        # WVP still rewritten; AOT left alone and reported, not silently skipped
+        assert result is not None
+        assert result["assets"]["AOT_10m"]["href"] == item["assets"]["AOT_10m"]["href"]
+        assert result["assets"]["WVP_10m"]["href"] == f"{_S2_STORE}/quality/atmosphere"
+        assert "S2B_T32TQR/AOT_10m" in caplog.text and "r20m/aot" in caplog.text
+
+    def test_asset_is_all_or_nothing_across_href_and_alternate(self):
+        # href matches but the alternate does not: neither is touched, so the two
+        # hrefs never end up at different depths (cleanup prefers the alternate).
+        item = _atmosphere_item()
+        item["assets"]["AOT_10m"]["alternate"]["s3"]["href"] = f"{_S2_STORE_S3}/somewhere/else"
+        item["assets"].pop("WVP_10m")
+        assert repoint_atmosphere_assets(item) is None
+
+    def test_heals_alternate_left_behind_at_the_array(self):
+        item = _atmosphere_item()
+        item["assets"]["AOT_10m"]["href"] = f"{_S2_STORE}/quality/atmosphere"
+        result = repoint_atmosphere_assets(item)
+        assert result is not None
+        s3 = result["assets"]["AOT_10m"]["alternate"]["s3"]
+        assert s3["href"] == f"{_S2_STORE_S3}/quality/atmosphere"
+
+    def test_null_members_do_not_raise(self):
+        item = _atmosphere_item()
+        item["assets"]["AOT_10m"]["alternate"] = None
+        item["assets"]["WVP_10m"]["alternate"] = {"s3": "not-a-dict"}
+        result = repoint_atmosphere_assets(item)
+        assert result is not None
+        for key in ("AOT_10m", "WVP_10m"):
+            assert result["assets"][key]["href"] == f"{_S2_STORE}/quality/atmosphere"
+        assert repoint_atmosphere_assets({"id": "x", "assets": None}) is None
+        assert repoint_atmosphere_assets({"id": "x", "assets": {"AOT_10m": None}}) is None
+
+    def test_registered_in_migrations(self):
+        from _migrate_catalog.migrations import MIGRATIONS
+
+        assert "repoint_atmosphere_assets" in MIGRATIONS
 
 
 _TJ_BASE = (

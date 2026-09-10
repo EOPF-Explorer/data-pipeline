@@ -21,6 +21,7 @@ from register_v1 import (  # noqa: E402
     add_expires,
     add_thumbnail_asset,
     add_visualization_links,
+    repoint_group_assets,
     resolve_exclude_ids,
     resolve_retention_days,
     upsert_item,
@@ -419,3 +420,144 @@ class TestResolveRetentionDays:
         # An empty value in a manifest must not crash the registration hot path.
         monkeypatch.setenv("EXPIRES_RETENTION_DAYS", "")
         assert resolve_retention_days() == 183
+
+
+_GEOZARR = "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-2-l2a/S2B_T32TQR.zarr"
+_GEOZARR_HTTPS = "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-2-l2a/S2B_T32TQR.zarr"
+
+
+def _atmosphere_item() -> Item:
+    """A real pystac Item as it looks after step 2 (hrefs rewritten to the output store)."""
+    item = _expires_item()
+    for key, var in (("AOT_10m", "aot"), ("WVP_10m", "wvp")):
+        item.add_asset(
+            key,
+            Asset(
+                href=f"{_GEOZARR_HTTPS}/quality/atmosphere/r10m/{var}",
+                media_type="application/vnd.zarr; version=3",
+                roles=["data"],
+                extra_fields={"gsd": 10},
+            ),
+        )
+    item.add_asset(
+        "SCL_20m",
+        Asset(href=f"{_GEOZARR_HTTPS}/conditions/mask/l2a_classification/r20m/scl"),
+    )
+    return item
+
+
+class TestRepointGroupAssets:
+    """repoint_group_assets points AOT/WVP at the quality/atmosphere group."""
+
+    def test_rewrites_href_and_media_type(self) -> None:
+        item = _atmosphere_item()
+        repoint_group_assets(item, _GEOZARR, "sentinel-2-l2a")
+        for key in ("AOT_10m", "WVP_10m"):
+            asset = item.assets[key]
+            assert asset.href == f"{_GEOZARR_HTTPS}/quality/atmosphere"
+            assert asset.media_type == "application/vnd.zarr; version=3"
+
+    def test_keeps_other_asset_fields(self) -> None:
+        item = _atmosphere_item()
+        repoint_group_assets(item, _GEOZARR, "sentinel-2-l2a")
+        assert item.assets["AOT_10m"].roles == ["data"]
+        assert item.assets["AOT_10m"].extra_fields["gsd"] == 10
+
+    def test_leaves_scl_alone(self) -> None:
+        item = _atmosphere_item()
+        scl_href = item.assets["SCL_20m"].href
+        repoint_group_assets(item, _GEOZARR, "sentinel-2-l2a")
+        assert item.assets["SCL_20m"].href == scl_href
+
+    def test_skips_items_without_the_assets(self) -> None:
+        item = _expires_item()
+        repoint_group_assets(item, _GEOZARR, "sentinel-2-l2a")
+        assert item.assets == {}
+
+    def test_idempotent(self) -> None:
+        item = _atmosphere_item()
+        repoint_group_assets(item, _GEOZARR, "sentinel-2-l2a")
+        repoint_group_assets(item, _GEOZARR, "sentinel-2-l2a")
+        assert item.assets["AOT_10m"].href == f"{_GEOZARR_HTTPS}/quality/atmosphere"
+
+    def test_skips_non_sentinel2_collections(self) -> None:
+        item = _atmosphere_item()
+        before = item.assets["AOT_10m"].href
+        repoint_group_assets(item, _GEOZARR, "sentinel-1-grd-rtc")
+        assert item.assets["AOT_10m"].href == before
+
+    def test_skips_assets_still_on_the_source_href(self) -> None:
+        # Step 2 found no source zarr and left the hrefs alone: an unconverted item
+        # must not be made to look registered against the output store.
+        item = _atmosphere_item()
+        source = "https://objects.eodc.eu/x/SRC.zarr/quality/atmosphere/r10m/aot"
+        item.assets["AOT_10m"].href = source
+        repoint_group_assets(item, _GEOZARR, "sentinel-2-l2a")
+        assert item.assets["AOT_10m"].href == source
+        assert item.assets["WVP_10m"].href == f"{_GEOZARR_HTTPS}/quality/atmosphere"
+
+    def test_logs_at_info(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level("INFO", logger="register_v1"):
+            repoint_group_assets(_atmosphere_item(), _GEOZARR, "sentinel-2-l2a")
+        assert "Repointed 2 asset(s)" in caplog.text
+
+
+def _s2_source_item_dict() -> dict:
+    """A minimal S2 L2A source item with the array-level AOT/WVP assets."""
+    src = "https://objects.eodc.eu/x/SRC_ITEM.zarr"
+    return {
+        "type": "Feature",
+        "stac_version": "1.0.0",
+        "id": "SRC_ITEM",
+        "geometry": {"type": "Point", "coordinates": [0.0, 0.0]},
+        "bbox": [0.0, 0.0, 0.0, 0.0],
+        "properties": {"datetime": "2020-01-01T00:00:00Z"},
+        "links": [],
+        "assets": {
+            "AOT_10m": {
+                "href": f"{src}/quality/atmosphere/r10m/aot",
+                "type": "application/vnd+zarr",
+            },
+            "WVP_10m": {
+                "href": f"{src}/quality/atmosphere/r10m/wvp",
+                "type": "application/vnd+zarr",
+            },
+        },
+        "collection": "src-collection",
+    }
+
+
+def test_run_registration_derives_s3_alternate_from_group_href(monkeypatch) -> None:
+    """The repoint runs before add_alternate_s3_assets, so alternate.s3.href follows it."""
+    import register_v1
+
+    resp = MagicMock()
+    resp.json.return_value = _s2_source_item_dict()
+    http = MagicMock()
+    http.get.return_value = resp
+    http.__enter__ = MagicMock(return_value=http)
+    http.__exit__ = MagicMock(return_value=False)
+    monkeypatch.setattr(register_v1.httpx, "Client", MagicMock(return_value=http))
+    monkeypatch.setattr(register_v1.zarr, "open", MagicMock(side_effect=OSError("offline")))
+    monkeypatch.setattr(register_v1, "get_s3_storage_class", lambda *a: "STANDARD")
+    monkeypatch.setattr(register_v1, "warm_thumbnail_cache", lambda item: None)
+    monkeypatch.setattr(register_v1.stac_auth, "open_client", MagicMock())
+    upsert = MagicMock()
+    monkeypatch.setattr(register_v1, "upsert_item", upsert)
+
+    register_v1.run_registration(
+        "https://src/SRC_ITEM.json",
+        "sentinel-2-l2a",
+        "https://api.test/stac",
+        "https://raster.test",
+        "https://s3.de.io.cloud.ovh.net",
+        "bucket",
+        "prefix",
+    )
+
+    item = upsert.call_args.args[2]
+    group = "bucket/prefix/sentinel-2-l2a/SRC_ITEM.zarr/quality/atmosphere"
+    for key in ("AOT_10m", "WVP_10m"):
+        asset = item.assets[key]
+        assert asset.href == f"https://s3.explorer.eopf.copernicus.eu/{group}"
+        assert asset.extra_fields["alternate"]["s3"]["href"] == f"s3://{group}"

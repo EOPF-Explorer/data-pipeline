@@ -18,6 +18,7 @@ is shown when the API supports `numberMatched`.
 | `add_acquisitions_filter_link` | Add the sibling-collection `Per-acquisition items (filter by tile grid:code)` related link to acquisition items, giving `related` ≥2 entries so STAC Browser renders the grouped "Additional Resources" categories. Scoped to acquisition items (identified by their `Parent tile datacube` link); no-op on cube/S2. |
 | `stamp_expires` | Backfill `properties.expires = datetime (acquisition) + retention` (timestamps ext); skips already-stamped, excluded, and items acquired before the floor. See [stamp_expires](#stamp_expires-backfill-retention-expiry) below |
 | `restamp_expires` | **Shorten** an existing `properties.expires` to `datetime (acquisition) + retention`. Writes only when the new value is **earlier** — never extends; skips excluded and unstamped items. Use when the retention policy changes. See [restamp_expires](#restamp_expires-shortening-the-retention-window) below |
+| `repoint_atmosphere_assets` | Point S2 L2A `AOT_10m`/`WVP_10m` `href` + `alternate.s3.href` at the `…/quality/atmosphere` group instead of the `…/r10m/aot\|wvp` array so titiler can open them (`assets=AOT_10m\|variables=/r10m:aot`). Suffix-based ⇒ host-agnostic and idempotent; an asset is rewritten only when both hrefs match, unrecognised hrefs are logged and skipped; never touches `SCL_20m` ([titiler-eopf#163](https://github.com/EOPF-Explorer/titiler-eopf/issues/163)) |
 
 ## `stamp_expires` (backfill retention expiry)
 

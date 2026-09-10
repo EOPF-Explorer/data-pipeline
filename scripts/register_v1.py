@@ -813,6 +813,36 @@ def consolidate_reflectance_assets(item: Item, geozarr_url: str) -> None:
     )
 
 
+# S2 L2A assets whose source href points at a Zarr *array* (quality/atmosphere/r10m/aot).
+# titiler's GeoZarrReader opens every asset as a DataTree, so an array href 500s;
+# the parent group opens fine and the client picks the variable with
+# `assets=AOT_10m|variables=/r10m:aot`. SCL is deliberately absent: its group
+# lacks the spatial/proj attrs until the data-model fix lands (titiler-eopf#163).
+_ATMOSPHERE_GROUP = "quality/atmosphere"
+_ATMOSPHERE_ASSET_KEYS = ("AOT_10m", "WVP_10m")
+
+
+def repoint_group_assets(item: Item, geozarr_url: str, collection: str) -> None:
+    """Point S2 AOT/WVP assets at their parent Zarr group so titiler can open them.
+
+    Only touches assets already rewritten to the output store (step 2): an item whose
+    assets still point at the source must not be made to look converted.
+    """
+    if not collection.lower().startswith(("sentinel-2", "sentinel2")):
+        return
+    store = s3_to_https(geozarr_url)
+    repointed = 0
+    for key in _ATMOSPHERE_ASSET_KEYS:
+        asset = item.assets.get(key)
+        if asset is None or not (asset.href or "").startswith(f"{store}/"):
+            continue
+        asset.href = f"{store}/{_ATMOSPHERE_GROUP}"
+        asset.media_type = "application/vnd.zarr; version=3"
+        repointed += 1
+    if repointed > 0:
+        logger.info(f"   🔗 Repointed {repointed} asset(s) to the {_ATMOSPHERE_GROUP} group")
+
+
 # === Registration Workflow ===
 
 
@@ -902,6 +932,11 @@ def run_registration(
 
     # 7. Remove XArray integration fields (ADR-111 compliance)
     remove_xarray_integration(item)
+
+    # 7b. Point AOT/WVP at their zarr group (array hrefs are unreadable by titiler).
+    # After step 6 so the projection probe still opens the array it opens today, and
+    # before step 8 so the S3 alternate is derived from the group href.
+    repoint_group_assets(item, geozarr_url, collection)
 
     # 8. Add alternate S3 URLs to assets (alternate-assets + storage extensions)
     # This also queries and adds storage:tier to each asset's alternate
