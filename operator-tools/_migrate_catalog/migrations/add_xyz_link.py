@@ -21,7 +21,9 @@ def _xyz_title(item: dict[str, Any], links: list[dict[str, Any]]) -> str:
     for link in links:
         if link.get("rel") == "viewer" and link.get("title"):
             return str(link["title"])
-    render = item.get("properties", {}).get("renders", {}).get("rgb", {})
+    # Item root first — see align_visualization_links; data-model #216 moved `renders` there.
+    renders = item.get("renders") or item.get("properties", {}).get("renders", {})
+    render = renders.get("rgb", {}) if isinstance(renders, dict) else {}
     if isinstance(render, dict) and render.get("title"):
         return str(render["title"])
     return "XYZ tile template"

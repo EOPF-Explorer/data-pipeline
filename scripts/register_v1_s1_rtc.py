@@ -29,6 +29,7 @@ from register_v1 import (
     add_store_link,
     add_thumbnail_asset,
     add_visualization_links,
+    renders_blocks,
     s3_to_https,
     upsert_item,
     warm_thumbnail_cache,
@@ -39,6 +40,9 @@ from stac_link_titles import ACQUISITIONS_FILTER_TITLE
 log = logging.getLogger(__name__)
 
 SAT_EXT = "https://stac-extensions.github.io/sat/v1.0.0/schema.json"
+
+# Suffix of the orbit-keyed γ⁰ asset names the builder emits (gamma0-rtc-backscatter-asc/-desc).
+_ORBIT_SHORT = {"ascending": "asc", "descending": "desc"}
 
 # Coverage-based preview-slice selection (Slice / pick_slice / slice_coverages) now lives in the
 # eopf_geozarr.stac.s1_rtc library — imported above and used by _pin_preview_to_best_recent below.
@@ -51,13 +55,26 @@ def _reorient_item_to_orbit(item: dict, orbit: str) -> None:
     metadata needs adjusting for the default preview: ``sat:orbit_state`` and the ``renders.rgb``
     expression. The builder omits ``sat:orbit_state`` on a dual-orbit cube, so set it (and declare the
     SAT extension) for the chosen preview slice. No asset-href rewrite is needed any more.
+
+    Rewrites EVERY copy of ``renders`` (item root and data-model's temporary ``properties``
+    mirror): updating one and leaving the other would ship two different orbits in one item. Today
+    the builder hands both names the same dict, so this is idempotent — but that is an
+    implementation detail of the builder, not a guarantee.
+
+    ``assets`` moves with the expression. data-model #216 added it to every render (the render
+    extension's one required field) and it names ONE orbit's γ⁰ asset, so reorienting the
+    expression alone leaves the item advertising the other orbit's asset. Only rewritten when
+    present: the pre-#216 builder emits no ``assets``, and inventing one here is the library's job.
     """
     props = item["properties"]
     props["sat:orbit_state"] = orbit
-    rgb = props.get("renders", {}).get("rgb")
-    if rgb is not None:
-        vv, vh = f"/{orbit}:vv", f"/{orbit}:vh"
-        rgb["expression"] = f"{vv};{vh};({vv})/({vh})"
+    vv, vh = f"/{orbit}:vv", f"/{orbit}:vh"
+    for renders in renders_blocks(item):
+        rgb = renders.get("rgb")
+        if isinstance(rgb, dict):
+            rgb["expression"] = f"{vv};{vh};({vv})/({vh})"
+            if "assets" in rgb:
+                rgb["assets"] = [f"gamma0-rtc-backscatter-{_ORBIT_SHORT[orbit]}"]
     exts = item.setdefault("stac_extensions", [])
     if SAT_EXT not in exts:
         exts.append(SAT_EXT)
