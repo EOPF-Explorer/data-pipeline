@@ -169,3 +169,116 @@ def test_time_index_picks_nearest():
     native = xr.Dataset(coords={"time": ("time", times)})
     assert m.time_index(native, "2026-06-07") == 1
     assert m.time_index(native, "2026-06-05T06:09:07") == 0
+
+
+# --- Structural drift classification -----------------------------------------
+#
+# The error dicts below were captured from real pydantic runs against real stores: one built by the
+# currently pinned writer (data-model 9ede8c3) and one with `time` stripped from the overview levels
+# (the shape of a cube written before data-model #192, i.e. the published archive).
+
+# Pre-#216 model rejecting the writer's own coordinate arrays. Before `time` joined the tolerated
+# names, these five made every current-generation store report FAIL.
+_EXTRA_FORBIDDEN = [
+    {
+        "type": "extra_forbidden",
+        "loc": ("members", "descending", "members", lvl, "members", "time"),
+        "msg": "Extra inputs are not permitted",
+    }
+    for lvl in ("r20m", "r60m", "r120m", "r360m", "r720m")
+]
+
+# v0.11.0 model on a pre-#192 cube: no `time` at the overview levels.
+_MISSING_TIME = [
+    {
+        "type": "value_error",
+        "loc": ("members", "descending", "members", lvl),
+        "msg": (
+            "Value error, Overview resolution dataset must contain coordinate arrays ['time'] "
+            "(expected ['time', 'x', 'y', 'spatial_ref']; see data-model #192)"
+        ),
+    }
+    for lvl in ("r20m", "r60m", "r120m", "r360m", "r720m")
+]
+
+# Pre-#216 writers wrote only `spatial_ref` into a conditions group, never `x`/`y`.
+_MISSING_CONDITION_COORDS = [
+    {
+        "type": "value_error",
+        "loc": ("members", "descending", "members", "conditions"),
+        "msg": (
+            "Value error, Conditions group must contain coordinate arrays ['x', 'y'] "
+            "(expected ['x', 'y', 'spatial_ref']; see data-model #192)"
+        ),
+    }
+]
+
+# Same wording, NOT drift: a native level without coordinates has no georeferencing at all —
+# rioxarray opens it with an identity transform and TiTiler renders it in the wrong place.
+_NO_GEOREFERENCING = [
+    {
+        "type": "value_error",
+        "loc": ("members", "descending", "members", "r10m"),
+        "msg": (
+            "Value error, Native resolution dataset must contain coordinate arrays "
+            "['x', 'y', 'spatial_ref'] (expected ['time', 'x', 'y', 'spatial_ref']; "
+            "see data-model #192)"
+        ),
+    }
+]
+
+_REAL_DEFECT = [
+    {
+        "type": "value_error",
+        "loc": ("members", "descending", "members", "r10m"),
+        "msg": "Value error, Native resolution dataset must contain 'vv' array",
+    }
+]
+
+
+def test_unstamped_store_drift_warns():
+    """An unstamped (pre-#216) cube reporting only known drift is WARN, not FAIL, under either pin."""
+    m = _mod()
+    for errs in (_EXTRA_FORBIDDEN, _MISSING_TIME, _MISSING_CONDITION_COORDS):
+        c = m.classify_structural_errors(errs, stamped=False)
+        assert c.level == m.Level.WARN
+        assert "known coord drift" in c.detail
+
+
+def test_stamped_store_gets_no_tolerance():
+    """`eopf:writer_schema` means the writer emits all of this — the same errors are then real."""
+    m = _mod()
+    for errs in (_EXTRA_FORBIDDEN, _MISSING_TIME, _MISSING_CONDITION_COORDS):
+        assert m.classify_structural_errors(errs, stamped=True).level == m.Level.FAIL
+
+
+def test_missing_native_coordinates_is_never_drift():
+    """The library uses one wording for four group kinds; only two of them are archive drift.
+
+    A substring match on "must contain coordinate arrays" also swallows the native-level failure —
+    a store with no georeferencing at all — and passes it as WARN on every unstamped cube, which is
+    the entire published archive.
+    """
+    m = _mod()
+    assert m.classify_structural_errors(_NO_GEOREFERENCING, stamped=False).level == m.Level.FAIL
+
+
+def test_stamp_read_from_root_attrs():
+    """The stamp is an int at the store root; anything else (absent, a string) reads as unstamped."""
+    m = _mod()
+
+    class _Root:
+        def __init__(self, attrs):
+            self.attrs = attrs
+
+    assert m._is_stamped(_Root({"eopf:writer_schema": 2}))
+    assert not m._is_stamped(_Root({}))
+    assert not m._is_stamped(_Root({"eopf:writer_schema": "2"}))
+
+
+def test_real_defect_fails_even_unstamped():
+    """Tolerating archive drift must not blind the gate to an actually broken store."""
+    m = _mod()
+    c = m.classify_structural_errors(_MISSING_TIME + _REAL_DEFECT, stamped=False)
+    assert c.level == m.Level.FAIL
+    assert "1 error(s)" in c.detail

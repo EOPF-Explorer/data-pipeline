@@ -133,27 +133,79 @@ def validate_dataset(ds: xr.Dataset) -> list[Check]:
 # --- store I/O + structural check (integration; exercised in main) ----------
 
 
+# Structural drift the PUBLISHED archive is known to carry — WARN, not FAIL. Two shapes, both from
+# stores written before data-model #216:
+#   * `extra_forbidden` on a level's coordinate arrays. The pre-#216 model closes the overview
+#     members over the data variables only, so the writer's own `x`/`y`/`time`/`spatial_ref` are
+#     rejected on a store that is in fact correct. (`time` was missing from this list, which is why
+#     every current-generation store reported FAIL: 5 errors, one per overview level.) data-model
+#     #261 fixed the model, so these disappear once the pin moves.
+#   * two exact coordinate-check failures. The library raises the same "must contain coordinate
+#     arrays" wording for FOUR different group kinds, and only these two are archive drift:
+#     an overview level missing `time` (written before #192, so datetime `.sel` cannot resolve at
+#     the coarse levels TiTiler previews from), and a conditions group missing `x`/`y` (the pre-#216
+#     writer only wrote `spatial_ref` there; re-running `ingest-s1-conditions` backfills them).
+#     Matching that wording as a SUBSTRING would also swallow "Native resolution dataset must
+#     contain coordinate arrays ['x', 'y', 'spatial_ref']" — a cube with no georeferencing at all,
+#     which rioxarray opens with an identity transform and TiTiler renders in the wrong place. That
+#     must stay FAIL, so these are matched in full.
+_KNOWN_DRIFT_COORDS = ("x", "y", "time", "spatial_ref")
+_KNOWN_DRIFT_MESSAGES = (
+    "Overview resolution dataset must contain coordinate arrays ['time']",
+    "Conditions group must contain coordinate arrays ['x', 'y']",
+)
+
+# Written at store creation from data-model #216 on. Its presence means the store came from a
+# generation that emits every coordinate array the model asks for — so nothing above is tolerated
+# and any validation error is a real defect. Absent = pre-#216 cube, i.e. the published archive.
+_WRITER_SCHEMA_ATTR = "eopf:writer_schema"
+
+
+def _is_known_drift(err: dict) -> bool:
+    """Is this validation error the published archive's known pre-#216 drift?"""
+    if err["type"] == "extra_forbidden":
+        return bool(err["loc"]) and err["loc"][-1] in _KNOWN_DRIFT_COORDS
+    if err["type"] != "value_error":
+        return False
+    msg = err.get("msg", "")
+    return any(known in msg for known in _KNOWN_DRIFT_MESSAGES)
+
+
+def _is_stamped(root: Any) -> bool:
+    """Was this store written by a #216-or-later writer (root carries `eopf:writer_schema`)?"""
+    return isinstance(root.attrs.get(_WRITER_SCHEMA_ATTR), int)
+
+
+def classify_structural_errors(errs: list[dict], *, stamped: bool) -> Check:
+    """Turn pydantic's errors into a Check: known pre-#216 drift → WARN, anything else → FAIL."""
+    drift: list[dict] = []
+    real: list[dict] = []
+    for e in errs:
+        (real if stamped or not _is_known_drift(e) else drift).append(e)
+    if real:
+        detail = "; ".join("/".join(map(str, e["loc"])) for e in real[:5])
+        return Check(Level.FAIL, "Strict schema (S1RtcRoot)", f"{len(real)} error(s): {detail}")
+    return Check(
+        Level.WARN,
+        "Strict schema (S1RtcRoot)",
+        f"pre-#216 store, {len(drift)} known coord drift error(s) — "
+        "re-ingest or run the conformance migration",
+    )
+
+
 def check_structural(root: Any) -> Check:
-    """Validate a store root against the S1RtcRoot model; known x/y/spatial_ref drift → WARN."""
+    """Validate a store root against the S1RtcRoot model; known pre-#216 drift → WARN."""
     try:
         from eopf_geozarr.data_api.s1_rtc import S1RtcRoot
         from pydantic import ValidationError
     except Exception as exc:  # noqa: BLE001  -- optional dep; degrade to WARN
         return Check(Level.WARN, "Strict schema (S1RtcRoot)", f"unavailable: {exc}")
+    stamped = _is_stamped(root)
     try:
         S1RtcRoot.from_zarr(root)
         return Check(Level.PASS, "Strict schema (S1RtcRoot)", "validates")
     except ValidationError as exc:
-        known = ("x", "y", "spatial_ref")
-        errs = exc.errors()
-        drift = [
-            e for e in errs if e["type"] == "extra_forbidden" and e["loc"] and e["loc"][-1] in known
-        ]
-        real = [e for e in errs if e not in drift]
-        if real:
-            detail = "; ".join("/".join(map(str, e["loc"])) for e in real[:5])
-            return Check(Level.FAIL, "Strict schema (S1RtcRoot)", f"{len(real)} error(s): {detail}")
-        return Check(Level.WARN, "Strict schema (S1RtcRoot)", f"known coord drift ({len(drift)})")
+        return classify_structural_errors(exc.errors(), stamped=stamped)
 
 
 def _open_root(store: str) -> Any:
