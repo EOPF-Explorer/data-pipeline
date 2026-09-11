@@ -219,13 +219,17 @@ class TestRepointAtmosphereAssets:
         for key in ("AOT_10m", "WVP_10m"):
             assert result["assets"][key]["href"] == f"{_S2_STORE}/"
 
-    def test_rewrites_alternate_s3_href_alongside(self):
-        result = repoint_atmosphere_assets(_atmosphere_item())
+    def test_leaves_alternate_s3_href_on_the_array(self):
+        """Only `href` moves. `alternate.s3.href` is what `s3_item_cleanup` and
+        `update_stac_storage_tier` consume, and they want the narrowest accurate
+        prefix — the store root would list the whole store and report MIXED."""
+        item = _atmosphere_item()
+        result = repoint_atmosphere_assets(item)
         assert result is not None
         for key in ("AOT_10m", "WVP_10m"):
             s3 = result["assets"][key]["alternate"]["s3"]
-            assert s3["href"] == f"{_S2_STORE_S3}/"
-            # Sibling storage fields survive the rewrite
+            assert s3["href"] == item["assets"][key]["alternate"]["s3"]["href"]
+            assert "/quality/atmosphere/r10m/" in s3["href"]
             assert s3["storage:scheme"]["tier"] == "STANDARD"
 
     def test_keeps_other_asset_fields(self):
@@ -293,23 +297,23 @@ class TestRepointAtmosphereAssets:
         assert result["assets"]["WVP_10m"]["href"] == f"{_S2_STORE}/"
         assert "S2B_T32TQR/AOT_10m" in caplog.text and "r20m/aot" in caplog.text
 
-    def test_asset_is_all_or_nothing_across_href_and_alternate(self):
-        # href matches but the alternate does not: neither is touched, so the two
-        # hrefs never end up at different depths (cleanup prefers the alternate).
+    def test_an_unrelated_alternate_is_never_disturbed(self):
+        # The alternate is out of scope entirely, whatever it points at.
         item = _atmosphere_item()
         item["assets"]["AOT_10m"]["alternate"]["s3"]["href"] = f"{_S2_STORE_S3}/somewhere/else"
-        item["assets"].pop("WVP_10m")
-        assert repoint_atmosphere_assets(item) is None
+        result = repoint_atmosphere_assets(item)
+        assert result is not None
+        s3 = result["assets"]["AOT_10m"]["alternate"]["s3"]
+        assert s3["href"] == f"{_S2_STORE_S3}/somewhere/else"
 
     def test_carries_forward_an_href_left_at_the_group(self):
         # An item repointed by the earlier revision of this migration stopped at the
-        # unopenable group; both it and its alternate must reach the store root.
+        # unopenable group; it must reach the store root.
         item = _atmosphere_item()
         item["assets"]["AOT_10m"]["href"] = f"{_S2_STORE}/quality/atmosphere"
         result = repoint_atmosphere_assets(item)
         assert result is not None
-        s3 = result["assets"]["AOT_10m"]["alternate"]["s3"]
-        assert s3["href"] == f"{_S2_STORE_S3}/"
+        assert result["assets"]["AOT_10m"]["href"] == f"{_S2_STORE}/"
 
     def test_null_members_do_not_raise(self):
         item = _atmosphere_item()
@@ -337,6 +341,12 @@ class TestRepointAtmosphereAssets:
         prefix = "tests-output/sentinel-2-l2a/"
         urls = {result["assets"][k]["alternate"]["s3"]["href"] for k in ("AOT_10m", "WVP_10m")}
         assert check_urls_confined(urls, [(bucket, prefix)]) == []
+        # and the href, on the cleanup fallback path, must be safe too
+        roots = {
+            result["assets"][k]["href"].replace(_S2_STORE, _S2_STORE_S3)
+            for k in ("AOT_10m", "WVP_10m")
+        }
+        assert check_urls_confined(roots, [(bucket, prefix)]) == []
 
     def test_registered_in_migrations(self):
         from _migrate_catalog.migrations import MIGRATIONS

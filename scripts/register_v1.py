@@ -943,14 +943,19 @@ def run_registration(
     # 7. Remove XArray integration fields (ADR-111 compliance)
     remove_xarray_integration(item)
 
-    # 7b. Point AOT/WVP at the store root (array hrefs are unreadable by titiler).
-    # After step 6 so the projection probe still opens the array it opens today, and
-    # before step 8 so the S3 alternate is derived from the root href.
-    repoint_root_assets(item, geozarr_url, collection)
-
     # 8. Add alternate S3 URLs to assets (alternate-assets + storage extensions)
     # This also queries and adds storage:tier to each asset's alternate
     add_alternate_s3_assets(item, s3_endpoint)
+
+    # 8b. Point AOT/WVP at the store root (array hrefs are unreadable by titiler).
+    # After step 6 so the projection probe still opens the array it opens today, and
+    # deliberately *after* step 8 so `alternate.s3.href` keeps the array path: that is
+    # what the S3 tooling consumes, and it wants the narrowest accurate prefix.
+    # Deriving the alternate from the root href instead would make
+    # `update_stac_storage_tier` list the entire store twice per item and report
+    # MIXED for any straggler anywhere in it, pinning these assets to
+    # `storage:refs: ["mixed"]` and re-selecting the item on every tier-cron run.
+    repoint_root_assets(item, geozarr_url, collection)
 
     # 9. Add visualization links (viewer, xyz, tilejson)
     add_visualization_links(item, raster_api_url, collection)

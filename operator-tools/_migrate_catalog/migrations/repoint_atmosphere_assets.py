@@ -13,8 +13,7 @@ logger = logging.getLogger(__name__)
 # group alone is accepted so an item repointed by an earlier revision of this migration
 # (which stopped at `…/quality/atmosphere`, a node with no consolidated metadata and so
 # unopenable) is carried forward rather than skipped. Host-agnostic: the old bucket host
-# and the gateway host both exist in the wild, and the same rule applies to the `s3://`
-# form in alternate.s3.href.
+# and the gateway host both exist in the wild.
 _ARRAY_HREF = {
     "AOT_10m": re.compile(r"/quality/atmosphere(?:(?:/r10m)?/aot)?/?$"),
     "WVP_10m": re.compile(r"/quality/atmosphere(?:(?:/r10m)?/wvp)?/?$"),
@@ -33,40 +32,33 @@ def _transform(item: dict[str, Any]) -> bool:
         asset = assets.get(key)
         if not isinstance(asset, dict):
             continue
-        holders = [asset]
-        alternate = asset.get("alternate")
-        if isinstance(alternate, dict) and isinstance(alternate.get("s3"), dict):
-            holders.append(alternate["s3"])
-
-        # All-or-nothing per asset: href and alternate.s3.href must never end up at
-        # different depths (s3_item_cleanup prefers the alternate).
-        rewrites = []
-        for holder in holders:
-            href = holder.get("href")
-            if not isinstance(href, str) or href.rstrip("/").endswith(_STORE_ROOT_SUFFIX):
-                continue  # absent, or already at the store root
-            if not array_href.search(href):
-                logger.warning(
-                    "Skipping %s/%s: unrecognised href %r", item.get("id", "unknown"), key, href
-                )
-                break
-            # Strip to the store root *with* its trailing slash. A bare `…/X.zarr`
-            # is rejected by `s3_item_cleanup.check_urls_confined` as
-            # `bare_zarr_store`, which would hard-abort `manage_collections clean`
-            # for the whole batch and stall the purge drain.
-            rewrites.append((holder, array_href.sub("/", href)))
-        else:
-            for holder, href in rewrites:
-                holder["href"] = href
-                changed = True
+        # Only `href` moves. `alternate.s3.href` stays on the array, because it is
+        # what the S3 tooling consumes and it wants the narrowest accurate prefix:
+        # `s3_item_cleanup` reads it in preference to `href` (and never reads `href`
+        # here, which is https, not s3://), and `update_stac_storage_tier` samples
+        # storage class under it — pointing it at the store root would list the whole
+        # store per item and report MIXED for a straggler anywhere in it.
+        href = asset.get("href")
+        if not isinstance(href, str) or href.rstrip("/").endswith(_STORE_ROOT_SUFFIX):
+            continue  # absent, or already at the store root
+        if not array_href.search(href):
+            logger.warning(
+                "Skipping %s/%s: unrecognised href %r", item.get("id", "unknown"), key, href
+            )
+            continue
+        # Strip to the store root *with* its trailing slash: a bare `…/X.zarr` is
+        # rejected by `s3_item_cleanup.check_urls_confined` as `bare_zarr_store`
+        # on the fallback path.
+        asset["href"] = array_href.sub("/", href)
+        changed = True
 
     return changed
 
 
 @migration(
     "repoint_atmosphere_assets",
-    "Point S2 L2A AOT_10m/WVP_10m hrefs (and alternate.s3.href) at the store root "
-    "instead of the r10m array so titiler can open them",
+    "Point S2 L2A AOT_10m/WVP_10m hrefs at the store root instead of the r10m array "
+    "so titiler can open them; alternate.s3.href is left on the array",
 )
 def repoint_atmosphere_assets(item: dict[str, Any]) -> dict[str, Any] | None:
     """Repoint AOT_10m/WVP_10m from a Zarr array to the store root.
@@ -86,8 +78,11 @@ def repoint_atmosphere_assets(item: dict[str, Any]) -> dict[str, Any] | None:
     Idempotent by construction: once the suffix is stripped the href ends at the
     ``.zarr`` root and is skipped, so a second pass returns ``None``. An asset whose
     href is neither an array nor the group is logged and left alone (visible in
-    ``--dry-run``), and an asset is rewritten only when *both* its href and its S3
-    alternate can be. ``SCL_20m`` is intentionally untouched — its group lacks the
+    ``--dry-run``). ``alternate.s3.href`` is deliberately out of scope: it is what
+    ``s3_item_cleanup`` (which prefers it over ``href``) and
+    ``update_stac_storage_tier`` consume, and both want the narrowest accurate
+    prefix — the store root would list the whole store per item and report MIXED
+    for a straggler anywhere in it. ``SCL_20m`` is intentionally untouched — its group lacks the
     spatial/proj attrs until data-model#262 lands, and repointing it early turns the
     whole item ``/info`` into a 500.
 

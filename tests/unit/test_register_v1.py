@@ -539,8 +539,10 @@ def _s2_source_item_dict() -> dict:
     }
 
 
-def test_run_registration_derives_s3_alternate_from_root_href(monkeypatch) -> None:
-    """The repoint runs before add_alternate_s3_assets, so alternate.s3.href follows it."""
+def test_run_registration_keeps_the_array_s3_alternate(monkeypatch) -> None:
+    """The repoint runs AFTER add_alternate_s3_assets, so alternate.s3.href keeps the
+    array path while href moves to the store root — the S3 tooling wants the narrow
+    prefix, titiler wants the root."""
     import register_v1
 
     resp = MagicMock()
@@ -569,7 +571,10 @@ def test_run_registration_derives_s3_alternate_from_root_href(monkeypatch) -> No
 
     item = upsert.call_args.args[2]
     root = "bucket/prefix/sentinel-2-l2a/SRC_ITEM.zarr"
-    for key in ("AOT_10m", "WVP_10m"):
+    for key, var in (("AOT_10m", "aot"), ("WVP_10m", "wvp")):
         asset = item.assets[key]
         assert asset.href == f"https://s3.explorer.eopf.copernicus.eu/{root}/"
-        assert asset.extra_fields["alternate"]["s3"]["href"] == f"s3://{root}/"
+        assert (
+            asset.extra_fields["alternate"]["s3"]["href"]
+            == f"s3://{root}/quality/atmosphere/r10m/{var}"
+        )
