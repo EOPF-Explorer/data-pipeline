@@ -9,14 +9,11 @@ logger = logging.getLogger(__name__)
 
 # Href suffix to strip so the asset lands on the store root. Both cpm_v262 and cpm_v270
 # put the 10 m array under r10m/ (tests/unit/test_prestage_source.py:107); the bare form
-# names the same variable in the same group, so it is accepted too. The optional trailing
-# group alone is accepted so an item repointed by an earlier revision of this migration
-# (which stopped at `…/quality/atmosphere`, a node with no consolidated metadata and so
-# unopenable) is carried forward rather than skipped. Host-agnostic: the old bucket host
-# and the gateway host both exist in the wild.
+# names the same variable in the same group, so it is accepted too. Host-agnostic: the
+# old bucket host and the gateway host both exist in the wild.
 _ARRAY_HREF = {
-    "AOT_10m": re.compile(r"/quality/atmosphere(?:(?:/r10m)?/aot)?/?$"),
-    "WVP_10m": re.compile(r"/quality/atmosphere(?:(?:/r10m)?/wvp)?/?$"),
+    "AOT_10m": re.compile(r"/quality/atmosphere(?:/r10m)?/aot/?$"),
+    "WVP_10m": re.compile(r"/quality/atmosphere(?:/r10m)?/wvp/?$"),
 }
 # A store root ends at the `.zarr` node; reaching it means the item is already migrated.
 _STORE_ROOT_SUFFIX = ".zarr"
@@ -100,7 +97,7 @@ def repoint_atmosphere_assets(item: dict[str, Any]) -> dict[str, Any] | None:
 
     Idempotent by construction: once the suffix is stripped the href ends at the
     ``.zarr`` root and is skipped, so a second pass returns ``None``. An asset whose
-    href is neither an array nor the group is logged and left alone (visible in
+    href is not one of the recognised array layouts is logged and left alone (visible in
     ``--dry-run``). ``alternate.s3.href`` is deliberately out of scope: it is what
     ``s3_item_cleanup`` (which prefers it over ``href``) and
     ``update_stac_storage_tier`` consume, and both want the narrowest accurate

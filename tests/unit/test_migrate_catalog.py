@@ -308,15 +308,6 @@ class TestRepointAtmosphereAssets:
         s3 = result["assets"]["AOT_10m"]["alternate"]["s3"]
         assert s3["href"] == f"{_S2_STORE_S3}/somewhere/else"
 
-    def test_carries_forward_an_href_left_at_the_group(self):
-        # An item repointed by the earlier revision of this migration stopped at the
-        # unopenable group; it must reach the store root.
-        item = _atmosphere_item()
-        item["assets"]["AOT_10m"]["href"] = f"{_S2_STORE}/quality/atmosphere"
-        result = repoint_atmosphere_assets(item)
-        assert result is not None
-        assert result["assets"]["AOT_10m"]["href"] == f"{_S2_STORE}/"
-
     def test_null_members_do_not_raise(self):
         # Malformed alternates are skipped (no narrow S3 pointer), never crash.
         item = _atmosphere_item()
