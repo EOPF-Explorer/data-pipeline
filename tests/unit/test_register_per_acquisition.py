@@ -109,6 +109,33 @@ def test_render_links_point_at_cube_endpoint_with_sel_datetime() -> None:
     assert xyz_hrefs == [links["xyz"]]
 
 
+def test_render_read_from_the_item_root() -> None:
+    """The render config is read from the item ROOT, where data-model #216 puts it.
+
+    `properties["renders"]["rgb"]` was subscripted directly, so an item carrying `renders` only at
+    the root — which is what data-model emits once the temporary `properties` mirror is dropped —
+    was a hard KeyError mid-decoration.
+    """
+    item = _acq_item()
+    item.extra_fields["renders"] = item.properties.pop("renders")
+    d = rpa.decorate_acquisition_item(
+        item, tile_id="31TCH", cube_collection=CUBE, raster_api=RASTER, stac_api_url=STAC
+    )
+    href = _links(d)["tilejson"]
+    assert "expression=" in href
+    assert _SEL in href
+
+
+def test_render_missing_raises_a_named_error() -> None:
+    """No renders anywhere is a build bug, not a decoration bug — say which item."""
+    item = _acq_item()
+    item.properties.pop("renders")
+    with pytest.raises(ValueError, match="renders.rgb"):
+        rpa.decorate_acquisition_item(
+            item, tile_id="31TCH", cube_collection=CUBE, raster_api=RASTER, stac_api_url=STAC
+        )
+
+
 def test_xyz_link_shape() -> None:
     """The xyz link carries the literal {z}/{x}/{y} template (catches f-string escaping bugs),
     is image/png, ordered right after tilejson, and shares tilejson's exact query."""

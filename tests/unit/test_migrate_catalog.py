@@ -244,6 +244,15 @@ class TestAddXyzLink:
         xyz = next(lk for lk in result["links"] if lk["rel"] == "xyz")
         assert xyz["title"] == "VV, VH, VV/VH composite"
 
+    def test_title_from_renders_at_the_item_root(self):
+        """data-model #216 moved `renders` to the item root; reading `properties` alone loses it."""
+        item = _item_with_tilejson(render_title="VV, VH, VV/VH composite")
+        item["renders"] = item["properties"].pop("renders")
+        result = add_xyz_link(item)
+        assert result is not None
+        xyz = next(lk for lk in result["links"] if lk["rel"] == "xyz")
+        assert xyz["title"] == "VV, VH, VV/VH composite"
+
     def test_title_fallback_when_no_viewer_or_renders(self):
         result = add_xyz_link(_item_with_tilejson())
         assert result is not None
@@ -389,6 +398,15 @@ class TestAlignVisualizationLinks:
     def test_skips_item_without_renders(self):
         item = {"id": "s2", "properties": {}, "links": _nav_links(), "assets": {}}
         assert align_visualization_links(item) is None
+
+    def test_reads_renders_from_the_item_root(self):
+        """Without the root read this silently reports "nothing to align" for every item."""
+        item = _old_acq_item()
+        item["renders"] = item["properties"].pop("renders")
+        result = align_visualization_links(item)
+        assert result is not None
+        by_rel = {lk["rel"]: lk for lk in result["links"]}
+        assert by_rel["viewer"]["title"] == "VV, VH, VV/VH composite"
 
     def test_retitles_even_when_xyz_absent(self):
         item = _old_acq_item()

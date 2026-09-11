@@ -180,17 +180,38 @@ def add_projection_from_zarr(item: Item) -> None:
 _PREFERRED_RENDERS = ("rgb", "visual", "thumbnail", "default")
 
 
+def renders_blocks(item: Item | dict) -> list[dict]:
+    """Every live copy of an item's ``renders`` block, item root first.
+
+    The render extension puts ``renders`` at the item ROOT — its Item branch requires it on the
+    item object, not in ``properties``. data-model moved it there (#216) and still writes a
+    temporary duplicate under ``properties`` so consumers pinned to the old location keep working.
+    Reading the root first survives the mirror's removal; still reading ``properties`` keeps the
+    items registered before the move readable. Returning *every* copy also lets a caller that
+    rewrites a render update both, so the two can never disagree.
+
+    Accepts a pystac ``Item`` (root fields land in ``extra_fields``) or a raw item dict.
+    """
+    sources = (
+        (item.extra_fields, item.properties)
+        if isinstance(item, Item)
+        else (item, item.get("properties") or {})
+    )
+    return [r for src in sources if isinstance(r := src.get("renders"), dict) and r]
+
+
 def _select_render(item: Item) -> dict | None:
     """Return the preferred render config from a render-extension ``renders`` dict.
 
-    Items built with the render extension carry ``properties.renders`` mapping a
-    render name to a config (expression/variables, rescale, bidx, ...). This lets
-    the data producer own the visualization rather than hardcoding it here.
+    Items built with the render extension carry a ``renders`` block mapping a render
+    name to a config (expression/variables, rescale, bidx, ...). This lets the data
+    producer own the visualization rather than hardcoding it here.
     Returns ``None`` when no usable renders are present.
     """
-    renders = item.properties.get("renders")
-    if not isinstance(renders, dict) or not renders:
+    blocks = renders_blocks(item)
+    if not blocks:
         return None
+    renders = blocks[0]
     candidates = [renders.get(name) for name in _PREFERRED_RENDERS]
     candidates.append(next(iter(renders.values())))
     for candidate in candidates:

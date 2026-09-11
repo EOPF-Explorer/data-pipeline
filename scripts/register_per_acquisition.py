@@ -27,7 +27,7 @@ import urllib.parse
 import stac_auth
 from eopf_geozarr.stac.s1_rtc import build_s1_rtc_per_acquisition_items
 from pystac import Item
-from register_v1 import EXPLORER_BASE, _render_to_query
+from register_v1 import EXPLORER_BASE, _render_to_query, renders_blocks
 from stac_link_titles import ACQUISITIONS_FILTER_TITLE, PARENT_DATACUBE_TITLE
 
 # Per-acquisition collections are env-split like the cube collections (…-tests/-staging/-prod). The
@@ -35,10 +35,10 @@ from stac_link_titles import ACQUISITIONS_FILTER_TITLE, PARENT_DATACUBE_TITLE
 DEFAULT_ACQ_COLLECTION = "sentinel-1-grd-rtc-acquisitions-tests"
 
 # Item *construction* — one item per cube `time` slice, oriented to its orbit, carrying the orbit's γ⁰
-# asset + a `renders.rgb` whose rescale (0.0,0.2) the builder now emits — lives in
+# asset + a `renders.rgb` whose per-band rescale the builder emits — lives in
 # eopf_geozarr.stac.s1_rtc.build_s1_rtc_per_acquisition_items. This script adds only the deployment
 # decoration (render/`via` links + thumbnail at the cube endpoint, `store` link, S3 alternates) and
-# upserts. The old in-pipeline apply_s1_rtc_rescale override is gone (the builder emits 0.0,0.2).
+# upserts. The old in-pipeline apply_s1_rtc_rescale override is gone (the builder owns the stretch).
 
 
 def _cube_item_base(raster_api: str, cube_collection: str, tile_id: str) -> str:
@@ -129,7 +129,12 @@ def decorate_acquisition_item(
     d = item.to_dict(include_self_link=False)
     item_id = d["id"]
     collection = d.get("collection", "")
-    render = d["properties"]["renders"]["rgb"]
+    # Item root first, `properties` mirror second — see register_v1.renders_blocks. Subscripting
+    # `properties` directly was a hard KeyError the moment data-model moved `renders` to the root.
+    blocks = renders_blocks(d)
+    if not blocks or not isinstance(blocks[0].get("rgb"), dict):
+        raise ValueError(f"per-acquisition item {item_id!r} carries no renders.rgb")
+    render = blocks[0]["rgb"]
     # Mirror the cube's link conventions (register_v1.add_visualization_links) so both item types
     # render an identical "Additional Resources" section in STAC Browser: order
     # store→viewer→tilejson→xyz, viewer/xyz titled by the render composite, tilejson "TileJSON for {id}".
