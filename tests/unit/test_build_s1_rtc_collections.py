@@ -180,8 +180,12 @@ def test_collection_render_tracks_the_builder():
 
     rgb = b._collection_render()["rgb"]
     upstream = _rgb_render(b._COLLECTION_RENDER_ORBIT)
-    # `assets` is collection-only (items carry real assets); every other key is upstream's.
-    assert {k: v for k, v in rgb.items() if k != "assets"} == upstream
+    # `assets` differs by design — the collection names both orbits' γ⁰ assets, an item names the
+    # one it renders — so drop it from BOTH sides. Stripping it from ours alone was fine only while
+    # upstream omitted it; data-model #216 added `assets` to every render (it is the render
+    # extension's one required field), after which the two dicts could never compare equal.
+    upstream_no_assets = {k: v for k, v in upstream.items() if k != "assets"}
+    assert {k: v for k, v in rgb.items() if k != "assets"} == upstream_no_assets
     assert rgb["assets"] == ["gamma0-rtc-backscatter-asc", "gamma0-rtc-backscatter-desc"]
     # One stretch per band: titiler applies a lone pair to all three, saturating the VV/VH ratio.
     assert len(rgb["rescale"]) == len(rgb["expression"].split(";"))
