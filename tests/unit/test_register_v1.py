@@ -21,7 +21,8 @@ from register_v1 import (  # noqa: E402
     add_expires,
     add_thumbnail_asset,
     add_visualization_links,
-    repoint_group_assets,
+    https_to_s3,
+    repoint_root_assets,
     resolve_exclude_ids,
     resolve_retention_days,
     upsert_item,
@@ -447,43 +448,43 @@ def _atmosphere_item() -> Item:
 
 
 class TestRepointGroupAssets:
-    """repoint_group_assets points AOT/WVP at the store root."""
+    """repoint_root_assets points AOT/WVP at the store root."""
 
     def test_rewrites_href_and_media_type(self) -> None:
         item = _atmosphere_item()
-        repoint_group_assets(item, _GEOZARR, "sentinel-2-l2a")
+        repoint_root_assets(item, _GEOZARR, "sentinel-2-l2a")
         for key in ("AOT_10m", "WVP_10m"):
             asset = item.assets[key]
-            assert asset.href == _GEOZARR_HTTPS
+            assert asset.href == f"{_GEOZARR_HTTPS}/"
             assert asset.media_type == "application/vnd.zarr; version=3"
 
     def test_keeps_other_asset_fields(self) -> None:
         item = _atmosphere_item()
-        repoint_group_assets(item, _GEOZARR, "sentinel-2-l2a")
+        repoint_root_assets(item, _GEOZARR, "sentinel-2-l2a")
         assert item.assets["AOT_10m"].roles == ["data"]
         assert item.assets["AOT_10m"].extra_fields["gsd"] == 10
 
     def test_leaves_scl_alone(self) -> None:
         item = _atmosphere_item()
         scl_href = item.assets["SCL_20m"].href
-        repoint_group_assets(item, _GEOZARR, "sentinel-2-l2a")
+        repoint_root_assets(item, _GEOZARR, "sentinel-2-l2a")
         assert item.assets["SCL_20m"].href == scl_href
 
     def test_skips_items_without_the_assets(self) -> None:
         item = _expires_item()
-        repoint_group_assets(item, _GEOZARR, "sentinel-2-l2a")
+        repoint_root_assets(item, _GEOZARR, "sentinel-2-l2a")
         assert item.assets == {}
 
     def test_idempotent(self) -> None:
         item = _atmosphere_item()
-        repoint_group_assets(item, _GEOZARR, "sentinel-2-l2a")
-        repoint_group_assets(item, _GEOZARR, "sentinel-2-l2a")
-        assert item.assets["AOT_10m"].href == _GEOZARR_HTTPS
+        repoint_root_assets(item, _GEOZARR, "sentinel-2-l2a")
+        repoint_root_assets(item, _GEOZARR, "sentinel-2-l2a")
+        assert item.assets["AOT_10m"].href == f"{_GEOZARR_HTTPS}/"
 
     def test_skips_non_sentinel2_collections(self) -> None:
         item = _atmosphere_item()
         before = item.assets["AOT_10m"].href
-        repoint_group_assets(item, _GEOZARR, "sentinel-1-grd-rtc")
+        repoint_root_assets(item, _GEOZARR, "sentinel-1-grd-rtc")
         assert item.assets["AOT_10m"].href == before
 
     def test_skips_assets_still_on_the_source_href(self) -> None:
@@ -492,13 +493,24 @@ class TestRepointGroupAssets:
         item = _atmosphere_item()
         source = "https://objects.eodc.eu/x/SRC.zarr/quality/atmosphere/r10m/aot"
         item.assets["AOT_10m"].href = source
-        repoint_group_assets(item, _GEOZARR, "sentinel-2-l2a")
+        repoint_root_assets(item, _GEOZARR, "sentinel-2-l2a")
         assert item.assets["AOT_10m"].href == source
-        assert item.assets["WVP_10m"].href == _GEOZARR_HTTPS
+        assert item.assets["WVP_10m"].href == f"{_GEOZARR_HTTPS}/"
+
+    def test_href_survives_the_s3_delete_confinement_guard(self) -> None:
+        """A bare `…/X.zarr` href is rejected as `bare_zarr_store`, which would make
+        every S2 item permanently undeletable by the retention cron."""
+        from s3_item_cleanup import check_urls_confined
+
+        item = _atmosphere_item()
+        repoint_root_assets(item, _GEOZARR, "sentinel-2-l2a")
+        urls = {https_to_s3(item.assets[k].href) or "" for k in ("AOT_10m", "WVP_10m")}
+        allowed = [("esa-zarr-sentinel-explorer-fra", "tests-output/sentinel-2-l2a/")]
+        assert check_urls_confined(urls, allowed) == []
 
     def test_logs_at_info(self, caplog: pytest.LogCaptureFixture) -> None:
         with caplog.at_level("INFO", logger="register_v1"):
-            repoint_group_assets(_atmosphere_item(), _GEOZARR, "sentinel-2-l2a")
+            repoint_root_assets(_atmosphere_item(), _GEOZARR, "sentinel-2-l2a")
         assert "Repointed 2 asset(s)" in caplog.text
 
 
@@ -559,5 +571,5 @@ def test_run_registration_derives_s3_alternate_from_root_href(monkeypatch) -> No
     root = "bucket/prefix/sentinel-2-l2a/SRC_ITEM.zarr"
     for key in ("AOT_10m", "WVP_10m"):
         asset = item.assets[key]
-        assert asset.href == f"https://s3.explorer.eopf.copernicus.eu/{root}"
-        assert asset.extra_fields["alternate"]["s3"]["href"] == f"s3://{root}"
+        assert asset.href == f"https://s3.explorer.eopf.copernicus.eu/{root}/"
+        assert asset.extra_fields["alternate"]["s3"]["href"] == f"s3://{root}/"

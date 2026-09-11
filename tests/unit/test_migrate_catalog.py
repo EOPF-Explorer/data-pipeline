@@ -217,14 +217,14 @@ class TestRepointAtmosphereAssets:
         result = repoint_atmosphere_assets(_atmosphere_item())
         assert result is not None
         for key in ("AOT_10m", "WVP_10m"):
-            assert result["assets"][key]["href"] == _S2_STORE
+            assert result["assets"][key]["href"] == f"{_S2_STORE}/"
 
     def test_rewrites_alternate_s3_href_alongside(self):
         result = repoint_atmosphere_assets(_atmosphere_item())
         assert result is not None
         for key in ("AOT_10m", "WVP_10m"):
             s3 = result["assets"][key]["alternate"]["s3"]
-            assert s3["href"] == _S2_STORE_S3
+            assert s3["href"] == f"{_S2_STORE_S3}/"
             # Sibling storage fields survive the rewrite
             assert s3["storage:scheme"]["tier"] == "STANDARD"
 
@@ -246,7 +246,7 @@ class TestRepointAtmosphereAssets:
     def test_works_without_alternate(self):
         result = repoint_atmosphere_assets(_atmosphere_item(with_alternate=False))
         assert result is not None
-        assert result["assets"]["AOT_10m"]["href"] == _S2_STORE
+        assert result["assets"]["AOT_10m"]["href"] == f"{_S2_STORE}/"
         assert "alternate" not in result["assets"]["AOT_10m"]
 
     def test_host_agnostic(self):
@@ -255,7 +255,7 @@ class TestRepointAtmosphereAssets:
         item["assets"]["AOT_10m"]["href"] = f"{old_host}/quality/atmosphere/r10m/aot"
         result = repoint_atmosphere_assets(item)
         assert result is not None
-        assert result["assets"]["AOT_10m"]["href"] == old_host
+        assert result["assets"]["AOT_10m"]["href"] == f"{old_host}/"
 
     def test_returns_none_when_already_migrated(self):
         migrated = repoint_atmosphere_assets(_atmosphere_item())
@@ -280,7 +280,7 @@ class TestRepointAtmosphereAssets:
         result = repoint_atmosphere_assets(item)
         assert result is not None
         for key in ("AOT_10m", "WVP_10m"):
-            assert result["assets"][key]["href"] == _S2_STORE
+            assert result["assets"][key]["href"] == f"{_S2_STORE}/"
 
     def test_unrecognised_href_is_skipped_and_logged(self, caplog):
         item = _atmosphere_item(with_alternate=False)
@@ -290,7 +290,7 @@ class TestRepointAtmosphereAssets:
         # WVP still rewritten; AOT left alone and reported, not silently skipped
         assert result is not None
         assert result["assets"]["AOT_10m"]["href"] == item["assets"]["AOT_10m"]["href"]
-        assert result["assets"]["WVP_10m"]["href"] == _S2_STORE
+        assert result["assets"]["WVP_10m"]["href"] == f"{_S2_STORE}/"
         assert "S2B_T32TQR/AOT_10m" in caplog.text and "r20m/aot" in caplog.text
 
     def test_asset_is_all_or_nothing_across_href_and_alternate(self):
@@ -309,7 +309,7 @@ class TestRepointAtmosphereAssets:
         result = repoint_atmosphere_assets(item)
         assert result is not None
         s3 = result["assets"]["AOT_10m"]["alternate"]["s3"]
-        assert s3["href"] == _S2_STORE_S3
+        assert s3["href"] == f"{_S2_STORE_S3}/"
 
     def test_null_members_do_not_raise(self):
         item = _atmosphere_item()
@@ -318,9 +318,25 @@ class TestRepointAtmosphereAssets:
         result = repoint_atmosphere_assets(item)
         assert result is not None
         for key in ("AOT_10m", "WVP_10m"):
-            assert result["assets"][key]["href"] == _S2_STORE
+            assert result["assets"][key]["href"] == f"{_S2_STORE}/"
         assert repoint_atmosphere_assets({"id": "x", "assets": None}) is None
         assert repoint_atmosphere_assets({"id": "x", "assets": {"AOT_10m": None}}) is None
+
+    def test_rewritten_hrefs_survive_the_s3_delete_confinement_guard(self):
+        """A bare `…/X.zarr` is rejected as `bare_zarr_store` and would stall the
+        purge drain (`manage_collections clean` aborts the whole batch). The store
+        root must therefore keep its trailing slash."""
+        import sys
+
+        sys.path.insert(0, "scripts")
+        from s3_item_cleanup import check_urls_confined
+
+        result = repoint_atmosphere_assets(_atmosphere_item())
+        assert result is not None
+        bucket = "esa-zarr-sentinel-explorer-fra"
+        prefix = "tests-output/sentinel-2-l2a/"
+        urls = {result["assets"][k]["alternate"]["s3"]["href"] for k in ("AOT_10m", "WVP_10m")}
+        assert check_urls_confined(urls, [(bucket, prefix)]) == []
 
     def test_registered_in_migrations(self):
         from _migrate_catalog.migrations import MIGRATIONS

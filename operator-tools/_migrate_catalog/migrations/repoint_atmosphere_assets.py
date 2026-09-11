@@ -50,7 +50,11 @@ def _transform(item: dict[str, Any]) -> bool:
                     "Skipping %s/%s: unrecognised href %r", item.get("id", "unknown"), key, href
                 )
                 break
-            rewrites.append((holder, array_href.sub("", href)))
+            # Strip to the store root *with* its trailing slash. A bare `…/X.zarr`
+            # is rejected by `s3_item_cleanup.check_urls_confined` as
+            # `bare_zarr_store`, which would hard-abort `manage_collections clean`
+            # for the whole batch and stall the purge drain.
+            rewrites.append((holder, array_href.sub("/", href)))
         else:
             for holder, href in rewrites:
                 holder["href"] = href

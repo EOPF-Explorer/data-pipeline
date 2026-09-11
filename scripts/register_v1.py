@@ -826,7 +826,7 @@ def consolidate_reflectance_assets(item: Item, geozarr_url: str) -> None:
 _ATMOSPHERE_ASSET_KEYS = ("AOT_10m", "WVP_10m")
 
 
-def repoint_group_assets(item: Item, geozarr_url: str, collection: str) -> None:
+def repoint_root_assets(item: Item, geozarr_url: str, collection: str) -> None:
     """Point S2 AOT/WVP assets at the store root so titiler can open them.
 
     Only touches assets already rewritten to the output store (step 2): an item whose
@@ -840,7 +840,13 @@ def repoint_group_assets(item: Item, geozarr_url: str, collection: str) -> None:
         asset = item.assets.get(key)
         if asset is None or not (asset.href or "").startswith(f"{store}/"):
             continue
-        asset.href = store
+        # Trailing slash is load-bearing, not cosmetic: step 8 derives
+        # `alternate.s3.href` from this, and `s3_item_cleanup.check_urls_confined`
+        # rejects any key ending in a bare `.zarr` as `bare_zarr_store` — which would
+        # make every S2 item permanently undeletable by the retention cron. With the
+        # slash the key still contains `.zarr/`, so `_partition_by_bucket` collapses it
+        # to the store prefix exactly as the reflectance asset does today.
+        asset.href = f"{store}/"
         asset.media_type = "application/vnd.zarr; version=3"
         repointed += 1
     if repointed > 0:
@@ -937,10 +943,10 @@ def run_registration(
     # 7. Remove XArray integration fields (ADR-111 compliance)
     remove_xarray_integration(item)
 
-    # 7b. Point AOT/WVP at their zarr group (array hrefs are unreadable by titiler).
+    # 7b. Point AOT/WVP at the store root (array hrefs are unreadable by titiler).
     # After step 6 so the projection probe still opens the array it opens today, and
-    # before step 8 so the S3 alternate is derived from the group href.
-    repoint_group_assets(item, geozarr_url, collection)
+    # before step 8 so the S3 alternate is derived from the root href.
+    repoint_root_assets(item, geozarr_url, collection)
 
     # 8. Add alternate S3 URLs to assets (alternate-assets + storage extensions)
     # This also queries and adds storage:tier to each asset's alternate
