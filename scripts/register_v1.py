@@ -814,16 +814,20 @@ def consolidate_reflectance_assets(item: Item, geozarr_url: str) -> None:
 
 
 # S2 L2A assets whose source href points at a Zarr *array* (quality/atmosphere/r10m/aot).
-# titiler's GeoZarrReader opens every asset as a DataTree, so an array href 500s;
-# the parent group opens fine and the client picks the variable with
-# `assets=AOT_10m|variables=/r10m:aot`. SCL is deliberately absent: its group
-# lacks the spatial/proj attrs until the data-model fix lands (titiler-eopf#163).
-_ATMOSPHERE_GROUP = "quality/atmosphere"
+# titiler's GeoZarrReader opens every asset as a DataTree with no fallback to the store
+# root (titiler/eopf/reader.py:168), so the href must name a node carrying consolidated
+# metadata — over HTTP there is no listing, and a group is only discoverable through its
+# own `consolidated_metadata`. The converter consolidates exactly two nodes, the store
+# root and measurements/reflectance (eopf-geozarr s2_optimization/s2_converter.py:322,325),
+# so `quality/atmosphere` is NOT openable and only the root is. Hence: point the asset at
+# the root and let the client select with `assets=AOT_10m|variables=/quality/atmosphere/r10m:aot`.
+# SCL is deliberately absent: its group lacks the spatial/proj attrs until data-model#262
+# lands (titiler-eopf#163).
 _ATMOSPHERE_ASSET_KEYS = ("AOT_10m", "WVP_10m")
 
 
 def repoint_group_assets(item: Item, geozarr_url: str, collection: str) -> None:
-    """Point S2 AOT/WVP assets at their parent Zarr group so titiler can open them.
+    """Point S2 AOT/WVP assets at the store root so titiler can open them.
 
     Only touches assets already rewritten to the output store (step 2): an item whose
     assets still point at the source must not be made to look converted.
@@ -836,11 +840,11 @@ def repoint_group_assets(item: Item, geozarr_url: str, collection: str) -> None:
         asset = item.assets.get(key)
         if asset is None or not (asset.href or "").startswith(f"{store}/"):
             continue
-        asset.href = f"{store}/{_ATMOSPHERE_GROUP}"
+        asset.href = store
         asset.media_type = "application/vnd.zarr; version=3"
         repointed += 1
     if repointed > 0:
-        logger.info(f"   🔗 Repointed {repointed} asset(s) to the {_ATMOSPHERE_GROUP} group")
+        logger.info(f"   🔗 Repointed {repointed} asset(s) to the store root")
 
 
 # === Registration Workflow ===

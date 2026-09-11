@@ -447,14 +447,14 @@ def _atmosphere_item() -> Item:
 
 
 class TestRepointGroupAssets:
-    """repoint_group_assets points AOT/WVP at the quality/atmosphere group."""
+    """repoint_group_assets points AOT/WVP at the store root."""
 
     def test_rewrites_href_and_media_type(self) -> None:
         item = _atmosphere_item()
         repoint_group_assets(item, _GEOZARR, "sentinel-2-l2a")
         for key in ("AOT_10m", "WVP_10m"):
             asset = item.assets[key]
-            assert asset.href == f"{_GEOZARR_HTTPS}/quality/atmosphere"
+            assert asset.href == _GEOZARR_HTTPS
             assert asset.media_type == "application/vnd.zarr; version=3"
 
     def test_keeps_other_asset_fields(self) -> None:
@@ -478,7 +478,7 @@ class TestRepointGroupAssets:
         item = _atmosphere_item()
         repoint_group_assets(item, _GEOZARR, "sentinel-2-l2a")
         repoint_group_assets(item, _GEOZARR, "sentinel-2-l2a")
-        assert item.assets["AOT_10m"].href == f"{_GEOZARR_HTTPS}/quality/atmosphere"
+        assert item.assets["AOT_10m"].href == _GEOZARR_HTTPS
 
     def test_skips_non_sentinel2_collections(self) -> None:
         item = _atmosphere_item()
@@ -494,7 +494,7 @@ class TestRepointGroupAssets:
         item.assets["AOT_10m"].href = source
         repoint_group_assets(item, _GEOZARR, "sentinel-2-l2a")
         assert item.assets["AOT_10m"].href == source
-        assert item.assets["WVP_10m"].href == f"{_GEOZARR_HTTPS}/quality/atmosphere"
+        assert item.assets["WVP_10m"].href == _GEOZARR_HTTPS
 
     def test_logs_at_info(self, caplog: pytest.LogCaptureFixture) -> None:
         with caplog.at_level("INFO", logger="register_v1"):
@@ -527,7 +527,7 @@ def _s2_source_item_dict() -> dict:
     }
 
 
-def test_run_registration_derives_s3_alternate_from_group_href(monkeypatch) -> None:
+def test_run_registration_derives_s3_alternate_from_root_href(monkeypatch) -> None:
     """The repoint runs before add_alternate_s3_assets, so alternate.s3.href follows it."""
     import register_v1
 
@@ -556,8 +556,8 @@ def test_run_registration_derives_s3_alternate_from_group_href(monkeypatch) -> N
     )
 
     item = upsert.call_args.args[2]
-    group = "bucket/prefix/sentinel-2-l2a/SRC_ITEM.zarr/quality/atmosphere"
+    root = "bucket/prefix/sentinel-2-l2a/SRC_ITEM.zarr"
     for key in ("AOT_10m", "WVP_10m"):
         asset = item.assets[key]
-        assert asset.href == f"https://s3.explorer.eopf.copernicus.eu/{group}"
-        assert asset.extra_fields["alternate"]["s3"]["href"] == f"s3://{group}"
+        assert asset.href == f"https://s3.explorer.eopf.copernicus.eu/{root}"
+        assert asset.extra_fields["alternate"]["s3"]["href"] == f"s3://{root}"

@@ -7,16 +7,20 @@ from _migrate_catalog.types import apply_item_transform
 
 logger = logging.getLogger(__name__)
 
-_GROUP_SUFFIX = "/quality/atmosphere"
-# Array-level href each asset was registered with. Both cpm_v262 and cpm_v270 put the
-# 10 m array under r10m/ (tests/unit/test_prestage_source.py:107); the bare form names
-# the same variable in the same group, so it is accepted too. Host-agnostic: the old
-# bucket host and the gateway host both exist in the wild, and the same rule applies
-# to the `s3://` form in alternate.s3.href.
+# Href suffix to strip so the asset lands on the store root. Both cpm_v262 and cpm_v270
+# put the 10 m array under r10m/ (tests/unit/test_prestage_source.py:107); the bare form
+# names the same variable in the same group, so it is accepted too. The optional trailing
+# group alone is accepted so an item repointed by an earlier revision of this migration
+# (which stopped at `…/quality/atmosphere`, a node with no consolidated metadata and so
+# unopenable) is carried forward rather than skipped. Host-agnostic: the old bucket host
+# and the gateway host both exist in the wild, and the same rule applies to the `s3://`
+# form in alternate.s3.href.
 _ARRAY_HREF = {
-    "AOT_10m": re.compile(r"/quality/atmosphere(?:/r10m)?/aot/?$"),
-    "WVP_10m": re.compile(r"/quality/atmosphere(?:/r10m)?/wvp/?$"),
+    "AOT_10m": re.compile(r"/quality/atmosphere(?:(?:/r10m)?/aot)?/?$"),
+    "WVP_10m": re.compile(r"/quality/atmosphere(?:(?:/r10m)?/wvp)?/?$"),
 }
+# A store root ends at the `.zarr` node; reaching it means the item is already migrated.
+_STORE_ROOT_SUFFIX = ".zarr"
 
 
 def _transform(item: dict[str, Any]) -> bool:
@@ -39,14 +43,14 @@ def _transform(item: dict[str, Any]) -> bool:
         rewrites = []
         for holder in holders:
             href = holder.get("href")
-            if not isinstance(href, str) or href.rstrip("/").endswith(_GROUP_SUFFIX):
-                continue  # absent, or already at the group
+            if not isinstance(href, str) or href.rstrip("/").endswith(_STORE_ROOT_SUFFIX):
+                continue  # absent, or already at the store root
             if not array_href.search(href):
                 logger.warning(
                     "Skipping %s/%s: unrecognised href %r", item.get("id", "unknown"), key, href
                 )
                 break
-            rewrites.append((holder, array_href.sub(_GROUP_SUFFIX, href)))
+            rewrites.append((holder, array_href.sub("", href)))
         else:
             for holder, href in rewrites:
                 holder["href"] = href
@@ -57,26 +61,31 @@ def _transform(item: dict[str, Any]) -> bool:
 
 @migration(
     "repoint_atmosphere_assets",
-    "Point S2 L2A AOT_10m/WVP_10m hrefs (and alternate.s3.href) at the quality/atmosphere "
-    "group instead of the r10m array so titiler can open them",
+    "Point S2 L2A AOT_10m/WVP_10m hrefs (and alternate.s3.href) at the store root "
+    "instead of the r10m array so titiler can open them",
 )
 def repoint_atmosphere_assets(item: dict[str, Any]) -> dict[str, Any] | None:
-    """Repoint AOT_10m/WVP_10m from a Zarr array to its parent group.
+    """Repoint AOT_10m/WVP_10m from a Zarr array to the store root.
 
-    titiler's GeoZarrReader opens every asset as a DataTree, so an href ending in
-    ``…/quality/atmosphere/r10m/aot`` fails (``/assets/AOT_10m/info`` 500s and
-    ``/info?assets=AOT_10m`` silently returns ``{}``). The parent group
-    ``…/quality/atmosphere`` opens and exposes ``/r10m:aot``, ``/r10m:wvp``, … as
-    variables, so the fix is STAC-only: point the asset at the group and let the
-    client select with ``assets=AOT_10m|variables=/r10m:aot``.
+    titiler's GeoZarrReader opens every asset as a DataTree and never falls back to
+    the store root, so an href ending in ``…/quality/atmosphere/r10m/aot`` fails
+    (``/assets/AOT_10m/info`` 500s and ``/info?assets=AOT_10m`` silently returns
+    ``{}``). The parent group does not work either: over HTTP a group is only
+    discoverable through its own ``consolidated_metadata``, and the converter writes
+    that for exactly two nodes — the store root and ``measurements/reflectance``
+    (eopf-geozarr ``s2_optimization/s2_converter.py:322,325``). Opening
+    ``…/quality/atmosphere`` therefore yields an empty tree. The store root does
+    carry it and exposes ``/quality/atmosphere/r10m:aot``, ``…:wvp``, … as variables,
+    so the fix is STAC-only: point the asset at the root and let the client select
+    with ``assets=AOT_10m|variables=/quality/atmosphere/r10m:aot``.
 
-    Idempotent by construction: once the suffix is stripped it no longer matches,
-    so a second pass returns ``None``. An asset whose href is neither an array nor
-    the group is logged and left alone (visible in ``--dry-run``), and an asset is
-    rewritten only when *both* its href and its S3 alternate can be. ``SCL_20m`` is
-    intentionally untouched — its group lacks the spatial/proj attrs until the
-    data-model fix lands, and repointing it early turns the whole item ``/info``
-    into a 500.
+    Idempotent by construction: once the suffix is stripped the href ends at the
+    ``.zarr`` root and is skipped, so a second pass returns ``None``. An asset whose
+    href is neither an array nor the group is logged and left alone (visible in
+    ``--dry-run``), and an asset is rewritten only when *both* its href and its S3
+    alternate can be. ``SCL_20m`` is intentionally untouched — its group lacks the
+    spatial/proj attrs until data-model#262 lands, and repointing it early turns the
+    whole item ``/info`` into a 500.
 
     See: https://github.com/EOPF-Explorer/titiler-eopf/issues/163
     """

@@ -213,18 +213,18 @@ def _atmosphere_item(with_alternate: bool = True) -> dict:
 
 
 class TestRepointAtmosphereAssets:
-    def test_rewrites_href_to_group(self):
+    def test_rewrites_href_to_store_root(self):
         result = repoint_atmosphere_assets(_atmosphere_item())
         assert result is not None
         for key in ("AOT_10m", "WVP_10m"):
-            assert result["assets"][key]["href"] == f"{_S2_STORE}/quality/atmosphere"
+            assert result["assets"][key]["href"] == _S2_STORE
 
     def test_rewrites_alternate_s3_href_alongside(self):
         result = repoint_atmosphere_assets(_atmosphere_item())
         assert result is not None
         for key in ("AOT_10m", "WVP_10m"):
             s3 = result["assets"][key]["alternate"]["s3"]
-            assert s3["href"] == f"{_S2_STORE_S3}/quality/atmosphere"
+            assert s3["href"] == _S2_STORE_S3
             # Sibling storage fields survive the rewrite
             assert s3["storage:scheme"]["tier"] == "STANDARD"
 
@@ -246,7 +246,7 @@ class TestRepointAtmosphereAssets:
     def test_works_without_alternate(self):
         result = repoint_atmosphere_assets(_atmosphere_item(with_alternate=False))
         assert result is not None
-        assert result["assets"]["AOT_10m"]["href"] == f"{_S2_STORE}/quality/atmosphere"
+        assert result["assets"]["AOT_10m"]["href"] == _S2_STORE
         assert "alternate" not in result["assets"]["AOT_10m"]
 
     def test_host_agnostic(self):
@@ -255,7 +255,7 @@ class TestRepointAtmosphereAssets:
         item["assets"]["AOT_10m"]["href"] = f"{old_host}/quality/atmosphere/r10m/aot"
         result = repoint_atmosphere_assets(item)
         assert result is not None
-        assert result["assets"]["AOT_10m"]["href"] == f"{old_host}/quality/atmosphere"
+        assert result["assets"]["AOT_10m"]["href"] == old_host
 
     def test_returns_none_when_already_migrated(self):
         migrated = repoint_atmosphere_assets(_atmosphere_item())
@@ -280,7 +280,7 @@ class TestRepointAtmosphereAssets:
         result = repoint_atmosphere_assets(item)
         assert result is not None
         for key in ("AOT_10m", "WVP_10m"):
-            assert result["assets"][key]["href"] == f"{_S2_STORE}/quality/atmosphere"
+            assert result["assets"][key]["href"] == _S2_STORE
 
     def test_unrecognised_href_is_skipped_and_logged(self, caplog):
         item = _atmosphere_item(with_alternate=False)
@@ -290,7 +290,7 @@ class TestRepointAtmosphereAssets:
         # WVP still rewritten; AOT left alone and reported, not silently skipped
         assert result is not None
         assert result["assets"]["AOT_10m"]["href"] == item["assets"]["AOT_10m"]["href"]
-        assert result["assets"]["WVP_10m"]["href"] == f"{_S2_STORE}/quality/atmosphere"
+        assert result["assets"]["WVP_10m"]["href"] == _S2_STORE
         assert "S2B_T32TQR/AOT_10m" in caplog.text and "r20m/aot" in caplog.text
 
     def test_asset_is_all_or_nothing_across_href_and_alternate(self):
@@ -301,13 +301,15 @@ class TestRepointAtmosphereAssets:
         item["assets"].pop("WVP_10m")
         assert repoint_atmosphere_assets(item) is None
 
-    def test_heals_alternate_left_behind_at_the_array(self):
+    def test_carries_forward_an_href_left_at_the_group(self):
+        # An item repointed by the earlier revision of this migration stopped at the
+        # unopenable group; both it and its alternate must reach the store root.
         item = _atmosphere_item()
         item["assets"]["AOT_10m"]["href"] = f"{_S2_STORE}/quality/atmosphere"
         result = repoint_atmosphere_assets(item)
         assert result is not None
         s3 = result["assets"]["AOT_10m"]["alternate"]["s3"]
-        assert s3["href"] == f"{_S2_STORE_S3}/quality/atmosphere"
+        assert s3["href"] == _S2_STORE_S3
 
     def test_null_members_do_not_raise(self):
         item = _atmosphere_item()
@@ -316,7 +318,7 @@ class TestRepointAtmosphereAssets:
         result = repoint_atmosphere_assets(item)
         assert result is not None
         for key in ("AOT_10m", "WVP_10m"):
-            assert result["assets"][key]["href"] == f"{_S2_STORE}/quality/atmosphere"
+            assert result["assets"][key]["href"] == _S2_STORE
         assert repoint_atmosphere_assets({"id": "x", "assets": None}) is None
         assert repoint_atmosphere_assets({"id": "x", "assets": {"AOT_10m": None}}) is None
 
