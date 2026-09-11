@@ -247,14 +247,16 @@ class TestRepointAtmosphereAssets:
         assert result["assets"]["SCL_20m"] == item["assets"]["SCL_20m"]
         assert result["assets"]["reflectance"] == item["assets"]["reflectance"]
 
-    def test_works_without_alternate(self):
-        result = repoint_atmosphere_assets(_atmosphere_item(with_alternate=False))
-        assert result is not None
-        assert result["assets"]["AOT_10m"]["href"] == f"{_S2_STORE}/"
-        assert "alternate" not in result["assets"]["AOT_10m"]
+    def test_skips_assets_without_an_s3_alternate(self, caplog):
+        """No alternate means no narrow S3 pointer, and `update_stac_storage_tier
+        --add-missing` would later derive one from the store-root href — listing the
+        whole store and stamping `storage:refs: ["mixed"]`. Leave the item alone."""
+        with caplog.at_level("WARNING"):
+            assert repoint_atmosphere_assets(_atmosphere_item(with_alternate=False)) is None
+        assert "no alternate.s3.href" in caplog.text
 
     def test_host_agnostic(self):
-        item = _atmosphere_item(with_alternate=False)
+        item = _atmosphere_item()
         old_host = "https://esa-zarr-sentinel-explorer-fra.s3.de.io.cloud.ovh.net/x/y.zarr"
         item["assets"]["AOT_10m"]["href"] = f"{old_host}/quality/atmosphere/r10m/aot"
         result = repoint_atmosphere_assets(item)
@@ -278,7 +280,7 @@ class TestRepointAtmosphereAssets:
         assert item["assets"]["AOT_10m"]["href"] == original_href
 
     def test_accepts_bare_and_trailing_slash_layouts(self):
-        item = _atmosphere_item(with_alternate=False)
+        item = _atmosphere_item()
         item["assets"]["AOT_10m"]["href"] = f"{_S2_STORE}/quality/atmosphere/aot"
         item["assets"]["WVP_10m"]["href"] = f"{_S2_STORE}/quality/atmosphere/r10m/wvp/"
         result = repoint_atmosphere_assets(item)
@@ -287,7 +289,7 @@ class TestRepointAtmosphereAssets:
             assert result["assets"][key]["href"] == f"{_S2_STORE}/"
 
     def test_unrecognised_href_is_skipped_and_logged(self, caplog):
-        item = _atmosphere_item(with_alternate=False)
+        item = _atmosphere_item()
         item["assets"]["AOT_10m"]["href"] = f"{_S2_STORE}/quality/atmosphere/r20m/aot"
         with caplog.at_level("WARNING"):
             result = repoint_atmosphere_assets(item)
@@ -316,13 +318,11 @@ class TestRepointAtmosphereAssets:
         assert result["assets"]["AOT_10m"]["href"] == f"{_S2_STORE}/"
 
     def test_null_members_do_not_raise(self):
+        # Malformed alternates are skipped (no narrow S3 pointer), never crash.
         item = _atmosphere_item()
         item["assets"]["AOT_10m"]["alternate"] = None
         item["assets"]["WVP_10m"]["alternate"] = {"s3": "not-a-dict"}
-        result = repoint_atmosphere_assets(item)
-        assert result is not None
-        for key in ("AOT_10m", "WVP_10m"):
-            assert result["assets"][key]["href"] == f"{_S2_STORE}/"
+        assert repoint_atmosphere_assets(item) is None
         assert repoint_atmosphere_assets({"id": "x", "assets": None}) is None
         assert repoint_atmosphere_assets({"id": "x", "assets": {"AOT_10m": None}}) is None
 
@@ -330,9 +330,6 @@ class TestRepointAtmosphereAssets:
         """A bare `…/X.zarr` is rejected as `bare_zarr_store` and would stall the
         purge drain (`manage_collections clean` aborts the whole batch). The store
         root must therefore keep its trailing slash."""
-        import sys
-
-        sys.path.insert(0, "scripts")
         from s3_item_cleanup import check_urls_confined
 
         result = repoint_atmosphere_assets(_atmosphere_item())
@@ -347,6 +344,17 @@ class TestRepointAtmosphereAssets:
             for k in ("AOT_10m", "WVP_10m")
         }
         assert check_urls_confined(roots, [(bucket, prefix)]) == []
+
+    def test_refuses_to_strip_an_href_with_no_zarr_root(self, caplog):
+        """A non-zarr / source-store layout matches on suffix alone and would be
+        mangled into `…/product/` and written back."""
+        item = _atmosphere_item()
+        item["assets"]["AOT_10m"]["href"] = "https://host/x/product/quality/atmosphere/r10m/aot"
+        with caplog.at_level("WARNING"):
+            result = repoint_atmosphere_assets(item)
+        assert result is not None  # WVP still migrates
+        assert result["assets"]["AOT_10m"]["href"] == item["assets"]["AOT_10m"]["href"]
+        assert "does not strip to a .zarr store root" in caplog.text
 
     def test_registered_in_migrations(self):
         from _migrate_catalog.migrations import MIGRATIONS

@@ -821,8 +821,12 @@ def consolidate_reflectance_assets(item: Item, geozarr_url: str) -> None:
 # root and measurements/reflectance (eopf-geozarr s2_optimization/s2_converter.py:322,325),
 # so `quality/atmosphere` is NOT openable and only the root is. Hence: point the asset at
 # the root and let the client select with `assets=AOT_10m|variables=/quality/atmosphere/r10m:aot`.
-# SCL is deliberately absent: its group lacks the spatial/proj attrs until data-model#262
-# lands (titiler-eopf#163).
+# SCL is deliberately absent, and the reason survives the move to the root: verified
+# 2026-09-11 against a prod store, the reader exposes `/quality/atmosphere/r10m` with
+# real bounds (so AOT/WVP georeference through the root today) but omits
+# `/conditions/mask/l2a_classification/r20m` entirely — `get_bounds` raises "does not
+# have spatial attributes". SCL is unrenderable wherever its href points until
+# data-model#262 writes the geo metadata (titiler-eopf#163).
 _ATMOSPHERE_ASSET_KEYS = ("AOT_10m", "WVP_10m")
 
 
@@ -840,12 +844,14 @@ def repoint_root_assets(item: Item, geozarr_url: str, collection: str) -> None:
         asset = item.assets.get(key)
         if asset is None or not (asset.href or "").startswith(f"{store}/"):
             continue
-        # Trailing slash is load-bearing, not cosmetic: step 8 derives
-        # `alternate.s3.href` from this, and `s3_item_cleanup.check_urls_confined`
-        # rejects any key ending in a bare `.zarr` as `bare_zarr_store` — which would
-        # make every S2 item permanently undeletable by the retention cron. With the
-        # slash the key still contains `.zarr/`, so `_partition_by_bucket` collapses it
-        # to the store prefix exactly as the reflectance asset does today.
+        # Trailing slash is load-bearing, not cosmetic. `s3_item_cleanup` prefers
+        # `alternate.s3.href` but falls back to this href whenever it is an `s3://`
+        # URL, and `check_urls_confined` rejects any key ending in a bare `.zarr` as
+        # `bare_zarr_store` — which would make the item undeletable by the retention
+        # cron. With the slash the key still contains `.zarr/`, so
+        # `_partition_by_bucket` collapses it to the store prefix exactly as the
+        # reflectance asset does. (Step 8 no longer derives the alternate from this
+        # href — 8b runs after it, on purpose; see the call site.)
         asset.href = f"{store}/"
         asset.media_type = "application/vnd.zarr; version=3"
         repointed += 1

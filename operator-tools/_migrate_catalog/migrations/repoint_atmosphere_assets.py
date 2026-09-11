@@ -38,18 +38,41 @@ def _transform(item: dict[str, Any]) -> bool:
         # here, which is https, not s3://), and `update_stac_storage_tier` samples
         # storage class under it — pointing it at the store root would list the whole
         # store per item and report MIXED for a straggler anywhere in it.
+        item_id = item.get("id", "unknown")
         href = asset.get("href")
         if not isinstance(href, str) or href.rstrip("/").endswith(_STORE_ROOT_SUFFIX):
             continue  # absent, or already at the store root
         if not array_href.search(href):
+            logger.warning("Skipping %s/%s: unrecognised href %r", item_id, key, href)
+            continue
+
+        # An asset with no `alternate.s3.href` has no narrow S3 pointer to fall back
+        # on, and `update_stac_storage_tier --add-missing` would later derive one
+        # from this href (`update_stac_storage_tier.py:244`) — i.e. from the store
+        # root, listing the whole store per asset and stamping
+        # `storage:refs: ["mixed"]` for any straggler in it. Leave those items alone
+        # and say so, rather than trading a titiler fix for a tiering regression.
+        alternate = asset.get("alternate")
+        s3 = alternate.get("s3") if isinstance(alternate, dict) else None
+        if not (isinstance(s3, dict) and isinstance(s3.get("href"), str)):
             logger.warning(
-                "Skipping %s/%s: unrecognised href %r", item.get("id", "unknown"), key, href
+                "Skipping %s/%s: no alternate.s3.href to keep the narrow S3 prefix", item_id, key
             )
             continue
+
         # Strip to the store root *with* its trailing slash: a bare `…/X.zarr` is
         # rejected by `s3_item_cleanup.check_urls_confined` as `bare_zarr_store`
         # on the fallback path.
-        asset["href"] = array_href.sub("/", href)
+        root = array_href.sub("/", href)
+        # The regex matches on suffix alone, so a non-zarr or source-store layout
+        # (`…/product/quality/atmosphere/r10m/aot`) would otherwise be mangled into
+        # `…/product/` and written back. Only ever land on a `.zarr` root.
+        if not root.rstrip("/").endswith(_STORE_ROOT_SUFFIX):
+            logger.warning(
+                "Skipping %s/%s: %r does not strip to a .zarr store root", item_id, key, href
+            )
+            continue
+        asset["href"] = root
         changed = True
 
     return changed
@@ -82,9 +105,11 @@ def repoint_atmosphere_assets(item: dict[str, Any]) -> dict[str, Any] | None:
     ``s3_item_cleanup`` (which prefers it over ``href``) and
     ``update_stac_storage_tier`` consume, and both want the narrowest accurate
     prefix — the store root would list the whole store per item and report MIXED
-    for a straggler anywhere in it. ``SCL_20m`` is intentionally untouched — its group lacks the
-    spatial/proj attrs until data-model#262 lands, and repointing it early turns the
-    whole item ``/info`` into a 500.
+    for a straggler anywhere in it. ``SCL_20m`` is intentionally untouched, and that
+    still holds at the root: the reader exposes ``/quality/atmosphere/r10m`` with real
+    bounds but omits ``/conditions/mask/l2a_classification/r20m``, which has no
+    spatial attrs until data-model#262 lands. SCL is unrenderable wherever its href
+    points, so repointing it early only turns a silent skip into a 500.
 
     See: https://github.com/EOPF-Explorer/titiler-eopf/issues/163
     """
