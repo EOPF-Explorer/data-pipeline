@@ -321,6 +321,8 @@ BASELAYER_COLLECTIONS = [
     "sentinel-1-grd-rtc-acquisitions-staging.json",
     "sentinel-2-l2a.json",
     "sentinel-2-l2a-staging.json",
+    "sentinel-2-l2a-samples-zarr3.json",
+    "sentinel-2-l2a-samples-zarr3-ovh.json",
 ]
 
 
@@ -365,7 +367,12 @@ def test_attribution_present_and_nonempty(filename: str) -> None:
 # --- Sentinel-2 L2A eodash collection metadata (issue #206) ------------------
 
 # Collections that must carry the eodash GeoZarr layer metadata.
-EODASH_COLLECTIONS = ["sentinel-2-l2a.json", "sentinel-2-l2a-staging.json"]
+EODASH_COLLECTIONS = [
+    "sentinel-2-l2a.json",
+    "sentinel-2-l2a-staging.json",
+    "sentinel-2-l2a-samples-zarr3.json",
+    "sentinel-2-l2a-samples-zarr3-ovh.json",
+]
 
 STYLE_HREF = (
     "https://raw.githubusercontent.com/EOPF-Explorer/eodash-assets/"
@@ -453,6 +460,8 @@ RASTERFORM_BASE = (
 EXPECTED_RASTERFORMS = {
     "sentinel-2-l2a.json": RASTERFORM_BASE + "bandsform.json",
     "sentinel-2-l2a-staging.json": RASTERFORM_BASE + "bandsform.json",
+    "sentinel-2-l2a-samples-zarr3.json": RASTERFORM_BASE + "bandsform.json",
+    "sentinel-2-l2a-samples-zarr3-ovh.json": RASTERFORM_BASE + "bandsform.json",
     "sentinel-1-grd-rtc-acquisitions-staging.json": RASTERFORM_BASE + "s1-bandsform.json",
 }
 
