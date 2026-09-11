@@ -11,6 +11,7 @@ from _migrate_catalog.migrations.add_xyz_link import add_xyz_link
 from _migrate_catalog.migrations.align_visualization_links import align_visualization_links
 from _migrate_catalog.migrations.fix_url_encoding import fix_url_encoding
 from _migrate_catalog.migrations.fix_zarr_media_type import fix_zarr_media_type
+from _migrate_catalog.migrations.repoint_atmosphere_assets import repoint_atmosphere_assets
 from _migrate_catalog.runner import STACMigrationRunner, compose_migrations
 from _migrate_catalog.types import MigrationResult
 
@@ -176,6 +177,180 @@ class TestFixZarrMediaType:
         assert result1 is not None
         result2 = fix_zarr_media_type(result1)
         assert result2 is None
+
+
+_S2_STORE = "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-2-l2a/S2B_T32TQR.zarr"
+_S2_STORE_S3 = "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-2-l2a/S2B_T32TQR.zarr"
+
+
+def _atmosphere_item(with_alternate: bool = True) -> dict:
+    """An S2 L2A item as registered today: AOT/WVP point at the r10m arrays."""
+    assets: dict = {
+        "reflectance": {
+            "href": f"{_S2_STORE}/measurements/reflectance",
+            "type": "application/vnd.zarr; version=3; profile=multiscales",
+        },
+        "SCL_20m": {
+            "href": f"{_S2_STORE}/conditions/mask/l2a_classification/r20m/scl",
+            "type": "application/vnd.zarr; version=3",
+        },
+    }
+    for key, var in (("AOT_10m", "aot"), ("WVP_10m", "wvp")):
+        assets[key] = {
+            "href": f"{_S2_STORE}/quality/atmosphere/r10m/{var}",
+            "type": "application/vnd.zarr; version=3",
+            "gsd": 10,
+            "roles": ["data"],
+        }
+        if with_alternate:
+            assets[key]["alternate"] = {
+                "s3": {
+                    "href": f"{_S2_STORE_S3}/quality/atmosphere/r10m/{var}",
+                    "storage:scheme": {"platform": "OVHcloud", "tier": "STANDARD"},
+                }
+            }
+    return {"id": "S2B_T32TQR", "assets": assets, "links": []}
+
+
+class TestRepointAtmosphereAssets:
+    def test_rewrites_href_to_store_root(self):
+        result = repoint_atmosphere_assets(_atmosphere_item())
+        assert result is not None
+        for key in ("AOT_10m", "WVP_10m"):
+            assert result["assets"][key]["href"] == f"{_S2_STORE}/"
+
+    def test_leaves_alternate_s3_href_on_the_array(self):
+        """Only `href` moves. `alternate.s3.href` is what `s3_item_cleanup` and
+        `update_stac_storage_tier` consume, and they want the narrowest accurate
+        prefix — the store root would list the whole store and report MIXED."""
+        item = _atmosphere_item()
+        result = repoint_atmosphere_assets(item)
+        assert result is not None
+        for key in ("AOT_10m", "WVP_10m"):
+            s3 = result["assets"][key]["alternate"]["s3"]
+            assert s3["href"] == item["assets"][key]["alternate"]["s3"]["href"]
+            assert "/quality/atmosphere/r10m/" in s3["href"]
+            assert s3["storage:scheme"]["tier"] == "STANDARD"
+
+    def test_keeps_other_asset_fields(self):
+        result = repoint_atmosphere_assets(_atmosphere_item())
+        assert result is not None
+        aot = result["assets"]["AOT_10m"]
+        assert aot["type"] == "application/vnd.zarr; version=3"
+        assert aot["gsd"] == 10
+        assert aot["roles"] == ["data"]
+
+    def test_never_touches_scl_or_reflectance(self):
+        item = _atmosphere_item()
+        result = repoint_atmosphere_assets(item)
+        assert result is not None
+        assert result["assets"]["SCL_20m"] == item["assets"]["SCL_20m"]
+        assert result["assets"]["reflectance"] == item["assets"]["reflectance"]
+
+    def test_skips_assets_without_an_s3_alternate(self, caplog):
+        """No alternate means no narrow S3 pointer, and `update_stac_storage_tier
+        --add-missing` would later derive one from the store-root href — listing the
+        whole store and stamping `storage:refs: ["mixed"]`. Leave the item alone."""
+        with caplog.at_level("WARNING"):
+            assert repoint_atmosphere_assets(_atmosphere_item(with_alternate=False)) is None
+        assert "no alternate.s3.href" in caplog.text
+
+    def test_host_agnostic(self):
+        item = _atmosphere_item()
+        old_host = "https://esa-zarr-sentinel-explorer-fra.s3.de.io.cloud.ovh.net/x/y.zarr"
+        item["assets"]["AOT_10m"]["href"] = f"{old_host}/quality/atmosphere/r10m/aot"
+        result = repoint_atmosphere_assets(item)
+        assert result is not None
+        assert result["assets"]["AOT_10m"]["href"] == f"{old_host}/"
+
+    def test_returns_none_when_already_migrated(self):
+        migrated = repoint_atmosphere_assets(_atmosphere_item())
+        assert migrated is not None
+        assert repoint_atmosphere_assets(migrated) is None
+
+    def test_returns_none_without_atmosphere_assets(self):
+        # S1-shaped item: no AOT/WVP keys at all
+        item = {"id": "s1-rtc-31TCG", "assets": {"vv": {"href": f"{_S2_STORE}/descending"}}}
+        assert repoint_atmosphere_assets(item) is None
+
+    def test_does_not_mutate_input(self):
+        item = _atmosphere_item()
+        original_href = item["assets"]["AOT_10m"]["href"]
+        repoint_atmosphere_assets(item)
+        assert item["assets"]["AOT_10m"]["href"] == original_href
+
+    def test_accepts_bare_and_trailing_slash_layouts(self):
+        item = _atmosphere_item()
+        item["assets"]["AOT_10m"]["href"] = f"{_S2_STORE}/quality/atmosphere/aot"
+        item["assets"]["WVP_10m"]["href"] = f"{_S2_STORE}/quality/atmosphere/r10m/wvp/"
+        result = repoint_atmosphere_assets(item)
+        assert result is not None
+        for key in ("AOT_10m", "WVP_10m"):
+            assert result["assets"][key]["href"] == f"{_S2_STORE}/"
+
+    def test_unrecognised_href_is_skipped_and_logged(self, caplog):
+        item = _atmosphere_item()
+        item["assets"]["AOT_10m"]["href"] = f"{_S2_STORE}/quality/atmosphere/r20m/aot"
+        with caplog.at_level("WARNING"):
+            result = repoint_atmosphere_assets(item)
+        # WVP still rewritten; AOT left alone and reported, not silently skipped
+        assert result is not None
+        assert result["assets"]["AOT_10m"]["href"] == item["assets"]["AOT_10m"]["href"]
+        assert result["assets"]["WVP_10m"]["href"] == f"{_S2_STORE}/"
+        assert "S2B_T32TQR/AOT_10m" in caplog.text and "r20m/aot" in caplog.text
+
+    def test_an_unrelated_alternate_is_never_disturbed(self):
+        # The alternate is out of scope entirely, whatever it points at.
+        item = _atmosphere_item()
+        item["assets"]["AOT_10m"]["alternate"]["s3"]["href"] = f"{_S2_STORE_S3}/somewhere/else"
+        result = repoint_atmosphere_assets(item)
+        assert result is not None
+        s3 = result["assets"]["AOT_10m"]["alternate"]["s3"]
+        assert s3["href"] == f"{_S2_STORE_S3}/somewhere/else"
+
+    def test_null_members_do_not_raise(self):
+        # Malformed alternates are skipped (no narrow S3 pointer), never crash.
+        item = _atmosphere_item()
+        item["assets"]["AOT_10m"]["alternate"] = None
+        item["assets"]["WVP_10m"]["alternate"] = {"s3": "not-a-dict"}
+        assert repoint_atmosphere_assets(item) is None
+        assert repoint_atmosphere_assets({"id": "x", "assets": None}) is None
+        assert repoint_atmosphere_assets({"id": "x", "assets": {"AOT_10m": None}}) is None
+
+    def test_rewritten_hrefs_survive_the_s3_delete_confinement_guard(self):
+        """A bare `…/X.zarr` is rejected as `bare_zarr_store` and would stall the
+        purge drain (`manage_collections clean` aborts the whole batch). The store
+        root must therefore keep its trailing slash."""
+        from s3_item_cleanup import check_urls_confined
+
+        result = repoint_atmosphere_assets(_atmosphere_item())
+        assert result is not None
+        bucket = "esa-zarr-sentinel-explorer-fra"
+        prefix = "tests-output/sentinel-2-l2a/"
+        urls = {result["assets"][k]["alternate"]["s3"]["href"] for k in ("AOT_10m", "WVP_10m")}
+        assert check_urls_confined(urls, [(bucket, prefix)]) == []
+        # and the href, on the cleanup fallback path, must be safe too
+        roots = {
+            result["assets"][k]["href"].replace(_S2_STORE, _S2_STORE_S3)
+            for k in ("AOT_10m", "WVP_10m")
+        }
+        assert check_urls_confined(roots, [(bucket, prefix)]) == []
+
+    def test_refuses_to_strip_an_href_with_no_zarr_root(self, caplog):
+        """A non-zarr / source-store layout matches on suffix alone and would be
+        mangled into `…/product/` and written back."""
+        item = _atmosphere_item()
+        item["assets"]["AOT_10m"]["href"] = "https://host/x/product/quality/atmosphere/r10m/aot"
+        with caplog.at_level("WARNING"):
+            result = repoint_atmosphere_assets(item)
+        assert result is not None  # WVP still migrates
+        assert result["assets"]["AOT_10m"]["href"] == item["assets"]["AOT_10m"]["href"]
+        assert "does not strip to a .zarr store root" in caplog.text
+
+    def test_registered_in_migrations(self):
+        from _migrate_catalog.migrations import MIGRATIONS
+
+        assert "repoint_atmosphere_assets" in MIGRATIONS
 
 
 _TJ_BASE = (
