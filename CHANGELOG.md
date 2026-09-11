@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.17.1 (2026-09-11)
+
+## What's Changed
+* fix(storage-tier): refuse to write back proxy-corrupted raster links by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/406
+* chore(demo): protect carbonplan/zarr-layer scene from expiry by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/414
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.17.0...v1.17.1
+
 ## 1.17.0 (2026-09-08)
 
 ## What's Changed
