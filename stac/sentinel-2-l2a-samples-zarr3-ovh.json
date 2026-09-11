@@ -1,0 +1,520 @@
+{
+  "id": "sentinel-2-l2a-samples-zarr3-ovh",
+  "type": "Collection",
+  "links": [
+    {
+      "rel": "license",
+      "href": "https://sentinel.esa.int/documents/247904/690755/Sentinel_Data_Legal_Notice",
+      "type": "application/pdf",
+      "title": "Legal notice on the use of Copernicus Sentinel Data and Service Information"
+    },
+    {
+      "rel": "cite-as",
+      "href": "https://doi.org/10.5270/S2_-znk9xsj"
+    },
+    {
+      "id": "OSM",
+      "rel": "xyz",
+      "href": "https://s2maps-tiles.eu/wmts/1.0.0/osm_3857/default/g/{z}/{y}/{x}.jpeg",
+      "type": "image/jpeg",
+      "roles": [
+        "baselayer",
+        "invisible"
+      ],
+      "title": "OSM Background",
+      "attribution": "{ OSM: Data &copy; <a href=\"http://www.openstreetmap.org/copyright\" target=\"_blank\">OpenStreetMap</a> contributors and <a href=\"https://maps.eox.at/#data\" target=\"_blank\">others</a>, Rendering &copy; <a href=\"http://eox.at\" target=\"_blank\">EOX</a> }"
+    },
+    {
+      "id": "terrain-light",
+      "rel": "xyz",
+      "href": "https://s2maps-tiles.eu/wmts/1.0.0/terrain-light_3857/default/g/{z}/{y}/{x}.jpeg",
+      "type": "image/jpeg",
+      "roles": [
+        "baselayer",
+        "visible"
+      ],
+      "title": "Terrain Light",
+      "attribution": "{ OSM: Data &copy; <a href=\"http://www.openstreetmap.org/copyright\" target=\"_blank\">OpenStreetMap</a> contributors and <a href=\"https://maps.eox.at/#data\" target=\"_blank\">others</a>, Rendering &copy; <a href=\"http://eox.at\" target=\"_blank\">EOX</a> }"
+    },
+    {
+      "id": "overlay_bright",
+      "rel": "xyz",
+      "href": "https://s2maps-tiles.eu/wmts/1.0.0/overlay_base_bright_3857/default/g/{z}/{y}/{x}.png",
+      "type": "image/png",
+      "roles": [
+        "overlay",
+        "visible"
+      ],
+      "title": "Overlay labels",
+      "attribution": "{ Overlay: Data &copy; <a href=\"http://www.openstreetmap.org/copyright\" target=\"_blank\">OpenStreetMap</a> contributors, Made with Natural Earth, Rendering &copy; <a href=\"https://eox.at\" target=\"_blank\">EOX</a> }"
+    },
+    {
+      "id": "cloudless-2024",
+      "rel": "xyz",
+      "href": "https://s2maps-tiles.eu/wmts/1.0.0/s2cloudless-2024_3857/default/g/{z}/{y}/{x}.jpeg",
+      "type": "image/jpeg",
+      "roles": [
+        "baselayer",
+        "invisible"
+      ],
+      "title": "EOxCloudless 2024",
+      "attribution": "{ EOxCloudless 2024: <a xmlns:dct=\"http://purl.org/dc/terms/\" href=\"https://s2maps.eu\" target=\"_blank\" property=\"dct:title\">Sentinel-2 cloudless - s2maps.eu</a> by <a xmlns:cc=\"http://creativecommons.org/ns#\" href=\"https://eox.at\" target=\"_blank\" property=\"cc:attributionName\" rel=\"cc:attributionURL\">EOX IT Services GmbH</a> (Contains modified Copernicus Sentinel data 2024) }"
+    },
+    {
+      "rel": "style",
+      "href": "https://raw.githubusercontent.com/EOPF-Explorer/eodash-assets/refs/heads/main/styles/geozarr.json",
+      "type": "application/json",
+      "asset:keys": [
+        "reflectance"
+      ]
+    }
+  ],
+  "title": "Sentinel-2 L2A [Samples Service proxy, OVH copy, not for users]",
+  "assets": {
+    "thumbnail": {
+      "href": "https://raw.githubusercontent.com/EOPF-Sample-Service/eopf-stac/main/thumbnails/sentinel-2-l2a.png",
+      "type": "image/png",
+      "roles": [
+        "thumbnail"
+      ],
+      "title": "Sentinel-2 Level-2A thumbnail"
+    }
+  },
+  "extent": {
+    "spatial": {
+      "bbox": [
+        [
+          -33.00058364868164,
+          34.20681381225586,
+          179.58160400390625,
+          72.0995864868164
+        ]
+      ]
+    },
+    "temporal": {
+      "interval": [
+        [
+          "2026-07-16T10:06:01.025+00:00",
+          "2026-09-10T13:47:31.025+00:00"
+        ]
+      ]
+    }
+  },
+  "license": "proprietary",
+  "keywords": [
+    "Copernicus",
+    "Sentinel",
+    "EU",
+    "ESA",
+    "Satellite",
+    "Global",
+    "Imagery",
+    "Reflectance"
+  ],
+  "providers": [
+    {
+      "url": "https://commission.europa.eu/",
+      "name": "European Commission",
+      "roles": [
+        "licensor"
+      ]
+    },
+    {
+      "url": "https://sentinel.esa.int/web/sentinel/missions/sentinel-2",
+      "name": "ESA",
+      "roles": [
+        "producer",
+        "processor"
+      ]
+    },
+    {
+      "url": "https://zarr.eopf.copernicus.eu/",
+      "name": "EOPF Sentinel Zarr Samples Service",
+      "roles": [
+        "host",
+        "processor"
+      ]
+    }
+  ],
+  "summaries": {
+    "gsd": [
+      10,
+      20,
+      60
+    ],
+    "bands": [
+      {
+        "name": "b01",
+        "eo:common_name": "coastal",
+        "description": "Coastal aerosol (band 1)",
+        "eo:center_wavelength": 0.443,
+        "eo:full_width_half_max": 0.027
+      },
+      {
+        "name": "b02",
+        "eo:common_name": "blue",
+        "description": "Blue (band 2)",
+        "eo:center_wavelength": 0.49,
+        "eo:full_width_half_max": 0.098
+      },
+      {
+        "name": "b03",
+        "eo:common_name": "green",
+        "description": "Green (band 3)",
+        "eo:center_wavelength": 0.56,
+        "eo:full_width_half_max": 0.045
+      },
+      {
+        "name": "b04",
+        "eo:common_name": "red",
+        "description": "Red (band 4)",
+        "eo:center_wavelength": 0.665,
+        "eo:full_width_half_max": 0.038
+      },
+      {
+        "name": "b05",
+        "eo:common_name": "rededge",
+        "description": "Red edge 1 (band 5)",
+        "eo:center_wavelength": 0.704,
+        "eo:full_width_half_max": 0.019
+      },
+      {
+        "name": "b06",
+        "eo:common_name": "rededge",
+        "description": "Red edge 2 (band 6)",
+        "eo:center_wavelength": 0.74,
+        "eo:full_width_half_max": 0.018
+      },
+      {
+        "name": "b07",
+        "eo:common_name": "rededge",
+        "description": "Red edge 3 (band 7)",
+        "eo:center_wavelength": 0.783,
+        "eo:full_width_half_max": 0.028
+      },
+      {
+        "name": "b08",
+        "eo:common_name": "nir",
+        "description": "NIR 1 (band 8)",
+        "eo:center_wavelength": 0.842,
+        "eo:full_width_half_max": 0.145
+      },
+      {
+        "name": "b8a",
+        "eo:common_name": "nir08",
+        "description": "NIR 2 (band 8A)",
+        "eo:center_wavelength": 0.865,
+        "eo:full_width_half_max": 0.033
+      },
+      {
+        "name": "b09",
+        "eo:common_name": "nir09",
+        "description": "NIR 3 (band 9)",
+        "eo:center_wavelength": 0.945,
+        "eo:full_width_half_max": 0.026
+      },
+      {
+        "name": "b10",
+        "eo:common_name": "cirrus",
+        "description": "Cirrus",
+        "eo:center_wavelength": 1.3735,
+        "eo:full_width_half_max": 0.075
+      },
+      {
+        "name": "b11",
+        "eo:common_name": "swir16",
+        "description": "SWIR 1 (band 11)",
+        "eo:center_wavelength": 1.61,
+        "eo:full_width_half_max": 0.143
+      },
+      {
+        "name": "b12",
+        "eo:common_name": "swir22",
+        "description": "SWIR 2 (band 12)",
+        "eo:center_wavelength": 2.19,
+        "eo:full_width_half_max": 0.242
+      }
+    ],
+    "sci:doi": [
+      "10.5270/S2_-znk9xsj"
+    ],
+    "platform": [
+      "Sentinel-2A",
+      "Sentinel-2B",
+      "Sentinel-2C"
+    ],
+    "instruments": [
+      "msi"
+    ],
+    "product:type": [
+      "S02MSIL2A"
+    ],
+    "constellation": [
+      "sentinel-2"
+    ],
+    "processing:level": [
+      "L2"
+    ],
+    "sat:platform_international_designator": [
+      "2015-028A",
+      "2017-013A",
+      "2024-157A"
+    ]
+  },
+  "description": "**Temporary proxy collection \u2014 not a user-facing product.**\n\nProxy STAC items for the Copernicus Data Space Samples Service Sentinel-2 L2A\nZarr v3 (cpm_v300) stores, created for the investigation in\nEOPF-Explorer/coordination#287: can the EOPF Explorer's TiTiler, STAC browser and\neodash read Samples Service GeoZarr as-is?\n\nThe items are clones of `sentinel-2-l2a-zarr3` on the Samples Service catalogue\n(https://stac.core.eopf.eodc.eu/collections/sentinel-2-l2a-zarr3), re-expressed in\nthe Explorer's asset layout and given Explorer visualization links. The assets point at a copy of four Samples Service stores held in the Explorer's own OVH object storage, so the tile, GDAL and OpenLayers checks can run against a gateway that serves HTTP Range requests correctly. No data\nis converted by the Explorer pipeline, and the items carry no `expires`: they are\nnot part of the Explorer's Sentinel-2 archive and must not be treated as such.\n\nTemporary, with no end date set yet: its lifetime will be decided once the Samples\nService transition is complete. Until that decision it is kept for the\ncoordination#287 investigation, and it is removed rather than migrated when the\ndecision goes against keeping it.",
+  "item_assets": {
+    "AOT_10m": {
+      "gsd": 10,
+      "type": "application/vnd.zarr; version=3",
+      "roles": [
+        "data"
+      ],
+      "title": "Aerosol optical thickness (AOT)"
+    },
+    "SCL_20m": {
+      "gsd": 20,
+      "type": "application/vnd.zarr; version=3",
+      "roles": [
+        "data"
+      ],
+      "title": "Scene classification map (SCL)"
+    },
+    "WVP_10m": {
+      "gsd": 10,
+      "type": "application/vnd.zarr; version=3",
+      "roles": [
+        "data"
+      ],
+      "title": "Water vapour (WVP)"
+    },
+    "reflectance": {
+      "gsd": 10,
+      "type": "application/vnd.zarr; version=3; profile=multiscales",
+      "roles": [
+        "data",
+        "reflectance"
+      ],
+      "title": "Surface reflectance measurements",
+      "bands": [
+        {
+          "name": "b01",
+          "eo:common_name": "coastal",
+          "description": "Coastal aerosol (band 1)",
+          "eo:center_wavelength": 0.443,
+          "eo:full_width_half_max": 0.027
+        },
+        {
+          "name": "b02",
+          "eo:common_name": "blue",
+          "description": "Blue (band 2)",
+          "eo:center_wavelength": 0.49,
+          "eo:full_width_half_max": 0.098
+        },
+        {
+          "name": "b03",
+          "eo:common_name": "green",
+          "description": "Green (band 3)",
+          "eo:center_wavelength": 0.56,
+          "eo:full_width_half_max": 0.045
+        },
+        {
+          "name": "b04",
+          "eo:common_name": "red",
+          "description": "Red (band 4)",
+          "eo:center_wavelength": 0.665,
+          "eo:full_width_half_max": 0.038
+        },
+        {
+          "name": "b05",
+          "eo:common_name": "rededge",
+          "description": "Red edge 1 (band 5)",
+          "eo:center_wavelength": 0.704,
+          "eo:full_width_half_max": 0.019
+        },
+        {
+          "name": "b06",
+          "eo:common_name": "rededge",
+          "description": "Red edge 2 (band 6)",
+          "eo:center_wavelength": 0.74,
+          "eo:full_width_half_max": 0.018
+        },
+        {
+          "name": "b07",
+          "eo:common_name": "rededge",
+          "description": "Red edge 3 (band 7)",
+          "eo:center_wavelength": 0.783,
+          "eo:full_width_half_max": 0.028
+        },
+        {
+          "name": "b08",
+          "eo:common_name": "nir",
+          "description": "NIR 1 (band 8)",
+          "eo:center_wavelength": 0.842,
+          "eo:full_width_half_max": 0.145
+        },
+        {
+          "name": "b8a",
+          "eo:common_name": "nir08",
+          "description": "NIR 2 (band 8A)",
+          "eo:center_wavelength": 0.865,
+          "eo:full_width_half_max": 0.033
+        },
+        {
+          "name": "b09",
+          "eo:common_name": "nir09",
+          "description": "NIR 3 (band 9)",
+          "eo:center_wavelength": 0.945,
+          "eo:full_width_half_max": 0.026
+        },
+        {
+          "name": "b10",
+          "eo:common_name": "cirrus",
+          "description": "Cirrus",
+          "eo:center_wavelength": 1.3735,
+          "eo:full_width_half_max": 0.075
+        },
+        {
+          "name": "b11",
+          "eo:common_name": "swir16",
+          "description": "SWIR 1 (band 11)",
+          "eo:center_wavelength": 1.61,
+          "eo:full_width_half_max": 0.143
+        },
+        {
+          "name": "b12",
+          "eo:common_name": "swir22",
+          "description": "SWIR 2 (band 12)",
+          "eo:center_wavelength": 2.19,
+          "eo:full_width_half_max": 0.242
+        }
+      ],
+      "cube:dimensions": {
+        "x": {
+          "type": "spatial",
+          "axis": "x",
+          "extent": [
+            699960.0,
+            809760.0
+          ],
+          "reference_system": "EPSG:32632"
+        },
+        "y": {
+          "type": "spatial",
+          "axis": "y",
+          "extent": [
+            4590240.0,
+            4700040.0
+          ],
+          "reference_system": "EPSG:32632"
+        }
+      },
+      "cube:variables": {
+        "b01": {
+          "dimensions": [
+            "y",
+            "x"
+          ],
+          "description": "Coastal aerosol (band 1)",
+          "type": "data"
+        },
+        "b02": {
+          "dimensions": [
+            "y",
+            "x"
+          ],
+          "description": "Blue (band 2)",
+          "type": "data"
+        },
+        "b03": {
+          "dimensions": [
+            "y",
+            "x"
+          ],
+          "description": "Green (band 3)",
+          "type": "data"
+        },
+        "b04": {
+          "dimensions": [
+            "y",
+            "x"
+          ],
+          "description": "Red (band 4)",
+          "type": "data"
+        },
+        "b05": {
+          "dimensions": [
+            "y",
+            "x"
+          ],
+          "description": "Red edge 1 (band 5)",
+          "type": "data"
+        },
+        "b06": {
+          "dimensions": [
+            "y",
+            "x"
+          ],
+          "description": "Red edge 2 (band 6)",
+          "type": "data"
+        },
+        "b07": {
+          "dimensions": [
+            "y",
+            "x"
+          ],
+          "description": "Red edge 3 (band 7)",
+          "type": "data"
+        },
+        "b08": {
+          "dimensions": [
+            "y",
+            "x"
+          ],
+          "description": "NIR 1 (band 8)",
+          "type": "data"
+        },
+        "b8A": {
+          "dimensions": [
+            "y",
+            "x"
+          ],
+          "description": "NIR 2 (band 8A)",
+          "type": "data"
+        },
+        "b09": {
+          "dimensions": [
+            "y",
+            "x"
+          ],
+          "description": "NIR 3 (band 9)",
+          "type": "data"
+        },
+        "b11": {
+          "dimensions": [
+            "y",
+            "x"
+          ],
+          "description": "SWIR 1 (band 11)",
+          "type": "data"
+        },
+        "b12": {
+          "dimensions": [
+            "y",
+            "x"
+          ],
+          "description": "SWIR 2 (band 12)",
+          "type": "data"
+        }
+      }
+    }
+  },
+  "stac_version": "1.1.0",
+  "stac_extensions": [
+    "https://stac-extensions.github.io/product/v0.1.0/schema.json",
+    "https://stac-extensions.github.io/sat/v1.0.0/schema.json",
+    "https://stac-extensions.github.io/scientific/v1.0.0/schema.json",
+    "https://stac-extensions.github.io/datacube/v2.3.0/schema.json"
+  ],
+  "eodash:layerExclusive": true,
+  "eodash:rasterform": "https://raw.githubusercontent.com/EOPF-Explorer/eodash-assets/refs/heads/main/forms/bandsform.json"
+}
