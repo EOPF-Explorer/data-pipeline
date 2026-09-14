@@ -8,8 +8,10 @@ those source items into a *proxy* collection on the Explorer STAC API so the
 Explorer's TiTiler, STAC browser and eodash can be pointed at Samples Service data
 without copying it.
 
-It deliberately does NOT convert, upload or expire anything: ``build_proxy_item`` is
-a pure dict-in/Item-out transform, and the only write is the STAC upsert.
+It deliberately does NOT convert or upload anything: ``build_proxy_item`` is a pure
+dict-in/Item-out transform, and the only write is the STAC upsert. It does stamp a
+fixed ``expires`` (see ``PROXY_EXPIRES``) — without one the items would be structurally
+undeletable, and a Track B copy in our own bucket could never be reclaimed.
 
 Render host is ``/rstaging`` (titiler-eopf **0.12.0**), not ``/raster`` (0.11.0): only
 0.12.0 serves the ``assets=<key>|bands=…`` / ``|variables=…`` notation these items use,
@@ -47,6 +49,8 @@ import logging
 import os
 import sys
 import urllib.parse
+from copy import deepcopy
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -54,7 +58,9 @@ import httpx
 import stac_auth
 from pystac import Asset, Item, Link
 from register_v1 import (
+    DEFAULT_S3_GATEWAY,
     EXPLORER_BASE,
+    TIMESTAMPS_EXTENSION,
     add_alternate_s3_assets,
     add_derived_from_link,
     add_store_link,
@@ -63,6 +69,7 @@ from register_v1 import (
     remove_xarray_integration,
     upsert_item,
 )
+from s3_item_cleanup import format_expires
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -116,9 +123,23 @@ ROOT_HREF_ASSETS = {
     "SCL_20m": ("SCL_20m", "scl", "Scene classification map (SCL)"),
 }
 
-# Source assets with no proxy equivalent: the 20m/60m atmosphere groups and the 60m
-# SCL duplicate the arrays already reachable from the root href.
-DROPPED_ASSETS = ("ATM_10m", "ATM_20m", "ATM_60m", "SCL_60m")
+# Retention. Loïc, 2026-09-14: the proxy expires on **1 November 2026**.
+#
+# Without an `expires` these items are structurally undeletable — `cleanup_expired_items.
+# evaluate_guards` returns `no_expires` first, before every other check — so a Track B copy
+# in our own bucket could never be reclaimed by anything automated. A fixed date, not
+# `now + N days`: the proxy answers coordination#287 once and the whole collection goes
+# away with it, so re-registering an item must not push the date out.
+#
+# For Track A this expires the STAC item only; the stores are EODC's and carry no S3
+# alternate, so nothing of theirs is reachable by the deleter. The cron is `--collection`
+# scoped and does not target these collections today — this makes the cleanup *possible*,
+# it does not schedule it.
+PROXY_EXPIRES = datetime(2026, 11, 1, tzinfo=UTC)
+
+# What a finished proxy item must advertise. Checked before the item is written, because
+# every other guard here is a warning and the render links name `reflectance` outright.
+EXPECTED_ASSET_KEYS = frozenset({"reflectance", *ROOT_HREF_ASSETS})
 
 # Links that only make sense in the source catalogue. ``collection`` is re-added
 # pointing at the proxy collection: the STAC item schema refuses a ``collection``
@@ -166,16 +187,28 @@ def rebase_store_root(item: Item, new_base: str) -> str:
 
 
 def build_root_href_assets(item: Item, root: str) -> None:
-    """Replace the atmosphere/mask group assets with root-href AOT/WVP/SCL assets."""
+    """Replace the atmosphere/mask group assets with root-href AOT/WVP/SCL assets.
+
+    Raises rather than skipping: the asset set IS coordination#287's criterion-1
+    acceptance condition, so an item registered with two of its four assets would be
+    indistinguishable from a passing one in both the exit code and the evidence file.
+    """
     root_href = root.rstrip("/")
     built = {}
     for key, (source_key, band_name, title) in ROOT_HREF_ASSETS.items():
         source = item.assets.get(source_key)
         if source is None:
-            logger.warning(f"   ⚠️  {item.id}: no {source_key} asset, skipping {key}")
-            continue
-        fields = dict(source.extra_fields)
-        bands = [b for b in fields.get("bands", []) if b.get("name") == band_name]
+            raise ValueError(f"{item.id}: no {source_key} asset to build {key} from")
+        fields = deepcopy(source.extra_fields)
+        source_bands = fields.get("bands", [])
+        bands = [b for b in source_bands if b.get("name") == band_name]
+        if source_bands and not bands:
+            # Failure-open here is worse than no asset: AOT and WVP are cut from the same
+            # source group, so an unmatched filter leaves each one advertising BOTH bands.
+            raise ValueError(
+                f"{item.id}: {source_key} has no {band_name!r} band "
+                f"(has {[b.get('name') for b in source_bands]}) — cannot build {key}"
+            )
         if bands:
             fields["bands"] = bands
             fields["description"] = bands[0].get("description", fields.get("description", ""))
@@ -187,9 +220,17 @@ def build_root_href_assets(item: Item, root: str) -> None:
             extra_fields=fields,
         )
 
-    for key in (*DROPPED_ASSETS, *ROOT_HREF_ASSETS):
-        item.assets.pop(key, None)
+    # Allowlist, not a denylist. Any source asset this transform does not know about
+    # would otherwise be proxied verbatim on a per-group href that cannot be opened over
+    # HTTPS — and a source `quicklook` would reintroduce the thumbnail we deliberately do
+    # not publish. EODC republished 220 items on 2026-09-10; the source schema is not
+    # frozen, so this has to be failure-closed. `reflectance` is built upstream by
+    # `consolidate_reflectance_assets`; everything else here is rebuilt above.
+    dropped = sorted(set(item.assets) - {"reflectance"})
+    item.assets = {key: item.assets[key] for key in ("reflectance",) if key in item.assets}
     item.assets.update(built)
+    if dropped:
+        logger.info(f"   🗑️  Dropped {len(dropped)} unproxied source asset(s): {', '.join(dropped)}")
 
 
 def fill_cube_extent(item: Item) -> None:
@@ -206,7 +247,11 @@ def fill_cube_extent(item: Item) -> None:
     dimensions = reflectance.extra_fields.get("cube:dimensions")
     if not dimensions:
         return
-    x_min, y_min, x_max, y_max = bbox[:4]
+    # A spec-legal `proj:bbox` is 4 OR 6 numbers; the 6-element form interleaves height,
+    # so slicing the first four would read [west, south, min-height, east].
+    x_min, y_min, x_max, y_max = (
+        (bbox[0], bbox[1], bbox[3], bbox[4]) if len(bbox) == 6 else bbox[:4]
+    )
     dimensions["x"]["extent"] = [x_min, x_max]
     dimensions["y"]["extent"] = [y_min, y_max]
 
@@ -267,6 +312,13 @@ def add_proxy_visualization(item: Item, raster_api_url: str, collection: str) ->
             title="EOPF Explorer",
         )
     )
+
+
+def stamp_proxy_expires(item: Item) -> None:
+    """Stamp the fixed proxy expiry so the retention cron can select these items."""
+    item.properties["expires"] = format_expires(PROXY_EXPIRES)
+    if TIMESTAMPS_EXTENSION not in item.stac_extensions:
+        item.stac_extensions.append(TIMESTAMPS_EXTENSION)
 
 
 def slash_bare_zarr_alternates(item: Item) -> None:
@@ -334,11 +386,37 @@ def build_proxy_item(
     remove_xarray_integration(item)
     reconcile_extensions(item)
 
+    # Nothing above fails loudly if the source drifts, and the render links below name
+    # `reflectance` unconditionally, so check the advertised set before it is written:
+    # `consolidate_reflectance_assets` only recognises SR_*/B??_<res> source keys and
+    # otherwise just logs. EODC republished 220 items on 2026-09-10; the schema is not
+    # frozen.
+    missing = EXPECTED_ASSET_KEYS - set(item.assets)
+    if missing:
+        raise ValueError(f"{item.id}: proxy item is missing asset(s) {sorted(missing)}")
+
+    stamp_proxy_expires(item)
     add_proxy_visualization(item, raster_api_url, collection)
     add_derived_from_link(item, self_href)
 
     if s3_endpoint:
-        add_alternate_s3_assets(item, s3_endpoint)
+        # `https_to_s3` returns None for every host it is not told about, silently, so
+        # pass the gateway the Track B hrefs actually use: zero alternates would make
+        # `s3_item_cleanup` record `no_s3_urls` (not a FAILURE_STATUS) and skip the store
+        # forever. Path-style (`<host>/<bucket>/<key>`) is what both our gateways serve; a
+        # virtual-hosted root is the one shape `https_to_s3` parses unaided, and naming its
+        # host as the gateway would make it read the bucket out of the path instead.
+        parsed = urlparse(root)
+        gateway = (
+            DEFAULT_S3_GATEWAY if ".s3." in parsed.netloc else f"{parsed.scheme}://{parsed.netloc}"
+        )
+        added = add_alternate_s3_assets(item, s3_endpoint, gateway)
+        if not added:
+            raise ValueError(
+                f"{item.id}: --s3-endpoint produced no alternate.s3 href for any asset "
+                f"(store root {root!r}). Registering it would create items no deleter "
+                f"can ever select."
+            )
         slash_bare_zarr_alternates(item)
 
     return item
@@ -352,12 +430,32 @@ def read_item_ids(path: Path) -> list[str]:
 
 
 def fetch_source_item(source_stac_api: str, source_collection: str, item_id: str) -> dict:
-    """GET one source item. A direct GET avoids depending on the source's conformance."""
-    url = f"{source_stac_api.rstrip('/')}/collections/{source_collection}/items/{item_id}"
-    with httpx.Client(timeout=30.0, follow_redirects=True) as http:
+    """GET one source item. A direct GET avoids depending on the source's conformance.
+
+    Both path components are percent-encoded: ``--item-ids-file`` is operator-edited and
+    httpx normalises RFC 3986 dot-segments, so an unquoted id of ``../../<other>/items/X``
+    would silently retarget the GET at another collection — making ``--source-collection``
+    no bound at all. ``quote(safe="")`` also stops ``#`` from truncating the URL.
+
+    Redirects are NOT followed: the HTTPS check in ``main`` validates the URL the operator
+    typed, and a 3xx could downgrade it to http or move it to another host, after which
+    whatever came back would be registered as if it had been asked for.
+    """
+    url = (
+        f"{source_stac_api.rstrip('/')}"
+        f"/collections/{urllib.parse.quote(source_collection, safe='')}"
+        f"/items/{urllib.parse.quote(item_id, safe='')}"
+    )
+    with httpx.Client(timeout=30.0, follow_redirects=False) as http:
         resp = http.get(url)
         resp.raise_for_status()
-        return dict(resp.json())
+        source = dict(resp.json())
+    # The id decides the filename written, the id registered and what --max-items counts.
+    # Taking it from the response would let the source choose all three.
+    returned = source.get("id")
+    if returned != item_id:
+        raise ValueError(f"{item_id}: source returned a different item id ({returned!r})")
+    return source
 
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -375,7 +473,16 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         required=True,
         help="Refuse to run if more ids than this are given (no silent truncation)",
     )
-    parser.add_argument("--dry-run", type=Path, metavar="DIR", help="Write <id>.json here instead")
+    parser.add_argument(
+        "--dry-run",
+        type=Path,
+        metavar="DIR",
+        help=(
+            "Write <id>.json here instead of registering. Not fully offline: with "
+            "--s3-endpoint it still issues read-only S3 head_object calls, because the "
+            "storage tier is part of the item being previewed."
+        ),
+    )
     parser.add_argument(
         "--store-root-base",
         metavar="URL",
@@ -396,12 +503,18 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
+    # Every URL that decides where data is read from or written to, not just the three
+    # the operator types most often: --store-root-base rewrites every asset href, and
+    # EXPLORER_BASE ends up in the `via` link (register_v1.main validates its own).
     for url, name in [
         (args.source_stac_api, "--source-stac-api"),
         (args.raster_api_url, "--raster-api-url"),
         (args.stac_api_url, "--stac-api-url"),
+        (args.store_root_base, "--store-root-base"),
+        (args.s3_endpoint, "--s3-endpoint"),
+        (EXPLORER_BASE, "EXPLORER_BASE_URL"),
     ]:
-        if urlparse(url).scheme != "https":
+        if url is not None and urlparse(url).scheme != "https":
             logger.error("Error: %s must be an HTTPS URL, got: %r", name, url)
             return 1
 
@@ -429,23 +542,38 @@ def main(argv: list[str] | None = None) -> int:
         client = stac_auth.open_client(args.stac_api_url)
         logger.info("Target STAC API: %s", args.stac_api_url)
 
+    failed: list[str] = []
     for item_id in item_ids:
-        source = fetch_source_item(args.source_stac_api, args.source_collection, item_id)
-        item = build_proxy_item(
-            source,
-            args.collection,
-            args.raster_api_url,
-            args.stac_api_url,
-            store_root_base=args.store_root_base,
-            s3_endpoint=args.s3_endpoint,
-        )
-        if client is None:
-            out = args.dry_run / f"{item.id}.json"
-            out.write_text(json.dumps(item.to_dict(), indent=2))
-            logger.info(f"   📄 {out}")
-        else:
-            upsert_item(client, args.collection, item)
+        try:
+            source = fetch_source_item(args.source_stac_api, args.source_collection, item_id)
+            item = build_proxy_item(
+                source,
+                args.collection,
+                args.raster_api_url,
+                args.stac_api_url,
+                store_root_base=args.store_root_base,
+                s3_endpoint=args.s3_endpoint,
+            )
+            if client is None:
+                # `item_id`, never `item.id`: the id names a file under --dry-run, and a
+                # path-bearing id would write outside that directory.
+                out = args.dry_run / f"{item_id}.json"
+                out.write_text(json.dumps(item.to_dict(), indent=2))
+                logger.info(f"   📄 {out}")
+            else:
+                upsert_item(client, args.collection, item)
+        except Exception as exc:  # noqa: BLE001 - one bad item must not hide the rest
+            failed.append(item_id)
+            logger.error("   ❌ %s: %s", item_id, exc)
+            continue
 
+    # Without this, a mid-run failure leaves a partially populated collection and no
+    # record of which ids landed — the operator cannot tell a clean run from a torn one.
+    registered = len(item_ids) - len(failed)
+    logger.info("Registered %d/%d item(s) into %s", registered, len(item_ids), args.collection)
+    if failed:
+        logger.error("Failed (%d): %s", len(failed), ", ".join(failed))
+        return 1
     return 0
 
 
