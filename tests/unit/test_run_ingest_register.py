@@ -145,6 +145,32 @@ def test_invalid_collection_rejected(bad_collection: str) -> None:
     mock_run.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    # "31TCH\n" is the `$`-matches-before-a-final-newline hole: it would have landed as
+    # `s1-rtc-31TCH\n.zarr` and `grid:code: "MGRS-31TCH\n"`.
+    "bad_tile",
+    ["", "3TCH", "310TCH", "61TCH", "31tch", "31TIH", "31TCH.zarr", "../31TCH", "31TCH\n"],
+)
+def test_invalid_tile_id_rejected(bad_tile: str) -> None:
+    """A malformed --tile-id must be refused before anything is written.
+
+    The store path is built straight from it (`s1-rtc-{tile}.zarr`) and the STAC builder only
+    rejects the name at register time -- i.e. after a multi-hour ingest has already created the
+    cube. The guard must fire before any subprocess runs, so a typo leaves nothing behind.
+    """
+    with patch(f"{_MOD}.subprocess.run") as mock_run, pytest.raises(ValueError, match="MGRS"):
+        run_pipeline(**{**_KWARGS, "tile_id": bad_tile})
+    mock_run.assert_not_called()
+
+
+@pytest.mark.parametrize("good_tile", ["31TCH", "01CAA", "60XVV", "33UWT"])
+def test_valid_tile_ids_accepted(good_tile: str) -> None:
+    """A false rejection blocks a real ingest, which is worse than the bug being guarded against."""
+    with patch(f"{_MOD}.subprocess.run", side_effect=[_mock_proc(0)] * 3) as mock_run:
+        assert run_pipeline(**{**_KWARGS, "tile_id": good_tile}) == 0
+    assert mock_run.call_count == 3
+
+
 def test_store_prefix_tracks_collection() -> None:
     """Store key prefix must be derived from --collection, not a fixed value.
 

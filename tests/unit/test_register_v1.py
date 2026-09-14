@@ -192,6 +192,22 @@ class TestSelectRender:
         renders = {"only": {"expression": "z"}}
         assert _select_render(_real_item(renders))["expression"] == "z"
 
+    def test_reads_renders_from_the_item_root(self):
+        """The render extension puts `renders` on the item, not in `properties` (data-model #216).
+
+        Reading only `properties` silently lost the config once data-model moved it, which drops
+        every visualization link from the item.
+        """
+        item = _real_item()
+        item.extra_fields["renders"] = {"rgb": {"expression": "root"}}
+        assert _select_render(item)["expression"] == "root"
+
+    def test_item_root_wins_over_the_properties_mirror(self):
+        """While both exist the root is authoritative — the mirror is the compatibility copy."""
+        item = _real_item({"rgb": {"expression": "mirror"}})
+        item.extra_fields["renders"] = {"rgb": {"expression": "root"}}
+        assert _select_render(item)["expression"] == "root"
+
 
 class TestRenderToQuery:
     def test_serializes_render_fields(self):

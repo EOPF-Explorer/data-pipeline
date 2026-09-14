@@ -23,10 +23,21 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 import subprocess  # nosec B404 -- composes this repo's own scripts with fixed argv (no shell)
 import sys
 
 log = logging.getLogger(__name__)
+
+# MGRS tile id: 2-digit UTM zone (01-60), latitude band, then the 100 km square column and row
+# letters. `I` and `O` are excluded throughout (they read as 1/0) and row letters stop at V. Kept in
+# sync with `eopf_geozarr.stac.s1_rtc._MGRS_TILE_RE` -- restated rather than imported because the
+# library only grew that pattern in data-model #216, while this guard has to hold under the current
+# pin as well. The library rejects a bad id when it BUILDS the STAC item, which is after this script
+# has spent hours ingesting a cube to `s1-rtc-<typo>.zarr`; checking here means a typo writes nothing.
+# Matched with `fullmatch`, not `match`: `$` also matches before a trailing newline, so "31TCH\n"
+# would pass and land as `s1-rtc-31TCH\n.zarr` and `grid:code: "MGRS-31TCH\n"`.
+_MGRS_TILE_RE = re.compile(r"(0[1-9]|[1-5][0-9]|60)[C-HJ-NP-X][A-HJ-NP-Z][A-HJ-NP-V]")
 
 # Per-environment S3 buckets and STAC collections are matched pairs: a tile ingested for
 # `staging` must land in BOTH the staging bucket and the staging collection. Crossing them
@@ -78,6 +89,12 @@ def run_pipeline(
     if not collection or "/" in collection:
         raise ValueError(
             f"collection must be a non-empty single path segment (no '/'), got: {collection!r}"
+        )
+    if not _MGRS_TILE_RE.fullmatch(tile_id):
+        raise ValueError(
+            f"tile_id must be an MGRS tile id such as '31TCH', got: {tile_id!r}. Ingest would write "
+            f"the cube to s1-rtc-{tile_id}.zarr and only fail afterwards, when the STAC builder "
+            "rejects the store name -- leaving an orphaned cube behind."
         )
     check_env_consistency(collection, s3_output_bucket)
     # TEMPORARY (#246): write the cube directly at titiler-eopf's reconstructed render path

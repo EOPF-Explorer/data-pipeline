@@ -450,3 +450,69 @@ def test_pin_noop_on_empty_cube(tmp_path) -> None:
     new_item, sel_time = _pin_preview_to_best_recent(item, store)
     assert sel_time is None
     assert new_item.properties["sat:orbit_state"] == "ascending"  # untouched
+
+
+# ---------------------------------------------------------------------------
+# `renders` at the item root (data-model #216) — with and without the mirror
+# ---------------------------------------------------------------------------
+
+from register_v1_s1_rtc import _reorient_item_to_orbit  # noqa: E402
+
+_ASC_EXPR = "/ascending:vv;/ascending:vh;(/ascending:vv)/(/ascending:vh)"
+
+
+def _rgb(expr: str) -> dict:
+    return {"rgb": {"expression": expr, "rescale": [[0.0, 0.1]], "bidx": [1]}}
+
+
+def test_reorient_rewrites_every_renders_copy() -> None:
+    """Both copies must move together, or one item advertises two different orbits.
+
+    data-model writes `renders` at the item root and mirrors it into `properties` until this repo
+    reads the root. Today the builder puts the SAME dict under both names and `Item.to_dict` is a
+    shallow copy, so the rewrite aliases — but that is the builder's implementation detail, and a
+    JSON round-trip (or dropping the mirror) separates them. Both shapes are covered.
+    """
+    shared = _rgb(_ASC_EXPR)
+    aliased = {"properties": {"renders": shared}, "renders": shared}
+    separate = {"properties": {"renders": _rgb(_ASC_EXPR)}, "renders": _rgb(_ASC_EXPR)}
+    for item in (aliased, separate):
+        _reorient_item_to_orbit(item, "descending")
+        for block in (item["renders"], item["properties"]["renders"]):
+            assert "/descending:vv" in block["rgb"]["expression"]
+            assert "/ascending" not in block["rgb"]["expression"]
+
+
+def test_reorient_moves_the_render_assets_with_the_expression() -> None:
+    """`renders.rgb.assets` names ONE orbit's γ⁰ asset (data-model #216).
+
+    Reorienting the expression but not `assets` ships a descending preview that advertises the
+    ascending asset — on the ~57 of 170 live cubes whose preview slice is descending.
+    """
+    rgb = _rgb(_ASC_EXPR)
+    rgb["rgb"]["assets"] = ["gamma0-rtc-backscatter-asc"]
+    item = {"properties": {}, "renders": rgb}
+    _reorient_item_to_orbit(item, "descending")
+    assert item["renders"]["rgb"]["assets"] == ["gamma0-rtc-backscatter-desc"]
+
+
+def test_reorient_adds_no_assets_when_the_builder_emitted_none() -> None:
+    """The pre-#216 builder emits no `assets`; inventing one here is the library's job."""
+    item = {"properties": {}, "renders": _rgb(_ASC_EXPR)}
+    _reorient_item_to_orbit(item, "descending")
+    assert "assets" not in item["renders"]["rgb"]
+
+
+def test_reorient_works_without_the_properties_mirror() -> None:
+    """The mirror is temporary: once data-model drops it, the root copy is the only one."""
+    item = {"properties": {}, "renders": _rgb(_ASC_EXPR)}
+    _reorient_item_to_orbit(item, "descending")
+    assert "/descending:vv" in item["renders"]["rgb"]["expression"]
+    assert item["properties"]["sat:orbit_state"] == "descending"
+
+
+def test_reorient_tolerates_an_item_with_no_renders() -> None:
+    """A render-less item still gets its orbit metadata; no KeyError."""
+    item: dict = {"properties": {}}
+    _reorient_item_to_orbit(item, "descending")
+    assert item["properties"]["sat:orbit_state"] == "descending"
