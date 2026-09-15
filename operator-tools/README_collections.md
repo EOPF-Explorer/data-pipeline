@@ -313,6 +313,16 @@ uv run operator-tools/manage_collections.py batch-create stac/ --pattern "*-stag
 - `--update`: Update existing collections instead of creating new
 - `--pattern`: File pattern to match (default: `*.json`)
 
+> ⚠️ `batch-create` globs `*.json` **non-recursively** and applies every match behind a
+> single confirmation. Templates that must NOT be created by a routine re-apply live in a
+> subdirectory and are therefore skipped: `stac/proxy/` holds the third-party proxy
+> collections (`sentinel-2-l2a-samples-zarr3*`, coordination#287), which advertise data we
+> neither host nor convert and must only be created deliberately:
+>
+> ```bash
+> uv run operator-tools/manage_collections.py create stac/proxy/sentinel-2-l2a-samples-zarr3.json
+> ```
+
 **Features:**
 - Processes all matching JSON files in directory
 - Shows preview before proceeding
