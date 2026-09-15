@@ -176,7 +176,9 @@ def copy_object(
             return None
         raise CopyError(f"GET {source_url} failed: HTTP {exc.code}") from exc
 
-    digest = hashlib.md5(body).hexdigest()  # noqa: S324 - matches S3 ETag, not security
+    # md5 because that is what S3 returns as the ETag; this is an integrity
+    # comparison against the source bytes, not a security hash.
+    digest = hashlib.md5(body, usedforsecurity=False).hexdigest()
     result = s3_client.put_object(Bucket=bucket, Key=dest_key, Body=body)
     etag = (result.get("ETag") or "").strip('"')
     if etag != digest:
