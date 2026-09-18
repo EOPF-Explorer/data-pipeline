@@ -135,16 +135,11 @@ def query_items(
     # (eopf-explorer-cronwf-tier-down.yaml, schedule 0 4 * * *), which shares this
     # client and had the same unretried pagination.
     catalog = stac_auth.open_resilient_client(stac_api_url)
-    # `limit` is the page size, not a cap: the whole window is walked and
-    # max_batch_size is applied client-side below, as before. Without it the
-    # server picks the page (stac-fastapi defaults to 10), so a 36 h window of
-    # S2 items was hundreds of /search POSTs, each racing the gateway's 15 s
-    # UPSTREAM_TIMEOUT. Not clamped to max_batch_size: that is an output cap applied
-    # after the tier filter, unrelated to how many rows a request carries, and
-    # coupling them would silently change the page when someone raises the batch.
-    # The page is bounded by stac_auth.MAX_PAGE_SIZE alone (one page of Item objects
-    # is held at a time, ~45 KB each), so `--page-size 10000` is a ~450 MB
-    # uninterruptible response — a hand-run choice, since nothing deploys this script.
+    # `limit` is the page size, not a cap (see stac_auth.DEFAULT_PAGE_SIZE; the server's
+    # default of 10 made a 36 h window of S2 items hundreds of /search POSTs). Not
+    # clamped to max_batch_size: that is an output cap applied after the tier filter,
+    # unrelated to how many rows a request carries, and coupling them would silently
+    # change the page when someone raises the batch.
     search = catalog.search(
         collections=[collection],
         datetime=f"{window_start.isoformat()}Z/{window_end.isoformat()}Z",

@@ -108,9 +108,14 @@ old demo dates — and the cleanup-time skip is the backstop regardless.
   second is the budget expiring before the first check, and it only wins when
   the budget is smaller than two pages. The worst-case page is
   `9 × 2 × STAC_HTTP_TIMEOUT + 90 s` (9 attempts, connect and read each bounded
-  by the timeout, 90 s of sleeps): **≈1170 s at the 60 s default, ≈225 s
-  against the gateway that 500s after its own 15 s upstream timeout**
-  (9 × 15 + 90). Raising `STAC_HTTP_TIMEOUT` raises the required gap with it;
+  by the timeout — `requests` applies a scalar timeout to both halves — with
+  0 + 2 + 4 + 8 + 16 + 20 + 20 + 20 = 90 s of sleeps between them): **≈1170 s
+  at the 60 s default, ≈225 s against the gateway that 500s after its own 15 s
+  upstream timeout** (9 × 15 + 90); ≈630 s at the default if only the read half
+  stalls. That ceiling holds for a socket that stalls completely: the read
+  timeout bounds the gap between bytes, not the request, so a server that
+  dribbles a byte every 59 s keeps one attempt alive indefinitely.
+  Raising `STAC_HTTP_TIMEOUT` raises the required gap with it;
   the tool refuses values above 300 s (a ≈5490 s page) as a typo fence only —
   see the deployment paragraph for what the fleet can actually absorb.
   Measured 2026-09-18 (`run_cleanup` against a local server whose landing page

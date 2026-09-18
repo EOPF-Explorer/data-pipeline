@@ -438,19 +438,11 @@ def run_cleanup(args: argparse.Namespace) -> int:
     processed = 0
     discovered: int | None = None
     time_budget_reached = False
-    # Wall clock from opening the read client to the end of the discovery read — every
-    # request that goes through the retrying client and nothing else (the write session
-    # and the S3 client are built before the clock starts: boto3's credential chain can
-    # stall on the IMDS probe, and that must not read as a slow scan). `time_budget_reached:
-    # true, processed: 0` (the README's alert pair) has two very different causes, a
-    # genuine backlog and every page burning its retry ladder on gateway 500s, and
-    # without this the summary cannot tell them apart.
-    # time.monotonic() directly, NOT _monotonic(): that seam is the budget clock, which
-    # a run without a budget must never read (tests pin it) and which tests drive as a
-    # fixed sequence of ticks; this is a measurement, not a control. None until the
-    # read client is about to open: if the guard trips before that (the write session
-    # or boto3's credential chain raised) the summary says null, not a number that is
-    # all boto3 and no STAC — the README promises the field never includes that stall.
+    # Wall clock from opening the read client to the end of the discovery read. It
+    # starts after the write session and the S3 client are built, so a boto3 credential
+    # stall (the IMDS probe) is excluded — see the README's `discovery_seconds`. It reads
+    # time.monotonic() directly, NOT _monotonic(): that seam is the budget clock, which a
+    # run without a budget must never read (tests pin it); this is a measurement.
     discovery_started: float | None = None
     discovery_seconds: float | None = None
 
@@ -531,25 +523,17 @@ def run_cleanup(args: argparse.Namespace) -> int:
         #
         # Iterated lazily, not list(...), so the budget is checked DURING discovery —
         # after every item read, hence at every page boundary, but never inside a page
-        # and not before the first item: the landing-page GET in open_resilient_client
-        # above, a second GET of the same page (pystac resolving rel:root lazily on
-        # the first search(), because stac-fastapi's root href ends in "/" and the
-        # manifest's --stac-api-url does not — see stac_auth.resilient_stac_io) and
-        # this first page all complete before the first check: three round trips,
-        # measured 2026-09-18 (two only when the root href is byte-identical to the
-        # URL opened), and a page fetch is uninterruptible for its whole retry ladder
-        # (~225 s against the 15 s gateway, ~1170 s worst case at the default
-        # timeout). That is why the README sizes the pod's activeDeadlineSeconds as
-        # max(budget + max(worst item, worst page), 3 x worst page). Without this
-        # check an unbounded discovery gets the pod killed by activeDeadlineSeconds
-        # mid-read — which emits no cleanup_summary at all. Nothing read this way is
-        # processed:
-        # the budget is monotone, so the delete loop's first check stops it too. That
-        # is the point — the run yields with a summary instead of vanishing — and the
-        # truncated read costs nothing, because the query is oldest-expiry-first and
-        # the same items head next tick's queue. What it emits is the README's alert
-        # pair (`time_budget_reached: true`, `processed: 0`), on purpose: a budget
-        # spent by discovery IS the stalled-cron condition, not a variant of healthy.
+        # and not before the first item (the round trips before the first check, and
+        # how the README sizes activeDeadlineSeconds against them, are in the README's
+        # sizing rule). Without this check an unbounded discovery gets the pod killed
+        # by activeDeadlineSeconds mid-read — which emits no cleanup_summary at all.
+        # Nothing read this way is processed: the budget is monotone, so the delete
+        # loop's first check stops it too. That is the point — the run yields with a
+        # summary instead of vanishing — and the truncated read costs nothing, because
+        # the query is oldest-expiry-first and the same items head next tick's queue.
+        # What it emits is the README's alert pair (`time_budget_reached: true`,
+        # `processed: 0`), on purpose: a budget spent by discovery IS the stalled-cron
+        # condition, not a variant of healthy.
         stale_items: list[dict[str, Any]] = []
         for stale_item in search.items_as_dicts():
             stale_items.append(stale_item)
