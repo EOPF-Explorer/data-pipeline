@@ -1334,11 +1334,11 @@ def test_summary_carries_discovery_seconds(expired_item, capsys) -> None:
     budget seam: a run without a budget must still not read that clock (pinned above).
     """
     clock = MagicMock()
-    # Three reads: the fallback bound before the guard, the restart right before the
-    # read client opens (after the write session and S3 client are built, so a boto3
-    # credential stall is excluded), the end of discovery. 7.5 pins the restart: from
-    # the first tick it would read 17.5.
-    clock.monotonic.side_effect = [990.0, 1000.0, 1007.5]
+    # Two reads: the start right before the read client opens (after the write session
+    # and S3 client are built, so a boto3 credential stall is excluded), and the end of
+    # discovery. Nothing reads the clock before the guard: a third tick here would go
+    # unconsumed and the test would still pass, so the list is exactly two.
+    clock.monotonic.side_effect = [1000.0, 1007.5]
     s3 = MagicMock()
     s3.get_paginator.return_value = _paginator([["a", "b"]])
     with patch("cleanup_expired_items.time", clock):
@@ -1356,8 +1356,8 @@ def test_aborted_summary_still_carries_discovery_seconds(capsys) -> None:
     client.search.return_value.items_as_dicts.side_effect = requests.ConnectionError("boom")
     clock = MagicMock()
     # 9 x 15 s attempts + 90 s of sleeps: the gateway ladder, exhausted. Ticks: the
-    # fallback bound, the restart before the read client opens, the abort.
-    clock.monotonic.side_effect = [990.0, 1000.0, 1225.0]
+    # start before the read client opens, the abort.
+    clock.monotonic.side_effect = [1000.0, 1225.0]
 
     with (
         patch("cleanup_expired_items.stac_auth.open_resilient_client", return_value=client),
@@ -1371,6 +1371,45 @@ def test_aborted_summary_still_carries_discovery_seconds(capsys) -> None:
     assert code == 1
     assert summary["aborted"] is True
     assert summary["discovery_seconds"] == 225.0
+
+
+def test_discovery_seconds_is_null_when_the_read_client_never_opened(capsys) -> None:
+    """A boto3 credential-chain stall that aborts the run must not be reported as
+    STAC time: the README promises the field never includes it, so it is null."""
+    clock = MagicMock()
+    clock.monotonic.side_effect = AssertionError("nothing may read the clock")
+
+    with (
+        patch("cleanup_expired_items.stac_auth.open_resilient_client") as open_client,
+        patch("cleanup_expired_items._session", return_value=MagicMock()),
+        patch("cleanup_expired_items._s3_client", side_effect=RuntimeError("IMDS stall")),
+        patch("cleanup_expired_items.time", clock),
+    ):
+        code = run_cleanup(_args(execute=True))
+
+    summary = _capture_lines(capsys)[-1]
+    assert code == 1
+    assert summary["aborted"] is True
+    assert summary["discovered"] is None
+    assert summary["discovery_seconds"] is None
+    open_client.assert_not_called()
+
+
+@pytest.mark.parametrize("raw", ["abc", "6000"])
+def test_bad_stac_http_timeout_aborts_inside_the_guard(monkeypatch, capsys, raw) -> None:
+    """Contract: unlike a bad flag (exit 2, no summary), a bad STAC_HTTP_TIMEOUT is read
+    when the search client opens, so the tick exits 1 WITH an aborted summary."""
+    monkeypatch.setenv("STAC_HTTP_TIMEOUT", raw)
+    with (
+        patch("cleanup_expired_items._session", return_value=MagicMock()),
+        patch("cleanup_expired_items._s3_client", return_value=MagicMock()),
+    ):
+        code = run_cleanup(_args(execute=True))
+
+    summary = _capture_lines(capsys)[-1]
+    assert code == 1
+    assert summary["aborted"] is True
+    assert summary["discovered"] is None
 
 
 # === The auth hook raises RuntimeError, not RequestException (issue #364) ===

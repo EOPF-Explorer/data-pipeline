@@ -8,9 +8,9 @@ from unittest.mock import patch
 
 import pytest
 from pystac import Asset, Item
+from stac_auth import DEFAULT_PAGE_SIZE
 
 from scripts.query_storage_tier_items import (
-    DEFAULT_PAGE_SIZE,
     get_storage_ref,
     is_already_migrated,
     main,
@@ -188,9 +188,11 @@ class TestQueryItems:
         """`limit` is the page size and is always sent; `max_batch_size` stays the cap.
 
         This script and the cleanup cron were the two fleet searches that omitted
-        `limit`, and the two that died on the gateway's 15 s upstream timeout on
-        2026-09-18; the two that pass 100 never have. Walking a 36 h window at the
-        server's default page (10) was hundreds of /search POSTs.
+        `limit`; walking a 36 h window at the server's default page (10) was hundreds
+        of /search POSTs. Not evidence that 100 avoids the gateway's 15 s upstream
+        timeout: the tier-down cron that died on it 2026-09-18 runs
+        submit_storage_tier_workflows, which already passed limit=100 (this script has
+        no manifest). The knob exists so that can be measured either way.
         """
         items = [create_stac_item(f"item-{i}", storage_refs=["standard"]) for i in range(10)]
         client = FakeStacClient(items)

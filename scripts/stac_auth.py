@@ -42,12 +42,18 @@ _EXPIRY_MARGIN_S = 30
 # the read half separately; override with STAC_HTTP_TIMEOUT (parsed lazily by
 # _search_timeout_s, never at import).
 _DEFAULT_SEARCH_TIMEOUT_S = 60.0
-# A typo fence, not a policy: 5x the default and 20x the gateway's own 15 s upstream
-# timeout. This is the one knob that defeats the callers' runtime budgets — a page fetch
-# is uninterruptible for its whole ladder, 9 x 2 x timeout + 90 s (see
-# resilient_stac_io), so "6000" typed for 60 is a ~30 h page that no
-# --max-runtime-seconds can stop and activeDeadlineSeconds ends with no cleanup_summary.
-# At this ceiling a page is at most 5490 s.
+# A typo fence ONLY, not a policy and not a deployment's tolerance: 5x the default and
+# 20x the gateway's own 15 s upstream timeout. This is one of the two knobs that defeat
+# the callers' runtime budgets (the other is --page-size, below) — a page fetch is
+# uninterruptible for its whole ladder, 9 x 2 x timeout + 90 s (see resilient_stac_io),
+# so "6000" typed for 60 is a ~30 h page that no --max-runtime-seconds can stop and
+# activeDeadlineSeconds ends with no cleanup_summary. At this ceiling a page is still
+# 5490 s, which alone exceeds the cleanup cron's 4200 s activeDeadlineSeconds: what
+# that deployment can actually absorb at its 3000 s budget is
+# 3000 + (18 x timeout + 90) < 4200, i.e. timeout <= ~61 s — barely above the default.
+# The library cannot know its callers' deadlines (the tier-down cron's is 900 s, the
+# migrate runner has none), so the deployment-specific bound lives in each caller's
+# manifest and README, and this constant only stops an order-of-magnitude typo.
 _MAX_SEARCH_TIMEOUT_S = 300.0
 
 # See resilient_stac_io() for why 500 is here and when to remove it.
@@ -55,19 +61,25 @@ _READ_RETRY_STATUSES = (429, 500, 502, 503, 504)
 
 # Items per /search page for the crons' discovery walks. A page, NOT a cap: the callers'
 # --max-items / --max-batch-size bound the run, this bounds one round trip. Without it
-# the server picks (stac-fastapi defaults to 10), so a 130-item cleanup batch was ~13
-# POSTs, each a fresh keyset query over the whole expired scan racing the gateway's 15 s
-# UPSTREAM_TIMEOUT. The hypothesis behind 100: the per-request count, not the row
-# count, is what killed six cleanup ticks on 2026-09-18, and the two fleet scripts that
-# pass a limit (submit_storage_tier_workflows, migrate_catalog: 100) have never hit it.
-# NOT proven against the real gateway — the counter-hypothesis is that a 100-item page
-# (~4.5 MB of upstream JSON at ~45 KB/item) moves each request CLOSER to the 15 s
-# cliff, not further. If ticks keep 500ing, lower --page-size before blaming the retry
-# policy.
+# the server picks (stac-fastapi defaults to 10), so the cleanup cron's 300-item batch
+# (the live --max-items) was 30 POSTs, each a fresh keyset query over the whole expired
+# scan racing the gateway's 15 s UPSTREAM_TIMEOUT. 100 is the value the other fleet
+# walkers already passed (submit_storage_tier_workflows, migrate_catalog), so it changes
+# nothing for them; it is NOT evidence that 100 avoids the 500 — the tier-down cron died
+# 2026-09-18T04:00 (APIError: Internal Server Error from get_pages) while passing
+# limit=100, and the counter-hypothesis is that a 100-item page (~4.5 MB of upstream
+# JSON at ~45 KB/item) moves each request CLOSER to the 15 s cliff, not further. What
+# the fix relies on is the retry, not the page size; this is the knob for finding out
+# which direction helps. If ticks keep 500ing, lower --page-size before blaming the
+# retry policy.
 DEFAULT_PAGE_SIZE = 100
 
 # A page is materialised in memory the same way a cleanup batch is, so it gets the
-# batch's ceiling: cleanup_expired_items.MAX_ITEMS_CEILING is this constant.
+# batch's ceiling: cleanup_expired_items.MAX_ITEMS_CEILING is this constant. Like
+# STAC_HTTP_TIMEOUT above, a typo fence, not a size any pod survives: at ~45 KB/item a
+# 10_000-row page is a ~450 MB uninterruptible response, against a 512Mi cleanup pod.
+# cleanup_expired_items clamps the page to --max-items; query_storage_tier_items has
+# no run cap to clamp to and is bounded by this constant alone (see its --page-size).
 MAX_PAGE_SIZE = 10_000
 
 
@@ -194,8 +206,11 @@ def _search_timeout_s() -> float:
     silently reintroduce it. Garbage is rejected too, not defaulted: the value the
     operator set is not the value in effect, and a loud failure inside the caller's
     guard (which still emits its summary) beats a silent 60 s. Values above
-    ``_MAX_SEARCH_TIMEOUT_S`` are rejected for the mirror-image reason: they silently
-    remove the bound a caller's runtime budget relies on (see the constant).
+    ``_MAX_SEARCH_TIMEOUT_S`` are rejected as order-of-magnitude typos (``6000`` for
+    ``60``) and nothing more: 300 s still makes a 5490 s page, longer than the cleanup
+    cron's whole 4200 s deadline, so the ceiling does not restore the bound a caller's
+    runtime budget relies on — the deployment's real tolerance (~61 s at 3000/4200) is
+    documented next to that deployment, not enforced here (see the constant).
     """
     raw = os.getenv("STAC_HTTP_TIMEOUT", "").strip()
     if raw == "":
@@ -310,14 +325,28 @@ def resilient_stac_io(timeout: float | None = None) -> StacApiIO:
     that stalls completely; and a caller's runtime budget cannot interrupt any of it — a
     page fetch is uninterruptible for its whole ladder. ``cleanup_expired_items`` checks
     its budget after every item read — at every page boundary, never inside one, and not
-    before the first item: the landing-page ``GET`` behind ``Client.open`` and the first
-    ``/search`` page both complete before the first check (two round trips, measured
-    2026-09-18 against a local server), each with its own ladder. Its README sizes the
-    pod's ``activeDeadlineSeconds`` against these figures, and raising
-    ``STAC_HTTP_TIMEOUT`` raises that requirement with it — which is why the value is
-    capped at ``_MAX_SEARCH_TIMEOUT_S`` (300 s, a 5490 s page).
-    Override the timeout with ``STAC_HTTP_TIMEOUT`` (``""`` and unset mean the default).
+    before the first item: the landing-page ``GET`` behind ``Client.open``, a second
+    ``GET`` of the same page, and the first ``/search`` page all complete before the
+    first check — three round trips, each with its own ladder. The second ``GET`` is
+    pystac resolving ``rel:root`` lazily on the first ``search()``: ``from_file`` binds
+    the root to the object only when the link's href equals the URL opened byte for
+    byte, and stac-fastapi builds ``rel:root`` from ``request.base_url``, which ends in
+    ``/``, while this fleet opens ``.../stac`` without one. Measured 2026-09-18 against
+    a local server: 3 round trips when the root href differs from the opened URL by a
+    trailing slash either way, 2 when identical or when the page has no ``rel:root``
+    (``test_round_trips_before_the_first_search`` pins both). The cleanup README sizes
+    the pod's ``activeDeadlineSeconds`` against these figures, and raising
+    ``STAC_HTTP_TIMEOUT`` raises that requirement with it; ``_MAX_SEARCH_TIMEOUT_S``
+    (300 s, a 5490 s page) fences only a typo, not that arithmetic.
+    Override the timeout with ``STAC_HTTP_TIMEOUT`` (``""`` and unset mean the default);
+    an explicit ``timeout`` argument is held to the same ``(0, 300]`` range.
     """
+    if timeout is not None and not (
+        math.isfinite(timeout) and 0 < timeout <= _MAX_SEARCH_TIMEOUT_S
+    ):
+        raise ValueError(
+            f"timeout must be in (0, {_MAX_SEARCH_TIMEOUT_S:g}] seconds (got {timeout!r})"
+        )
     # One budget, `total=8`, for every error class — connect/read/status are left at
     # urllib3's default (None = inherit `total`) ON PURPOSE. Bounding them lower so that
     # "the API is down" fails fast reads well and is wrong: urllib3 files a ConnectionReset
@@ -359,9 +388,12 @@ def open_resilient_client(url: str) -> Client:
     deliberately not migrated: bare ``Client.open`` remains on the read paths of
     ``aggregate_items``, ``query_stac``, ``trigger_cdse``, ``watch_cdse_and_process``,
     ``list_tile_frames``, ``wipe_s1rtc_tiles`` and ``operator-tools/manage_collections``
-    — the last walks whole collections, the same exposure as the migrated runner. They
-    keep pystac-client's default ``StacApiIO`` (no timeout, 5 transport retries, no
-    status retries).
+    — the last walks whole collections, the same exposure as the migrated runner, and
+    unlike the others it is a DEPLOYED DESTRUCTIVE PROD CRON: it ships in the image
+    (``docker/Dockerfile``) and is what the 6-hourly ``s2-staging-purge`` CronWorkflow
+    runs (``--max-items 2000``, deletes S3 objects then STAC items). They keep
+    pystac-client's default ``StacApiIO`` (no timeout, 5 transport retries, no status
+    retries); migrating that one is a follow-up, not a side effect of this module.
 
     Read paths only — this carries no auth and its retries must never reach a write.
     """

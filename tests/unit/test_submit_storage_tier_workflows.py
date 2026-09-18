@@ -567,6 +567,7 @@ class TestMainDateFieldForwarding:
             date_field: str,
             target_storage_ref: str | None,
             exclude_ids: set[str] | frozenset[str] = frozenset(),
+            page_size: int = 100,
         ) -> list[str]:
             captured.append(date_field)
             return []
@@ -610,6 +611,7 @@ class TestMainDateFieldForwarding:
             date_field: str,
             target_storage_ref: str | None,
             exclude_ids: set[str] | frozenset[str] = frozenset(),
+            page_size: int = 100,
         ) -> list[str]:
             captured.append(date_field)
             return []
@@ -687,6 +689,7 @@ class TestMainMinAgeMode:
             date_field: str,
             target_storage_ref: str | None,
             exclude_ids: set[str] | frozenset[str] = frozenset(),
+            page_size: int = 100,
         ) -> list[str]:
             captured.append(
                 {
@@ -745,6 +748,7 @@ class TestMainMinAgeMode:
             date_field: str,
             target_storage_ref: str | None,
             exclude_ids: set[str] | frozenset[str] = frozenset(),
+            page_size: int = 100,
         ) -> list[str]:
             captured.append(date_field)
             return []
@@ -830,6 +834,7 @@ class TestMainMinAgeMode:
             date_field: str,
             target_storage_ref: str | None,
             exclude_ids: set[str] | frozenset[str] = frozenset(),
+            page_size: int = 100,
         ) -> list[str]:
             captured.append(
                 {

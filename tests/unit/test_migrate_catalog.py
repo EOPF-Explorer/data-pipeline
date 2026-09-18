@@ -2000,11 +2000,7 @@ def test_search_client_is_resilient() -> None:
     stalled socket or a transient reset can't kill a long backfill (runner
     defects seen live: a 4.5h hang, then a ConnectionReset abort at ~20%). The
     migration's idempotent re-run is the final backstop."""
-    import sys
-    from pathlib import Path
-
-    sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
-    import stac_auth
+    import stac_auth  # on the path via pyproject's pytest `pythonpath`
 
     # Moved to stac_auth.resilient_stac_io() 2026-09-18 so the cleanup and storage-tier
     # crons, which failed the same way, share one policy. See tests/unit/test_stac_read_retry.py

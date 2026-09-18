@@ -84,12 +84,16 @@ def _now() -> datetime:
 MAX_BUDGET_SECONDS = 86_400
 
 # The item cap is also the MEMORY cap: `stale_items` is fully materialised before
-# the first delete, at roughly 45 KB per S2 L2A item dict. At a 4Gi pod limit the
-# real ceiling is ~90k, so this fences the plausible typo (100000 for 10000)
-# without constraining any real run — the live cron uses 130. An OOMKill is a
-# SIGKILL, which lands wherever it lands, including between the S3 delete and the
-# STAC delete: exactly the tear --max-runtime-seconds exists to prevent. One number
-# with the /search page ceiling, because a page is materialised the same way.
+# the first delete, at roughly 45 KB per S2 L2A item dict. The prod cleanup pod runs
+# under `limits: memory: 512Mi` (platform-deploy, eopf-explorer-cronwf-historical-
+# cleanup.yaml), which is ~11.9k items of dicts alone, before the interpreter, boto3
+# and the write session — so 10000 is NOT a value that pod survives; it sits at the
+# OOM point, not below it. This is a typo fence only (100000 for 10000), and the
+# live cron uses 300 (~13 MB). Raise --max-items in steps and watch the pod's memory.
+# An OOMKill is a SIGKILL, which lands wherever it lands, including between the S3
+# delete and the STAC delete: exactly the tear --max-runtime-seconds exists to
+# prevent. One number with the /search page ceiling, because a page is materialised
+# the same way.
 MAX_ITEMS_CEILING = stac_auth.MAX_PAGE_SIZE
 
 
@@ -406,8 +410,11 @@ def run_cleanup(args: argparse.Namespace) -> int:
             "(0 removes the cap entirely; above the ceiling risks an OOMKill)"
         )
     page_size = args.page_size
-    if not 1 <= page_size <= MAX_ITEMS_CEILING:
-        raise ValueError(f"page_size must be 1..{MAX_ITEMS_CEILING}, got {page_size}")
+    # stac_auth.MAX_PAGE_SIZE, the same authority as the argparse validator
+    # (stac_auth.page_size_arg) and the --page-size help string, so the flag has one
+    # ceiling even once the page gets a smaller one than the batch.
+    if not 1 <= page_size <= stac_auth.MAX_PAGE_SIZE:
+        raise ValueError(f"page_size must be 1..{stac_auth.MAX_PAGE_SIZE}, got {page_size}")
     budget = args.max_runtime_seconds
     if budget is not None and not 1 <= budget <= MAX_BUDGET_SECONDS:
         raise ValueError(
@@ -440,9 +447,11 @@ def run_cleanup(args: argparse.Namespace) -> int:
     # without this the summary cannot tell them apart.
     # time.monotonic() directly, NOT _monotonic(): that seam is the budget clock, which
     # a run without a budget must never read (tests pin it) and which tests drive as a
-    # fixed sequence of ticks; this is a measurement, not a control. Bound here so
-    # emit_summary's fallback is defined even if the guard trips before the restart below.
-    discovery_started = time.monotonic()
+    # fixed sequence of ticks; this is a measurement, not a control. None until the
+    # read client is about to open: if the guard trips before that (the write session
+    # or boto3's credential chain raised) the summary says null, not a number that is
+    # all boto3 and no STAC — the README promises the field never includes that stall.
+    discovery_started: float | None = None
     discovery_seconds: float | None = None
 
     def emit_summary(*, aborted: bool = False) -> None:
@@ -465,6 +474,8 @@ def run_cleanup(args: argparse.Namespace) -> int:
             "discovery_seconds": (
                 discovery_seconds
                 if discovery_seconds is not None
+                else None
+                if discovery_started is None
                 else round(time.monotonic() - discovery_started, 1)
             ),
         }
@@ -476,7 +487,7 @@ def run_cleanup(args: argparse.Namespace) -> int:
             summary["aborted"] = True
         print(json.dumps(summary), flush=True)
 
-    # Guarded from here down. Everything ABOVE -- the two config checks and
+    # Guarded from here down. Everything ABOVE -- the three config checks and
     # resolve_exclude_ids -- is a configuration error that exits 2 and writes no
     # summary; README_cleanup_expired_items.md documents that as the one case
     # where a missing summary line is harmless. Everything below talks to a live
@@ -494,12 +505,16 @@ def run_cleanup(args: argparse.Namespace) -> int:
         client = stac_auth.open_resilient_client(args.stac_api_url)
         stac_base_url = str(client.self_href).rstrip("/")
 
+        # page_size is logged because it is the knob the README says to lower when
+        # ticks keep 500ing, and discovery_seconds cannot be read without knowing
+        # whether it covered 100-row pages or 10-row ones.
         logger.info(
-            "Cleanup start: collection=%s dry_run=%s max_items=%d allowed_bucket=%s "
-            "max_runtime_seconds=%s",
+            "Cleanup start: collection=%s dry_run=%s max_items=%d page_size=%d "
+            "allowed_bucket=%s max_runtime_seconds=%s",
             args.collection,
             dry_run,
             args.max_items,
+            page_size,
             args.allowed_bucket,
             budget,
         )
@@ -516,12 +531,15 @@ def run_cleanup(args: argparse.Namespace) -> int:
         # Iterated lazily, not list(...), so the budget is checked DURING discovery —
         # after every item read, hence at every page boundary, but never inside a page
         # and not before the first item: the landing-page GET in open_resilient_client
-        # above and this first page both complete before the first check (two round
-        # trips, measured 2026-09-18), and a page fetch is uninterruptible for its whole
-        # retry ladder (~225 s against the 15 s gateway, ~1170 s worst case at the
-        # default timeout — see stac_auth.resilient_stac_io). That is why the README
-        # sizes the pod's activeDeadlineSeconds as
-        # max(budget + max(worst item, worst page), 2 x worst page). Without this
+        # above, a second GET of the same page (pystac resolving rel:root lazily on
+        # the first search(), because stac-fastapi's root href ends in "/" and the
+        # manifest's --stac-api-url does not — see stac_auth.resilient_stac_io) and
+        # this first page all complete before the first check: three round trips,
+        # measured 2026-09-18 (two only when the root href is byte-identical to the
+        # URL opened), and a page fetch is uninterruptible for its whole retry ladder
+        # (~225 s against the 15 s gateway, ~1170 s worst case at the default
+        # timeout). That is why the README sizes the pod's activeDeadlineSeconds as
+        # max(budget + max(worst item, worst page), 3 x worst page). Without this
         # check an unbounded discovery gets the pod killed by activeDeadlineSeconds
         # mid-read — which emits no cleanup_summary at all. Nothing read this way is
         # processed:
@@ -689,8 +707,9 @@ def main(argv: list[str] | None = None) -> int:
         type=stac_auth.page_size_arg,
         default=DEFAULT_PAGE_SIZE,
         help=(
-            f"Items per /search request during discovery (1..{MAX_ITEMS_CEILING}). "
-            "A page, not a cap: --max-items still bounds the run."
+            f"Items per /search request during discovery (1..{stac_auth.MAX_PAGE_SIZE}). "
+            "A page, not a cap: --max-items still bounds the run, and the page is "
+            "clamped to it."
         ),
     )
     parser.add_argument(

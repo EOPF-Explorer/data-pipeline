@@ -35,6 +35,13 @@ class _FlakyHandler(BaseHTTPRequestHandler):
     fail_times = 0
     fail_status = 500
     seen: list[str] = []
+    # The landing page's rel:root href, relative to the server root. stac-fastapi
+    # builds it from request.base_url, which always ends in "/", while the fleet opens
+    # `.../stac` without one — and pystac binds the root to the object only when the
+    # two are byte-identical, otherwise the first search() re-fetches it (a second GET
+    # on the retrying adapter, with its own full ladder). "/" is the prod shape; a test
+    # sets "" to model a byte-identical root.
+    root_path = "/"
 
     def _respond(self) -> None:
         type(self).seen.append(self.command)
@@ -46,14 +53,15 @@ class _FlakyHandler(BaseHTTPRequestHandler):
         # "/" must be a STAC landing page so Client.open() can be exercised; every other
         # path answers as a search would.
         if self.path == "/" and self.command == "GET":
-            port = str(self.server.server_port).encode()
+            base = f"http://127.0.0.1:{self.server.server_port}".encode()
             body = (
                 b'{"type":"Catalog","id":"test","stac_version":"1.0.0",'
                 b'"description":"test","conformsTo":['
                 b'"https://api.stacspec.org/v1.0.0/core",'
                 b'"https://api.stacspec.org/v1.0.0/item-search"],'
-                b'"links":[{"rel":"self","href":"http://127.0.0.1:' + port + b'/"},'
-                b'{"rel":"search","href":"http://127.0.0.1:' + port + b'/search",'
+                b'"links":[{"rel":"self","href":"' + base + b'/"},'
+                b'{"rel":"root","href":"' + base + type(self).root_path.encode() + b'"},'
+                b'{"rel":"search","href":"' + base + b'/search",'
                 b'"type":"application/geo+json","method":"POST"}]}'
             )
         else:
@@ -75,9 +83,10 @@ class _FlakyHandler(BaseHTTPRequestHandler):
 def flaky_server():
     """A local HTTP server whose failure count and status the test sets."""
 
-    def _start(fail_times: int, fail_status: int = 500) -> str:
+    def _start(fail_times: int, fail_status: int = 500, root_path: str = "/") -> str:
         _FlakyHandler.fail_times = fail_times
         _FlakyHandler.fail_status = fail_status
+        _FlakyHandler.root_path = root_path
         _FlakyHandler.seen = []
         server = HTTPServer(("127.0.0.1", 0), _FlakyHandler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -251,8 +260,13 @@ def test_hand_rolled_pairing_loses_the_timeout(flaky_server):
 
 
 def _client_then_reset(flaky_server, fail_times: int):
-    """Open against a healthy landing page, then arm the failures for the search only."""
+    """Open against a healthy landing page, resolve the root, then arm the failures
+    for the search only. Without the explicit resolve the first ``search()`` re-fetches
+    ``rel:root`` (see ``_FlakyHandler.root_path``) and the armed failures land on that
+    GET, not on the POST these two tests exist to pin."""
     client = stac_auth.open_resilient_client(flaky_server(fail_times=0))
+    client.get_root()
+    assert _FlakyHandler.seen == ["GET", "GET"], "open, then the lazy rel:root fetch"
     _FlakyHandler.seen = []
     _FlakyHandler.fail_times = fail_times
     return client
@@ -272,6 +286,38 @@ def test_exhausted_ladder_through_client_search_raises_apierror(flaky_server):
         list(client.search(collections=["c"], limit=1).items_as_dicts())
     assert _FlakyHandler.seen == ["POST"] * 9
     assert sum(call.args[0] for call in sleep.call_args_list) == 90.0
+
+
+@pytest.mark.parametrize(
+    ("root_path", "expected"),
+    [
+        ("/", ["GET", "GET", "POST"]),
+        ("", ["GET", "POST"]),
+    ],
+    ids=["root-with-trailing-slash-(prod)", "root-byte-identical"],
+)
+def test_round_trips_before_the_first_search(flaky_server, root_path, expected):
+    """The number of uninterruptible round trips before a caller's first budget check.
+
+    The cleanup README sizes ``activeDeadlineSeconds`` on this count (``3 x worst page``),
+    and it was wrong in prose for three review rounds because only prose guarded it.
+    ``from_file`` binds ``rel:root`` to the client only when the link href equals the
+    opened URL exactly; stac-fastapi's root href ends in ``/`` and the fleet's
+    ``--stac-api-url`` does not, so production is the three-trip case.
+    """
+    url = flaky_server(fail_times=0, root_path=root_path)  # opened without a slash
+    client = stac_auth.open_resilient_client(url)
+    list(client.search(collections=["c"], limit=1).items_as_dicts())
+    assert _FlakyHandler.seen == expected
+
+
+def test_explicit_timeout_argument_is_fenced_like_the_env(flaky_server):
+    """``resilient_stac_io(timeout=6000)`` must not route around the env ceiling."""
+    with pytest.raises(ValueError, match=r"\(0, 300\]"):
+        stac_auth.resilient_stac_io(timeout=6000)
+    with pytest.raises(ValueError, match="timeout"):
+        stac_auth.resilient_stac_io(timeout=0)
+    assert stac_auth.resilient_stac_io(timeout=300).timeout == 300
 
 
 # --- the effective budget -----------------------------------------------------------
