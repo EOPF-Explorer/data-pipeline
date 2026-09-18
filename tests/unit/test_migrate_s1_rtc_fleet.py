@@ -37,7 +37,7 @@ def _patch_list(monkeypatch, items=_ITEMS) -> None:
 def test_continues_past_a_failing_store_and_records_it(monkeypatch) -> None:
     _patch_list(monkeypatch)
 
-    def fake_redrive(store, *, dry_run=False):
+    def fake_redrive(store, *, dry_run=False, **_kw):
         if "30TWQ" in store:
             raise RuntimeError("unreadable store")
         return migrate.RedriveReport(store=store, orbits=["ascending"])
@@ -53,7 +53,7 @@ def test_continues_past_a_failing_store_and_records_it(monkeypatch) -> None:
 def test_buckets_derived_already_current_and_skipped(monkeypatch) -> None:
     _patch_list(monkeypatch)
 
-    def fake_redrive(store, *, dry_run=False):
+    def fake_redrive(store, *, dry_run=False, **_kw):
         if "30TUM" in store:
             return migrate.RedriveReport(store=store, already_current=True)
         if "30TWQ" in store:
@@ -74,7 +74,7 @@ def test_resolves_each_href_to_s3_before_redriving(monkeypatch) -> None:
     _patch_list(monkeypatch)
     seen: list[str] = []
 
-    def fake_redrive(store, *, dry_run=False):
+    def fake_redrive(store, *, dry_run=False, **_kw):
         seen.append(store)
         return migrate.RedriveReport(store=store, orbits=["ascending"])
 
@@ -90,7 +90,7 @@ def test_dry_run_threads_through_to_every_store(monkeypatch) -> None:
     _patch_list(monkeypatch)
     seen_dry: list[bool] = []
 
-    def fake_redrive(store, *, dry_run=False):
+    def fake_redrive(store, *, dry_run=False, **_kw):
         seen_dry.append(dry_run)
         return migrate.RedriveReport(store=store, orbits=["ascending"])
 
@@ -101,11 +101,34 @@ def test_dry_run_threads_through_to_every_store(monkeypatch) -> None:
     assert seen_dry == [True, True, True]
 
 
+def test_rewrite_root_geo_threads_through_to_every_store(monkeypatch) -> None:
+    """Default OFF, and the opt-in reaches every store.
+
+    `redrive_store` is what actually decides whether the library rewrites a production cube's ROOT
+    metadata; if the fleet driver drops the flag, the CLI switch is decorative.
+    """
+    _patch_list(monkeypatch)
+    seen: list[bool] = []
+
+    def fake_redrive(store, *, dry_run=False, rewrite_root_geo=False):
+        seen.append(rewrite_root_geo)
+        return migrate.RedriveReport(store=store, orbits=["ascending"])
+
+    monkeypatch.setattr(migrate, "redrive_store", fake_redrive)
+
+    migrate.run_fleet("http://stac", "coll")
+    assert seen == [False, False, False]
+
+    seen.clear()
+    migrate.run_fleet("http://stac", "coll", rewrite_root_geo=True)
+    assert seen == [True, True, True]
+
+
 def test_only_item_and_skip_tiles_filter_the_fleet(monkeypatch) -> None:
     _patch_list(monkeypatch)
     seen: list[str] = []
 
-    def fake_redrive(store, *, dry_run=False):
+    def fake_redrive(store, *, dry_run=False, **_kw):
         seen.append(store)
         return migrate.RedriveReport(store=store, orbits=["ascending"])
 
@@ -137,7 +160,7 @@ def test_main_list_enumerates_without_opening_stores(monkeypatch, capsys) -> Non
     assert out.count("\n") == len(_ITEMS)
 
 
-def _ok_report(store, *, dry_run=False):
+def _ok_report(store, *, dry_run=False, **_kw):
     return migrate.RedriveReport(store=store, orbits=["ascending"])
 
 
@@ -153,7 +176,7 @@ def test_backup_prefix_backs_up_each_store_before_redrive(monkeypatch) -> None:
         migrate.s1_store_meta, "backup_store", lambda s, b: calls.append(("backup", s, b)) or 1
     )
 
-    def fake_redrive(store, *, dry_run=False):
+    def fake_redrive(store, *, dry_run=False, **_kw):
         calls.append(("redrive", store))
         return migrate.RedriveReport(store=store, orbits=["ascending"])
 
@@ -201,7 +224,7 @@ def test_main_proceeds_when_versioning_on(monkeypatch) -> None:
     monkeypatch.setattr(migrate.s1_store_meta, "s3_versioning_enabled", lambda *a, **k: True)
     seen: list[str] = []
     monkeypatch.setattr(
-        migrate, "redrive_store", lambda s, *, dry_run=False: seen.append(s) or _ok_report(s)
+        migrate, "redrive_store", lambda s, *, dry_run=False, **_kw: seen.append(s) or _ok_report(s)
     )
 
     rc = migrate.main(["--stac-api-url", "x", "--cube-collection", "y", "--bucket", "b"])
@@ -259,7 +282,7 @@ def test_main_allow_no_backup_bypasses_the_gate(monkeypatch) -> None:
     monkeypatch.setattr(migrate.s1_store_meta, "s3_versioning_enabled", _must_not_call)
     seen: list[str] = []
     monkeypatch.setattr(
-        migrate, "redrive_store", lambda s, *, dry_run=False: seen.append(s) or _ok_report(s)
+        migrate, "redrive_store", lambda s, *, dry_run=False, **_kw: seen.append(s) or _ok_report(s)
     )
 
     rc = migrate.main(
