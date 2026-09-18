@@ -34,8 +34,20 @@ spec:
     secondsAfterFailure: 259200
   arguments:
     parameters:
-    - name: pipeline_image_version          # REQUIRED — RC tag containing migrate_s1_rtc_datamodel.py
-      value: v0.8.0-s1rtc-rc3
+    # The old RC tag `v0.8.0-s1rtc-rc3` predates the eopf-geozarr v0.11.0 pin, so it carries neither
+    # the stable completion marker nor `--rewrite-root-geo`.
+    #
+    # Why `pr-413` and not a `sha-<short>` tag: `PUSH_IMAGE` in .github/workflows/build.yml is false
+    # for a plain branch push, so the branch build's `sha-<head>` tag is built in the runner and
+    # discarded -- it is never in the registry. Only the pull_request build publishes, and its
+    # `type=sha` names the SYNTHESISED MERGE commit, which is absent from git history and is replaced
+    # on every push. `pr-413` is the one published tag that stays correct as the PR moves.
+    #
+    # ⚠ `pr-413` is a MOVING tag: it follows the PR head. That is fine for a staging/dry-run, and is
+    # NOT acceptable for a real run against production cubes. Before any non-dry-run: merge #413, let
+    # the main build publish an immutable `sha-<main-sha>`, and pin THAT here.
+    - name: pipeline_image_version          # REQUIRED — build containing migrate_s1_rtc_datamodel.py
+      value: pr-413
     - name: stac_api_url
       value: https://api.explorer.eopf.copernicus.eu/stac
     - name: cube_collection
@@ -56,6 +68,8 @@ spec:
       value: "false"
     - name: allow_no_backup                 # "true" → real run with NO backup (recovery = re-ingest)
       value: "false"
+    - name: rewrite_root_geo                # "true" → ALSO rewrite each store's root geo metadata
+      value: "false"                        # SAFE DEFAULT: re-derive vv/vh + consolidate, nothing else
   templates:
   - name: migrate
     activeDeadlineSeconds: 21600            # 6h ceiling for the whole fleet
@@ -82,6 +96,7 @@ spec:
         [ "$DRY_RUN" = "true" ] && args+=(--dry-run)
         [ "$ROLLBACK" = "true" ] && args+=(--rollback)
         [ "$ALLOW_NO_BACKUP" = "true" ] && args+=(--allow-no-backup)
+        [ "$REWRITE_ROOT_GEO" = "true" ] && args+=(--rewrite-root-geo)
         [ -n "$BACKUP_PREFIX" ] && args+=(--backup-prefix "$BACKUP_PREFIX")
         [ -n "$ITEM" ] && args+=(--item "$ITEM")
         [ -n "$SKIP_TILES" ] && args+=(--skip-tiles $SKIP_TILES)
@@ -115,6 +130,8 @@ spec:
         value: "{{workflow.parameters.item}}"
       - name: ALLOW_NO_BACKUP
         value: "{{workflow.parameters.allow_no_backup}}"
+      - name: REWRITE_ROOT_GEO
+        value: "{{workflow.parameters.rewrite_root_geo}}"
       - name: AWS_ACCESS_KEY_ID
         valueFrom:
           secretKeyRef:

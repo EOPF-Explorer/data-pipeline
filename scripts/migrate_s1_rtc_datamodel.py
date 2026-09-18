@@ -7,12 +7,22 @@ existing stores (append doesn't recreate arrays):
   - #202 — out-of-swath nodata stored as `NaN` (not `0.0`) so titiler masks it transparent;
   - #203 — consolidated metadata on *every* orbit group, not just the last-ingested one.
 
-`redrive_store` reproduces, in place, exactly what a fresh re-ingest would write — by re-deriving each
-present orbit's vv/vh from the cube's own native band masked by its own `border_mask`, regenerating the
-overviews with the writer's `np.nanmean` downsample, restoring the CF attrs, and consolidating every
-orbit. The overview math is the data-model writer's own private `_downsample_2d`/`OVERVIEW_CHAIN`, so
-the result is value-identical to a re-ingest only at the pinned writer — `assert_writer_pinned()` (R5)
-refuses to run otherwise. See plan `the-migration-of-the-adaptive-wolf.md`.
+`redrive_store` re-derives, in place, each present orbit's vv/vh from the cube's own native band
+masked by its own `border_mask`, regenerates the overviews with the writer's `np.nanmean` downsample,
+restores the CF attrs, and consolidates every orbit. The overview math is the data-model writer's own
+private `_downsample_2d`/`OVERVIEW_CHAIN`, so the *backscatter* is value-identical to a re-ingest at
+the pinned writer — `assert_writer_pinned()` (R5) refuses to run otherwise.
+
+**It is NOT value-identical to a fresh re-ingest overall, from eopf-geozarr 0.11.0 on.** The writer
+now builds overview `border_mask` levels with block-`max` (data-model F11), while a migrated cube's
+mask levels were written with `nearest` and this migration never touches `border_mask` at all — it is
+the authoritative input to the re-derive, so rewriting it here would change the very mask the vv/vh
+are being masked by. The difference is bounded and one-directional (`nearest` can drop a valid pixel
+a `max` would keep; it can never invent one), and it is the conformance migration's job, not this
+one's. Do not restore the old "reproduces exactly what a fresh re-ingest would write" claim without
+also re-deriving the mask ladder.
+
+See plan `the-migration-of-the-adaptive-wolf.md`.
 """
 
 from __future__ import annotations
@@ -23,7 +33,6 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import eopf_geozarr
 import numpy as np
 import s1_store_meta
 import zarr
@@ -39,10 +48,25 @@ from register_v1 import https_to_s3
 
 log = logging.getLogger("migrate_s1_rtc_datamodel")
 
-# Per-store completion marker (root attr): the migration is idempotent on the *store*, keyed by the
-# writer the re-derive ran against. Writes within a store are not atomic across objects, so a crash
-# mid-store leaves no marker and the store is re-derived in full on the next run (R2).
+# Per-store completion marker (root attr): the migration is idempotent on the *store*. Writes within
+# a store are not atomic across objects, so a crash mid-store leaves no marker and the store is
+# re-derived in full on the next run (R2).
 MIGRATION_MARKER_KEY = "datamodel_migrated"
+
+# The marker is a STABLE token, deliberately NOT the writer version. It used to be
+# `eopf_geozarr.__version__`, which coupled "has this store been migrated?" to "which release am I
+# running?" — so the 0.10.2 -> 0.11.0 pin bump would have stopped every already-migrated store's
+# marker from matching and re-derived the entire fleet's bulk vv/vh from scratch, for nothing.
+#
+# What the marker answers is "have #201/#202/#203 been applied to this store", and that is a property
+# of the store, not of the running release. The behaviour guarantee lives where it belongs:
+# `assert_writer_pinned()` checks the writer on every run.
+MIGRATION_MARKER_VALUE = "1"
+
+# Every marker that means "already migrated". The version-valued entries are what earlier runs wrote;
+# both releases shipped a byte-identical `s1_ingest.py` (see the re-pin history in `s1_store_meta`),
+# so a store marked by either has had the same three fixes and must NOT be re-derived.
+ACCEPTED_MIGRATION_MARKERS = frozenset({MIGRATION_MARKER_VALUE, "0.10.1", "0.10.2"})
 
 
 @dataclass
@@ -60,23 +84,31 @@ class RedriveReport:
 
 
 def _marker_value() -> str:
-    """The writer the migration runs against (the completion-marker value).
-
-    Deliberately version-granular (``eopf_geozarr.__version__``), not the exact git rev — two ``0.10.1``
-    builds share a marker. The precise-behaviour guarantee comes from ``assert_writer_pinned`` at run
-    time (version + fill value + OVERVIEW_CHAIN), not from the marker; the marker only answers "did *a*
-    pinned writer already migrate this store" (the option-(b) R5 scope).
-    """
-    return str(eopf_geozarr.__version__)
+    """The completion-marker value written by this migration."""
+    return MIGRATION_MARKER_VALUE
 
 
-def redrive_store(store_path: str | Path, *, dry_run: bool = False) -> RedriveReport:
+def redrive_store(
+    store_path: str | Path,
+    *,
+    dry_run: bool = False,
+    rewrite_root_geo: bool = False,
+) -> RedriveReport:
     """Re-derive one cube store in place to the current data-model; return what changed.
 
-    Idempotent via the per-store completion marker: a store already migrated at the current writer is
-    a no-op. Follows the consolidated-metadata dance (drop → reopen ``r+`` → re-derive → marker →
-    ``consolidate_s1_store``) so the writer sees fresh per-array metadata. ``dry_run`` reports what
-    would happen (already-current / which orbits, which lack ``border_mask``) and writes **nothing**.
+    Idempotent via the per-store completion marker: a store already migrated is a no-op. Follows the
+    consolidated-metadata dance (drop → reopen ``r+`` → re-derive → marker → consolidate) so the
+    writer sees fresh per-array metadata. ``dry_run`` reports what would happen (already-current /
+    which orbits, which lack ``border_mask``) and writes **nothing**.
+
+    ``rewrite_root_geo`` (default False) keeps this migration inside its stated contract: re-derive
+    vv/vh and consolidate, touch nothing else. From eopf-geozarr 0.11.0, the library's
+    ``consolidate_s1_store`` *also* rewrites the store ROOT — replacing ``proj:code`` with
+    ``EPSG:4326``, reprojecting ``spatial:bbox`` to lon/lat and setting ``zarr_conventions``. That is
+    a reasonable thing for the ingest path to do, but this script runs against ``s3://`` PRODUCTION
+    cubes, so it must not happen as a silent side effect of a "re-derive the bands" run. Left False,
+    the consolidation here is plain ``zarr.consolidate_metadata`` over every orbit group and the root
+    — which is all #203 ever asked for. Pass True to opt into the library's root refinement.
     """
     s1_store_meta.assert_writer_pinned()  # R5 — refuse to run on a drifted writer
     # Keep the URI as a string — `Path("s3://b/x")` collapses the `//` to `s3:/b/x` and breaks the s3
@@ -86,7 +118,7 @@ def redrive_store(store_path: str | Path, *, dry_run: bool = False) -> RedriveRe
 
     root_ro = zarr.open_group(store_path, mode="r", zarr_format=3)
     report.orbits = [name for name, _ in root_ro.groups()]
-    if dict(root_ro.attrs).get(MIGRATION_MARKER_KEY) == _marker_value():
+    if dict(root_ro.attrs).get(MIGRATION_MARKER_KEY) in ACCEPTED_MIGRATION_MARKERS:
         report.already_current = True
         return report
 
@@ -142,7 +174,14 @@ def redrive_store(store_path: str | Path, *, dry_run: bool = False) -> RedriveRe
     # (which idempotency would then skip forever). `set_root_attr` edits the root zarr.json directly so
     # the marker doesn't clobber the consolidated metadata just written.
     if report.orbits:
-        consolidate_s1_store(str(store_path), report.orbits[0])
+        if rewrite_root_geo:
+            consolidate_s1_store(str(store_path), report.orbits[0])
+        else:
+            # #203 without the root refinement: consolidate every orbit group, then the root. This is
+            # the same pair of calls `consolidate_s1_store` makes after its root rewrite.
+            for orbit_name in report.orbits:
+                zarr.consolidate_metadata(str(store_path), path=orbit_name, zarr_format=3)
+            zarr.consolidate_metadata(str(store_path), zarr_format=3)
     if not report.skipped_no_border_mask:
         s1_store_meta.set_root_attr(str(store_path), MIGRATION_MARKER_KEY, _marker_value())
     return report
@@ -176,13 +215,15 @@ def run_fleet(
     only_item: str | None = None,
     skip_tiles: tuple[str, ...] = (),
     backup_prefix: str | None = None,
+    rewrite_root_geo: bool = False,
 ) -> FleetReport:
     """Redrive every cube in ``cube_collection``; one bad store is logged and skipped, never aborting.
 
-    Resumable: a store already at the current writer reports ``already_current`` (the marker) and is a
-    no-op, so a re-run only touches the stores that still need it. When ``backup_prefix`` is set (the
+    Resumable: an already-migrated store reports ``already_current`` (the marker) and is a no-op, so a
+    re-run only touches the stores that still need it. When ``backup_prefix`` is set (the
     no-versioning fallback), each store is copied there *before* it is re-derived; a backup failure marks
-    that store failed and it is not re-derived.
+    that store failed and it is not re-derived. ``rewrite_root_geo`` is passed straight to
+    ``redrive_store`` — see its docstring for why it defaults to False against production cubes.
     """
     fleet = FleetReport()
     for item_id, href in list_cube_items(stac_api_url, cube_collection):
@@ -198,7 +239,7 @@ def run_fleet(
         try:
             if backup_prefix and not dry_run:
                 s1_store_meta.backup_store(store, _backup_path(backup_prefix, item_id))
-            rpt = redrive_store(store, dry_run=dry_run)
+            rpt = redrive_store(store, dry_run=dry_run, rewrite_root_geo=rewrite_root_geo)
         except Exception as exc:  # noqa: BLE001 -- the fleet must continue past one unreadable store
             log.exception("redrive failed for %s (%s)", item_id, store)
             fleet.failed.append((item_id, str(exc)))
@@ -282,6 +323,13 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="S3 endpoint for the versioning check (else AWS_ENDPOINT_URL)",
     )
+    parser.add_argument(
+        "--rewrite-root-geo",
+        action="store_true",
+        help="also let the library rewrite each store's ROOT metadata (proj:code -> EPSG:4326, "
+        "lon/lat spatial:bbox, zarr_conventions). OFF by default: this migration's contract is "
+        "re-derive vv/vh and consolidate, and it runs against production cubes.",
+    )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
 
@@ -331,6 +379,7 @@ def main(argv: list[str] | None = None) -> int:
         only_item=args.item,
         skip_tiles=tuple(args.skip_tiles),
         backup_prefix=args.backup_prefix,
+        rewrite_root_geo=args.rewrite_root_geo,
     )
     log.info(
         "fleet %s: derived=%d already-current=%d skipped-no-border_mask=%d failed=%d",

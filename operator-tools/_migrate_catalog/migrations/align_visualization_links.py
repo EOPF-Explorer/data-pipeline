@@ -11,7 +11,11 @@ _ORDER = {"store": 0, "viewer": 1, "tilejson": 2, "xyz": 3, "via": 4, "related":
 
 
 def _transform(item: dict[str, Any]) -> bool:
-    render = item.get("properties", {}).get("renders", {}).get("rgb")
+    # Item root first: data-model #216 moved `renders` there (the render extension requires it on
+    # the item) and mirrors it into `properties` only until the pipeline reads the root. Reading
+    # `properties` alone would quietly report "nothing to align" for every item once that goes.
+    renders = item.get("renders") or item.get("properties", {}).get("renders", {})
+    render = renders.get("rgb") if isinstance(renders, dict) else None
     if not isinstance(render, dict):
         # No producer render config (e.g. S2 hardcoded visualization) — nothing to align.
         return False

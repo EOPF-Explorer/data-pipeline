@@ -40,7 +40,7 @@ dependencies = [
     # This branch needs BOTH: S1 registration/ingest and open_source_datatree.
     # Chunk-alignment was split out to data-model#221, so quality/atmosphere
     # aot/wvp ship unsharded until that lands.
-    "eopf-geozarr @ git+https://github.com/EOPF-Explorer/data-model.git@9ede8c34dfe534727e93d80e278ad4390f5656d0",
+    "eopf-geozarr @ git+https://github.com/EOPF-Explorer/data-model.git@v0.11.0",
     "mgrs==1.5.4",
     "requests==2.34.2",
 ]
