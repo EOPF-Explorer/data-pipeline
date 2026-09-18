@@ -151,7 +151,9 @@ class TestQueryItems:
         ]
         client = FakeStacClient(items)
 
-        with patch("scripts.query_storage_tier_items.Client.open", return_value=client):
+        with patch(
+            "scripts.query_storage_tier_items.stac_auth.open_resilient_client", return_value=client
+        ):
             result = query_items(STAC_API_URL, COLLECTION, 7, "glacier", 100)
 
         assert result == ["item-2", "item-4", "item-5"]
@@ -160,7 +162,9 @@ class TestQueryItems:
         items = [create_stac_item(f"item-{i}", storage_refs=["standard"]) for i in range(10)]
         client = FakeStacClient(items)
 
-        with patch("scripts.query_storage_tier_items.Client.open", return_value=client):
+        with patch(
+            "scripts.query_storage_tier_items.stac_auth.open_resilient_client", return_value=client
+        ):
             result = query_items(STAC_API_URL, COLLECTION, 7, "glacier", 3)
 
         assert len(result) == 3
@@ -169,7 +173,9 @@ class TestQueryItems:
     def test_empty_collection(self):
         client = FakeStacClient([])
 
-        with patch("scripts.query_storage_tier_items.Client.open", return_value=client):
+        with patch(
+            "scripts.query_storage_tier_items.stac_auth.open_resilient_client", return_value=client
+        ):
             result = query_items(STAC_API_URL, COLLECTION, 7, "glacier", 100)
 
         assert result == []
@@ -181,7 +187,9 @@ class TestQueryItems:
         ]
         client = FakeStacClient(items)
 
-        with patch("scripts.query_storage_tier_items.Client.open", return_value=client):
+        with patch(
+            "scripts.query_storage_tier_items.stac_auth.open_resilient_client", return_value=client
+        ):
             result = query_items(STAC_API_URL, COLLECTION, 7, "glacier", 100)
 
         assert result == []
@@ -194,7 +202,9 @@ class TestQueryItems:
         ]
         client = FakeStacClient(items)
 
-        with patch("scripts.query_storage_tier_items.Client.open", return_value=client):
+        with patch(
+            "scripts.query_storage_tier_items.stac_auth.open_resilient_client", return_value=client
+        ):
             result = query_items(
                 STAC_API_URL, COLLECTION, 7, "glacier", 100, exclude_ids={"demo-1"}
             )
@@ -208,7 +218,9 @@ class TestQueryItems:
         ]
         client = FakeStacClient(items)
 
-        with patch("scripts.query_storage_tier_items.Client.open", return_value=client):
+        with patch(
+            "scripts.query_storage_tier_items.stac_auth.open_resilient_client", return_value=client
+        ):
             result = query_items(STAC_API_URL, COLLECTION, 7, "glacier", 3, exclude_ids={"demo-1"})
 
         assert result == ["item-0", "item-1", "item-2"]
@@ -226,7 +238,10 @@ class TestMain:
         client = FakeStacClient(items)
 
         with (
-            patch("scripts.query_storage_tier_items.Client.open", return_value=client),
+            patch(
+                "scripts.query_storage_tier_items.stac_auth.open_resilient_client",
+                return_value=client,
+            ),
             patch("sys.stdout", new_callable=StringIO) as stdout,
         ):
             exit_code = main(
@@ -253,7 +268,10 @@ class TestMain:
         client = FakeStacClient([])
 
         with (
-            patch("scripts.query_storage_tier_items.Client.open", return_value=client),
+            patch(
+                "scripts.query_storage_tier_items.stac_auth.open_resilient_client",
+                return_value=client,
+            ),
             patch("sys.stdout", new_callable=StringIO) as stdout,
         ):
             exit_code = main(
@@ -278,7 +296,10 @@ class TestMain:
         client = FakeStacClient(items)
 
         with (
-            patch("scripts.query_storage_tier_items.Client.open", return_value=client),
+            patch(
+                "scripts.query_storage_tier_items.stac_auth.open_resilient_client",
+                return_value=client,
+            ),
             patch("sys.stdout", new_callable=StringIO) as stdout,
         ):
             exit_code = main(
@@ -311,7 +332,10 @@ class TestMain:
         client = FakeStacClient(items)
 
         with (
-            patch("scripts.query_storage_tier_items.Client.open", return_value=client),
+            patch(
+                "scripts.query_storage_tier_items.stac_auth.open_resilient_client",
+                return_value=client,
+            ),
             patch("sys.stdout", new_callable=StringIO) as stdout,
         ):
             exit_code = main(
@@ -341,7 +365,10 @@ class TestMain:
         client = FakeStacClient(items)
 
         with (
-            patch("scripts.query_storage_tier_items.Client.open", return_value=client),
+            patch(
+                "scripts.query_storage_tier_items.stac_auth.open_resilient_client",
+                return_value=client,
+            ),
             patch("sys.stdout", new_callable=StringIO) as stdout,
         ):
             exit_code = main(
@@ -364,7 +391,7 @@ class TestMain:
 
     def test_error_returns_nonzero(self):
         with patch(
-            "scripts.query_storage_tier_items.Client.open",
+            "scripts.query_storage_tier_items.stac_auth.open_resilient_client",
             side_effect=Exception("Connection failed"),
         ):
             exit_code = main(

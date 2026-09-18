@@ -83,8 +83,8 @@ class TestQueryStacItems:
         mock_catalog = MagicMock()
         mock_catalog.search.return_value = mock_search
 
-        with patch("submit_storage_tier_workflows.Client") as mock_client:
-            mock_client.open.return_value = mock_catalog
+        with patch("submit_storage_tier_workflows.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value = mock_catalog
             result = query_stac_items(
                 "https://stac.example.com",
                 "sentinel-2",
@@ -93,7 +93,10 @@ class TestQueryStacItems:
             )
 
         assert result == ["item-a", "item-b"]
-        mock_client.open.assert_called_once_with("https://stac.example.com")
+        # open_resilient_client, not Client.open: it is the only form that keeps BOTH the
+        # retries and the timeout (see stac_auth.resilient_stac_io). Without the retries one
+        # transient 5xx mid-pagination aborts the tier-down run (prod, 2026-09-18T04:00).
+        mock_open.assert_called_once_with("https://stac.example.com")
         mock_catalog.search.assert_called_once_with(
             collections=["sentinel-2"],
             datetime="2024-01-01T00:00:00Z/2024-01-02T00:00:00Z",
@@ -107,8 +110,8 @@ class TestQueryStacItems:
         mock_catalog = MagicMock()
         mock_catalog.search.return_value = mock_search
 
-        with patch("submit_storage_tier_workflows.Client") as mock_client:
-            mock_client.open.return_value = mock_catalog
+        with patch("submit_storage_tier_workflows.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value = mock_catalog
             result = query_stac_items(
                 "https://stac.example.com",
                 "sentinel-2",
@@ -128,8 +131,8 @@ class TestQueryStacItems:
         mock_catalog = MagicMock()
         mock_catalog.search.return_value = mock_search
 
-        with patch("submit_storage_tier_workflows.Client") as mock_client:
-            mock_client.open.return_value = mock_catalog
+        with patch("submit_storage_tier_workflows.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value = mock_catalog
             result = query_stac_items(
                 "https://stac.example.com",
                 "sentinel-2",
@@ -160,8 +163,8 @@ class TestQueryStacItems:
         mock_catalog = MagicMock()
         mock_catalog.search.return_value = mock_search
 
-        with patch("submit_storage_tier_workflows.Client") as mock_client:
-            mock_client.open.return_value = mock_catalog
+        with patch("submit_storage_tier_workflows.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value = mock_catalog
             query_stac_items(
                 "https://stac.example.com",
                 "sentinel-2",
@@ -306,8 +309,8 @@ class TestQueryStacItemsTierFilter:
         mock_catalog = MagicMock()
         mock_catalog.search.return_value = mock_search
 
-        with patch("submit_storage_tier_workflows.Client") as mock_client:
-            mock_client.open.return_value = mock_catalog
+        with patch("submit_storage_tier_workflows.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value = mock_catalog
             result = query_stac_items(
                 "https://stac.example.com",
                 "sentinel-2",
@@ -329,8 +332,8 @@ class TestQueryStacItemsTierFilter:
         mock_catalog = MagicMock()
         mock_catalog.search.return_value = mock_search
 
-        with patch("submit_storage_tier_workflows.Client") as mock_client:
-            mock_client.open.return_value = mock_catalog
+        with patch("submit_storage_tier_workflows.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value = mock_catalog
             result = query_stac_items(
                 "https://stac.example.com",
                 "sentinel-2",
@@ -351,8 +354,8 @@ class TestQueryStacItemsTierFilter:
         mock_catalog = MagicMock()
         mock_catalog.search.return_value = mock_search
 
-        with patch("submit_storage_tier_workflows.Client") as mock_client:
-            mock_client.open.return_value = mock_catalog
+        with patch("submit_storage_tier_workflows.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value = mock_catalog
             result = query_stac_items(
                 "https://stac.example.com",
                 "sentinel-2",
@@ -375,8 +378,8 @@ class TestQueryStacItemsTierFilter:
         mock_catalog = MagicMock()
         mock_catalog.search.return_value = mock_search
 
-        with patch("submit_storage_tier_workflows.Client") as mock_client:
-            mock_client.open.return_value = mock_catalog
+        with patch("submit_storage_tier_workflows.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value = mock_catalog
             result = query_stac_items(
                 "https://stac.example.com",
                 "sentinel-2",
@@ -394,8 +397,8 @@ class TestQueryStacItemsTierFilter:
         mock_catalog = MagicMock()
         mock_catalog.search.return_value = mock_search
 
-        with patch("submit_storage_tier_workflows.Client") as mock_client:
-            mock_client.open.return_value = mock_catalog
+        with patch("submit_storage_tier_workflows.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value = mock_catalog
             query_stac_items(
                 "https://stac.example.com",
                 "sentinel-2",

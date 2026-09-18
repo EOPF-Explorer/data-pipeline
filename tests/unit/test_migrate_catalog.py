@@ -721,8 +721,8 @@ class TestSTACMigrationRunner:
         runner = self._make_runner()
         mock_search = _make_mock_search([item_with_wrong_media_type], total=1)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = mock_search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = mock_search
             result = runner.run_migration(
                 "test-col", fix_zarr_media_type, "fix_zarr_media_type", dry_run=True
             )
@@ -737,8 +737,8 @@ class TestSTACMigrationRunner:
         runner = self._make_runner()
         mock_search = _make_mock_search([item_with_wrong_media_type], total=1)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = mock_search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = mock_search
             result = runner.run_migration("test-col", fix_zarr_media_type, "fix_zarr_media_type")
 
         assert result.items_modified == 1
@@ -751,8 +751,8 @@ class TestSTACMigrationRunner:
         runner = self._make_runner()
         mock_search = _make_mock_search([item_clean], total=1)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = mock_search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = mock_search
             result = runner.run_migration("test-col", fix_zarr_media_type, "fix_zarr_media_type")
 
         assert result.items_skipped == 1
@@ -764,8 +764,8 @@ class TestSTACMigrationRunner:
         mock_search = _make_mock_search([item_with_wrong_media_type], total=1)
         runner._update_item.side_effect = Exception("API error")
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = mock_search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = mock_search
             result = runner.run_migration("test-col", fix_zarr_media_type, "fix_zarr_media_type")
 
         assert result.items_failed == 1
@@ -777,8 +777,8 @@ class TestSTACMigrationRunner:
         runner = self._make_runner()
         mock_search = _make_mock_search([item_with_wrong_media_type, item_clean], total=2)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = mock_search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = mock_search
             result = runner.run_migration("test-col", fix_zarr_media_type, "fix_zarr_media_type")
 
         assert result.items_processed == 2
@@ -792,13 +792,13 @@ class TestSTACMigrationRunner:
         runner = self._make_runner()
         mock_search = _make_mock_search([item_clean], total=1)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = mock_search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = mock_search
             runner.run_migration(
                 "test-col", fix_zarr_media_type, "fix_zarr_media_type", ids=["item-a", "item-b"]
             )
 
-        mock_client.open.return_value.search.assert_called_once_with(
+        mock_open.return_value.search.assert_called_once_with(
             collections=["test-col"], ids=["item-a", "item-b"], max_items=None, limit=100
         )
 
@@ -807,11 +807,11 @@ class TestSTACMigrationRunner:
         runner = self._make_runner()
         mock_search = _make_mock_search([item_clean], total=1)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = mock_search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = mock_search
             runner.run_migration("test-col", fix_zarr_media_type, "fix_zarr_media_type")
 
-        mock_client.open.return_value.search.assert_called_once_with(
+        mock_open.return_value.search.assert_called_once_with(
             collections=["test-col"], max_items=None, limit=100
         )
 
@@ -844,8 +844,8 @@ class TestSTACMigrationRunner:
         mock_search.matched.return_value = 1
         mock_search.pages_as_dicts.return_value = [{"features": [item]}]
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = mock_search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = mock_search
             runner.run_migration("test-col", add_xyz_link, "add_xyz_link")
 
         runner._update_item.assert_called_once()
@@ -878,8 +878,8 @@ class TestSTACMigrationRunner:
         # Prove the runner does NOT touch the pystac-parsing path.
         mock_search.pages.side_effect = KeyError("href")
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = mock_search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = mock_search
             result = runner.run_migration("test-col", add_xyz_link, "add_xyz_link")
 
         assert result.items_processed == 1
@@ -909,9 +909,9 @@ class TestSTACMigrationRunner:
         with (
             patch.object(runner.session, "get", return_value=mock_resp),
             patch.object(runner.session, "post", return_value=mock_resp) as mock_post,
-            patch("_migrate_catalog.runner.Client") as mock_client,
+            patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open,
         ):
-            mock_client.open.return_value.search.return_value = mock_search
+            mock_open.return_value.search.return_value = mock_search
             copied, skipped, failed = runner.clone_collection("source-col", "target-col")
 
         assert copied == 2
@@ -948,9 +948,9 @@ class TestSTACMigrationRunner:
         with (
             patch.object(runner.session, "get", return_value=mock_resp),
             patch.object(runner.session, "post", side_effect=post_side_effect),
-            patch("_migrate_catalog.runner.Client") as mock_client,
+            patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open,
         ):
-            mock_client.open.return_value.search.return_value = mock_search
+            mock_open.return_value.search.return_value = mock_search
             copied, skipped, failed = runner.clone_collection("source-col", "target-col")
 
         assert copied == 0
@@ -971,12 +971,12 @@ class TestFetchExistingIds:
         mock_search = MagicMock()
         mock_search.pages.return_value = [mock_page]
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = mock_search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = mock_search
             result = runner._fetch_existing_ids("my-col", page_size=100)
 
         assert result == {"item-1", "item-2"}
-        mock_client.open.return_value.search.assert_called_once_with(
+        mock_open.return_value.search.assert_called_once_with(
             collections=["my-col"], max_items=None, limit=100
         )
 
@@ -1008,9 +1008,9 @@ class TestCloneResume:
             patch.object(runner.session, "get", return_value=mock_resp),
             patch.object(runner.session, "post", return_value=mock_resp) as mock_post,
             patch.object(runner, "_fetch_existing_ids", return_value={"item-1"}),
-            patch("_migrate_catalog.runner.Client") as mock_client,
+            patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open,
         ):
-            mock_client.open.return_value.search.return_value = mock_source_search
+            mock_open.return_value.search.return_value = mock_source_search
             copied, skipped, failed = runner.clone_collection(
                 "source-col", "target-col", resume=True
             )
@@ -1036,9 +1036,9 @@ class TestCloneResume:
             patch.object(runner.session, "get", return_value=mock_resp),
             patch.object(runner.session, "post", return_value=mock_resp) as mock_post,
             patch.object(runner, "_fetch_existing_ids", return_value=set()),
-            patch("_migrate_catalog.runner.Client") as mock_client,
+            patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open,
         ):
-            mock_client.open.return_value.search.return_value = mock_source_search
+            mock_open.return_value.search.return_value = mock_source_search
             copied, skipped, failed = runner.clone_collection(
                 "source-col", "target-col", resume=True
             )
@@ -1102,8 +1102,8 @@ class TestAtomicUpdate:
         runner._session = MagicMock(return_value=session)  # type: ignore[method-assign]
 
         search = _make_mock_search([_dirty_item(0)], total=1)
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             result = runner.run_migration("test-col", fix_zarr_media_type, "m")
 
         assert result.items_failed == 1
@@ -2000,14 +2000,24 @@ def test_search_client_is_resilient() -> None:
     stalled socket or a transient reset can't kill a long backfill (runner
     defects seen live: a 4.5h hang, then a ConnectionReset abort at ~20%). The
     migration's idempotent re-run is the final backstop."""
-    from _migrate_catalog.runner import _SEARCH_TIMEOUT, _resilient_stac_io
+    import sys
+    from pathlib import Path
 
-    io = _resilient_stac_io()
-    assert io.timeout == _SEARCH_TIMEOUT
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent / "scripts"))
+    import stac_auth
+
+    # Moved to stac_auth.resilient_stac_io() 2026-09-18 so the cleanup and storage-tier
+    # crons, which failed the same way, share one policy. See tests/unit/test_stac_read_retry.py
+    # for the behavioural coverage (this asserts configuration only).
+    io = stac_auth.resilient_stac_io()
+    assert io.timeout == stac_auth._SEARCH_TIMEOUT_S
     retry = io.session.get_adapter("https://example.com").max_retries
     assert retry.total and retry.total >= 5
     assert retry.backoff_factor and retry.backoff_factor > 0
     assert "POST" in retry.allowed_methods  # /search pagination uses POST
+    # 500 added 2026-09-18: the prod gateway surfaces an upstream ReadTimeout as 500,
+    # not 504, so a policy without it did not fire (six prod ticks lost).
+    assert 500 in retry.status_forcelist
 
 
 # === Parallel writes (--concurrency) ===
@@ -2063,8 +2073,8 @@ class TestRunMigrationConcurrency:
 
     def _run(self, runner, items, concurrency, dry_run=False):  # noqa: ANN001, ANN202
         mock_search = _make_mock_search(items, total=len(items))
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = mock_search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = mock_search
             return runner.run_migration(
                 "test-col",
                 fix_zarr_media_type,
@@ -2181,8 +2191,8 @@ class TestRunMigrationConcurrency:
             return fix_zarr_media_type(item)
 
         mock_search = _make_mock_search([_dirty_item(i) for i in range(30)], total=30)
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = mock_search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = mock_search
             runner.run_migration("test-col", tracking_fn, "tracking", concurrency=8)
 
         assert fn_threads == {threading.get_ident()}
@@ -2214,8 +2224,8 @@ class TestConcurrencyAcrossPages:
         pages = [[_dirty_item(pg * 20 + i) for i in range(20)] for pg in range(5)]
         search = _multi_page_search(pages, total=100)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             result = runner.run_migration(
                 "test-col", fix_zarr_media_type, "fix_zarr_media_type", concurrency=8
             )
@@ -2252,8 +2262,8 @@ class TestCircuitBreaker:
         pages = [[_dirty_item(pg * 10 + i) for i in range(10)] for pg in range(20)]
         search = _multi_page_search(pages, total=200)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             result = runner.run_migration(
                 "test-col",
                 fix_zarr_media_type,
@@ -2286,8 +2296,8 @@ class TestCircuitBreaker:
         pages = [[_dirty_item(pg * 20 + i) for i in range(20)] for pg in range(10)]
         search = _multi_page_search(pages, total=200)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             result = runner.run_migration(
                 "test-col",
                 fix_zarr_media_type,
@@ -2304,8 +2314,8 @@ class TestCircuitBreaker:
         pages = [[_dirty_item(pg * 10 + i) for i in range(10)] for pg in range(5)]
         search = _multi_page_search(pages, total=50)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             result = runner.run_migration(
                 "test-col", fix_zarr_media_type, "fix_zarr_media_type", max_consecutive_failures=0
             )
@@ -2319,8 +2329,8 @@ class TestCircuitBreaker:
         runner._update_item = MagicMock()  # type: ignore[method-assign]
         search = _multi_page_search([[_dirty_item(i) for i in range(10)]], total=10)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             result = runner.run_migration("test-col", fix_zarr_media_type, "fix_zarr_media_type")
 
         assert result.aborted is False
@@ -2329,16 +2339,16 @@ class TestCircuitBreaker:
     def test_negative_threshold_rejected(self) -> None:
         runner = STACMigrationRunner("https://api.example.com/stac")
         search = _make_mock_search([_dirty_item(0)], total=1)
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             with pytest.raises(ValueError, match="max_consecutive_failures must be >= 0"):
                 runner.run_migration("c", fix_zarr_media_type, "m", max_consecutive_failures=-1)
 
     def test_negative_concurrency_rejected(self) -> None:
         runner = STACMigrationRunner("https://api.example.com/stac")
         search = _make_mock_search([_dirty_item(0)], total=1)
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             with pytest.raises(ValueError, match="concurrency must be >= 1"):
                 runner.run_migration("c", fix_zarr_media_type, "m", concurrency=0)
 
@@ -2372,8 +2382,8 @@ class TestMaxWrites:
         pages = [[_dirty_item(pg * 20 + i) for i in range(20)] for pg in range(10)]
         search = _multi_page_search(pages, total=200)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             result = runner.run_migration(
                 "test-col",
                 fix_zarr_media_type,
@@ -2404,8 +2414,8 @@ class TestMaxWrites:
         page = unmodelable + [_dirty_item(0)]
         search = _multi_page_search([page], total=len(page))
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             result = runner.run_migration(
                 "test-col",
                 fix_zarr_media_type,
@@ -2428,8 +2438,8 @@ class TestMaxWrites:
         pages = [[_dirty_item(pg * 20 + i) for i in range(20)] for pg in range(10)]
         search = _multi_page_search(pages, total=200)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             result = runner.run_migration(
                 "test-col", fix_zarr_media_type, "fix_zarr_media_type", max_writes=25
             )
@@ -2458,8 +2468,8 @@ class TestMaxWrites:
         pages = [[_stampable_item(item_id=f"s-{pg}-{i}") for i in range(20)] for pg in range(10)]
         search = _multi_page_search(pages, total=200)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             result = runner.run_migration(
                 "test-col", stamp_expires, "stamp_expires", concurrency=4, max_writes=30
             )
@@ -2475,8 +2485,8 @@ class TestMaxWrites:
         pages = [[_dirty_item(pg * 20 + i) for i in range(20)] for pg in range(5)]
         search = _multi_page_search(pages, total=100)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             result = runner.run_migration(
                 "test-col", fix_zarr_media_type, "fix_zarr_media_type", max_writes=None
             )
@@ -2488,8 +2498,8 @@ class TestMaxWrites:
         runner, written = self._runner_recording()
         search = _multi_page_search([[_dirty_item(i) for i in range(10)]], total=10)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             result = runner.run_migration(
                 "test-col", fix_zarr_media_type, "fix_zarr_media_type", max_writes=999
             )
@@ -2503,8 +2513,8 @@ class TestMaxWrites:
         runner, written = self._runner_recording()
         search = _multi_page_search([[_dirty_item(i) for i in range(10)]], total=10)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             result = runner.run_migration(
                 "test-col", fix_zarr_media_type, "fix_zarr_media_type", max_writes=10
             )
@@ -2532,8 +2542,8 @@ class TestMaxWrites:
         pages = [[_dirty_item(pg * 20 + i) for i in range(20)] for pg in range(10)]
         search = _multi_page_search(pages, total=200)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             result = runner.run_migration(
                 "test-col",
                 fix_zarr_media_type,
@@ -2569,8 +2579,8 @@ class TestMaxWrites:
         search.matched.return_value = 1000
         search.pages_as_dicts.side_effect = lambda: page_gen()
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             runner.run_migration(
                 "test-col", fix_zarr_media_type, "fix_zarr_media_type", max_writes=25
             )
@@ -2586,8 +2596,8 @@ class TestMaxWrites:
         page = [_clean_item(i) for i in range(50)] + [_dirty_item(i) for i in range(20)]
         search = _multi_page_search([page], total=70)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             result = runner.run_migration(
                 "test-col", fix_zarr_media_type, "fix_zarr_media_type", max_writes=5
             )
@@ -2600,8 +2610,8 @@ class TestMaxWrites:
         pages = [[_dirty_item(pg * 20 + i) for i in range(20)] for pg in range(10)]
         search = _multi_page_search(pages, total=200)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             result = runner.run_migration(
                 "test-col",
                 fix_zarr_media_type,
@@ -2617,8 +2627,8 @@ class TestMaxWrites:
     def test_negative_max_writes_rejected(self) -> None:
         runner = STACMigrationRunner("https://api.example.com/stac")
         search = _make_mock_search([_dirty_item(0)], total=1)
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             with pytest.raises(ValueError, match="max_writes must be >= 1"):
                 runner.run_migration("c", fix_zarr_media_type, "m", max_writes=0)
 
@@ -2665,10 +2675,10 @@ class TestInterruptCancelsQueuedWrites:
 
         search = _make_mock_search([_dirty_item(i) for i in range(n_items)], total=n_items)
         with (
-            patch("_migrate_catalog.runner.Client") as mock_client,
+            patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open,
             patch("_migrate_catalog.runner.click.progressbar") as mock_pb,
         ):
-            mock_client.open.return_value.search.return_value = search
+            mock_open.return_value.search.return_value = search
             mock_pb.return_value.__enter__.return_value = bar
             with pytest.raises(KeyboardInterrupt):
                 runner.run_migration(
@@ -2717,8 +2727,8 @@ class TestStampExpiresUnderConcurrency:
         runner = STACMigrationRunner("https://api.example.com/stac")
         runner._update_item = MagicMock()  # type: ignore[method-assign]
         mock_search = _make_mock_search(items, total=len(items))
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = mock_search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = mock_search
             result = runner.run_migration("test-col", stamp_expires, "stamp_expires", concurrency=4)
 
         assert result.items_modified == 20

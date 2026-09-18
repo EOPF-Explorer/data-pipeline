@@ -40,7 +40,6 @@ import boto3
 import requests
 import stac_auth
 from botocore.exceptions import BotoCoreError, ClientError
-from pystac_client import Client
 from s3_item_cleanup import (
     UnconfinedS3URLError,
     count_s3_objects_for_item,
@@ -449,7 +448,10 @@ def run_cleanup(args: argparse.Namespace) -> int:
     # endpoint and can fail at runtime, and those failures must stay visible in
     # the audit stream instead of ending the process silently.
     try:
-        client = Client.open(args.stac_api_url)
+        # Discovery pages /search ~30 times unretried; one page past the gateway's
+        # UPSTREAM_TIMEOUT aborted six prod ticks on 2026-09-18. Reads only — the item
+        # DELETEs use _session() below, which must NOT retry (non-atomic unit).
+        client = stac_auth.open_resilient_client(args.stac_api_url)
         session = _session(args.stac_api_url)
         s3_client = _s3_client(args.s3_endpoint)
         stac_base_url = str(client.self_href).rstrip("/")
@@ -470,7 +472,25 @@ def run_cleanup(args: argparse.Namespace) -> int:
         # paginates with a keyset token anchored on the last item returned; deleting
         # items mid-iteration removes that anchor, so the next page fails with
         # "Could not find item using token". max_items bounds this list.
-        stale_items = list(search.items_as_dicts())
+        #
+        # Iterated lazily, not list(...), so the budget is checked DURING discovery.
+        # A retrying page can now take minutes (stac_auth.resilient_stac_io), and an
+        # unbounded discovery gets the pod killed by activeDeadlineSeconds mid-read —
+        # which emits no cleanup_summary at all. Deleting still happens only after the
+        # read, so the invariant above holds; a short read is the front of the
+        # oldest-expiry-first queue and the rest is re-found next tick.
+        stale_items: list[dict[str, Any]] = []
+        for stale_item in search.items_as_dicts():
+            stale_items.append(stale_item)
+            if budget_spent():
+                logger.warning(
+                    "Runtime budget of %ds spent during discovery after %d items — "
+                    "processing what was found; the remainder is re-discovered next run "
+                    "(oldest-expiry first, so nothing starves)",
+                    budget,
+                    len(stale_items),
+                )
+                break
         discovered = len(stale_items)
 
         # Checked here as well as in the loop: discovery alone can spend the budget,

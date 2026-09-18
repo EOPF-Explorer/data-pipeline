@@ -24,11 +24,19 @@ import time
 import httpx
 import requests
 from pystac_client import Client
+from pystac_client.stac_api_io import StacApiIO
+from urllib3.util.retry import Retry
 
 logger = logging.getLogger(__name__)
 
 # Refetch this many seconds before the token actually expires.
 _EXPIRY_MARGIN_S = 30
+
+# Per-request read timeout for search pagination; override with STAC_HTTP_TIMEOUT.
+_SEARCH_TIMEOUT_S = float(os.getenv("STAC_HTTP_TIMEOUT", "60"))
+
+# See resilient_stac_io() for why 500 is here and when to remove it.
+_READ_RETRY_STATUSES = (429, 500, 502, 503, 504)
 
 _lock = threading.Lock()
 
@@ -116,6 +124,94 @@ def bearer_auth(request: requests.PreparedRequest) -> requests.PreparedRequest:
     """
     request.headers.update(auth_headers())
     return request
+
+
+def resilient_stac_io(timeout: float | None = None) -> StacApiIO:
+    """A ``StacApiIO`` for READ paths: per-request timeout plus retries on transient 5xx.
+
+    Search pagination is the fragile part of every long run. Without this:
+
+    * no timeout -> a stalled socket hangs the run forever (observed: 4.5 h wall / 26 s
+      CPU, never past "Found N items");
+    * weak default retries -> one transient failure mid-pagination aborts the whole run
+      (observed: a 23k-item staging backfill crashed at ~20%).
+
+    🔴 **``allowed_methods`` MUST include POST.** STAC ``/search`` is a POST, and urllib3's
+    default ``Retry`` allows only idempotent methods — so a retry policy that omits it is
+    configured, reported as present, and silently never fires on the one call that matters.
+
+    🔴 **500 is in the retry list because of a gateway defect, not because 500 is
+    retryable in general.** ``eoapi-stac-auth-proxy`` (v1.1.0) lets an upstream
+    ``httpx.ReadTimeout`` escape its ASGI app, so an upstream that exceeds its
+    ``UPSTREAM_TIMEOUT`` (15 s in prod) surfaces as **500, not 504**. Proven 2026-09-18:
+    six ``historical-cleanup`` ticks failed at 15.013-15.016 s with
+    ``APIError: Internal Server Error``, matched one-for-one by ``httpx.ReadTimeout``
+    tracebacks in the proxy log for the same second. A correct policy that retries
+    502/503/504 and not 500 does not fire here — which is exactly what the previous
+    ``_resilient_stac_io`` did. **If the proxy is fixed to return 504, drop 500 from this
+    list**: it is a workaround for someone else's status code, and retrying a genuine
+    500 elsewhere only delays a real error.
+
+    Safe only on reads. ``/search`` and ``GET`` are idempotent, so a retried request cannot
+    duplicate an effect. **Never mount this on a session that carries DELETEs or POSTs of
+    items** — retrying those on a 5xx is the non-atomic-write hazard that PUT-instead-of-
+    DELETE-then-POST exists to avoid. Write sessions are built separately, on purpose.
+
+    🔴 **Use ``open_resilient_client`` rather than calling this and passing the result to
+    ``Client.open`` yourself.** ``Client.from_file`` calls ``stac_io.update(timeout=None)``
+    when handed a ``stac_io``, and ``StacApiIO.update`` *assigns* rather than merges — so
+    the timeout set here is silently reset to ``None`` and ``STAC_HTTP_TIMEOUT`` becomes a
+    no-op. The retries survive (they live on the session's adapters, which ``update`` does
+    not touch); only the timeout is lost, which is the half of this that a passing unit
+    test cannot see.
+
+    Worst case per request, with the bounds below: the status ladder sleeps
+    0+2+4+8+16 = **30 s**, and each of the 6 attempts can spend the full read timeout, so
+    **~390 s per page** at the 60 s default. Against a gateway that 500s after its own 15 s
+    timeout it is ~120 s. Either way it is far more than one request, so **a caller with a
+    runtime budget must check it between pages, not only after discovery** — see
+    ``cleanup_expired_items``, which pages explicitly for exactly this reason.
+    Override the timeout with ``STAC_HTTP_TIMEOUT``.
+    """
+    # The categories are bounded separately on purpose. Left at the urllib3 default they
+    # are all None, which means each one silently inherits `total` — so a *connection
+    # refusal* (the API is down, not blipping) would walk the same 8-step, 246 s ladder as
+    # a transient 5xx. That is the wrong trade twice over: it turns "service is down" from
+    # a fast, legible failure into a four-minute stall per page, and in a budgeted cron it
+    # burns the budget on a request that was never going to succeed.
+    #   status  — the case this exists for; a degraded gateway recovers within seconds.
+    #   connect — down is down; two tries distinguish a blip from an outage.
+    #   read    — a half-open socket; the timeout already bounds each attempt.
+    # backoff_max caps each sleep at 20 s (urllib3's own default is 120 s), so the status
+    # ladder sleeps 0+2+4+8+16 = 30 s rather than 246 s.
+    retry = Retry(
+        total=8,
+        connect=2,
+        read=2,
+        status=5,
+        backoff_factor=1.0,
+        backoff_max=20,
+        status_forcelist=_READ_RETRY_STATUSES,
+        allowed_methods=frozenset({"GET", "POST"}),
+        raise_on_status=False,
+    )
+    return StacApiIO(
+        timeout=timeout if timeout is not None else _SEARCH_TIMEOUT_S, max_retries=retry
+    )
+
+
+def open_resilient_client(url: str) -> Client:
+    """Open a read Client that keeps BOTH its retries and its timeout.
+
+    The one correct way to combine ``resilient_stac_io`` with ``Client.open``: the timeout
+    must also be passed to ``Client.open``, because ``Client.from_file`` resets the
+    ``stac_io``'s timeout to ``None`` otherwise (see ``resilient_stac_io``). Every read path
+    should call this rather than assembling the pair by hand, so the trap is sprung once,
+    here, instead of at each call site.
+
+    Read paths only — this carries no auth and its retries must never reach a write.
+    """
+    return Client.open(url, stac_io=resilient_stac_io(), timeout=_SEARCH_TIMEOUT_S)
 
 
 def open_client(url: str) -> Client:

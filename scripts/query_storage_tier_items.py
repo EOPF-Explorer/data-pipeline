@@ -21,8 +21,8 @@ import os
 import sys
 from datetime import UTC, datetime, timedelta
 
+import stac_auth
 from pystac import Item
-from pystac_client import Client
 from s3_item_cleanup import resolve_exclude_ids
 from update_stac_storage_tier import TIER_TO_SCHEME
 
@@ -121,7 +121,9 @@ def query_items(
     logger.info(f"Time window: {window_start.isoformat()}Z to {window_end.isoformat()}Z")
     logger.info(f"Target storage ref: {target_storage_ref}, max batch: {max_batch_size}")
 
-    catalog = Client.open(stac_api_url)
+    # Same unretried-pagination failure as the cleanup cron: eopf-storage-tier-down
+    # died 2026-09-18T04:00 with APIError: Internal Server Error from get_pages.
+    catalog = stac_auth.open_resilient_client(stac_api_url)
     search = catalog.search(
         collections=[collection],
         datetime=f"{window_start.isoformat()}Z/{window_end.isoformat()}Z",
