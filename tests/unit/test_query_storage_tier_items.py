@@ -9,6 +9,7 @@ from unittest.mock import patch
 from pystac import Asset, Item
 
 from scripts.query_storage_tier_items import (
+    DEFAULT_PAGE_SIZE,
     get_storage_ref,
     is_already_migrated,
     main,
@@ -67,8 +68,10 @@ class FakeStacClient:
 
     def __init__(self, items: list[Item]):
         self.items = items
+        self.search_kwargs: dict | None = None
 
     def search(self, **kwargs):
+        self.search_kwargs = kwargs
         return FakeItemSearch(self.items)
 
 
@@ -179,6 +182,30 @@ class TestQueryItems:
             result = query_items(STAC_API_URL, COLLECTION, 7, "glacier", 100)
 
         assert result == []
+
+    def test_search_passes_an_explicit_page_size(self):
+        """`limit` is the page size and is always sent; `max_batch_size` stays the cap.
+
+        This script and the cleanup cron were the two fleet searches that omitted
+        `limit`, and the two that died on the gateway's 15 s upstream timeout on
+        2026-09-18; the two that pass 100 never have. Walking a 36 h window at the
+        server's default page (10) was hundreds of /search POSTs.
+        """
+        items = [create_stac_item(f"item-{i}", storage_refs=["standard"]) for i in range(10)]
+        client = FakeStacClient(items)
+
+        with patch(
+            "scripts.query_storage_tier_items.stac_auth.open_resilient_client", return_value=client
+        ):
+            result = query_items(STAC_API_URL, COLLECTION, 7, "glacier", 3)
+        assert client.search_kwargs["limit"] == DEFAULT_PAGE_SIZE == 100
+        assert len(result) == 3, "the cap is still max_batch_size, not the page size"
+
+        with patch(
+            "scripts.query_storage_tier_items.stac_auth.open_resilient_client", return_value=client
+        ):
+            query_items(STAC_API_URL, COLLECTION, 7, "glacier", 3, page_size=500)
+        assert client.search_kwargs["limit"] == 500
 
     def test_all_migrated(self):
         items = [

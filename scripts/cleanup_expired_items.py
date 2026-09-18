@@ -117,6 +117,18 @@ def _item_cap(raw: str) -> int:
     return value
 
 
+def _page_size(raw: str) -> int:
+    """argparse type for --page-size: 1..MAX_ITEMS_CEILING, same ceiling as the cap
+    because a page is materialised in memory the same way a batch is."""
+    try:
+        value = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"must be a whole number (got {raw!r})") from None
+    if not 1 <= value <= MAX_ITEMS_CEILING:
+        raise argparse.ArgumentTypeError(f"must be 1..{MAX_ITEMS_CEILING} (got {value})")
+    return value
+
+
 def _budget_seconds(raw: str) -> int | None:
     """argparse type for --max-runtime-seconds: a clean usage error, not a traceback.
 
@@ -159,9 +171,21 @@ def _monotonic() -> float:
     return time.monotonic()
 
 
-def build_search_kwargs(collection: str, now: datetime, max_items: int) -> dict[str, Any]:
+# Items per /search page during discovery. Page size, NOT the cap: `--max-items`
+# bounds the run, this bounds one round trip. Without it the server picks
+# (stac-fastapi defaults to 10), so a 130-item batch was ~13 POSTs, each a fresh
+# keyset query over the whole expired scan racing the gateway's 15 s
+# UPSTREAM_TIMEOUT — and that per-request exposure, not the row count, is what
+# killed six ticks on 2026-09-18. The two fleet scripts that pass a limit
+# (submit_storage_tier_workflows, migrate_catalog: 100) have never hit it.
+DEFAULT_PAGE_SIZE = 100
+
+
+def build_search_kwargs(
+    collection: str, now: datetime, max_items: int, page_size: int = DEFAULT_PAGE_SIZE
+) -> dict[str, Any]:
     """CQL2 discovery query for items whose ``expires`` is before ``now``,
-    oldest-first, capped at ``max_items``."""
+    oldest-first, capped at ``max_items`` and read ``page_size`` items per request."""
     return {
         "collections": [collection],
         "filter_lang": "cql2-json",
@@ -174,6 +198,8 @@ def build_search_kwargs(collection: str, now: datetime, max_items: int) -> dict[
         # across pages when the sort has no total order.
         "sortby": ["+properties.expires", "+id"],
         "max_items": max_items,
+        # A page larger than the cap is rows the client discards on arrival.
+        "limit": min(page_size, max_items),
     }
 
 
@@ -394,6 +420,9 @@ def run_cleanup(args: argparse.Namespace) -> int:
             f"max_items must be 1..{MAX_ITEMS_CEILING}, got {args.max_items} "
             "(0 removes the cap entirely; above the ceiling risks an OOMKill)"
         )
+    page_size = args.page_size
+    if not 1 <= page_size <= MAX_ITEMS_CEILING:
+        raise ValueError(f"page_size must be 1..{MAX_ITEMS_CEILING}, got {page_size}")
     budget = args.max_runtime_seconds
     if budget is not None and not 1 <= budget <= MAX_BUDGET_SECONDS:
         raise ValueError(
@@ -466,7 +495,9 @@ def run_cleanup(args: argparse.Namespace) -> int:
             budget,
         )
 
-        search = client.search(**build_search_kwargs(args.collection, now, args.max_items))
+        search = client.search(
+            **build_search_kwargs(args.collection, now, args.max_items, page_size)
+        )
 
         # Materialise the whole result set BEFORE deleting anything. The search
         # paginates with a keyset token anchored on the last item returned; deleting
@@ -476,16 +507,20 @@ def run_cleanup(args: argparse.Namespace) -> int:
         # Iterated lazily, not list(...), so the budget is checked DURING discovery.
         # A retrying page can now take minutes (stac_auth.resilient_stac_io), and an
         # unbounded discovery gets the pod killed by activeDeadlineSeconds mid-read —
-        # which emits no cleanup_summary at all. Deleting still happens only after the
-        # read, so the invariant above holds; a short read is the front of the
-        # oldest-expiry-first queue and the rest is re-found next tick.
+        # which emits no cleanup_summary at all. Nothing read this way is processed:
+        # the budget is monotone, so the delete loop's first check stops it too. That
+        # is the point — the run yields with a summary instead of vanishing — and the
+        # truncated read costs nothing, because the query is oldest-expiry-first and
+        # the same items head next tick's queue. What it emits is the README's alert
+        # pair (`time_budget_reached: true`, `processed: 0`), on purpose: a budget
+        # spent by discovery IS the stalled-cron condition, not a variant of healthy.
         stale_items: list[dict[str, Any]] = []
         for stale_item in search.items_as_dicts():
             stale_items.append(stale_item)
             if budget_spent():
                 logger.warning(
                     "Runtime budget of %ds spent during discovery after %d items — "
-                    "processing what was found; the remainder is re-discovered next run "
+                    "processing none of them; they are re-discovered next run "
                     "(oldest-expiry first, so nothing starves)",
                     budget,
                     len(stale_items),
@@ -630,6 +665,15 @@ def main(argv: list[str] | None = None) -> int:
         type=_item_cap,
         default=DEFAULT_MAX_ITEMS,
         help="Cap on items processed per run",
+    )
+    parser.add_argument(
+        "--page-size",
+        type=_page_size,
+        default=DEFAULT_PAGE_SIZE,
+        help=(
+            f"Items per /search request during discovery (1..{MAX_ITEMS_CEILING}). "
+            "A page, not a cap: --max-items still bounds the run."
+        ),
     )
     parser.add_argument(
         "--max-runtime-seconds",

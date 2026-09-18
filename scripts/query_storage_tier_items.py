@@ -36,6 +36,10 @@ logger = logging.getLogger(__name__)
 for lib in ["botocore", "boto3", "urllib3", "httpx", "httpcore"]:
     logging.getLogger(lib).setLevel(logging.WARNING)
 
+# Items per /search page. Matches submit_storage_tier_workflows and migrate_catalog,
+# the fleet's two search paths that have never hit the gateway timeout; see query_items.
+DEFAULT_PAGE_SIZE = 100
+
 
 def get_storage_ref(s3_info: dict) -> str | None:
     """Extract primary storage:refs value from an asset's alternate.s3 info.
@@ -94,6 +98,7 @@ def query_items(
     target_storage_ref: str,
     max_batch_size: int,
     exclude_ids: set[str] | frozenset[str] = frozenset(),
+    page_size: int = DEFAULT_PAGE_SIZE,
 ) -> list[str]:
     """Query STAC and return item IDs needing storage tier change.
 
@@ -108,6 +113,7 @@ def query_items(
         target_storage_ref: The storage:refs value indicating target tier.
         max_batch_size: Maximum number of items to return.
         exclude_ids: Item IDs that must never be selected (demo denylist).
+        page_size: Items per /search request while walking the window.
 
     Returns:
         List of item IDs needing storage tier change.
@@ -124,9 +130,16 @@ def query_items(
     # Same unretried-pagination failure as the cleanup cron: eopf-storage-tier-down
     # died 2026-09-18T04:00 with APIError: Internal Server Error from get_pages.
     catalog = stac_auth.open_resilient_client(stac_api_url)
+    # `limit` is the page size, not a cap: the whole window is walked and
+    # max_batch_size is applied client-side below, as before. Without it the
+    # server picks the page (stac-fastapi defaults to 10), so a 36 h window of
+    # S2 items was hundreds of /search POSTs, each racing the gateway's 15 s
+    # UPSTREAM_TIMEOUT — the same per-request exposure that killed the cleanup
+    # cron. The fleet scripts that always passed limit=100 have never hit it.
     search = catalog.search(
         collections=[collection],
         datetime=f"{window_start.isoformat()}Z/{window_end.isoformat()}Z",
+        limit=page_size,
     )
 
     total_found = 0
@@ -175,6 +188,15 @@ def main(argv: list[str] | None = None) -> int:
         help="Maximum number of items to return (default: 100)",
     )
     parser.add_argument(
+        "--page-size",
+        type=int,
+        default=DEFAULT_PAGE_SIZE,
+        help=(
+            f"Items per /search request while walking the window (default: "
+            f"{DEFAULT_PAGE_SIZE}). A page, not a cap: --max-batch-size still bounds the output."
+        ),
+    )
+    parser.add_argument(
         "--exclude-file",
         default=None,
         help=(
@@ -194,6 +216,7 @@ def main(argv: list[str] | None = None) -> int:
             target_storage_ref=target_storage_ref,
             max_batch_size=args.max_batch_size,
             exclude_ids=resolve_exclude_ids(args.exclude_file),
+            page_size=args.page_size,
         )
         sys.stdout.write(json.dumps(items))
         sys.stdout.flush()

@@ -17,6 +17,7 @@ Design tracked out-of-repo (session memory + PR description); this is Task 1.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import threading
 import time
@@ -32,8 +33,9 @@ logger = logging.getLogger(__name__)
 # Refetch this many seconds before the token actually expires.
 _EXPIRY_MARGIN_S = 30
 
-# Per-request read timeout for search pagination; override with STAC_HTTP_TIMEOUT.
-_SEARCH_TIMEOUT_S = float(os.getenv("STAC_HTTP_TIMEOUT", "60"))
+# Per-request read timeout for search pagination; override with STAC_HTTP_TIMEOUT
+# (parsed lazily by _search_timeout_s, never at import).
+_DEFAULT_SEARCH_TIMEOUT_S = 60.0
 
 # See resilient_stac_io() for why 500 is here and when to remove it.
 _READ_RETRY_STATUSES = (429, 500, 502, 503, 504)
@@ -126,6 +128,38 @@ def bearer_auth(request: requests.PreparedRequest) -> requests.PreparedRequest:
     return request
 
 
+def _search_timeout_s() -> float:
+    """Read ``STAC_HTTP_TIMEOUT`` at call time, not import time.
+
+    ``value: ""`` is how this fleet's Argo templates spell an unset optional parameter
+    (see ``cleanup_expired_items._budget_seconds``), so ``""`` and unset both mean the
+    default. Parsed here rather than at module level on purpose: ``scripts/`` is the
+    shipped wheel, and a ``float("")`` raised during ``import stac_auth`` lands before
+    argparse and before ``run_cleanup``'s broad guard — the tick dies with no
+    ``cleanup_summary`` at all, on every pod that imports this module.
+
+    ``0`` and negatives are rejected rather than mapped to "no timeout": no timeout is
+    the 4.5 h hang that ``resilient_stac_io`` exists to prevent, and a typo must not
+    silently reintroduce it. Garbage is rejected too, not defaulted: the value the
+    operator set is not the value in effect, and a loud failure inside the caller's
+    guard (which still emits its summary) beats a silent 60 s.
+    """
+    raw = os.getenv("STAC_HTTP_TIMEOUT", "").strip()
+    if raw == "":
+        return _DEFAULT_SEARCH_TIMEOUT_S
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError(f"STAC_HTTP_TIMEOUT must be a number of seconds (got {raw!r})") from None
+    # `not (x > 0)` rather than `x <= 0`: it also rejects NaN, which float() accepts.
+    if not (math.isfinite(value) and value > 0):
+        raise ValueError(
+            f"STAC_HTTP_TIMEOUT must be a finite number > 0 seconds; unset it for the "
+            f"default (got {raw!r})"
+        )
+    return value
+
+
 def resilient_stac_io(timeout: float | None = None) -> StacApiIO:
     """A ``StacApiIO`` for READ paths: per-request timeout plus retries on transient 5xx.
 
@@ -165,38 +199,40 @@ def resilient_stac_io(timeout: float | None = None) -> StacApiIO:
     not touch); only the timeout is lost, which is the half of this that a passing unit
     test cannot see.
 
-    Worst case per request, with the bounds below: the status ladder sleeps
-    0+2+4+8+16 = **30 s**, and each of the 6 attempts can spend the full read timeout, so
-    **~390 s per page** at the 60 s default. Against a gateway that 500s after its own 15 s
-    timeout it is ~120 s. Either way it is far more than one request, so **a caller with a
-    runtime budget must check it between pages, not only after discovery** — see
-    ``cleanup_expired_items``, which pages explicitly for exactly this reason.
-    Override the timeout with ``STAC_HTTP_TIMEOUT``.
+    Worst case per request: 9 attempts (``total=8``) with sleeps of
+    0+2+4+8+16+20+20+20 = **90 s** between them, and each attempt can spend the full read
+    timeout, so **~630 s per page** at the 60 s default. Against a gateway that 500s after
+    its own 15 s timeout it is ~225 s. Either way it is far more than one request, so **a
+    caller with a runtime budget must check it between pages, not only after discovery**
+    — see ``cleanup_expired_items``, which pages explicitly for exactly this reason.
+    Override the timeout with ``STAC_HTTP_TIMEOUT`` (``""`` and unset mean the default).
     """
-    # The categories are bounded separately on purpose. Left at the urllib3 default they
-    # are all None, which means each one silently inherits `total` — so a *connection
-    # refusal* (the API is down, not blipping) would walk the same 8-step, 246 s ladder as
-    # a transient 5xx. That is the wrong trade twice over: it turns "service is down" from
-    # a fast, legible failure into a four-minute stall per page, and in a budgeted cron it
-    # burns the budget on a request that was never going to succeed.
-    #   status  — the case this exists for; a degraded gateway recovers within seconds.
-    #   connect — down is down; two tries distinguish a blip from an outage.
-    #   read    — a half-open socket; the timeout already bounds each attempt.
-    # backoff_max caps each sleep at 20 s (urllib3's own default is 120 s), so the status
-    # ladder sleeps 0+2+4+8+16 = 30 s rather than 246 s.
+    # One budget, `total=8`, for every error class — connect/read/status are left at
+    # urllib3's default (None = inherit `total`) ON PURPOSE. Bounding them lower so that
+    # "the API is down" fails fast reads well and is wrong: urllib3 files a ConnectionReset
+    # under *read*, not *connect*, so `read=2` silently cuts the budget from 8 to 2 for the
+    # transient mid-pagination reset this policy exists to survive (the one that crashed
+    # the 23k-item backfill at ~20%), while the object still reports `total=8`.
+    # test_stac_read_retry pins the effective budget per error class so that cannot
+    # regress unseen. A genuine outage costs at most one page's worst case (above) before
+    # the caller's runtime budget or the run's own failure path takes over.
+    #
+    # backoff_max caps each sleep at 20 s (urllib3's default is 120 s): 90 s of sleeps
+    # across the ladder rather than 246 s. respect_retry_after_header is off because it
+    # bypasses that cap: on 429/503 urllib3 sleeps the server's Retry-After instead, bounded
+    # only by `retry_after_max` (default 21600 s), so one response carrying a large header
+    # would stall a page for hours whatever backoff_max says.
     retry = Retry(
         total=8,
-        connect=2,
-        read=2,
-        status=5,
         backoff_factor=1.0,
         backoff_max=20,
+        respect_retry_after_header=False,
         status_forcelist=_READ_RETRY_STATUSES,
         allowed_methods=frozenset({"GET", "POST"}),
         raise_on_status=False,
     )
     return StacApiIO(
-        timeout=timeout if timeout is not None else _SEARCH_TIMEOUT_S, max_retries=retry
+        timeout=timeout if timeout is not None else _search_timeout_s(), max_retries=retry
     )
 
 
@@ -211,7 +247,8 @@ def open_resilient_client(url: str) -> Client:
 
     Read paths only — this carries no auth and its retries must never reach a write.
     """
-    return Client.open(url, stac_io=resilient_stac_io(), timeout=_SEARCH_TIMEOUT_S)
+    timeout = _search_timeout_s()
+    return Client.open(url, stac_io=resilient_stac_io(timeout), timeout=timeout)
 
 
 def open_client(url: str) -> Client:

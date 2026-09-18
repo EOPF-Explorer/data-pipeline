@@ -8,12 +8,23 @@ difference between "retries POST" and "has a retry object". So the central test 
 real socket and counts the requests the server actually received.
 """
 
+import os
+import subprocess
+import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
 import stac_auth
+from urllib3.exceptions import (
+    ConnectTimeoutError,
+    MaxRetryError,
+    ProtocolError,
+    ReadTimeoutError,
+)
+from urllib3.util.retry import Retry
 
 
 class _FlakyHandler(BaseHTTPRequestHandler):
@@ -172,7 +183,7 @@ def test_write_session_has_no_retries():
 
 def test_timeout_is_set_and_overridable():
     """No timeout means a stalled socket hangs the run forever (observed: 4.5 h)."""
-    assert stac_auth.resilient_stac_io().timeout == stac_auth._SEARCH_TIMEOUT_S
+    assert stac_auth.resilient_stac_io().timeout == stac_auth._search_timeout_s()
     assert stac_auth.resilient_stac_io(timeout=12).timeout == 12
 
 
@@ -192,9 +203,8 @@ def test_timeout_survives_client_open(flaky_server):
 
     client = stac_auth.open_resilient_client(url)
 
-    assert (
-        client._stac_io.timeout == stac_auth._SEARCH_TIMEOUT_S
-    ), "timeout was reset by Client.open — open_resilient_client must pass it through"
+    # Reset to None by Client.open otherwise — open_resilient_client must pass timeout= through.
+    assert client._stac_io.timeout == stac_auth._search_timeout_s()
 
 
 def test_retries_survive_client_open(flaky_server):
@@ -221,3 +231,135 @@ def test_hand_rolled_pairing_loses_the_timeout(flaky_server):
         "pystac-client no longer drops the timeout — open_resilient_client's extra "
         "timeout= argument may now be redundant; re-check before simplifying it away"
     )
+
+
+# --- the effective budget per error class ---------------------------------------------
+
+
+def _read_retry() -> Retry:
+    return stac_auth.resilient_stac_io(timeout=1).session.get_adapter("https://x").max_retries
+
+
+def _walk(retry: Retry, **kw) -> tuple[int, float]:
+    """Drive Retry.increment() to exhaustion; return (retries granted, total sleep)."""
+    granted, slept = 0, 0.0
+    while True:
+        try:
+            retry = retry.increment(method="POST", url="/search", **kw)
+        except MaxRetryError:
+            return granted, slept
+        granted += 1
+        slept += retry.get_backoff_time()
+
+
+class _Status500:
+    status = 500
+
+    def get_redirect_location(self) -> None:
+        return None
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(
+            ProtocolError("Connection aborted.", ConnectionResetError(54)), id="ConnectionReset"
+        ),
+        pytest.param(ReadTimeoutError(None, "/search", "Read timed out."), id="ReadTimeout"),
+        pytest.param(ConnectTimeoutError("connect timed out"), id="ConnectTimeout"),
+    ],
+)
+def test_every_error_class_gets_the_full_budget(error):
+    """`total=8` must be the budget that fires, not a number the object merely reports.
+
+    A draft of this policy set `connect=2, read=2, status=5` alongside `total=8` to
+    fail fast on outages. urllib3 classifies a ConnectionReset as a *read* error, so
+    that cut the budget from 8 to 2 for the mid-pagination reset the policy exists to
+    survive — and `retry.total` still said 8. Measured on the two objects: reset/read/
+    connect all 8 -> 2. This walks the real `increment()` so the number asserted is
+    the one that would fire.
+    """
+    granted, slept = _walk(_read_retry(), error=error)
+    assert granted == 8
+    # 0+2+4+8+16+20+20+20 with backoff_max=20: the figure the docstring quotes.
+    assert slept == 90.0
+
+
+def test_status_retries_get_the_full_budget_too():
+    granted, slept = _walk(_read_retry(), response=_Status500())
+    assert granted == 8
+    assert slept == 90.0
+
+
+def test_retry_after_header_cannot_extend_a_sleep_past_backoff_max():
+    """`backoff_max` does not cap `Retry-After`; only ignoring the header does.
+
+    urllib3 sleeps the server's Retry-After on 429/503 when
+    `respect_retry_after_header` is on, bounded by `retry_after_max` (default 21600 s),
+    not by `backoff_max`. One 503 with a large header would stall a page for hours.
+    """
+    retry = _read_retry()
+    assert retry.respect_retry_after_header is False
+
+    resp = MagicMock()
+    resp.headers = {"Retry-After": "3600"}
+    with patch("time.sleep") as sleep:
+        retry.sleep(resp)
+    for call in sleep.call_args_list:
+        assert call.args[0] <= 20, f"slept {call.args[0]} s: the header was honoured"
+
+
+# --- STAC_HTTP_TIMEOUT, parsed at call time --------------------------------------------
+
+
+@pytest.mark.parametrize("raw", ["", "  "], ids=["empty", "blank"])
+def test_timeout_env_empty_means_default(monkeypatch, raw):
+    """`value: ""` is this fleet's spelling of an unset optional Argo parameter.
+
+    The module used to compute `float(os.getenv("STAC_HTTP_TIMEOUT", "60"))` at import,
+    so `""` raised during `import stac_auth` — before argparse and before the cleanup
+    cron's summary guard — on every pod that imports the shipped wheel.
+    """
+    monkeypatch.setenv("STAC_HTTP_TIMEOUT", raw)
+    assert stac_auth._search_timeout_s() == stac_auth._DEFAULT_SEARCH_TIMEOUT_S == 60.0
+    assert stac_auth.resilient_stac_io().timeout == 60.0
+
+
+def test_timeout_env_unset_means_default(monkeypatch):
+    monkeypatch.delenv("STAC_HTTP_TIMEOUT", raising=False)
+    assert stac_auth._search_timeout_s() == 60.0
+
+
+def test_timeout_env_valid_value_is_used_by_both_entry_points(monkeypatch, flaky_server):
+    monkeypatch.setenv("STAC_HTTP_TIMEOUT", "12.5")
+    assert stac_auth.resilient_stac_io().timeout == 12.5
+    assert stac_auth.open_resilient_client(flaky_server(fail_times=0))._stac_io.timeout == 12.5
+
+
+@pytest.mark.parametrize("raw", ["abc", "0", "-5", "nan", "inf"])
+def test_timeout_env_garbage_and_non_positive_are_rejected(monkeypatch, raw):
+    """A loud ValueError, not a silent default and not "no timeout".
+
+    `0`/negative are rejected rather than read as "no timeout" because no timeout is
+    the 4.5 h hang this module exists to prevent. The error is raised at call time,
+    inside the caller's guard, so the cleanup cron still emits its summary.
+    """
+    monkeypatch.setenv("STAC_HTTP_TIMEOUT", raw)
+    with pytest.raises(ValueError, match="STAC_HTTP_TIMEOUT"):
+        stac_auth._search_timeout_s()
+
+
+def test_import_survives_an_empty_timeout_env():
+    """The trap is import-time evaluation, which no in-process test can see: this module
+    is already imported by the time a test sets the variable. So import it fresh."""
+    env = {**os.environ, "STAC_HTTP_TIMEOUT": ""}
+    # Fixed argv, no shell: nothing here is untrusted input.
+    proc = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", "import stac_auth; print(stac_auth._search_timeout_s())"],
+        cwd=os.path.dirname(stac_auth.__file__),
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == "60.0"

@@ -865,6 +865,7 @@ dependencies = [
     { name = "requests" },
     { name = "s3fs" },
     { name = "tenacity" },
+    { name = "urllib3" },
     { name = "xarray" },
     { name = "zarr", extra = ["cast-value-rs"] },
 ]
@@ -906,6 +907,7 @@ requires-dist = [
     { name = "requests", specifier = "==2.34.2" },
     { name = "s3fs", specifier = "==2026.7.0" },
     { name = "tenacity", specifier = "==9.1.4" },
+    { name = "urllib3", specifier = ">=2" },
     { name = "xarray", specifier = "==2026.7.0" },
     { name = "zarr", extras = ["cast-value-rs"], specifier = ">=3.2.1" },
 ]

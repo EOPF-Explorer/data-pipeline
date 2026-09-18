@@ -117,6 +117,7 @@ old demo dates — and the cleanup-time skip is the backstop regardless.
 | `--s3-endpoint` | `AWS_ENDPOINT_URL` env | S3 endpoint URL |
 | `--allowed-bucket` | `esa-zarr-sentinel-explorer-fra` | Assets outside it are skipped |
 | `--max-items` | `100` | Cap on items processed per run (1–10000; **`0` used to mean UNLIMITED**, not zero — pystac-client gates pagination on a falsy check) |
+| `--page-size` | `100` | Items per `/search` request during discovery (1–10000). A page, not a cap: `--max-items` still bounds the run. Passed as `limit` so the server's default (10) does not turn a 130-item batch into 13 requests, each racing the gateway's 15 s upstream timeout |
 | `--max-runtime-seconds` | off | Stop at the next item boundary after N seconds (1–86400; `""` means off) |
 | `--exclude-file` | `EXPIRES_EXCLUDE_FILE` env | Item-ID denylist |
 | `--execute` | off (dry-run) | Actually delete |
@@ -165,7 +166,12 @@ The inverse needs watching too: `time_budget_reached: true` **with**
 `processed: 0` is a run that succeeded, exited `0` and drained nothing — discovery
 alone spent the budget. Sustained, that is a permanently stalled cron wearing a
 green tick, and no exit code will tell you. **That pair is the condition to alert
-on.**
+on.** Discovery checks the budget between items as it reads (since the search
+client started retrying, one page can take minutes), so on such a run
+`discovered` may be anything from `0` up to `--max-items`: the items it did read
+are **not** processed — the budget is already spent, so the delete loop stops at
+its first check — and the log says so (`processing none of them`). A healthy
+quiet tick is `time_budget_reached: false, discovered: 0`.
 
 A **configuration** error (a bad `--max-runtime-seconds` value) exits `2` at parse
 time, before anything is read or deleted, and writes no summary. That is the one

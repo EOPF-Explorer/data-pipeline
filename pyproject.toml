@@ -43,6 +43,10 @@ dependencies = [
     "eopf-geozarr @ git+https://github.com/EOPF-Explorer/data-model.git@9ede8c34dfe534727e93d80e278ad4390f5656d0",
     "mgrs==1.5.4",
     "requests==2.34.2",
+    # scripts/stac_auth.py imports urllib3.util.retry directly and passes
+    # Retry(backoff_max=...), which is 2.x-only. Transitive via requests, but a
+    # direct import gets a direct pin.
+    "urllib3>=2",
 ]
 
 [tool.uv]

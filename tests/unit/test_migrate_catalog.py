@@ -2010,7 +2010,7 @@ def test_search_client_is_resilient() -> None:
     # crons, which failed the same way, share one policy. See tests/unit/test_stac_read_retry.py
     # for the behavioural coverage (this asserts configuration only).
     io = stac_auth.resilient_stac_io()
-    assert io.timeout == stac_auth._SEARCH_TIMEOUT_S
+    assert io.timeout == stac_auth._search_timeout_s()
     retry = io.session.get_adapter("https://example.com").max_retries
     assert retry.total and retry.total >= 5
     assert retry.backoff_factor and retry.backoff_factor > 0

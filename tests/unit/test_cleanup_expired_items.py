@@ -8,6 +8,7 @@ boto3 and the STAC session are mocked — no network.
 """
 
 import json
+import logging
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,6 +19,7 @@ import pytest
 import requests
 from botocore.exceptions import ClientError, EndpointConnectionError
 from cleanup_expired_items import (
+    DEFAULT_PAGE_SIZE,
     MAX_BUDGET_SECONDS,
     MAX_ITEMS_CEILING,
     _monotonic,
@@ -86,6 +88,24 @@ def test_build_search_kwargs_sorts_and_caps() -> None:
     # pagination silently under-returns across pages without a total order.
     assert kwargs["sortby"] == ["+properties.expires", "+id"]
     assert kwargs["max_items"] == 25
+
+
+def test_build_search_kwargs_passes_an_explicit_page_size() -> None:
+    """`limit` is sent, so the server's default page (10) never sets the request count.
+
+    The two scripts that died on the gateway's 15 s upstream timeout (2026-09-18) were
+    exactly the two that omitted `limit`; the two that pass 100 never have. Page size is
+    NOT the cap: `max_items` stays what bounds the run.
+    """
+    kwargs = build_search_kwargs("sentinel-2-l2a-staging", NOW, 130)
+    assert kwargs["limit"] == DEFAULT_PAGE_SIZE == 100
+    assert kwargs["max_items"] == 130
+
+    # Overridable, and never larger than the cap: a page past `max_items` is rows the
+    # client discards on arrival.
+    assert build_search_kwargs("c", NOW, 130, page_size=500)["limit"] == 130
+    assert build_search_kwargs("c", NOW, 5)["limit"] == 5
+    assert build_search_kwargs("c", NOW, 5)["max_items"] == 5
 
 
 # === Guards ===
@@ -413,6 +433,7 @@ def _args(
     execute: bool = False,
     max_items: int = 100,
     max_runtime_seconds: int | None = None,
+    page_size: int = DEFAULT_PAGE_SIZE,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         stac_api_url="https://stac.example.com",
@@ -420,6 +441,7 @@ def _args(
         s3_endpoint=None,
         allowed_bucket=BUCKET,
         max_items=max_items,
+        page_size=page_size,
         max_runtime_seconds=max_runtime_seconds,
         exclude_file=None,
         execute=execute,
@@ -780,6 +802,43 @@ def test_budget_stops_discovery_itself_not_only_the_delete_loop(expired_item, ca
     assert summary["time_budget_reached"] is True
     # The run still reported itself: this is the whole point versus being SIGKILLed.
     assert summary["event"] == "cleanup_summary"
+    # Not one of the two items read was started: the budget is monotone, so the
+    # delete loop's first check stops it too.
+    assert _session.get.call_count == 0
+
+
+def test_budget_spent_during_discovery_says_it_processes_nothing(
+    expired_item, caplog, capsys
+) -> None:
+    """The log must not promise work the run cannot do.
+
+    An earlier draft logged "processing what was found" on this path. It never did:
+    `budget_spent()` is monotone, so whatever discovery read is dropped at the loop's
+    first check and `processed` is 0 — while the README names `time_budget_reached: true`
+    + `processed: 0` as THE stalled-cron alert. A log line claiming otherwise argues
+    against the alert. The summary must also stay distinguishable from a quiet tick,
+    which is `time_budget_reached: false`.
+    """
+    items = _items(expired_item, 5)
+    with caplog.at_level(logging.WARNING, logger="cleanup_expired_items"):
+        code, session = _run_budgeted(
+            items,
+            budget=100,
+            clock_values=[BOOT, BOOT + 10, BOOT + 150, BOOT + 151, BOOT + 152],
+        )
+
+    summary = _capture_lines(capsys)[-1]
+    assert code == 0
+    assert session.get.call_count == 0
+    assert (summary["time_budget_reached"], summary["processed"]) == (True, 0)
+    assert summary["discovered"] == 2
+
+    discovery_warnings = [
+        r.getMessage() for r in caplog.records if "spent during discovery" in r.getMessage()
+    ]
+    assert len(discovery_warnings) == 1
+    assert "processing none of them" in discovery_warnings[0]
+    assert "processing what was found" not in discovery_warnings[0]
 
 
 def test_run_cleanup_budget_covers_discovery_not_just_the_loop(expired_item) -> None:
@@ -1226,6 +1285,33 @@ def test_cli_rejects_an_item_cap_above_the_ceiling(capsys) -> None:
     err = capsys.readouterr().err
     assert "memory cap" in err
     assert "_item_cap" not in err
+
+
+def test_cli_page_size_defaults_and_reaches_the_search(capsys) -> None:
+    """`--page-size` lands in the search kwargs as `limit`, default 100, cap-bounded."""
+    with patch("cleanup_expired_items.run_cleanup", return_value=0) as run:
+        main(_CLI_BASE)
+        assert run.call_args.args[0].page_size == DEFAULT_PAGE_SIZE
+        main([*_CLI_BASE, "--page-size", "250"])
+        assert run.call_args.args[0].page_size == 250
+
+    for bad in ("0", "10001", "ten"):
+        with pytest.raises(SystemExit) as exc:
+            main([*_CLI_BASE, "--page-size", bad])
+        assert exc.value.code == 2
+    assert "_page_size" not in capsys.readouterr().err
+
+    client = MagicMock()
+    client.self_href = "https://stac.example.com"
+    client.search.return_value.items_as_dicts.return_value = iter([])
+    with (
+        patch("cleanup_expired_items.stac_auth.open_resilient_client", return_value=client),
+        patch("cleanup_expired_items._session"),
+        patch("cleanup_expired_items._s3_client"),
+    ):
+        run_cleanup(_args(max_items=130, page_size=250))
+    assert client.search.call_args.kwargs["limit"] == 130
+    assert client.search.call_args.kwargs["max_items"] == 130
 
 
 # === The auth hook raises RuntimeError, not RequestException (issue #364) ===
