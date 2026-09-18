@@ -16,6 +16,7 @@ Design tracked out-of-repo (session memory + PR description); this is Task 1.
 
 from __future__ import annotations
 
+import argparse
 import logging
 import math
 import os
@@ -41,9 +42,54 @@ _EXPIRY_MARGIN_S = 30
 # the read half separately; override with STAC_HTTP_TIMEOUT (parsed lazily by
 # _search_timeout_s, never at import).
 _DEFAULT_SEARCH_TIMEOUT_S = 60.0
+# A typo fence, not a policy: 5x the default and 20x the gateway's own 15 s upstream
+# timeout. This is the one knob that defeats the callers' runtime budgets — a page fetch
+# is uninterruptible for its whole ladder, 9 x 2 x timeout + 90 s (see
+# resilient_stac_io), so "6000" typed for 60 is a ~30 h page that no
+# --max-runtime-seconds can stop and activeDeadlineSeconds ends with no cleanup_summary.
+# At this ceiling a page is at most 5490 s.
+_MAX_SEARCH_TIMEOUT_S = 300.0
 
 # See resilient_stac_io() for why 500 is here and when to remove it.
 _READ_RETRY_STATUSES = (429, 500, 502, 503, 504)
+
+# Items per /search page for the crons' discovery walks. A page, NOT a cap: the callers'
+# --max-items / --max-batch-size bound the run, this bounds one round trip. Without it
+# the server picks (stac-fastapi defaults to 10), so a 130-item cleanup batch was ~13
+# POSTs, each a fresh keyset query over the whole expired scan racing the gateway's 15 s
+# UPSTREAM_TIMEOUT. The hypothesis behind 100: the per-request count, not the row
+# count, is what killed six cleanup ticks on 2026-09-18, and the two fleet scripts that
+# pass a limit (submit_storage_tier_workflows, migrate_catalog: 100) have never hit it.
+# NOT proven against the real gateway — the counter-hypothesis is that a 100-item page
+# (~4.5 MB of upstream JSON at ~45 KB/item) moves each request CLOSER to the 15 s
+# cliff, not further. If ticks keep 500ing, lower --page-size before blaming the retry
+# policy.
+DEFAULT_PAGE_SIZE = 100
+
+# A page is materialised in memory the same way a cleanup batch is, so it gets the
+# batch's ceiling: cleanup_expired_items.MAX_ITEMS_CEILING is this constant.
+MAX_PAGE_SIZE = 10_000
+
+
+def page_size_arg(raw: str) -> int:
+    """argparse ``type`` for ``--page-size``: 1..MAX_PAGE_SIZE, with ``""`` the default.
+
+    ``""`` is how this fleet's Argo templates spell an unset optional parameter (they
+    splice ``value: ""`` into argv unconditionally), and a type that rejects it fails the
+    pod at parse time — exit 2, no cleanup_summary, every tick. Lives here rather than
+    in ``cleanup_expired_items`` so the tier-down cron does not import the module that
+    deletes S3 objects, and its import-time ``logging.basicConfig``, for a flag parser.
+    """
+    if raw.strip() == "":
+        return DEFAULT_PAGE_SIZE
+    try:
+        value = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"must be a whole number (got {raw!r})") from None
+    if not 1 <= value <= MAX_PAGE_SIZE:
+        raise argparse.ArgumentTypeError(f"must be 1..{MAX_PAGE_SIZE} (got {value})")
+    return value
+
 
 _lock = threading.Lock()
 
@@ -147,7 +193,9 @@ def _search_timeout_s() -> float:
     the 4.5 h hang that ``resilient_stac_io`` exists to prevent, and a typo must not
     silently reintroduce it. Garbage is rejected too, not defaulted: the value the
     operator set is not the value in effect, and a loud failure inside the caller's
-    guard (which still emits its summary) beats a silent 60 s.
+    guard (which still emits its summary) beats a silent 60 s. Values above
+    ``_MAX_SEARCH_TIMEOUT_S`` are rejected for the mirror-image reason: they silently
+    remove the bound a caller's runtime budget relies on (see the constant).
     """
     raw = os.getenv("STAC_HTTP_TIMEOUT", "").strip()
     if raw == "":
@@ -156,11 +204,11 @@ def _search_timeout_s() -> float:
         value = float(raw)
     except ValueError:
         raise ValueError(f"STAC_HTTP_TIMEOUT must be a number of seconds (got {raw!r})") from None
-    # `not (x > 0)` rather than `x <= 0`: it also rejects NaN, which float() accepts.
-    if not (math.isfinite(value) and value > 0):
+    # `not (0 < x)` rather than `x <= 0`: it also rejects NaN, which float() accepts.
+    if not (math.isfinite(value) and 0 < value <= _MAX_SEARCH_TIMEOUT_S):
         raise ValueError(
-            f"STAC_HTTP_TIMEOUT must be a finite number > 0 seconds; unset it for the "
-            f"default (got {raw!r})"
+            f"STAC_HTTP_TIMEOUT must be a number of seconds in (0, "
+            f"{_MAX_SEARCH_TIMEOUT_S:g}]; unset it for the default (got {raw!r})"
         )
     return value
 
@@ -261,9 +309,13 @@ def resilient_stac_io(timeout: float | None = None) -> StacApiIO:
     attempt alive indefinitely, and the 4.5 h hang above is prevented only for a socket
     that stalls completely; and a caller's runtime budget cannot interrupt any of it — a
     page fetch is uninterruptible for its whole ladder. ``cleanup_expired_items`` checks
-    its budget on every item read, so at every page boundary, but never inside one; its
-    README sizes the pod's ``activeDeadlineSeconds`` against this figure, and raising
-    ``STAC_HTTP_TIMEOUT`` raises that requirement with it.
+    its budget after every item read — at every page boundary, never inside one, and not
+    before the first item: the landing-page ``GET`` behind ``Client.open`` and the first
+    ``/search`` page both complete before the first check (two round trips, measured
+    2026-09-18 against a local server), each with its own ladder. Its README sizes the
+    pod's ``activeDeadlineSeconds`` against these figures, and raising
+    ``STAC_HTTP_TIMEOUT`` raises that requirement with it — which is why the value is
+    capped at ``_MAX_SEARCH_TIMEOUT_S`` (300 s, a 5490 s page).
     Override the timeout with ``STAC_HTTP_TIMEOUT`` (``""`` and unset mean the default).
     """
     # One budget, `total=8`, for every error class — connect/read/status are left at
@@ -300,9 +352,16 @@ def open_resilient_client(url: str) -> Client:
 
     The one correct way to combine ``resilient_stac_io`` with ``Client.open``: the timeout
     must also be passed to ``Client.open``, because ``Client.from_file`` resets the
-    ``stac_io``'s timeout to ``None`` otherwise (see ``resilient_stac_io``). Every read path
-    should call this rather than assembling the pair by hand, so the trap is sprung once,
-    here, instead of at each call site.
+    ``stac_io``'s timeout to ``None`` otherwise (see ``resilient_stac_io``). Every cron
+    read path (``cleanup_expired_items``, ``query_storage_tier_items``,
+    ``submit_storage_tier_workflows``, ``_migrate_catalog.runner``) calls this rather
+    than assembling the pair by hand, so the trap is sprung once, here. Known exceptions,
+    deliberately not migrated: bare ``Client.open`` remains on the read paths of
+    ``aggregate_items``, ``query_stac``, ``trigger_cdse``, ``watch_cdse_and_process``,
+    ``list_tile_frames``, ``wipe_s1rtc_tiles`` and ``operator-tools/manage_collections``
+    — the last walks whole collections, the same exposure as the migrated runner. They
+    keep pystac-client's default ``StacApiIO`` (no timeout, 5 transport retries, no
+    status retries).
 
     Read paths only — this carries no auth and its retries must never reach a write.
     """

@@ -19,6 +19,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 import stac_auth
+from pystac_client.exceptions import APIError
 from urllib3.exceptions import (
     ConnectTimeoutError,
     MaxRetryError,
@@ -51,7 +52,9 @@ class _FlakyHandler(BaseHTTPRequestHandler):
                 b'"description":"test","conformsTo":['
                 b'"https://api.stacspec.org/v1.0.0/core",'
                 b'"https://api.stacspec.org/v1.0.0/item-search"],'
-                b'"links":[{"rel":"self","href":"http://127.0.0.1:' + port + b'/"}]}'
+                b'"links":[{"rel":"self","href":"http://127.0.0.1:' + port + b'/"},'
+                b'{"rel":"search","href":"http://127.0.0.1:' + port + b'/search",'
+                b'"type":"application/geo+json","method":"POST"}]}'
             )
         else:
             body = b'{"type": "FeatureCollection", "features": [], "links": []}'
@@ -182,9 +185,10 @@ def test_write_session_has_no_retries():
     assert read_adapter.max_retries.total == 8
 
 
-def test_timeout_is_set_and_overridable():
+def test_timeout_is_set_and_overridable(monkeypatch):
     """No timeout means a stalled socket hangs the run forever (observed: 4.5 h)."""
-    assert stac_auth.resilient_stac_io().timeout == stac_auth._search_timeout_s()
+    monkeypatch.delenv("STAC_HTTP_TIMEOUT", raising=False)
+    assert stac_auth.resilient_stac_io().timeout == 60.0
     assert stac_auth.resilient_stac_io(timeout=12).timeout == 12
 
 
@@ -235,6 +239,42 @@ def test_hand_rolled_pairing_loses_the_timeout(flaky_server):
 
 
 # --- the effective budget per error class ---------------------------------------------
+
+
+# --- the production call path ---------------------------------------------------------
+#
+# Every socket test above drives `session.post(...)` / `.get(...)`. Production never does:
+# `StacApiIO.request` builds a PreparedRequest and calls `session.send(prepped, timeout=
+# ..., **merge_environment_settings(...))`, one level further out — the same shape of hole
+# as the `Client.open` timeout trap. The retries live on the adapter, which both paths
+# reach, but only these two tests pin that they still fire from `Client.search()`.
+
+
+def _client_then_reset(flaky_server, fail_times: int):
+    """Open against a healthy landing page, then arm the failures for the search only."""
+    client = stac_auth.open_resilient_client(flaky_server(fail_times=0))
+    _FlakyHandler.seen = []
+    _FlakyHandler.fail_times = fail_times
+    return client
+
+
+def test_retry_fires_through_client_search(flaky_server):
+    client = _client_then_reset(flaky_server, fail_times=2)
+    items = list(client.search(collections=["c"], limit=1).items_as_dicts())
+    assert items == []
+    assert _FlakyHandler.seen == ["POST", "POST", "POST"], "2 x 500 then the page"
+
+
+def test_exhausted_ladder_through_client_search_raises_apierror(flaky_server):
+    """An always-500 server: 9 attempts, 90 s of sleeps, and the caller sees APIError."""
+    client = _client_then_reset(flaky_server, fail_times=10**6)
+    with patch("time.sleep") as sleep, pytest.raises(APIError):
+        list(client.search(collections=["c"], limit=1).items_as_dicts())
+    assert _FlakyHandler.seen == ["POST"] * 9
+    assert sum(call.args[0] for call in sleep.call_args_list) == 90.0
+
+
+# --- the effective budget -----------------------------------------------------------
 
 
 def _read_retry() -> Retry:
@@ -386,16 +426,27 @@ def test_timeout_env_valid_value_is_used_by_both_entry_points(monkeypatch, flaky
     assert stac_auth.open_resilient_client(flaky_server(fail_times=0))._stac_io.timeout == 12.5
 
 
-@pytest.mark.parametrize("raw", ["abc", "0", "-5", "nan", "inf"])
-def test_timeout_env_garbage_and_non_positive_are_rejected(monkeypatch, raw):
+@pytest.mark.parametrize("raw", ["abc", "0", "-5", "nan", "inf", "6000"])
+def test_timeout_env_garbage_and_out_of_range_are_rejected(monkeypatch, raw):
     """A loud ValueError, not a silent default and not "no timeout".
 
     `0`/negative are rejected rather than read as "no timeout" because no timeout is
-    the 4.5 h hang this module exists to prevent. The error is raised at call time,
-    inside the caller's guard, so the cleanup cron still emits its summary.
+    the 4.5 h hang this module exists to prevent. `6000` (a typo for 60) is rejected
+    because a page is uninterruptible for 9 x 2 x timeout + 90 s — ~30 h — and it is
+    the one knob that removes the bound the callers' runtime budgets rely on. The error
+    is raised at call time, inside the caller's guard, so the cleanup cron still emits
+    its summary.
     """
     monkeypatch.setenv("STAC_HTTP_TIMEOUT", raw)
     with pytest.raises(ValueError, match="STAC_HTTP_TIMEOUT"):
+        stac_auth._search_timeout_s()
+
+
+def test_timeout_env_ceiling_is_named_and_inclusive(monkeypatch):
+    monkeypatch.setenv("STAC_HTTP_TIMEOUT", "300")
+    assert stac_auth._search_timeout_s() == stac_auth._MAX_SEARCH_TIMEOUT_S == 300.0
+    monkeypatch.setenv("STAC_HTTP_TIMEOUT", "300.5")
+    with pytest.raises(ValueError, match=r"\(0, 300\]"):
         stac_auth._search_timeout_s()
 
 

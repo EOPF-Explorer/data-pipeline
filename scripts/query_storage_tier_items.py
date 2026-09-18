@@ -23,13 +23,14 @@ from datetime import UTC, datetime, timedelta
 
 import stac_auth
 
-# DEFAULT_PAGE_SIZE (100) is the cleanup cron's, not a copy: `_page_size("")` returns
-# that constant, so the two scripts must share it. 100 matches submit_storage_tier_workflows
-# and migrate_catalog, the fleet's two search paths that have never hit the gateway
-# timeout; see query_items.
-from cleanup_expired_items import DEFAULT_PAGE_SIZE, _page_size
+# Shared with the cleanup cron through stac_auth, not imported from cleanup_expired_items:
+# that module deletes S3 objects and calls logging.basicConfig at import, and
+# `page_size_arg("")` must resolve to the same constant in both. Neither this script nor
+# submit_storage_tier_workflows has an in-tool runtime budget — the walk is bounded by
+# the query window and the pod's deadline only.
 from pystac import Item
 from s3_item_cleanup import resolve_exclude_ids
+from stac_auth import DEFAULT_PAGE_SIZE, page_size_arg
 from update_stac_storage_tier import TIER_TO_SCHEME
 
 # Configure logging
@@ -194,7 +195,7 @@ def main(argv: list[str] | None = None) -> int:
         # The cleanup cron's validator, so a typo (0, -5, 20000) is a usage error at
         # parse time rather than pystac-client's bare Exception after a network round
         # trip, and `""` (the fleet's unset-Argo-parameter idiom) means the default.
-        type=_page_size,
+        type=page_size_arg,
         default=DEFAULT_PAGE_SIZE,
         help=(
             f"Items per /search request while walking the window (default: "

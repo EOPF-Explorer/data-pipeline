@@ -1299,7 +1299,7 @@ def test_cli_page_size_defaults_and_reaches_the_search(capsys) -> None:
         with pytest.raises(SystemExit) as exc:
             main([*_CLI_BASE, "--page-size", bad])
         assert exc.value.code == 2
-    assert "_page_size" not in capsys.readouterr().err
+    assert "page_size_arg" not in capsys.readouterr().err
 
     client = MagicMock()
     client.self_href = "https://stac.example.com"
@@ -1334,7 +1334,11 @@ def test_summary_carries_discovery_seconds(expired_item, capsys) -> None:
     budget seam: a run without a budget must still not read that clock (pinned above).
     """
     clock = MagicMock()
-    clock.monotonic.side_effect = [1000.0, 1007.5]
+    # Three reads: the fallback bound before the guard, the restart right before the
+    # read client opens (after the write session and S3 client are built, so a boto3
+    # credential stall is excluded), the end of discovery. 7.5 pins the restart: from
+    # the first tick it would read 17.5.
+    clock.monotonic.side_effect = [990.0, 1000.0, 1007.5]
     s3 = MagicMock()
     s3.get_paginator.return_value = _paginator([["a", "b"]])
     with patch("cleanup_expired_items.time", clock):
@@ -1351,8 +1355,9 @@ def test_aborted_summary_still_carries_discovery_seconds(capsys) -> None:
     client.self_href = "https://stac.example.com"
     client.search.return_value.items_as_dicts.side_effect = requests.ConnectionError("boom")
     clock = MagicMock()
-    # 9 x 15 s attempts + 90 s of sleeps: the gateway ladder, exhausted.
-    clock.monotonic.side_effect = [1000.0, 1225.0]
+    # 9 x 15 s attempts + 90 s of sleeps: the gateway ladder, exhausted. Ticks: the
+    # fallback bound, the restart before the read client opens, the abort.
+    clock.monotonic.side_effect = [990.0, 1000.0, 1225.0]
 
     with (
         patch("cleanup_expired_items.stac_auth.open_resilient_client", return_value=client),

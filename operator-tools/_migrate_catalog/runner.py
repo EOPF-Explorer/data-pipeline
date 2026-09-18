@@ -25,9 +25,17 @@ import stac_auth  # noqa: E402
 logger = logging.getLogger(__name__)
 
 # The search-pagination client's resilience now lives in stac_auth.resilient_stac_io(),
-# shared with the cleanup and storage-tier crons, which failed the same way. urllib3 cannot
-# always retry a reset mid-body, so it stays best-effort; the migration is idempotent
-# (skips already-stamped), so anything that slips through is recovered by re-running.
+# shared with the cleanup and storage-tier crons, which failed the same way. Three things
+# moved for THIS caller in the process: (a) the timeout is now real — the old
+# `Client.open(url, stac_io=...)` let Client.from_file reset it to None, so the
+# `_SEARCH_TIMEOUT` it carried was never in effect and a stalled socket could hang a
+# 23k-item walk; it is 60 s per connect/read half now (STAC_HTTP_TIMEOUT, capped at
+# 300); (b) 500 is retried, where the old forcelist stopped at 429/502/503/504 (the
+# gateway's upstream timeout surfaces as 500, see resilient_stac_io); (c) the ladder is
+# shorter — backoff_max 120 -> 20 s and Retry-After no longer honoured, so 90 s of
+# sleeps per page instead of 246 s. urllib3 cannot always retry a reset mid-body, so it
+# stays best-effort; the migration is idempotent (skips already-stamped), so anything
+# that slips through is recovered by re-running.
 
 
 def _transaction_body(item_dict: dict[str, Any]) -> dict[str, Any] | None:
