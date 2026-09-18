@@ -27,6 +27,7 @@ All dependencies are managed via `uv` and will be automatically installed when r
 | `--age-days` | Yes | -- | Target age in days for tier transition |
 | `--to-storage-class` | Yes | -- | Target S3 storage class (`STANDARD`, `STANDARD_IA`, or `EXPRESS_ONEZONE`) |
 | `--max-batch-size` | No | `100` | Maximum number of items to return |
+| `--page-size` | No | `100` | Items per `/search` request (1–10000; `""` means the default). A page, not a cap: `--max-batch-size` still bounds the output, and the page is not clamped to it |
 
 ### Storage Class to Refs Mapping
 

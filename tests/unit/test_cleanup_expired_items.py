@@ -93,9 +93,11 @@ def test_build_search_kwargs_sorts_and_caps() -> None:
 def test_build_search_kwargs_passes_an_explicit_page_size() -> None:
     """`limit` is sent, so the server's default page (10) never sets the request count.
 
-    The two scripts that died on the gateway's 15 s upstream timeout (2026-09-18) were
-    exactly the two that omitted `limit`; the two that pass 100 never have. Page size is
-    NOT the cap: `max_items` stays what bounds the run.
+    This script and query_storage_tier_items were the two fleet searches that omitted
+    `limit`. Not evidence that 100 avoids the gateway's 15 s upstream timeout: the
+    tier-down cron that died on it 2026-09-18 runs submit_storage_tier_workflows, which
+    already passed limit=100; the retry is the fix, the knob is for measuring which
+    direction helps. Page size is NOT the cap: `max_items` stays what bounds the run.
     """
     kwargs = build_search_kwargs("sentinel-2-l2a-staging", NOW, 130)
     assert kwargs["limit"] == DEFAULT_PAGE_SIZE == 100
@@ -1375,9 +1377,14 @@ def test_aborted_summary_still_carries_discovery_seconds(capsys) -> None:
 
 def test_discovery_seconds_is_null_when_the_read_client_never_opened(capsys) -> None:
     """A boto3 credential-chain stall that aborts the run must not be reported as
-    STAC time: the README promises the field never includes it, so it is null."""
+    STAC time: the README promises the field never includes it, so it is null.
+
+    The clock RETURNS a value rather than raising: `run_cleanup`'s broad `except` would
+    swallow an AssertionError from the mock and print `null` for the wrong reason, so a
+    clock read moved above `_s3_client()` would pass unnoticed. With a readable clock
+    that regression reports `0.0` here and fails."""
     clock = MagicMock()
-    clock.monotonic.side_effect = AssertionError("nothing may read the clock")
+    clock.monotonic.return_value = 1000.0
 
     with (
         patch("cleanup_expired_items.stac_auth.open_resilient_client") as open_client,

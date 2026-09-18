@@ -1,4 +1,10 @@
-"""OIDC client-credentials auth for the STAC Transactions write endpoints.
+"""STAC client plumbing shared by the crons: OIDC write auth and the resilient read path.
+
+Two halves. The read half (``open_resilient_client``, ``resilient_stac_io``,
+``DEFAULT_PAGE_SIZE`` / ``MAX_PAGE_SIZE`` / ``page_size_arg``, the ``STAC_HTTP_TIMEOUT``
+parser) is a retrying search client for ``/search`` pagination, shared so the tier-down
+cron does not import the module that deletes S3 objects for a flag parser. The write
+half is the OIDC client-credentials auth for the STAC Transactions endpoints:
 
 A no-op when the OIDC env is absent, so local/dev and any unconfigured environment keep
 writing unauthenticated. When ``OIDC_TOKEN_URL`` / ``OIDC_CLIENT_ID`` /
@@ -11,7 +17,8 @@ bearer that ``open_client`` wires onto the pystac-client session via
 A configured-but-failing token endpoint raises rather than degrading to a silent
 unauthenticated write.
 
-Design tracked out-of-repo (session memory + PR description); this is Task 1.
+Design tracked out-of-repo (session memory + PR description); the write half is Task 1,
+the read half is PR #418.
 """
 
 from __future__ import annotations
@@ -75,11 +82,14 @@ _READ_RETRY_STATUSES = (429, 500, 502, 503, 504)
 DEFAULT_PAGE_SIZE = 100
 
 # A page is materialised in memory the same way a cleanup batch is, so it gets the
-# batch's ceiling: cleanup_expired_items.MAX_ITEMS_CEILING is this constant. Like
+# batch's ceiling: cleanup_expired_items.MAX_ITEMS_CEILING IS this constant, so raising
+# it for a bigger page also raises the cap on an irreversible-delete batch. Like
 # STAC_HTTP_TIMEOUT above, a typo fence, not a size any pod survives: at ~45 KB/item a
 # 10_000-row page is a ~450 MB uninterruptible response, against a 512Mi cleanup pod.
-# cleanup_expired_items clamps the page to --max-items; query_storage_tier_items has
-# no run cap to clamp to and is bounded by this constant alone (see its --page-size).
+# cleanup_expired_items clamps the page to --max-items; query_storage_tier_items and
+# submit_storage_tier_workflows have no run cap to clamp to and are bounded by this
+# constant alone (see their --page-size) — the latter is the deployed one, in the
+# tier-down cron's pod at limits.memory 1Gi.
 MAX_PAGE_SIZE = 10_000
 
 
@@ -334,7 +344,11 @@ def resilient_stac_io(timeout: float | None = None) -> StacApiIO:
     ``/``, while this fleet opens ``.../stac`` without one. Measured 2026-09-18 against
     a local server: 3 round trips when the root href differs from the opened URL by a
     trailing slash either way, 2 when identical or when the page has no ``rel:root``
-    (``test_round_trips_before_the_first_search`` pins both). The cleanup README sizes
+    (``test_round_trips_before_the_first_search`` pins both). That server was
+    stac-fastapi-shaped; prod's links also pass through ``eoapi-stac-auth-proxy``'s link
+    rewriter, which has not been sampled, so prod may be 2 — the sizing keeps 3 as the
+    conservative count, and at the deployed 3000/4200 the budget term binds either way.
+    The cleanup README sizes
     the pod's ``activeDeadlineSeconds`` against these figures, and raising
     ``STAC_HTTP_TIMEOUT`` raises that requirement with it; ``_MAX_SEARCH_TIMEOUT_S``
     (300 s, a 5490 s page) fences only a typo, not that arithmetic.

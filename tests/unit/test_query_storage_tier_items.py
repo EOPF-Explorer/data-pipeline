@@ -467,6 +467,21 @@ class TestMain:
             assert main([*_CLI_BASE, "--page-size", ""]) == 0
         assert client.search_kwargs["limit"] == DEFAULT_PAGE_SIZE == 100
 
+    def test_cli_forwards_a_non_default_page_size(self):
+        """`--page-size 250` reaches `search()` as `limit`. The test above asserts the
+        default, which is also what a dropped `page_size=args.page_size` produces; only
+        a value the default cannot yield pins the forwarding."""
+        client = FakeStacClient([])
+        with (
+            patch(
+                "scripts.query_storage_tier_items.stac_auth.open_resilient_client",
+                return_value=client,
+            ),
+            patch("sys.stdout", new_callable=StringIO),
+        ):
+            assert main([*_CLI_BASE, "--page-size", "250"]) == 0
+        assert client.search_kwargs["limit"] == 250
+
 
 _CLI_BASE = [
     "--stac-api-url",

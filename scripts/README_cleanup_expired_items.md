@@ -121,8 +121,11 @@ old demo dates — and the cleanup-time skip is the backstop regardless.
   `discovery_seconds: 6.0`; with `/search` answering 500, 500, 200 and no
   delay, 2.01 s wall — the 0 s + 2 s sleeps of a 3-attempt ladder — and
   `discovery_seconds: 2.0`. `test_round_trips_before_the_first_search` pins
-  both counts (3 with the prod shape, 2 with a byte-identical root href). The
-  failure this rule prevents: the last discovery page enters the ladder just
+  both counts (3 with the prod shape, 2 with a byte-identical root href). That
+  server was stac-fastapi-shaped; prod's links also pass through
+  `eoapi-stac-auth-proxy`'s link rewriter, which has not been sampled, so prod
+  may be 2 — the rule keeps 3 as the conservative count, and at 3000/4200 the
+  first term binds either way. The failure this rule prevents: the last discovery page enters the ladder just
   before the budget expires, the pod is SIGKILLed mid-`/search`, and there is
   **no `cleanup_summary` at all** — so the alert pair below never fires.
 
@@ -159,9 +162,9 @@ old demo dates — and the cleanup-time skip is the backstop regardless.
 | `--s3-endpoint` | `AWS_ENDPOINT_URL` env | S3 endpoint URL |
 | `--allowed-bucket` | `esa-zarr-sentinel-explorer-fra` | Assets outside it are skipped |
 | `--max-items` | `100` | Cap on items processed per run (1–10000; **`0` used to mean UNLIMITED**, not zero — pystac-client gates pagination on a falsy check) |
-| `--page-size` | `100` | Items per `/search` request during discovery (1–10000; `""` means the default), clamped to `--max-items`. A page, not a cap: `--max-items` still bounds the run. Passed as `limit` so the server's default (10) does not turn the live 300-item batch into 30 requests, each racing the gateway's 15 s upstream timeout — a hypothesis, not a measurement, and one the tier-down cron argues against (it died the same day already passing `limit=100`): a 100-item page is ~4.5 MB of upstream JSON and could move each request *closer* to that cliff; lower it if ticks keep 500ing. Like `STAC_HTTP_TIMEOUT` it makes one request arbitrarily long; its 10000 ceiling is a memory typo fence (~450 MB of JSON), not a time bound. Logged in the `Cleanup start` line. ⚠️ **Requires image `>= v1.17.1`** (the first release after v1.17.0; unreleased at the time of writing). Prod pins v1.16.1, so its bump jumps two releases; devseed-staging's suspended cron pins v1.13.2, four behind. Adding it to a manifest without bumping `pipeline_image_version` gives `unrecognized arguments`, exit 2, every tick |
+| `--page-size` | `100` | Items per `/search` request during discovery (1–10000; `""` means the default), clamped to `--max-items`. A page, not a cap: `--max-items` still bounds the run. Passed as `limit` so the server's default (10) does not turn the live 300-item batch into 30 requests, each racing the gateway's 15 s upstream timeout — a hypothesis, not a measurement, and one the tier-down cron argues against (it died the same day already passing `limit=100`): a 100-item page is ~4.5 MB of upstream JSON and could move each request *closer* to that cliff; lower it if ticks keep 500ing. Like `STAC_HTTP_TIMEOUT` it makes one request arbitrarily long; its 10000 ceiling is a memory typo fence (~450 MB of JSON), not a time bound. Logged in the `Cleanup start` line. ⚠️ **Requires image `>= v1.17.1`** (the first release after v1.17.0; unreleased at the time of writing). Prod pins v1.16.1, so its bump jumps two releases; devseed-staging's suspended cron pins v1.13.2, six behind (v1.14.0, v1.15.0, v1.16.0, v1.16.1, v1.17.0, v1.17.1). Adding it to a manifest without bumping `pipeline_image_version` gives `unrecognized arguments`, exit 2, every tick |
 | `--max-runtime-seconds` | off | Stop at the next item boundary after N seconds (1–86400; `""` means off). Size the outer deadline as `max(budget + max(worst item, worst page), 3 × worst page)` — the page is ≈225 s against the 15 s gateway, ≈1170 s at the default `STAC_HTTP_TIMEOUT`; see the sizing rule above |
-| `STAC_HTTP_TIMEOUT` (env) | `60` | Per-request connect and read timeout, in seconds, for the retrying search client (`(0, 300]`; `""` and unset mean the default). It is the `T` in the sizing rule: a page is uninterruptible for `9 × 2 × T + 90 s`, and at the deployed 3000/4200 anything above ~61 s breaks the rule. `0`, negatives, garbage and values above 300 are rejected — not at parse time but when the read client opens, inside the guard: the run exits `1` with a normal `cleanup_summary` carrying `aborted: true` and `discovered: null` |
+| `STAC_HTTP_TIMEOUT` (env) | `60` | Per-request connect and read timeout, in seconds, for the retrying search client (`(0, 300]`; `""` and unset mean the default). It is the `T` in the sizing rule: a page is uninterruptible for `9 × 2 × T + 90 s`, and at the deployed 3000/4200 anything above ~61 s breaks the rule. `0`, negatives, garbage and values above 300 are rejected — not at parse time but when the read client opens, inside the guard: the run exits `1` with a normal `cleanup_summary` carrying `aborted: true` and `discovered: null`. ⚠️ **Requires image `>= v1.17.1`** (nothing under `scripts/` reads it on `origin/main` or at `v1.17.0`). Unlike a flag, an older image does not reject it — it **ignores it silently**: on prod's v1.16.1 the tick stays green and nothing changes, so set it only together with the pin bump |
 | `--exclude-file` | `EXPIRES_EXCLUDE_FILE` env | Item-ID denylist |
 | `--execute` | off (dry-run) | Actually delete |
 
@@ -259,7 +262,8 @@ discovery time.
 `deleted`" must not trip on either of them.
 
 `aborted: true` appears **only** on a run that died before finishing the batch —
-anything raising between opening the STAC client and the end of the item loop.
+anything raising between building the write session and the end of the item loop
+(the S3 client and the STAC read client open after it, so a boto3 stall counts).
 The key is additive and absent from every healthy run, so consumers keyed on
 `event == "cleanup_summary"` are unaffected. On such a run `discovered` is
 `null` rather than `0` when discovery itself was what raised: the number is

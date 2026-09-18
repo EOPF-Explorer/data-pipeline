@@ -676,6 +676,51 @@ class TestMainDateFieldForwarding:
         assert submitted_payloads[0]["storage_class"] == "STANDARD"
 
 
+class TestMainPageSizeForwarding:
+    def test_page_size_forwarded_to_query(self) -> None:
+        """A NON-default `--page-size` reaches query_stac_items. The other stubs declare
+        `page_size: int = 100` themselves, so they pass whether or not main() forwards
+        the flag; only a value the default cannot produce pins the forwarding."""
+        captured: list[int] = []
+
+        def capture_query(
+            stac_api_url: str,
+            collection: str,
+            window_start: str,
+            window_end: str,
+            date_field: str,
+            target_storage_ref: str | None,
+            exclude_ids: set[str] | frozenset[str] = frozenset(),
+            page_size: int = 100,
+        ) -> list[str]:
+            captured.append(page_size)
+            return []
+
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "submit_storage_tier_workflows.py",
+                    "--start-date",
+                    "2024-01-01",
+                    "--end-date",
+                    "2024-01-02",
+                    "--collection",
+                    "sentinel-2-l2a",
+                    "--page-size",
+                    "250",
+                    "--dry-run",
+                ],
+            ),
+            patch("submit_storage_tier_workflows.query_stac_items", side_effect=capture_query),
+        ):
+            from submit_storage_tier_workflows import main
+
+            main()
+
+        assert captured == [250]
+
+
 class TestMainMinAgeMode:
     def test_min_age_days_issues_single_sided_tier_aware_query(self) -> None:
         """--min-age-days runs one open-lower-bound query with the target tier ref."""

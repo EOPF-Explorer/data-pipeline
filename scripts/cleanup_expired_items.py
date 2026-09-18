@@ -495,7 +495,8 @@ def run_cleanup(args: argparse.Namespace) -> int:
     # the audit stream instead of ending the process silently.
     try:
         # Before 2026-09-18 discovery paged /search at the server's default page (10),
-        # ~13-30 POSTs per tick, none retried; one page past the gateway's
+        # 10-30 POSTs per tick across the fleet (--max-items 100 on staging and
+        # s3olci, 300 on prod), none retried; one page past the gateway's
         # UPSTREAM_TIMEOUT aborted six prod ticks that day. Now 1-3 pages of `limit`
         # rows, each retried on a transient 5xx. Reads only — the item DELETEs use
         # _session(), which must NOT retry (non-atomic unit).
@@ -707,9 +708,9 @@ def main(argv: list[str] | None = None) -> int:
         type=stac_auth.page_size_arg,
         default=DEFAULT_PAGE_SIZE,
         help=(
-            f"Items per /search request during discovery (1..{stac_auth.MAX_PAGE_SIZE}). "
-            "A page, not a cap: --max-items still bounds the run, and the page is "
-            "clamped to it."
+            f"Items per /search request during discovery (1..{stac_auth.MAX_PAGE_SIZE}; "
+            '"" means the default). A page, not a cap: --max-items still bounds the run, '
+            "and the page is clamped to it."
         ),
     )
     parser.add_argument(
