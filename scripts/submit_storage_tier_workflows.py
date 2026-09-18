@@ -19,10 +19,10 @@ from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import requests
-from pystac_client import Client
 
 # The tier-aware selection reuses the proven client-side predicate and tier map
 # from the same scripts/ package (both are on the path in-image and under pytest).
+import stac_auth
 from query_storage_tier_items import is_already_migrated
 from s3_item_cleanup import resolve_exclude_ids
 from update_stac_storage_tier import TIER_TO_SCHEME
@@ -162,7 +162,7 @@ def query_stac_items(
     denylist, so the recurring tier-down cannot move a protected scene off the
     performance tier (a reconversion re-arms the ``created`` age band 90 days out).
     """
-    catalog = Client.open(stac_api_url)
+    catalog = stac_auth.open_resilient_client(stac_api_url)
     if window_start is None:
         # Single-sided open lower bound for age-based selection.
         search = catalog.search(
