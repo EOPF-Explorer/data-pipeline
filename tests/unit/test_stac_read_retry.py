@@ -8,6 +8,7 @@ difference between "retries POST" and "has a retry object". So the central test 
 real socket and counts the requests the server actually received.
 """
 
+import logging
 import os
 import subprocess
 import sys
@@ -302,11 +303,60 @@ def test_retry_after_header_cannot_extend_a_sleep_past_backoff_max():
     assert retry.respect_retry_after_header is False
 
     resp = MagicMock()
+    resp.status = 503
     resp.headers = {"Retry-After": "3600"}
+    resp.get_redirect_location.return_value = None
+    # Two increments first: urllib3's backoff is 0 until the history holds two
+    # consecutive errors, and a 0 s backoff never reaches time.sleep — so on a
+    # history-less Retry the assertion below is vacuous (it was, once).
+    retry = retry.increment(method="POST", url="/search", response=resp)
+    retry = retry.increment(method="POST", url="/search", response=resp)
+
     with patch("time.sleep") as sleep:
         retry.sleep(resp)
-    for call in sleep.call_args_list:
-        assert call.args[0] <= 20, f"slept {call.args[0]} s: the header was honoured"
+    sleep.assert_called_once()
+    assert sleep.call_args.args[0] == 2.0, "backoff_factor * 2**(2-1), not the header's hour"
+
+    # Control: the same policy with the header honoured sleeps the hour, so the
+    # assertion above is on the flag and not on a sleep that never fires.
+    with patch("time.sleep") as sleep:
+        retry.new(respect_retry_after_header=True).sleep(resp)
+    assert sleep.call_args.args[0] == 3600
+
+
+@pytest.mark.parametrize("method", ["DELETE", "PUT", "PATCH"])
+def test_write_methods_are_never_retried_by_the_read_policy(method):
+    """The one property that makes "read paths only" true.
+
+    `test_write_session_has_no_retries` shows the write session is a different object;
+    this shows that even the read policy itself, mounted on the wrong session by a future
+    refactor, would not retry a write on a 5xx.
+    """
+    retry = _read_retry()
+    assert retry.is_retry(method, 500) is False
+    assert retry.is_retry("POST", 500) is True
+    assert retry.is_retry("GET", 500) is True
+
+
+def test_each_retry_logs_a_warning(flaky_server, caplog):
+    """urllib3 logs a status-forcelist retry at DEBUG only, and both crons pin the
+    `urllib3` logger to WARNING — so without this line the 500-retry path, the whole
+    point of the policy, leaves no trace in production logs."""
+    url = flaky_server(fail_times=2)
+    session = _session_from(stac_auth.resilient_stac_io(timeout=5))
+
+    with caplog.at_level(logging.WARNING, logger=stac_auth.logger.name):
+        session.post(f"{url}/search", json={})
+
+    lines = [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == stac_auth.logger.name and r.levelno == logging.WARNING
+    ]
+    assert len(lines) == 2
+    assert "POST" in lines[0] and "/search" in lines[0] and "HTTP 500" in lines[0]
+    assert "7 retries left" in lines[0]
+    assert "6 retries left" in lines[1]
 
 
 # --- STAC_HTTP_TIMEOUT, parsed at call time --------------------------------------------

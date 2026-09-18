@@ -6,6 +6,7 @@ from io import StringIO
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 from pystac import Asset, Item
 
 from scripts.query_storage_tier_items import (
@@ -435,3 +436,43 @@ class TestMain:
             )
 
         assert exit_code == 1
+
+    @pytest.mark.parametrize("bad", ["0", "-5", "20000", "ten"])
+    def test_cli_rejects_a_bad_page_size_before_any_network_call(self, bad, capsys):
+        """Same validator as the cleanup cron. Unvalidated `type=int` let these reach
+        `search()` and die after a network round trip inside pystac-client with a bare
+        `Exception("Invalid limit of 0, ...")` -> rc 1 and a traceback; the cleanup twin
+        was a clean usage error at parse time."""
+        with (
+            patch("scripts.query_storage_tier_items.stac_auth.open_resilient_client") as opener,
+            pytest.raises(SystemExit) as exc,
+        ):
+            main([*_CLI_BASE, "--page-size", bad])
+        assert exc.value.code == 2
+        assert "--page-size" in capsys.readouterr().err
+        opener.assert_not_called()
+
+    def test_cli_treats_an_empty_page_size_as_the_default(self):
+        """`""` is this fleet's spelling of an unset optional Argo parameter."""
+        client = FakeStacClient([])
+        with (
+            patch(
+                "scripts.query_storage_tier_items.stac_auth.open_resilient_client",
+                return_value=client,
+            ),
+            patch("sys.stdout", new_callable=StringIO),
+        ):
+            assert main([*_CLI_BASE, "--page-size", ""]) == 0
+        assert client.search_kwargs["limit"] == DEFAULT_PAGE_SIZE == 100
+
+
+_CLI_BASE = [
+    "--stac-api-url",
+    STAC_API_URL,
+    "--collection",
+    COLLECTION,
+    "--age-days",
+    "7",
+    "--to-storage-class",
+    "STANDARD_IA",
+]

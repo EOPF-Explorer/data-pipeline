@@ -21,11 +21,15 @@ import math
 import os
 import threading
 import time
+from types import TracebackType
+from typing import Self
 
 import httpx
 import requests
 from pystac_client import Client
 from pystac_client.stac_api_io import StacApiIO
+from urllib3 import BaseHTTPResponse
+from urllib3.connectionpool import ConnectionPool
 from urllib3.util.retry import Retry
 
 logger = logging.getLogger(__name__)
@@ -33,8 +37,9 @@ logger = logging.getLogger(__name__)
 # Refetch this many seconds before the token actually expires.
 _EXPIRY_MARGIN_S = 30
 
-# Per-request read timeout for search pagination; override with STAC_HTTP_TIMEOUT
-# (parsed lazily by _search_timeout_s, never at import).
+# Per-request timeout for search pagination — applied by `requests` to the connect AND
+# the read half separately; override with STAC_HTTP_TIMEOUT (parsed lazily by
+# _search_timeout_s, never at import).
 _DEFAULT_SEARCH_TIMEOUT_S = 60.0
 
 # See resilient_stac_io() for why 500 is here and when to remove it.
@@ -160,6 +165,43 @@ def _search_timeout_s() -> float:
     return value
 
 
+class _LoggedRetry(Retry):
+    """``Retry`` that says so, at WARNING, every time it fires on a status.
+
+    urllib3 logs a status-forcelist retry at DEBUG only (``connectionpool.py``: ``log.debug
+    ("Retry: %s", url)``); its own WARNING line covers connection errors alone, which is
+    why this logs statuses alone — a connection-error retry already has a line. The crons
+    pin the ``urllib3`` logger to WARNING, so the 500-retry path — the reason this policy
+    exists — would leave no trace in production logs, and a tick whose every page burnt
+    the whole ladder on gateway 500s would read like a quiet one. ``increment`` is the
+    one call every retry goes through, and ``Retry.new`` rebuilds via ``type(self)``, so
+    the subclass survives the copy-on-increment. No counter is kept: urllib3 copies the
+    object on every increment, so a per-run tally would have to be threaded through
+    ``new`` and read back out of the session's adapter — count the log line instead.
+    """
+
+    def increment(
+        self,
+        method: str | None = None,
+        url: str | None = None,
+        response: BaseHTTPResponse | None = None,
+        error: Exception | None = None,
+        _pool: ConnectionPool | None = None,
+        _stacktrace: TracebackType | None = None,
+    ) -> Self:
+        new = super().increment(method, url, response, error, _pool, _stacktrace)
+        if response is not None:
+            logger.warning(
+                "Retrying %s %s after HTTP %s: %s retries left, next sleep %.0f s",
+                method,
+                url,
+                response.status,
+                new.total,
+                new.get_backoff_time(),
+            )
+        return new
+
+
 def resilient_stac_io(timeout: float | None = None) -> StacApiIO:
     """A ``StacApiIO`` for READ paths: per-request timeout plus retries on transient 5xx.
 
@@ -189,7 +231,16 @@ def resilient_stac_io(timeout: float | None = None) -> StacApiIO:
     Safe only on reads. ``/search`` and ``GET`` are idempotent, so a retried request cannot
     duplicate an effect. **Never mount this on a session that carries DELETEs or POSTs of
     items** — retrying those on a 5xx is the non-atomic-write hazard that PUT-instead-of-
-    DELETE-then-POST exists to avoid. Write sessions are built separately, on purpose.
+    DELETE-then-POST exists to avoid. The write session the cleanup cron builds by hand
+    (``cleanup_expired_items._session``) carries no retries at all. The one exception is
+    pre-existing and not this module's doing:
+    ``open_client`` below calls ``Client.open`` with no ``stac_io``, so its session gets
+    pystac-client's default ``StacApiIO(max_retries=5)`` — ``Retry(total=5,
+    allowed_methods={DELETE, GET, HEAD, OPTIONS, PUT, TRACE}, status_forcelist=set())``
+    — and that session carries ``register_v1.upsert_item`` (PUT/POST) and
+    ``wipe_s1rtc_tiles.delete_items`` (DELETE). The empty forcelist means a 5xx is never
+    retried there; only a transport error is, and the operations have been individually
+    idempotent since #352. Left as is on purpose — changing it is a write-path decision.
 
     🔴 **Use ``open_resilient_client`` rather than calling this and passing the result to
     ``Client.open`` yourself.** ``Client.from_file`` calls ``stac_io.update(timeout=None)``
@@ -199,12 +250,20 @@ def resilient_stac_io(timeout: float | None = None) -> StacApiIO:
     not touch); only the timeout is lost, which is the half of this that a passing unit
     test cannot see.
 
-    Worst case per request: 9 attempts (``total=8``) with sleeps of
-    0+2+4+8+16+20+20+20 = **90 s** between them, and each attempt can spend the full read
-    timeout, so **~630 s per page** at the 60 s default. Against a gateway that 500s after
-    its own 15 s timeout it is ~225 s. Either way it is far more than one request, so **a
-    caller with a runtime budget must check it between pages, not only after discovery**
-    — see ``cleanup_expired_items``, which pages explicitly for exactly this reason.
+    Worst case per page: 9 attempts (``total=8``) with sleeps of 0+2+4+8+16+20+20+20 =
+    **90 s** between them. ``requests`` maps a scalar timeout to *both* halves
+    (``TimeoutSauce(connect=timeout, read=timeout)``), so one attempt against a fully
+    stalled socket can spend up to 2 × timeout — a **~1170 s ceiling per page** at the
+    60 s default (9 × 120 + 90), ~630 s if only the read half stalls. Against a gateway
+    that 500s after its own 15 s upstream timeout it is ~225 s (9 × 15 + 90). Two things
+    that ceiling does NOT cover: the read timeout is per socket read, so it bounds the gap
+    between bytes, not the request — a server that dribbles a byte every 59 s keeps one
+    attempt alive indefinitely, and the 4.5 h hang above is prevented only for a socket
+    that stalls completely; and a caller's runtime budget cannot interrupt any of it — a
+    page fetch is uninterruptible for its whole ladder. ``cleanup_expired_items`` checks
+    its budget on every item read, so at every page boundary, but never inside one; its
+    README sizes the pod's ``activeDeadlineSeconds`` against this figure, and raising
+    ``STAC_HTTP_TIMEOUT`` raises that requirement with it.
     Override the timeout with ``STAC_HTTP_TIMEOUT`` (``""`` and unset mean the default).
     """
     # One budget, `total=8`, for every error class — connect/read/status are left at
@@ -222,7 +281,7 @@ def resilient_stac_io(timeout: float | None = None) -> StacApiIO:
     # bypasses that cap: on 429/503 urllib3 sleeps the server's Retry-After instead, bounded
     # only by `retry_after_max` (default 21600 s), so one response carrying a large header
     # would stall a page for hours whatever backoff_max says.
-    retry = Retry(
+    retry = _LoggedRetry(
         total=8,
         backoff_factor=1.0,
         backoff_max=20,

@@ -1314,6 +1314,60 @@ def test_cli_page_size_defaults_and_reaches_the_search(capsys) -> None:
     assert client.search.call_args.kwargs["max_items"] == 130
 
 
+@pytest.mark.parametrize("raw", ["", "  "], ids=["empty", "blank"])
+def test_cli_treats_an_empty_page_size_as_the_default(raw: str) -> None:
+    """`--page-size ""` is this fleet's spelling of an unset optional Argo parameter.
+
+    `_budget_seconds` already maps it to "off" for exactly this reason; a sibling flag
+    that rejects it is exit 2 with no cleanup_summary, every tick, the moment a template
+    splices the parameter unconditionally.
+    """
+    with patch("cleanup_expired_items.run_cleanup", return_value=0) as run:
+        main([*_CLI_BASE, "--page-size", raw])
+    assert run.call_args.args[0].page_size == DEFAULT_PAGE_SIZE
+
+
+def test_summary_carries_discovery_seconds(expired_item, capsys) -> None:
+    """`time_budget_reached: true, processed: 0` has two causes — a real backlog, or
+    every page burning its retry ladder on gateway 500s — and only the time discovery
+    took tells them apart. Measured with `time.monotonic` directly, not the `_monotonic`
+    budget seam: a run without a budget must still not read that clock (pinned above).
+    """
+    clock = MagicMock()
+    clock.monotonic.side_effect = [1000.0, 1007.5]
+    s3 = MagicMock()
+    s3.get_paginator.return_value = _paginator([["a", "b"]])
+    with patch("cleanup_expired_items.time", clock):
+        _run_with([expired_item], get_status=200, s3=s3)
+
+    summary = _capture_lines(capsys)[-1]
+    assert summary["discovery_seconds"] == 7.5
+
+
+def test_aborted_summary_still_carries_discovery_seconds(capsys) -> None:
+    """A page that fails after its whole ladder is the case the field exists to show, so
+    a discovery that raises must report the time to the abort rather than lose it."""
+    client = MagicMock()
+    client.self_href = "https://stac.example.com"
+    client.search.return_value.items_as_dicts.side_effect = requests.ConnectionError("boom")
+    clock = MagicMock()
+    # 9 x 15 s attempts + 90 s of sleeps: the gateway ladder, exhausted.
+    clock.monotonic.side_effect = [1000.0, 1225.0]
+
+    with (
+        patch("cleanup_expired_items.stac_auth.open_resilient_client", return_value=client),
+        patch("cleanup_expired_items._session", return_value=MagicMock()),
+        patch("cleanup_expired_items._s3_client", return_value=MagicMock()),
+        patch("cleanup_expired_items.time", clock),
+    ):
+        code = run_cleanup(_args(execute=True))
+
+    summary = _capture_lines(capsys)[-1]
+    assert code == 1
+    assert summary["aborted"] is True
+    assert summary["discovery_seconds"] == 225.0
+
+
 # === The auth hook raises RuntimeError, not RequestException (issue #364) ===
 #
 # `_session` sets `session.auth = stac_auth.bearer_auth`, so the OIDC token fetch

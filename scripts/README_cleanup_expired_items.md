@@ -88,14 +88,30 @@ old demo dates — and the cleanup-time skip is the backstop regardless.
   starts before the discovery query, so a slow search spends it too.
 
   ⚠️ **Sizing rule:** the budget stops the run from *starting* another item; it
-  does not cut short the one in flight. So whatever hard deadline sits outside
-  the tool (`activeDeadlineSeconds`, a shell `timeout`) must be greater than
-  `budget + worst-case single item`, or the kill lands mid-item anyway and you
-  are back where you started. That gap is the whole point of the flag.
+  does not cut short the one in flight — and it does not cut short a `/search`
+  page either. Discovery checks the budget on every item read, so at every page
+  boundary, but a page fetch is uninterruptible for its whole retry ladder
+  (since 2026-09-18 the search client retries transient 5xx, 500 included). So
+  whatever hard deadline sits outside the tool (`activeDeadlineSeconds`, a shell
+  `timeout`) must be greater than
+  `budget + max(worst-case single item, worst-case search page)`, or the kill
+  lands mid-item or mid-page anyway and you are back where you started. The
+  worst-case page is `9 × 2 × STAC_HTTP_TIMEOUT + 90 s` (9 attempts, connect
+  and read each bounded by the timeout, 90 s of sleeps): **≈1170 s at the 60 s
+  default, ≈225 s against the gateway that 500s after its own 15 s upstream
+  timeout** (9 × 15 + 90), and raising `STAC_HTTP_TIMEOUT` raises the required
+  gap with it. Measured in review (2026-09-18, `run_cleanup` against real
+  sockets): a 1 s budget overran to 10.1 s wall clock on a 3-attempt ladder,
+  exactly the model. The failure this rule prevents: the last discovery page
+  enters the ladder just before the budget expires, the pod is SIGKILLed
+  mid-`/search`, and there is **no `cleanup_summary` at all** — so the alert
+  pair below never fires.
 
-  **Proposed** S2 sizing (not deployed as of 2026-09-07 — nothing in this repo
-  or in platform-deploy passes the flag yet): budget 3000 s against a 4200 s
-  deadline, leaving 20 min for an item whose p90 is 30 s.
+  S2 sizing as deployed (platform-deploy, 2026-09-18): budget 3000 s against a
+  4200 s `activeDeadlineSeconds`, a 1200 s gap. That clears an item whose p90 is
+  30 s and the ≈225 s gateway page, but **not** the ≈1170 s stalled-socket page
+  at the default timeout. Whether to widen the gap or lower `STAC_HTTP_TIMEOUT`
+  is a deploy-time decision; re-check it at the pin bump.
 
   ⚠️ **Requires image `>= v1.15.0`.** The flag is unreleased at the time of
   writing (`main` is v1.14.0). Adding it to a manifest without bumping
@@ -117,8 +133,8 @@ old demo dates — and the cleanup-time skip is the backstop regardless.
 | `--s3-endpoint` | `AWS_ENDPOINT_URL` env | S3 endpoint URL |
 | `--allowed-bucket` | `esa-zarr-sentinel-explorer-fra` | Assets outside it are skipped |
 | `--max-items` | `100` | Cap on items processed per run (1–10000; **`0` used to mean UNLIMITED**, not zero — pystac-client gates pagination on a falsy check) |
-| `--page-size` | `100` | Items per `/search` request during discovery (1–10000). A page, not a cap: `--max-items` still bounds the run. Passed as `limit` so the server's default (10) does not turn a 130-item batch into 13 requests, each racing the gateway's 15 s upstream timeout |
-| `--max-runtime-seconds` | off | Stop at the next item boundary after N seconds (1–86400; `""` means off) |
+| `--page-size` | `100` | Items per `/search` request during discovery (1–10000; `""` means the default). A page, not a cap: `--max-items` still bounds the run. Passed as `limit` so the server's default (10) does not turn a 130-item batch into 13 requests, each racing the gateway's 15 s upstream timeout — a hypothesis, not a measurement: a 100-item page is ~4.5 MB of upstream JSON and could move each request *closer* to that cliff; lower it if ticks keep 500ing. ⚠️ **Requires image `>= v1.17.1`** (the first release after v1.17.0; unreleased at the time of writing, and prod pins v1.16.1, so the bump jumps two releases). Adding it to a manifest without bumping `pipeline_image_version` gives `unrecognized arguments`, exit 2, every tick |
+| `--max-runtime-seconds` | off | Stop at the next item boundary after N seconds (1–86400; `""` means off). Size the outer deadline as `budget + max(worst item, worst search page)` — the page is ≈225 s against the 15 s gateway, ≈1170 s at the default `STAC_HTTP_TIMEOUT`; see the sizing rule above |
 | `--exclude-file` | `EXPIRES_EXCLUDE_FILE` env | Item-ID denylist |
 | `--execute` | off (dry-run) | Actually delete |
 
@@ -181,11 +197,24 @@ The final `cleanup_summary` line carries:
 
 ```
 ts, event, dry_run, collection, discovered, processed, by_status, failures,
-time_budget_reached, [aborted]
+time_budget_reached, discovery_seconds, [aborted]
 ```
 
 `discovered - processed` is what this run found but did not attempt. It is **not**
 the remaining backlog — `discovered` is already capped by `--max-items`.
+
+`discovery_seconds` is the wall clock from opening the STAC client to the end of
+the discovery read — everything that goes through the retrying search client,
+before the first item is touched. It puts a number on the alert pair:
+`time_budget_reached: true, processed: 0` means discovery spent the budget, and
+this says how much. *What* spent it has two very different answers — a slow scan
+of a large expired backlog, or every page burning its retry ladder on gateway
+5xx — and the log tells them apart: the search client writes one WARNING line
+per status retry (`Retrying POST …/search after HTTP 500: N retries left, next
+sleep S s`; urllib3 itself logs those at DEBUG only, so without it the retry
+path is invisible in Loki). Many of those lines with `discovered` at a page or
+two is the ladder; none of them is the scan. On an aborted run the field is the
+time to the abort, so a page that failed after its whole ladder still shows up.
 
 `time_budget_reached` and `aborted` are both deliberately *not* `by_status` keys:
 `by_status` counts per-item outcomes, and a dashboard asserting "every status is

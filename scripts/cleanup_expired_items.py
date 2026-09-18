@@ -119,7 +119,15 @@ def _item_cap(raw: str) -> int:
 
 def _page_size(raw: str) -> int:
     """argparse type for --page-size: 1..MAX_ITEMS_CEILING, same ceiling as the cap
-    because a page is materialised in memory the same way a batch is."""
+    because a page is materialised in memory the same way a batch is.
+
+    ``""`` means the default, for the same reason ``_budget_seconds`` maps it to "off":
+    this fleet's Argo templates splice ``value: ""`` into argv unconditionally for an
+    unset optional parameter, and a type that rejects it fails the pod at parse time,
+    exit 2 with no cleanup_summary, every tick. Shared with query_storage_tier_items.
+    """
+    if raw.strip() == "":
+        return DEFAULT_PAGE_SIZE
     try:
         value = int(raw)
     except ValueError:
@@ -175,9 +183,13 @@ def _monotonic() -> float:
 # bounds the run, this bounds one round trip. Without it the server picks
 # (stac-fastapi defaults to 10), so a 130-item batch was ~13 POSTs, each a fresh
 # keyset query over the whole expired scan racing the gateway's 15 s
-# UPSTREAM_TIMEOUT — and that per-request exposure, not the row count, is what
-# killed six ticks on 2026-09-18. The two fleet scripts that pass a limit
-# (submit_storage_tier_workflows, migrate_catalog: 100) have never hit it.
+# UPSTREAM_TIMEOUT. The hypothesis behind 100: the per-request count, not the row
+# count, is what killed six ticks on 2026-09-18, and the two fleet scripts that pass
+# a limit (submit_storage_tier_workflows, migrate_catalog: 100) have never hit it.
+# NOT proven against the real gateway — the counter-hypothesis is that a 100-item
+# page (~4.5 MB of upstream JSON at ~45 KB/item) moves each request CLOSER to the
+# 15 s cliff, not further. If ticks keep 500ing after this lands, lower --page-size
+# before blaming the retry policy.
 DEFAULT_PAGE_SIZE = 100
 
 
@@ -446,6 +458,16 @@ def run_cleanup(args: argparse.Namespace) -> int:
     processed = 0
     discovered: int | None = None
     time_budget_reached = False
+    # Wall clock from opening the read client to the end of the discovery read — every
+    # request that goes through the retrying client, so the pre-loop cost the budget
+    # must absorb. `time_budget_reached: true, processed: 0` (the README's alert pair)
+    # has two very different causes, a genuine backlog and every page burning its retry
+    # ladder on gateway 500s, and without this the summary cannot tell them apart.
+    # time.monotonic() directly, NOT _monotonic(): that seam is the budget clock, which
+    # a run without a budget must never read (tests pin it) and which tests drive as a
+    # fixed sequence of ticks; this is a measurement, not a control.
+    discovery_started = time.monotonic()
+    discovery_seconds: float | None = None
 
     def emit_summary(*, aborted: bool = False) -> None:
         summary: dict[str, Any] = {
@@ -461,6 +483,14 @@ def run_cleanup(args: argparse.Namespace) -> int:
             "by_status": counts,
             "failures": failures,
             "time_budget_reached": time_budget_reached,
+            # Set at the end of the discovery read, or at the abort if discovery is
+            # what raised — a page that failed after burning the whole ladder is the
+            # case this field exists to show, so it must not be lost with the run.
+            "discovery_seconds": (
+                discovery_seconds
+                if discovery_seconds is not None
+                else round(time.monotonic() - discovery_started, 1)
+            ),
         }
         if aborted:
             # ADDITIVE, and present only on an aborted run: dashboards keyed on
@@ -477,9 +507,11 @@ def run_cleanup(args: argparse.Namespace) -> int:
     # endpoint and can fail at runtime, and those failures must stay visible in
     # the audit stream instead of ending the process silently.
     try:
-        # Discovery pages /search ~30 times unretried; one page past the gateway's
-        # UPSTREAM_TIMEOUT aborted six prod ticks on 2026-09-18. Reads only — the item
-        # DELETEs use _session() below, which must NOT retry (non-atomic unit).
+        # Before 2026-09-18 discovery paged /search at the server's default page (10),
+        # ~13-30 POSTs per tick, none retried; one page past the gateway's
+        # UPSTREAM_TIMEOUT aborted six prod ticks that day. Now 1-3 pages of `limit`
+        # rows, each retried on a transient 5xx. Reads only — the item DELETEs use
+        # _session() below, which must NOT retry (non-atomic unit).
         client = stac_auth.open_resilient_client(args.stac_api_url)
         session = _session(args.stac_api_url)
         s3_client = _s3_client(args.s3_endpoint)
@@ -504,10 +536,15 @@ def run_cleanup(args: argparse.Namespace) -> int:
         # items mid-iteration removes that anchor, so the next page fails with
         # "Could not find item using token". max_items bounds this list.
         #
-        # Iterated lazily, not list(...), so the budget is checked DURING discovery.
-        # A retrying page can now take minutes (stac_auth.resilient_stac_io), and an
-        # unbounded discovery gets the pod killed by activeDeadlineSeconds mid-read —
-        # which emits no cleanup_summary at all. Nothing read this way is processed:
+        # Iterated lazily, not list(...), so the budget is checked DURING discovery —
+        # on every item read, hence at every page boundary, but never inside a page: a
+        # page fetch is uninterruptible for its whole retry ladder (~225 s against the
+        # 15 s gateway, ~1170 s worst case at the default timeout — see
+        # stac_auth.resilient_stac_io), which is why the README sizes the pod's
+        # activeDeadlineSeconds as budget + max(worst item, worst page). Without this
+        # check an unbounded discovery gets the pod killed by activeDeadlineSeconds
+        # mid-read — which emits no cleanup_summary at all. Nothing read this way is
+        # processed:
         # the budget is monotone, so the delete loop's first check stops it too. That
         # is the point — the run yields with a summary instead of vanishing — and the
         # truncated read costs nothing, because the query is oldest-expiry-first and
@@ -527,6 +564,7 @@ def run_cleanup(args: argparse.Namespace) -> int:
                 )
                 break
         discovered = len(stale_items)
+        discovery_seconds = round(time.monotonic() - discovery_started, 1)
 
         # Checked here as well as in the loop: discovery alone can spend the budget,
         # and when it also returns zero rows the loop never runs. Without this, that
