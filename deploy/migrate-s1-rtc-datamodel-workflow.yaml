@@ -34,8 +34,11 @@ spec:
     secondsAfterFailure: 259200
   arguments:
     parameters:
-    - name: pipeline_image_version          # REQUIRED — RC tag containing migrate_s1_rtc_datamodel.py
-      value: v0.8.0-s1rtc-rc3
+    # Commit-sha tag, not an RC tag: this build is the first to carry the eopf-geozarr v0.11.0 pin,
+    # the stable completion marker and `--rewrite-root-geo`. `type=sha` in .github/workflows/build.yml
+    # emits `sha-<short>` for every pushed commit, so it names an exact tree with no release needed.
+    - name: pipeline_image_version          # REQUIRED — build containing migrate_s1_rtc_datamodel.py
+      value: sha-38966e3
     - name: stac_api_url
       value: https://api.explorer.eopf.copernicus.eu/stac
     - name: cube_collection
@@ -56,6 +59,8 @@ spec:
       value: "false"
     - name: allow_no_backup                 # "true" → real run with NO backup (recovery = re-ingest)
       value: "false"
+    - name: rewrite_root_geo                # "true" → ALSO rewrite each store's root geo metadata
+      value: "false"                        # SAFE DEFAULT: re-derive vv/vh + consolidate, nothing else
   templates:
   - name: migrate
     activeDeadlineSeconds: 21600            # 6h ceiling for the whole fleet
@@ -82,6 +87,7 @@ spec:
         [ "$DRY_RUN" = "true" ] && args+=(--dry-run)
         [ "$ROLLBACK" = "true" ] && args+=(--rollback)
         [ "$ALLOW_NO_BACKUP" = "true" ] && args+=(--allow-no-backup)
+        [ "$REWRITE_ROOT_GEO" = "true" ] && args+=(--rewrite-root-geo)
         [ -n "$BACKUP_PREFIX" ] && args+=(--backup-prefix "$BACKUP_PREFIX")
         [ -n "$ITEM" ] && args+=(--item "$ITEM")
         [ -n "$SKIP_TILES" ] && args+=(--skip-tiles $SKIP_TILES)
@@ -115,6 +121,8 @@ spec:
         value: "{{workflow.parameters.item}}"
       - name: ALLOW_NO_BACKUP
         value: "{{workflow.parameters.allow_no_backup}}"
+      - name: REWRITE_ROOT_GEO
+        value: "{{workflow.parameters.rewrite_root_geo}}"
       - name: AWS_ACCESS_KEY_ID
         valueFrom:
           secretKeyRef:
