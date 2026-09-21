@@ -1,24 +1,16 @@
 """STAC client plumbing shared by the crons: OIDC write auth and the resilient read path.
 
-Two halves. The read half (``open_resilient_client``, ``resilient_stac_io``,
-``DEFAULT_PAGE_SIZE`` / ``MAX_PAGE_SIZE`` / ``page_size_arg``, the ``STAC_HTTP_TIMEOUT``
-parser) is a retrying search client for ``/search`` pagination, shared so the tier-down
-cron does not import the module that deletes S3 objects for a flag parser. The write
-half is the OIDC client-credentials auth for the STAC Transactions endpoints:
+The read half (``open_resilient_client`` and friends) is a retrying client for ``/search``
+pagination. It lives here so the tier-down cron does not import the module that deletes S3
+objects just to get a flag parser.
 
-A no-op when the OIDC env is absent, so local/dev and any unconfigured environment keep
-writing unauthenticated. When ``OIDC_TOKEN_URL`` / ``OIDC_CLIENT_ID`` /
-``OIDC_CLIENT_SECRET`` are all set, ``get_token`` fetches (and caches) a client-credentials
-bearer that ``open_client`` wires onto the pystac-client session via
-``session.auth = bearer_auth``. ``requests`` re-runs the auth hook on every
-``session.put/post`` (used by ``upsert_item``), so each write carries a fresh
-``Authorization`` header — even across a batch that outlives the token.
-
-A configured-but-failing token endpoint raises rather than degrading to a silent
+The write half is OIDC client-credentials auth for the STAC Transactions endpoints, and a
+no-op when the OIDC env is absent, so unconfigured environments keep writing
+unauthenticated. With ``OIDC_TOKEN_URL`` / ``OIDC_CLIENT_ID`` / ``OIDC_CLIENT_SECRET`` set,
+``get_token`` caches a bearer that ``open_client`` wires on as ``session.auth``; requests
+re-runs the hook per call, so every write in a long batch carries a fresh header. A
+configured-but-failing token endpoint raises rather than degrading to a silent
 unauthenticated write.
-
-Design tracked out-of-repo (session memory + PR description); the write half is Task 1,
-the read half is PR #418.
 """
 
 from __future__ import annotations
@@ -45,59 +37,36 @@ logger = logging.getLogger(__name__)
 # Refetch this many seconds before the token actually expires.
 _EXPIRY_MARGIN_S = 30
 
-# Per-request timeout for search pagination — applied by `requests` to the connect AND
-# the read half separately (`TimeoutSauce(connect=timeout, read=timeout)`); override with
-# STAC_HTTP_TIMEOUT (parsed lazily by _search_timeout_s, never at import).
+# Per-request timeout for search pagination, applied by `requests` to the connect and the
+# read half separately. Override with STAC_HTTP_TIMEOUT (parsed lazily, never at import).
 _DEFAULT_SEARCH_TIMEOUT_S = 60.0
-# A typo fence ONLY, not a policy and not a deployment's tolerance: 5x the default and
-# 20x the gateway's own 15 s upstream timeout. This is one of the two knobs that defeat
-# the callers' runtime budgets (the other is --page-size, below) — a page fetch is
-# uninterruptible for its whole ladder (see resilient_stac_io), so "6000" typed for 60 is
-# a ~30 h page that no --max-runtime-seconds can stop and activeDeadlineSeconds ends
-# with no cleanup_summary. The library cannot know its callers' deadlines (the tier-down
-# cron's is 900 s, the migrate runner has none), so the deployment-specific bound lives
-# in each caller's manifest and README (the cleanup one carries the sizing rule), and
-# this constant only stops an order-of-magnitude typo.
+# A typo fence only, not a deployment's tolerance: a page fetch is uninterruptible for its
+# whole ladder, so "6000" typed for 60 outlasts any caller's runtime budget. The real
+# bound belongs in each caller's manifest; the sizing rule is in the cleanup README.
 _MAX_SEARCH_TIMEOUT_S = 300.0
 
 # See resilient_stac_io() for why 500 is here and when to remove it.
 _READ_RETRY_STATUSES = (429, 500, 502, 503, 504)
 
-# Items per /search page for the crons' discovery walks. A page, NOT a cap: the callers'
-# --max-items / --max-batch-size bound the run, this bounds one round trip. Without it
-# the server picks (stac-fastapi defaults to 10), so the cleanup cron's 300-item batch
-# (the live --max-items) was 30 POSTs, each a fresh keyset query over the whole expired
-# scan racing the gateway's 15 s UPSTREAM_TIMEOUT. 100 is the value the other fleet
-# walkers already passed (submit_storage_tier_workflows, migrate_catalog), so it changes
-# nothing for them; it is NOT evidence that 100 avoids the 500 — the tier-down cron died
-# 2026-09-18T04:00 (APIError: Internal Server Error from get_pages) while passing
-# limit=100, and the counter-hypothesis is that a 100-item page (~4.5 MB of upstream
-# JSON at ~45 KB/item) moves each request CLOSER to the 15 s cliff, not further. What
-# the fix relies on is the retry, not the page size; this is the knob for finding out
-# which direction helps. If ticks keep 500ing, lower --page-size before blaming the
-# retry policy.
+# Items per /search page. A page, NOT a cap: --max-items / --max-batch-size bound the run,
+# this bounds one round trip. Left unset the server picks 10, which turned a 300-item batch
+# into 30 POSTs. Whether 100 is the RIGHT page against the real gateway is unproven — the
+# tier-down cron died while already passing limit=100, and a bigger page may sit closer to
+# the 15 s cliff, not further. The fix is the retry; this is the knob for finding out.
 DEFAULT_PAGE_SIZE = 100
 
-# A page is materialised in memory the same way a cleanup batch is, so it gets the
-# batch's ceiling: cleanup_expired_items.MAX_ITEMS_CEILING IS this constant, so raising
-# it for a bigger page also raises the cap on an irreversible-delete batch. Like
-# STAC_HTTP_TIMEOUT above, a typo fence, not a size any pod survives: at ~45 KB/item a
-# 10_000-row page is a ~450 MB uninterruptible response, against a 512Mi cleanup pod.
-# cleanup_expired_items clamps the page to --max-items; query_storage_tier_items and
-# submit_storage_tier_workflows have no run cap to clamp to and are bounded by this
-# constant alone (see their --page-size) — the latter is the deployed one, in the
-# tier-down cron's pod at limits.memory 1Gi.
+# A typo fence, not a survivable size: a page is materialised in memory like a cleanup
+# batch, and cleanup_expired_items.MAX_ITEMS_CEILING IS this constant, so raising it also
+# raises the cap on an irreversible-delete batch. At ~45 KB/item, 10_000 rows is ~450 MB
+# against a 512Mi pod.
 MAX_PAGE_SIZE = 10_000
 
 
 def page_size_arg(raw: str) -> int:
     """argparse ``type`` for ``--page-size``: 1..MAX_PAGE_SIZE, with ``""`` the default.
 
-    ``""`` is how this fleet's Argo templates spell an unset optional parameter (they
-    splice ``value: ""`` into argv unconditionally), and a type that rejects it fails the
-    pod at parse time — exit 2, no cleanup_summary, every tick. Lives here rather than
-    in ``cleanup_expired_items`` so the tier-down cron does not import the module that
-    deletes S3 objects, and its import-time ``logging.basicConfig``, for a flag parser.
+    ``""`` must be accepted: the Argo templates splice ``value: ""`` into argv for an unset
+    optional parameter, and rejecting it fails the pod at parse time on every tick.
     """
     if raw.strip() == "":
         return DEFAULT_PAGE_SIZE
@@ -201,20 +170,12 @@ def bearer_auth(request: requests.PreparedRequest) -> requests.PreparedRequest:
 def _search_timeout_s() -> float:
     """Read ``STAC_HTTP_TIMEOUT`` at call time, not import time.
 
-    ``value: ""`` is how this fleet's Argo templates spell an unset optional parameter
-    (see ``cleanup_expired_items._budget_seconds``), so ``""`` and unset both mean the
-    default. Parsed here rather than at module level on purpose: ``scripts/`` is the
-    shipped wheel, and a ``float("")`` raised during ``import stac_auth`` lands before
-    argparse and before ``run_cleanup``'s broad guard — the tick dies with no
-    ``cleanup_summary`` at all, on every pod that imports this module.
+    Lazily on purpose: parsed at module level, a bad value raises during ``import
+    stac_auth``, before argparse and before the caller's guard, so the tick dies with no
+    summary at all. ``""`` and unset both mean the default (the Argo unset idiom).
 
-    ``0`` and negatives are rejected rather than mapped to "no timeout": no timeout is
-    the 4.5 h hang that ``resilient_stac_io`` exists to prevent, and a typo must not
-    silently reintroduce it. Garbage is rejected too, not defaulted: the value the
-    operator set is not the value in effect, and a loud failure inside the caller's
-    guard (which still emits its summary) beats a silent 60 s. Values above
-    ``_MAX_SEARCH_TIMEOUT_S`` are rejected as order-of-magnitude typos and nothing more
-    — a typo fence, not a deployment's tolerance (see the constant).
+    Bad values raise rather than falling back to the default, and ``0`` is not "no
+    timeout" — no timeout is the hang this module exists to prevent.
     """
     raw = os.getenv("STAC_HTTP_TIMEOUT", "").strip()
     if raw == "":
@@ -235,12 +196,10 @@ def _search_timeout_s() -> float:
 class _LoggedRetry(Retry):
     """``Retry`` that says so, at WARNING, every time it fires on a status.
 
-    Statuses only: urllib3 already emits a WARNING for a connection-error retry but logs
-    a status-forcelist retry at DEBUG (``connectionpool.py``: ``log.debug("Retry: %s",
-    url)``), and the crons pin the ``urllib3`` logger to WARNING, so the 500-retry path —
-    the reason this policy exists — would otherwise leave no trace in production logs.
-    ``increment`` is the one call every retry goes through, and ``Retry.new`` rebuilds
-    via ``type(self)``, so the subclass survives the copy-on-increment.
+    urllib3 logs a status-forcelist retry at DEBUG and the crons pin that logger to
+    WARNING, so the 500 path — the reason this policy exists — would leave no trace in
+    production. ``increment`` is the one call every retry goes through, and ``Retry.new``
+    rebuilds via ``type(self)``, so the subclass survives the copy-on-increment.
     """
 
     def increment(
@@ -268,54 +227,30 @@ class _LoggedRetry(Retry):
 def resilient_stac_io(timeout: float | None = None) -> StacApiIO:
     """A ``StacApiIO`` for READ paths: per-request timeout plus retries on transient 5xx.
 
-    Search pagination is the fragile part of every long run. Without this:
+    Four things here are load-bearing and easy to undo by accident:
 
-    * no timeout -> a stalled socket hangs the run forever (observed: 4.5 h wall / 26 s
-      CPU, never past "Found N items");
-    * weak default retries -> one transient failure mid-pagination aborts the whole run
-      (observed: a 23k-item staging backfill crashed at ~20%).
+    🔴 **``allowed_methods`` MUST include POST.** STAC ``/search`` is a POST and urllib3's
+    default allows only idempotent methods, so a policy that omits it reports as present
+    and never fires on the one call that matters.
 
-    🔴 **``allowed_methods`` MUST include POST.** STAC ``/search`` is a POST, and urllib3's
-    default ``Retry`` allows only idempotent methods — so a retry policy that omits it is
-    configured, reported as present, and silently never fires on the one call that matters.
+    🔴 **500 is retried because of a gateway defect, not on principle.**
+    ``eoapi-stac-auth-proxy`` lets an upstream ``httpx.ReadTimeout`` escape its ASGI app,
+    so a page past its ``UPSTREAM_TIMEOUT`` surfaces as 500 rather than 504 — which is why
+    the previous policy, correct by the book at 502/503/504, never fired.
+    **Drop 500 when the proxy is fixed** (developmentseed/stac-auth-proxy#211).
 
-    🔴 **500 is in the retry list because of a gateway defect, not because 500 is
-    retryable in general.** ``eoapi-stac-auth-proxy`` (v1.1.0) lets an upstream
-    ``httpx.ReadTimeout`` escape its ASGI app, so an upstream that exceeds its
-    ``UPSTREAM_TIMEOUT`` (15 s in prod) surfaces as **500, not 504**. Proven 2026-09-18:
-    six ``historical-cleanup`` ticks failed at 15.013-15.016 s with
-    ``APIError: Internal Server Error``, matched one-for-one by ``httpx.ReadTimeout``
-    tracebacks in the proxy log for the same second. A correct policy that retries
-    502/503/504 and not 500 does not fire here — which is exactly what the previous
-    ``_resilient_stac_io`` did. **If the proxy is fixed to return 504, drop 500 from this
-    list**: it is a workaround for someone else's status code, and retrying a genuine
-    500 elsewhere only delays a real error.
+    🔴 **Reads only. Never mount this on a session carrying item DELETEs or POSTs** —
+    retrying a non-atomic write on a 5xx is the hazard PUT-instead-of-DELETE-then-POST
+    exists to avoid. The cleanup cron's write session carries no retries at all.
 
-    Safe only on reads. ``/search`` and ``GET`` are idempotent, so a retried request cannot
-    duplicate an effect. **Never mount this on a session that carries DELETEs or POSTs of
-    items** — retrying those on a 5xx is the non-atomic-write hazard that PUT-instead-of-
-    DELETE-then-POST exists to avoid. The write session the cleanup cron builds by hand
-    (``cleanup_expired_items._session``) carries no retries at all. ``open_client`` below
-    keeps pystac-client's default ``StacApiIO(max_retries=5)`` on its write session
-    (transport retries only, empty status forcelist) — pre-existing, left as is on
-    purpose: changing it is a write-path decision, and a follow-up to this PR, not part of it.
+    🔴 **Call ``open_resilient_client``, not this plus ``Client.open``.** ``Client.open``
+    silently resets the ``stac_io``'s timeout to ``None``; the retries survive, the timeout
+    does not, and no unit test on this object can see the difference.
 
-    🔴 **Use ``open_resilient_client`` rather than calling this and passing the result to
-    ``Client.open`` yourself.** ``Client.from_file`` calls ``stac_io.update(timeout=None)``
-    when handed a ``stac_io``, and ``StacApiIO.update`` *assigns* rather than merges — so
-    the timeout set here is silently reset to ``None`` and ``STAC_HTTP_TIMEOUT`` becomes a
-    no-op. The retries survive (they live on the session's adapters, which ``update`` does
-    not touch); only the timeout is lost, which is the half of this that a passing unit
-    test cannot see.
-
-    A page fetch is uninterruptible for its whole retry ladder — no caller's runtime
-    budget can cut it short. The sizing rule for the outer deadline, the worst-case page
-    figures, the round trips before a caller's first budget check and their ``rel:root``
-    trailing-slash cause, and the 2026-09-18 measurements all live in
-    ``scripts/README_cleanup_expired_items.md`` (sizing rule); ``_MAX_SEARCH_TIMEOUT_S``
-    fences only a typo, not that arithmetic.
-    Override the timeout with ``STAC_HTTP_TIMEOUT`` (``""`` and unset mean the default);
-    an explicit ``timeout`` argument is held to the same ``(0, 300]`` range.
+    A page fetch is uninterruptible for its whole ladder, so no caller's runtime budget can
+    cut it short — ``scripts/README_cleanup_expired_items.md`` has the rule for sizing an
+    outer deadline against that. ``STAC_HTTP_TIMEOUT`` overrides the timeout; an explicit
+    ``timeout`` is held to the same range.
     """
     if timeout is not None and not (
         math.isfinite(timeout) and 0 < timeout <= _MAX_SEARCH_TIMEOUT_S
@@ -323,21 +258,14 @@ def resilient_stac_io(timeout: float | None = None) -> StacApiIO:
         raise ValueError(
             f"timeout must be in (0, {_MAX_SEARCH_TIMEOUT_S:g}] seconds (got {timeout!r})"
         )
-    # One budget, `total=8`, for every error class — connect/read/status are left at
-    # urllib3's default (None = inherit `total`) ON PURPOSE. Bounding them lower so that
-    # "the API is down" fails fast reads well and is wrong: urllib3 files a ConnectionReset
-    # under *read*, not *connect*, so `read=2` silently cuts the budget from 8 to 2 for the
-    # transient mid-pagination reset this policy exists to survive (the one that crashed
-    # the 23k-item backfill at ~20%), while the object still reports `total=8`.
-    # test_stac_read_retry pins the effective budget per error class so that cannot
-    # regress unseen. A genuine outage costs at most one page's worst case (above) before
-    # the caller's runtime budget or the run's own failure path takes over.
+    # connect/read/status are left at None (inherit `total`) ON PURPOSE: urllib3 files a
+    # ConnectionReset under *read*, so `read=2` would cut the budget from 8 to 2 for the
+    # exact mid-pagination reset this exists to survive, while still reporting total=8.
+    # test_stac_read_retry pins the effective budget per error class.
     #
-    # backoff_max caps each sleep at 20 s (urllib3's default is 120 s): 90 s of sleeps
-    # across the ladder rather than 246 s. respect_retry_after_header is off because it
-    # bypasses that cap: on 429/503 urllib3 sleeps the server's Retry-After instead, bounded
-    # only by `retry_after_max` (default 21600 s), so one response carrying a large header
-    # would stall a page for hours whatever backoff_max says.
+    # backoff_max caps each sleep at 20 s (default 120), giving 90 s of sleeps per ladder.
+    # respect_retry_after_header is off because it bypasses that cap — on 429/503 urllib3
+    # would sleep the server's Retry-After, bounded only by retry_after_max (6 h).
     retry = _LoggedRetry(
         total=8,
         backoff_factor=1.0,
@@ -355,17 +283,10 @@ def resilient_stac_io(timeout: float | None = None) -> StacApiIO:
 def open_resilient_client(url: str) -> Client:
     """Open a read Client that keeps BOTH its retries and its timeout.
 
-    The one correct way to combine ``resilient_stac_io`` with ``Client.open``: the timeout
-    must also be passed to ``Client.open``, because ``Client.from_file`` resets the
-    ``stac_io``'s timeout to ``None`` otherwise (see ``resilient_stac_io``). Every cron
-    read path (``cleanup_expired_items``, ``query_storage_tier_items``,
-    ``submit_storage_tier_workflows``, ``_migrate_catalog.runner``) calls this rather
-    than assembling the pair by hand, so the trap is sprung once, here. Other read paths
-    deliberately stay on bare ``Client.open`` (no timeout, 5 transport retries, no status
-    retries); the one that matters is ``operator-tools/manage_collections``, a DEPLOYED
-    DESTRUCTIVE PROD CRON (ships in the image, runs the 6-hourly ``s2-staging-purge``
-    with ``--max-items 2000``, deletes S3 objects then STAC items) — migrating it is the
-    follow-up to this PR, not a side effect of this module.
+    ``Client.open`` resets the ``stac_io``'s timeout unless it is also passed the timeout
+    directly, so every cron read path goes through here and the trap is sprung once.
+    ``operator-tools/manage_collections`` is still on bare ``Client.open``; migrating it is
+    a follow-up to this PR.
 
     Read paths only — this carries no auth and its retries must never reach a write.
     """

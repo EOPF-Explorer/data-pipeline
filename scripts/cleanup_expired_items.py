@@ -83,17 +83,12 @@ def _now() -> datetime:
 # when added to a float deadline.
 MAX_BUDGET_SECONDS = 86_400
 
-# The item cap is also the MEMORY cap: `stale_items` is fully materialised before
-# the first delete, at roughly 45 KB per S2 L2A item dict. The prod cleanup pod runs
-# under `limits: memory: 512Mi` (platform-deploy, eopf-explorer-cronwf-historical-
-# cleanup.yaml), which is ~11.9k items of dicts alone, before the interpreter, boto3
-# and the write session — so 10000 is NOT a value that pod survives; it sits at the
-# OOM point, not below it. This is a typo fence only (100000 for 10000), and the
-# live cron uses 300 (~13 MB). Raise --max-items in steps and watch the pod's memory.
-# An OOMKill is a SIGKILL, which lands wherever it lands, including between the S3
-# delete and the STAC delete: exactly the tear --max-runtime-seconds exists to
-# prevent. One number with the /search page ceiling, because a page is materialised
-# the same way.
+# The item cap is also the MEMORY cap: `stale_items` is fully materialised before the
+# first delete, ~45 KB per item, in a 512Mi pod. So 10000 is a typo fence (100000 for
+# 10000), NOT a value that pod survives — it sits at the OOM point, and the live cron
+# uses 300. Raise --max-items in steps and watch the pod. An OOMKill is a SIGKILL and
+# can land between the S3 delete and the STAC delete: the tear --max-runtime-seconds
+# exists to prevent. Shared with the /search page ceiling, which is materialised alike.
 MAX_ITEMS_CEILING = stac_auth.MAX_PAGE_SIZE
 
 
@@ -438,15 +433,20 @@ def run_cleanup(args: argparse.Namespace) -> int:
     processed = 0
     discovered: int | None = None
     time_budget_reached = False
-    # Wall clock from opening the read client to the end of the discovery read. It
-    # starts after the write session and the S3 client are built, so a boto3 credential
-    # stall (the IMDS probe) is excluded — see the README's `discovery_seconds`. It reads
-    # time.monotonic() directly, NOT _monotonic(): that seam is the budget clock, which a
-    # run without a budget must never read (tests pin it); this is a measurement.
+    # Wall clock over the discovery read, started after the write session and S3 client so
+    # a boto3 credential stall is excluded. Reads time.monotonic() directly, NOT
+    # _monotonic(): that seam is the budget clock, which an unbudgeted run must not read.
     discovery_started: float | None = None
     discovery_seconds: float | None = None
 
     def emit_summary(*, aborted: bool = False) -> None:
+        # Set at the end of the discovery read, or measured here if discovery is what
+        # raised — a page that failed after burning the whole ladder is the case this
+        # field exists to show, so it must not be lost with the run.
+        elapsed = discovery_seconds
+        if elapsed is None and discovery_started is not None:
+            elapsed = round(time.monotonic() - discovery_started, 1)
+
         summary: dict[str, Any] = {
             "ts": format_expires(_now()),
             "event": "cleanup_summary",
@@ -460,16 +460,7 @@ def run_cleanup(args: argparse.Namespace) -> int:
             "by_status": counts,
             "failures": failures,
             "time_budget_reached": time_budget_reached,
-            # Set at the end of the discovery read, or at the abort if discovery is
-            # what raised — a page that failed after burning the whole ladder is the
-            # case this field exists to show, so it must not be lost with the run.
-            "discovery_seconds": (
-                discovery_seconds
-                if discovery_seconds is not None
-                else None
-                if discovery_started is None
-                else round(time.monotonic() - discovery_started, 1)
-            ),
+            "discovery_seconds": elapsed,
         }
         if aborted:
             # ADDITIVE, and present only on an aborted run: dashboards keyed on
@@ -486,11 +477,9 @@ def run_cleanup(args: argparse.Namespace) -> int:
     # endpoint and can fail at runtime, and those failures must stay visible in
     # the audit stream instead of ending the process silently.
     try:
-        # Before 2026-09-18 discovery paged /search at the server's default page (10),
-        # 10-30 POSTs per tick across the fleet (--max-items 100 on staging and
-        # s3olci, 300 on prod), none retried; one page past the gateway's
-        # UPSTREAM_TIMEOUT aborted six prod ticks that day. Now 1-3 pages of `limit`
-        # rows, each retried on a transient 5xx. Reads only — the item DELETEs use
+        # Discovery used to page at the server's default of 10 — 10-30 unretried POSTs a
+        # tick, one of which past the gateway's UPSTREAM_TIMEOUT aborted the run. Now 1-3
+        # pages, each retried on a transient 5xx. Reads only: the item DELETEs use
         # _session(), which must NOT retry (non-atomic unit).
         session = _session(args.stac_api_url)
         s3_client = _s3_client(args.s3_endpoint)
@@ -498,8 +487,7 @@ def run_cleanup(args: argparse.Namespace) -> int:
         client = stac_auth.open_resilient_client(args.stac_api_url)
         stac_base_url = str(client.self_href).rstrip("/")
 
-        # page_size is logged because it is the knob the README says to lower when
-        # ticks keep 500ing, and discovery_seconds cannot be read without knowing
+        # page_size is logged because discovery_seconds cannot be read without knowing
         # whether it covered 100-row pages or 10-row ones.
         logger.info(
             "Cleanup start: collection=%s dry_run=%s max_items=%d page_size=%d "
@@ -516,24 +504,17 @@ def run_cleanup(args: argparse.Namespace) -> int:
             **build_search_kwargs(args.collection, now, args.max_items, page_size)
         )
 
-        # Materialise the whole result set BEFORE deleting anything. The search
-        # paginates with a keyset token anchored on the last item returned; deleting
-        # items mid-iteration removes that anchor, so the next page fails with
-        # "Could not find item using token". max_items bounds this list.
+        # Materialise the whole result set BEFORE deleting anything. The search paginates
+        # with a keyset token anchored on the last item returned; deleting items
+        # mid-iteration removes that anchor and the next page fails.
         #
-        # Iterated lazily, not list(...), so the budget is checked DURING discovery —
-        # after every item read, hence at every page boundary, but never inside a page
-        # and not before the first item (the round trips before the first check, and
-        # how the README sizes activeDeadlineSeconds against them, are in the README's
-        # sizing rule). Without this check an unbounded discovery gets the pod killed
-        # by activeDeadlineSeconds mid-read — which emits no cleanup_summary at all.
-        # Nothing read this way is processed: the budget is monotone, so the delete
-        # loop's first check stops it too. That is the point — the run yields with a
-        # summary instead of vanishing — and the truncated read costs nothing, because
-        # the query is oldest-expiry-first and the same items head next tick's queue.
-        # What it emits is the README's alert pair (`time_budget_reached: true`,
-        # `processed: 0`), on purpose: a budget spent by discovery IS the stalled-cron
-        # condition, not a variant of healthy.
+        # Iterated lazily, not list(...), so the budget is checked during discovery — at
+        # every page boundary, never inside a page. Without it an unbounded discovery gets
+        # the pod killed mid-read, which emits no cleanup_summary at all. Nothing read this
+        # way is processed (the budget is monotone, so the delete loop stops too) and
+        # nothing starves, because the query is oldest-expiry-first. The resulting
+        # `time_budget_reached: true` + `processed: 0` is the README's alert pair, on
+        # purpose: a budget spent by discovery IS the stalled-cron condition.
         stale_items: list[dict[str, Any]] = []
         for stale_item in search.items_as_dicts():
             stale_items.append(stale_item)

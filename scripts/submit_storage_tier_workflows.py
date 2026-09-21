@@ -164,20 +164,14 @@ def query_stac_items(
     performance tier (a reconversion re-arms the ``created`` age band 90 days out).
 
     ``page_size`` is the ``/search`` page (``limit``), not a cap — the whole window is
-    walked. It was a hard-coded 100 when the tier-down cron running this script
-    (platform-deploy ``eopf-explorer-cronwf-tier-down.yaml``, schedule ``0 4 * * *``)
-    died 2026-09-18T04:00 with ``APIError: Internal Server Error from get_pages``: one
-    unretried page past the gateway's 15 s upstream timeout. The retrying client below
-    is the fix; ``--page-size`` is the knob for finding out whether a smaller page helps.
+    walked. It was hard-coded at 100 when the tier-down cron running this script died on
+    one unretried page past the gateway's upstream timeout; the retrying client is the
+    fix, and ``--page-size`` is the knob for testing whether a smaller page helps.
 
-    Deadline note for the pin bump: that cron's ``activeDeadlineSeconds: 900`` is now
-    SMALLER than one worst-case page (~225 s against the 15 s gateway, ~1170 s at the
-    default ``STAC_HTTP_TIMEOUT``), and ``main`` interleaves query -> webhook submit per
-    window, so a deadline SIGKILL can land after some payloads are already submitted,
-    with no completion log. Before this client a transient 5xx aborted in ~15 s with a
-    clean exit 1. Not destructive — ``concurrencyPolicy: Forbid`` plus the idempotent
-    re-run (already-migrated items are filtered out) cover it — but the 900 s should be
-    re-sized against these figures when the image pin is bumped.
+    🔴 **Re-size that cron's ``activeDeadlineSeconds: 900`` at the pin bump.** It is now
+    smaller than one worst-case page, and ``main`` interleaves query -> webhook submit, so
+    a deadline SIGKILL can land after some payloads are away, with no completion log. Not
+    destructive (``concurrencyPolicy: Forbid``, and the re-run is idempotent).
     """
     catalog = stac_auth.open_resilient_client(stac_api_url)
     if window_start is None:

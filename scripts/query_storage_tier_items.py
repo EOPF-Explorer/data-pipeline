@@ -128,18 +128,12 @@ def query_items(
     logger.info(f"Time window: {window_start.isoformat()}Z to {window_end.isoformat()}Z")
     logger.info(f"Target storage ref: {target_storage_ref}, max batch: {max_batch_size}")
 
-    # Hardened by symmetry with submit_storage_tier_workflows, not because this script
-    # failed: no platform-deploy manifest runs it (grep query_storage_tier over the
-    # checkout finds none). The tier-down cron that died 2026-09-18T04:00 with
-    # "APIError: Internal Server Error from get_pages" runs submit_storage_tier_workflows
-    # (eopf-explorer-cronwf-tier-down.yaml, schedule 0 4 * * *), which shares this
-    # client and had the same unretried pagination.
+    # Hardened by symmetry, not because this script failed — no manifest runs it. The cron
+    # that died runs submit_storage_tier_workflows, which shares this client.
     catalog = stac_auth.open_resilient_client(stac_api_url)
-    # `limit` is the page size, not a cap (see stac_auth.DEFAULT_PAGE_SIZE; the server's
-    # default of 10 made a 36 h window of S2 items hundreds of /search POSTs). Not
-    # clamped to max_batch_size: that is an output cap applied after the tier filter,
-    # unrelated to how many rows a request carries, and coupling them would silently
-    # change the page when someone raises the batch.
+    # `limit` is the page size, not a cap. Deliberately not clamped to max_batch_size:
+    # that is an output cap applied after the tier filter, and coupling them would
+    # silently change the page whenever someone raises the batch.
     search = catalog.search(
         collections=[collection],
         datetime=f"{window_start.isoformat()}Z/{window_end.isoformat()}Z",
