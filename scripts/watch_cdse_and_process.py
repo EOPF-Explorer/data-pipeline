@@ -21,7 +21,7 @@ from pathlib import Path
 
 import mgrs
 from pystac_client import Client
-from run_ingest_register import check_env_consistency
+from run_ingest_register import check_env_consistency, check_tile_id
 
 log = logging.getLogger(__name__)
 
@@ -97,7 +97,15 @@ def query_cdse(
 ) -> list[dict[str, str]]:
     """Query the CDSE STAC API for S1 GRD products over `bbox` in the last `lookback_days`.
 
-    Returns ``[{"product_id", "date": "YYYY-MM-DD"}, ...]``. Items without a datetime are skipped.
+    Returns ``[{"product_id", "date": "YYYY-MM-DD"}, ...]`` **oldest first**. Items without a
+    datetime are skipped.
+
+    The sort is load-bearing, not cosmetic: the CDSE search sets no `sortby`, so its order is
+    unspecified (in practice datetime-descending), while ingest appends ONE acquisition per product
+    under the writer's monotonicity guard. Walking newest-first makes every older product in the
+    same run an out-of-order append — each fails, none is marked processed, and the next run repeats
+    the same order and the same failures. `--allow-out-of-order` is the escape hatch for a cube that
+    is already inverted; ordering here is what stops it happening in the first place.
     """
     now = dt.datetime.now(dt.UTC)
     start = now - dt.timedelta(days=lookback_days)
@@ -114,6 +122,8 @@ def query_cdse(
             log.warning("skipping %s: no datetime", item.id)
             continue
         products.append({"product_id": item.id, "date": date})
+    # Ties (same date, several products) keep their relative order — sorted() is stable.
+    products.sort(key=lambda p: p["date"])
     return products
 
 
@@ -162,6 +172,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stac-api-url", required=True, help="STAC API base URL")
     parser.add_argument("--raster-api-url", required=True, help="TiTiler raster API base URL")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--allow-out-of-order",
+        action="store_true",
+        help="Forward to Script B (and on to the writer): accept an acquisition older than the "
+        "cube's last time slice. Needed to backfill into a cube that already holds a newer scene.",
+    )
     # Local-only Script A args (no Argo equivalent); default to the $S1T_WORKDIR layout.
     parser.add_argument("--eodag-cfg", default=f"{S1T_WORKDIR}/config/eodag.yml")
     parser.add_argument("--dem-dir", default=f"{S1T_WORKDIR}/DEM/COP_DEM_GLO30")
@@ -200,6 +216,7 @@ def _script_b_cmd(args: argparse.Namespace, tile: str, geotiff_prefix: str) -> l
         "--s3-endpoint", args.s3_endpoint,
         "--stac-api-url", args.stac_api_url,
         "--raster-api-url", args.raster_api_url,
+        *(["--allow-out-of-order"] if args.allow_out_of_order else []),
     ]  # fmt: skip
 
 
@@ -244,6 +261,10 @@ def run_watch(args: argparse.Namespace) -> dict[str, int]:
     # Script B (run_ingest_register) enforces the same invariant, but only after orthorectification.
     check_env_consistency(args.collection, args.s3_zarr_bucket)
     tiles = [t.strip() for t in args.tiles.split(",") if t.strip()]
+    # Same reason as check_env_consistency above: Script B validates the tile id too, but only after
+    # Script A has already orthorectified and uploaded GeoTIFFs for it.
+    for tile in tiles:
+        check_tile_id(tile)
     state = load_processed(STATE_FILE)
     counts = {"found": 0, "new": 0, "processed": 0, "failed": 0}
 

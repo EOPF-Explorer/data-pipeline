@@ -34,8 +34,21 @@ spec:
     secondsAfterFailure: 259200
   arguments:
     parameters:
-    - name: pipeline_image_version          # REQUIRED — RC tag containing migrate_s1_rtc_datamodel.py
-      value: v0.8.0-s1rtc-rc3
+    # The old RC tag `v0.8.0-s1rtc-rc3` predates the eopf-geozarr v0.11.0 pin, so it carries neither
+    # the stable completion marker nor `--rewrite-root-geo`.
+    #
+    # Why `pr-413` and not a `sha-<short>` tag: `PUSH_IMAGE` in .github/workflows/build.yml is false
+    # for a plain branch push, so the branch build's `sha-<head>` tag is built in the runner and
+    # discarded -- it is never in the registry. Only the pull_request build publishes, and its
+    # `type=sha` names the SYNTHESISED MERGE commit, which is absent from git history and is replaced
+    # on every push. `pr-413` is the one published tag that stays correct as the PR moves.
+    #
+    # ⚠ `pr-413` is a MOVING tag: it follows the PR head. That is fine for a staging/dry-run, and is
+    # NOT acceptable for a real run against production cubes. Before any non-dry-run: merge #413, let
+    # the main build publish an immutable `sha-<main-sha>`, and pin THAT here. The template enforces
+    # this — a `pr-*`/`latest` tag with dry_run=false exits 1 before the driver starts.
+    - name: pipeline_image_version          # REQUIRED — build containing migrate_s1_rtc_datamodel.py
+      value: pr-413
     - name: stac_api_url
       value: https://api.explorer.eopf.copernicus.eu/stac
     - name: cube_collection
@@ -56,6 +69,8 @@ spec:
       value: "false"
     - name: allow_no_backup                 # "true" → real run with NO backup (recovery = re-ingest)
       value: "false"
+    - name: rewrite_root_geo                # "true" → ALSO rewrite each store's root geo metadata
+      value: "false"                        # SAFE DEFAULT: re-derive vv/vh + consolidate, nothing else
   templates:
   - name: migrate
     activeDeadlineSeconds: 21600            # 6h ceiling for the whole fleet
@@ -73,6 +88,20 @@ spec:
       command: [bash]
       source: |
         set -uo pipefail
+        # A real run must be reproducible: refuse a MOVING tag (`pr-<N>`, `latest`) unless this is a
+        # dry run. The comment on pipeline_image_version says the same thing, but a comment cannot
+        # stop a submit -- and the cube bucket has S3 versioning OFF, so a run against an image other
+        # than the one the dry run validated is not recoverable. Pin an immutable `sha-<main-sha>`
+        # (published by the main-branch build) for anything that writes.
+        case "$PIPELINE_IMAGE_VERSION" in
+          pr-*|latest)
+            if [ "$DRY_RUN" != "true" ]; then
+              echo "REFUSING: image tag '$PIPELINE_IMAGE_VERSION' is mutable and dry_run=false." >&2
+              echo "Pin an immutable sha-<main-sha> tag for a real run (see the manifest header)." >&2
+              exit 1
+            fi
+            ;;
+        esac
         args=(
           --stac-api-url "$STAC_API_URL"
           --cube-collection "$CUBE_COLLECTION"
@@ -82,6 +111,7 @@ spec:
         [ "$DRY_RUN" = "true" ] && args+=(--dry-run)
         [ "$ROLLBACK" = "true" ] && args+=(--rollback)
         [ "$ALLOW_NO_BACKUP" = "true" ] && args+=(--allow-no-backup)
+        [ "$REWRITE_ROOT_GEO" = "true" ] && args+=(--rewrite-root-geo)
         [ -n "$BACKUP_PREFIX" ] && args+=(--backup-prefix "$BACKUP_PREFIX")
         [ -n "$ITEM" ] && args+=(--item "$ITEM")
         [ -n "$SKIP_TILES" ] && args+=(--skip-tiles $SKIP_TILES)
@@ -105,6 +135,8 @@ spec:
         value: "{{workflow.parameters.s3_endpoint}}"
       - name: DRY_RUN
         value: "{{workflow.parameters.dry_run}}"
+      - name: PIPELINE_IMAGE_VERSION
+        value: "{{workflow.parameters.pipeline_image_version}}"
       - name: ROLLBACK
         value: "{{workflow.parameters.rollback}}"
       - name: BACKUP_PREFIX
@@ -115,6 +147,8 @@ spec:
         value: "{{workflow.parameters.item}}"
       - name: ALLOW_NO_BACKUP
         value: "{{workflow.parameters.allow_no_backup}}"
+      - name: REWRITE_ROOT_GEO
+        value: "{{workflow.parameters.rewrite_root_geo}}"
       - name: AWS_ACCESS_KEY_ID
         valueFrom:
           secretKeyRef:

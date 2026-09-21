@@ -79,6 +79,7 @@ def test_exits_0_on_success() -> None:
         border_mask_path=_ACQ["vv_mask"],
         store_path="/store.zarr",
         orbit_direction="ascending",
+        allow_out_of_order=False,  # the guard stands unless a caller opts out
     )
     mock_disc_cond.assert_called_once_with("/input")
     mock_ing_cond.assert_called_once_with(
@@ -312,7 +313,9 @@ def test_run_ingest_local_passthrough(tmp_path) -> None:
     ):
         rc = run_ingest("s3://bucket/in/", local_store, "descending")
     assert rc == 0
-    mock_ingest.assert_called_once_with("s3://bucket/in/", local_store, "descending")
+    mock_ingest.assert_called_once_with(
+        "s3://bucket/in/", local_store, "descending", allow_out_of_order=False
+    )
     mock_upload.assert_not_called()
 
 
@@ -938,3 +941,39 @@ def test_sync_tree_result_opens_as_zarr(tmp_path) -> None:
 
     g = zarr.open_group(remote, mode="r", zarr_format=3)["descending"]["r10m"]
     assert list(g["time"][...]) == [0, 1]
+
+
+# ---------------------------------------------------------------------------
+# --allow-out-of-order (eopf-geozarr 0.11.0 refuses a non-monotonic append)
+# ---------------------------------------------------------------------------
+
+
+def test_allow_out_of_order_reaches_the_writer() -> None:
+    """Backfilling an older scene, and appending to a cube built by the pre-0.11.0 discovery order
+    (platform sorted before timestamp, so mixed S1A/S1C cubes are not chronological), both need the
+    writer's monotonicity guard relaxed. If the flag does not reach it, those appends hard-fail."""
+    with (
+        patch(f"{_MOD}.discover_s1tiling_acquisitions", return_value=[_ACQ]),
+        patch(f"{_MOD}._acquisition_has_data", return_value=True),
+        patch(f"{_MOD}.ingest_s1tiling_acquisition", return_value=0) as mock_ing,
+        patch(f"{_MOD}.discover_s1tiling_conditions", return_value=[]),
+        patch(f"{_MOD}.consolidate_s1_store"),
+        patch(f"{_MOD}._patch_cf_grid_mapping"),
+    ):
+        ingest_all("/input", "/store.zarr", "ascending", allow_out_of_order=True)
+
+    assert mock_ing.call_args.kwargs["allow_out_of_order"] is True
+
+
+def test_cli_defaults_to_refusing_out_of_order() -> None:
+    """Off unless asked for: an unexpected time inversion in a routine cron run must still fail."""
+    from ingest_v1_s1_rtc import _build_parser
+
+    base = [
+        "--s3-geotiff-prefix", "/in",
+        "--s3-zarr-store", "/store.zarr",
+        "--tile-id", "31TCH",
+        "--orbit-direction", "ascending",
+    ]  # fmt: skip
+    assert _build_parser().parse_args(base).allow_out_of_order is False
+    assert _build_parser().parse_args([*base, "--allow-out-of-order"]).allow_out_of_order is True
