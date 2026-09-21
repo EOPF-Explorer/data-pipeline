@@ -57,17 +57,21 @@ def _run(tmp_path: Path, **env_overrides: str) -> subprocess.CompletedProcess[st
     )
 
 
-@pytest.mark.parametrize("tag", ["pr-413", "pr-9", "latest"])
-def test_moving_tag_with_dry_run_false_is_refused(tmp_path: Path, tag: str) -> None:
-    """The bound is the tool's, not a comment's: a real run on a moving tag exits before the driver."""
+@pytest.mark.parametrize("tag", ["pr-413", "pr-9", "latest", "main", "fix-s1-rtc-pin-prep", ""])
+def test_mutable_tag_with_dry_run_false_is_refused(tmp_path: Path, tag: str) -> None:
+    """The bound is the tool's, not a comment's: a real run on a mutable tag exits before the driver.
+
+    An allowlist, so the cases that matter are the ones NOT enumerated: `main` and a branch name are
+    republished builds, and an empty tag is a mis-submitted parameter.
+    """
     result = _run(tmp_path, PIPELINE_IMAGE_VERSION=tag, DRY_RUN="false")
     assert result.returncode == 1, result.stdout
     assert "REFUSING" in result.stderr
     assert "STUB PYTHON" not in result.stdout, "the driver started despite the refusal"
 
 
-@pytest.mark.parametrize("tag", ["pr-413", "latest"])
-def test_moving_tag_is_allowed_for_a_dry_run(tmp_path: Path, tag: str) -> None:
+@pytest.mark.parametrize("tag", ["pr-413", "latest", "main"])
+def test_mutable_tag_is_allowed_for_a_dry_run(tmp_path: Path, tag: str) -> None:
     """Dry runs write nothing, so a moving tag is fine there — and is called out in the log."""
     result = _run(tmp_path, PIPELINE_IMAGE_VERSION=tag, DRY_RUN="true")
     assert result.returncode == 0, result.stderr
@@ -75,9 +79,10 @@ def test_moving_tag_is_allowed_for_a_dry_run(tmp_path: Path, tag: str) -> None:
     assert "--dry-run" in result.stdout
 
 
-def test_immutable_tag_runs_for_real(tmp_path: Path) -> None:
-    """A `sha-<main-sha>` tag is what a real run is supposed to use; the guard stays out of its way."""
-    result = _run(tmp_path, PIPELINE_IMAGE_VERSION="sha-7d662ed", DRY_RUN="false")
+@pytest.mark.parametrize("tag", ["v1.17.1", "v2.0.0-rc1", "sha-33f03f8"])
+def test_immutable_tag_runs_for_real(tmp_path: Path, tag: str) -> None:
+    """A release tag or a commit tag is what a real run uses; the guard stays out of its way."""
+    result = _run(tmp_path, PIPELINE_IMAGE_VERSION=tag, DRY_RUN="false")
     assert result.returncode == 0, result.stderr
     assert "STUB PYTHON" in result.stdout
     assert "--dry-run" not in result.stdout
@@ -88,6 +93,8 @@ def test_manifest_defaults_stay_safe() -> None:
     spec = yaml.safe_load(MANIFEST.read_text())["spec"]
     params = {p["name"]: p.get("value", "") for p in spec["arguments"]["parameters"]}
     assert params["dry_run"] == "true"
+    # The shipped pin must itself pass the guard, or a real run is refused out of the box.
+    assert params["pipeline_image_version"].startswith(("v", "sha-"))
     assert params["allow_no_backup"] == "false"
     assert params["rewrite_root_geo"] == "false"
     assert params["rollback"] == "false"
