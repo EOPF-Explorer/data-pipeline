@@ -16,10 +16,9 @@
 #      `backup_prefix` is given (C2 rollback safety).
 #   3. ROLLBACK (only if a backup_prefix was used): -p rollback=true -p backup_prefix=<s3://…>
 #
-# pipeline_image_version MUST be an RC build that contains scripts/migrate_s1_rtc_datamodel.py
-# (verify: `docker run --rm <image> python /app/scripts/migrate_s1_rtc_datamodel.py --help`). The live
-# v0.8.0-s1rtc-rc2 predates this script — cut a new RC from feat--s1_grd_phase5 after the migration
-# code merges.
+# pipeline_image_version MUST contain scripts/migrate_s1_rtc_datamodel.py AND the eopf-geozarr
+# v0.11.0 pin (verify: `docker run --rm <image> python /app/scripts/migrate_s1_rtc_datamodel.py
+# --help`). That means v1.17.1 or later; every tag before it predates #413.
 apiVersion: argoproj.io/v1alpha1
 kind: Workflow
 metadata:
@@ -34,21 +33,19 @@ spec:
     secondsAfterFailure: 259200
   arguments:
     parameters:
-    # The old RC tag `v0.8.0-s1rtc-rc3` predates the eopf-geozarr v0.11.0 pin, so it carries neither
-    # the stable completion marker nor `--rewrite-root-geo`.
+    # `v1.17.1` is the first release containing #413 (the eopf-geozarr v0.11.0 pin, the writer
+    # behavioural probe, the stable completion marker and `--rewrite-root-geo`). Release tags are
+    # immutable and are published by the tag build (`type=ref,event=tag`), which is what a run
+    # against production cubes needs — the bucket has S3 versioning OFF, so a run on an image other
+    # than the one the dry run validated is not recoverable.
     #
-    # Why `pr-413` and not a `sha-<short>` tag: `PUSH_IMAGE` in .github/workflows/build.yml is false
-    # for a plain branch push, so the branch build's `sha-<head>` tag is built in the runner and
-    # discarded -- it is never in the registry. Only the pull_request build publishes, and its
-    # `type=sha` names the SYNTHESISED MERGE commit, which is absent from git history and is replaced
-    # on every push. `pr-413` is the one published tag that stays correct as the PR moves.
-    #
-    # ⚠ `pr-413` is a MOVING tag: it follows the PR head. That is fine for a staging/dry-run, and is
-    # NOT acceptable for a real run against production cubes. Before any non-dry-run: merge #413, let
-    # the main build publish an immutable `sha-<main-sha>`, and pin THAT here. The template enforces
-    # this — a `pr-*`/`latest` tag with dry_run=false exits 1 before the driver starts.
+    # It replaces `pr-413`, used for the 2026-09-18 dry runs. A `pr-<N>` tag FOLLOWS THE PR HEAD, so
+    # it is fine for a dry run and never acceptable for a write. So are `latest` and `main`, both of
+    # which the main-branch build republishes on every merge. The template enforces this rather than
+    # trusting the comment: anything that is not a `v*` release tag or an immutable `sha-*` tag exits
+    # 1 when dry_run=false, before the driver starts.
     - name: pipeline_image_version          # REQUIRED — build containing migrate_s1_rtc_datamodel.py
-      value: pr-413
+      value: v1.17.1
     - name: stac_api_url
       value: https://api.explorer.eopf.copernicus.eu/stac
     - name: cube_collection
@@ -88,20 +85,22 @@ spec:
       command: [bash]
       source: |
         set -uo pipefail
-        # A real run must be reproducible: refuse a MOVING tag (`pr-<N>`, `latest`) unless this is a
-        # dry run. The comment on pipeline_image_version says the same thing, but a comment cannot
-        # stop a submit -- and the cube bucket has S3 versioning OFF, so a run against an image other
-        # than the one the dry run validated is not recoverable. Pin an immutable `sha-<main-sha>`
-        # (published by the main-branch build) for anything that writes.
-        case "$PIPELINE_IMAGE_VERSION" in
-          pr-*|latest)
-            if [ "$DRY_RUN" != "true" ]; then
-              echo "REFUSING: image tag '$PIPELINE_IMAGE_VERSION' is mutable and dry_run=false." >&2
-              echo "Pin an immutable sha-<main-sha> tag for a real run (see the manifest header)." >&2
+        # A real run must be reproducible, so it may only use an IMMUTABLE tag: a `v*` release tag
+        # or a `sha-*` commit tag. Everything else -- `pr-<N>` (follows the PR head), `latest` and
+        # `main` (republished on every merge), a branch name -- is refused unless this is a dry run.
+        # An allowlist, not a denylist: a new mutable tag shape must be admitted deliberately.
+        # The cube bucket has S3 versioning OFF, so a run on an image other than the one the dry run
+        # validated is not recoverable.
+        if [ "$DRY_RUN" != "true" ]; then
+          case "$PIPELINE_IMAGE_VERSION" in
+            v*|sha-*) ;;
+            *)
+              echo "REFUSING: image tag '$PIPELINE_IMAGE_VERSION' is not immutable and dry_run=false." >&2
+              echo "Use a v<release> or sha-<commit> tag for a real run (see the manifest header)." >&2
               exit 1
-            fi
-            ;;
-        esac
+              ;;
+          esac
+        fi
         args=(
           --stac-api-url "$STAC_API_URL"
           --cube-collection "$CUBE_COLLECTION"
