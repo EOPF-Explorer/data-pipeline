@@ -45,7 +45,8 @@ spec:
     #
     # ⚠ `pr-413` is a MOVING tag: it follows the PR head. That is fine for a staging/dry-run, and is
     # NOT acceptable for a real run against production cubes. Before any non-dry-run: merge #413, let
-    # the main build publish an immutable `sha-<main-sha>`, and pin THAT here.
+    # the main build publish an immutable `sha-<main-sha>`, and pin THAT here. The template enforces
+    # this — a `pr-*`/`latest` tag with dry_run=false exits 1 before the driver starts.
     - name: pipeline_image_version          # REQUIRED — build containing migrate_s1_rtc_datamodel.py
       value: pr-413
     - name: stac_api_url
@@ -87,6 +88,20 @@ spec:
       command: [bash]
       source: |
         set -uo pipefail
+        # A real run must be reproducible: refuse a MOVING tag (`pr-<N>`, `latest`) unless this is a
+        # dry run. The comment on pipeline_image_version says the same thing, but a comment cannot
+        # stop a submit -- and the cube bucket has S3 versioning OFF, so a run against an image other
+        # than the one the dry run validated is not recoverable. Pin an immutable `sha-<main-sha>`
+        # (published by the main-branch build) for anything that writes.
+        case "$PIPELINE_IMAGE_VERSION" in
+          pr-*|latest)
+            if [ "$DRY_RUN" != "true" ]; then
+              echo "REFUSING: image tag '$PIPELINE_IMAGE_VERSION' is mutable and dry_run=false." >&2
+              echo "Pin an immutable sha-<main-sha> tag for a real run (see the manifest header)." >&2
+              exit 1
+            fi
+            ;;
+        esac
         args=(
           --stac-api-url "$STAC_API_URL"
           --cube-collection "$CUBE_COLLECTION"
@@ -120,6 +135,8 @@ spec:
         value: "{{workflow.parameters.s3_endpoint}}"
       - name: DRY_RUN
         value: "{{workflow.parameters.dry_run}}"
+      - name: PIPELINE_IMAGE_VERSION
+        value: "{{workflow.parameters.pipeline_image_version}}"
       - name: ROLLBACK
         value: "{{workflow.parameters.rollback}}"
       - name: BACKUP_PREFIX
