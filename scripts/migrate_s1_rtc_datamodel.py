@@ -36,6 +36,7 @@ from pathlib import Path
 import numpy as np
 import s1_store_meta
 import zarr
+from eopf_geozarr.conversion import fs_utils
 from eopf_geozarr.conversion.s1_ingest import (
     BACKSCATTER_CF_ATTRS,
     FLOAT32_NAN_FILL_VALUE,
@@ -116,10 +117,24 @@ def redrive_store(
     store_path = str(store_path)
     report = RedriveReport(store=store_path)
 
-    root_ro = zarr.open_group(store_path, mode="r", zarr_format=3)
+    # `use_consolidated=False`: the root's consolidated block can be stale (an orbit group appended
+    # since the last consolidation is simply absent from it), and every later step — which orbits are
+    # reported, which are re-derived, which get consolidated — keys off this list. The library's own
+    # `consolidate_s1_store` re-enumerates the same way for the same reason.
+    root_ro = zarr.open_group(store_path, mode="r", zarr_format=3, use_consolidated=False)
     report.orbits = [name for name, _ in root_ro.groups()]
     if dict(root_ro.attrs).get(MIGRATION_MARKER_KEY) in ACCEPTED_MIGRATION_MARKERS:
         report.already_current = True
+        if rewrite_root_geo:
+            # Say so. Idempotency is keyed on the re-derive, not on the root geo, so once the fleet
+            # is marked an operator passing --rewrite-root-geo gets `already-current=N, derived=0`
+            # and no root rewrite. Silently ignoring an explicitly-passed flag on a production run
+            # is how an operator concludes the rewrite happened when it did not.
+            log.warning(
+                "%s: already migrated — --rewrite-root-geo IGNORED (the marker short-circuits "
+                "this store). Rewrite the root geo metadata separately if it is really wanted.",
+                store_path,
+            )
         return report
 
     if dry_run:  # report-only: no drop-consolidated, no r+, no writes
@@ -131,6 +146,7 @@ def redrive_store(
     # C1: a consolidated store serves stale array metadata to writers — drop it before reopening r+.
     s1_store_meta.drop_consolidated_metadata(store_path)
     root = zarr.open_group(str(store_path), mode="r+", zarr_format=3)
+    report.orbits = [name for name, _ in root.groups()]  # post-drop listing wins
 
     overview_levels = OVERVIEW_CHAIN[1:]  # (level, parent, factor) below native r10m
     for orbit_name, orbit in root.groups():
@@ -178,10 +194,18 @@ def redrive_store(
             consolidate_s1_store(str(store_path), report.orbits[0])
         else:
             # #203 without the root refinement: consolidate every orbit group, then the root. This is
-            # the same pair of calls `consolidate_s1_store` makes after its root rewrite.
+            # the same pair of calls `consolidate_s1_store` makes after its root rewrite — including
+            # its two preconditions, which are not optional:
+            #   - enumerate from the post-drop listing (`report.orbits`, refreshed above), never
+            #     through a consolidated root: an orbit group appended since the last consolidation
+            #     is absent from a stale root block, so consolidating through it would re-derive
+            #     that orbit above and then skip consolidating it here.
+            #   - normalize the URI. OVH S3 is sensitive to the double slashes an href-derived path
+            #     can carry, and the library normalizes before every consolidate call.
+            normalized = fs_utils.normalize_path(str(store_path))
             for orbit_name in report.orbits:
-                zarr.consolidate_metadata(str(store_path), path=orbit_name, zarr_format=3)
-            zarr.consolidate_metadata(str(store_path), zarr_format=3)
+                zarr.consolidate_metadata(normalized, path=orbit_name, zarr_format=3)
+            zarr.consolidate_metadata(normalized, zarr_format=3)
     if not report.skipped_no_border_mask:
         s1_store_meta.set_root_attr(str(store_path), MIGRATION_MARKER_KEY, _marker_value())
     return report

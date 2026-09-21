@@ -8,6 +8,7 @@ result reproduces the fresh cube exactly (NaN-aware values + CF attrs + standalo
 
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -391,3 +392,83 @@ def test_rewrite_root_geo_opt_in_calls_the_library(
     migrate.redrive_store(fresh_cube, rewrite_root_geo=True)
 
     assert len(calls) == 1
+
+
+# --- enumeration must not run through a stale consolidated root -------------------------------
+
+
+def _legacy_bands_keeping_consolidated(store: Path) -> None:
+    """Legacy-ise vv/vh but LEAVE the consolidated metadata in place (unlike `_demigrate`).
+
+    `_demigrate` drops it, so every other test enters `redrive_store` with no consolidated block at
+    all — which is exactly the condition under which a stale one cannot be noticed.
+    """
+    root = zarr.open_group(str(store), mode="r+", zarr_format=3, use_consolidated=False)
+    for _orbit, og in root.groups():
+        for level in _all_levels():
+            for band in ("vv", "vh"):
+                arr = og[level][band]
+                arr[:] = np.nan_to_num(arr[:], nan=0.0) if level == "r10m" else 0.0
+                for k in ("_FillValue", "standard_name", "units"):
+                    arr.attrs.pop(k, None)
+
+
+def _drop_from_consolidated_root(store: Path, orbit: str) -> None:
+    """Remove `orbit` from the ROOT's consolidated block, leaving the group itself on disk.
+
+    This is the state the library's `consolidate_s1_store` docstring warns about — "an orbit group
+    created since the last consolidation is absent from a stale root block". It is written by hand
+    here because the local writer path happens to refresh the root when it appends a new orbit
+    group; the invariant under test is our own enumeration, not how a store came to be stale.
+    """
+    root_json = store / "zarr.json"
+    meta = json.loads(root_json.read_text())
+    members = meta["consolidated_metadata"]["metadata"]
+    # The block is a FLAT map ("descending", "descending/r10m", "descending/r10m/vv", ...); leaving
+    # the children behind would orphan them and zarr refuses to open the store at all.
+    for key in [k for k in members if k == orbit or k.startswith(f"{orbit}/")]:
+        del members[key]
+    root_json.write_text(json.dumps(meta))
+
+
+def test_consolidates_an_orbit_absent_from_the_stale_root(fresh_cube: Path) -> None:
+    """#203 for real: an orbit missing from the consolidated root still gets consolidated.
+
+    Enumerating orbits through a stale block re-derives that orbit anyway (the re-derive walks a
+    post-drop handle) and then silently skips consolidating it — readers opening it standalone fall
+    back to a listing. The library re-enumerates with `use_consolidated=False` for exactly this
+    reason; so must this script.
+    """
+    _drop_from_consolidated_root(fresh_cube, "descending")
+    stale = zarr.open_group(str(fresh_cube), mode="r", zarr_format=3)
+    assert [name for name, _ in stale.groups()] == ["ascending"], "fixture: root is not stale"
+
+    _legacy_bands_keeping_consolidated(fresh_cube)
+    report = migrate.redrive_store(fresh_cube)
+
+    assert set(report.orbits) == {"ascending", "descending"}, "the newest orbit was not enumerated"
+    for orbit in ("ascending", "descending"):
+        assert (
+            "consolidated_metadata" in (fresh_cube / orbit / "zarr.json").read_text()
+        ), f"{orbit} was re-derived but left unconsolidated"
+
+
+def test_rewrite_root_geo_on_an_already_migrated_store_is_reported_not_silent(
+    fresh_cube: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The marker short-circuits the store, so --rewrite-root-geo cannot take effect — say so.
+
+    Once the fleet has been migrated every store carries the marker, and an operator passing
+    --rewrite-root-geo gets `already-current=N, derived=0` with no root rewrite. Silently ignoring
+    an explicitly-passed flag on a production run is how an operator concludes it happened.
+    """
+    s1_store_meta.set_root_attr(str(fresh_cube), migrate.MIGRATION_MARKER_KEY, "1")
+
+    with caplog.at_level("WARNING"):
+        report = migrate.redrive_store(fresh_cube, rewrite_root_geo=True)
+
+    assert report.already_current is True
+    assert any(
+        "rewrite-root-geo" in rec.getMessage() and "IGNORED" in rec.getMessage()
+        for rec in caplog.records
+    ), f"no warning about the ignored flag; got: {[r.getMessage() for r in caplog.records]}"
