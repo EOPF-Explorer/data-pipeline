@@ -19,10 +19,10 @@ from datetime import UTC, datetime, timedelta
 from typing import cast
 
 import requests
-from pystac_client import Client
 
 # The tier-aware selection reuses the proven client-side predicate and tier map
 # from the same scripts/ package (both are on the path in-image and under pytest).
+import stac_auth
 from query_storage_tier_items import is_already_migrated
 from s3_item_cleanup import resolve_exclude_ids
 from update_stac_storage_tier import TIER_TO_SCHEME
@@ -141,6 +141,7 @@ def query_stac_items(
     date_field: str = "datetime",
     target_storage_ref: str | None = None,
     exclude_ids: set[str] | frozenset[str] = frozenset(),
+    page_size: int = stac_auth.DEFAULT_PAGE_SIZE,
 ) -> list[str]:
     """Query STAC for items whose ``date_field`` falls in the window. Returns item IDs.
 
@@ -161,21 +162,31 @@ def query_stac_items(
     ``exclude_ids`` are never selected regardless of window or tier — the demo
     denylist, so the recurring tier-down cannot move a protected scene off the
     performance tier (a reconversion re-arms the ``created`` age band 90 days out).
+
+    ``page_size`` is the ``/search`` page (``limit``), not a cap — the whole window is
+    walked. It was hard-coded at 100 when the tier-down cron running this script died on
+    one unretried page past the gateway's upstream timeout; the retrying client is the
+    fix, and ``--page-size`` is the knob for testing whether a smaller page helps.
+
+    🔴 **Re-size that cron's ``activeDeadlineSeconds: 900`` at the pin bump.** It is now
+    smaller than one worst-case page, and ``main`` interleaves query -> webhook submit, so
+    a deadline SIGKILL can land after some payloads are away, with no completion log. Not
+    destructive (``concurrencyPolicy: Forbid``, and the re-run is idempotent).
     """
-    catalog = Client.open(stac_api_url)
+    catalog = stac_auth.open_resilient_client(stac_api_url)
     if window_start is None:
         # Single-sided open lower bound for age-based selection.
         search = catalog.search(
             collections=[collection],
             filter={"op": "<", "args": [{"property": date_field}, window_end]},
             filter_lang="cql2-json",
-            limit=100,
+            limit=page_size,
         )
     elif date_field == "datetime":
         search = catalog.search(
             collections=[collection],
             datetime=f"{window_start}/{window_end}",
-            limit=100,
+            limit=page_size,
         )
     else:
         search = catalog.search(
@@ -185,7 +196,7 @@ def query_stac_items(
                 "args": [{"property": date_field}, window_start, window_end],
             },
             filter_lang="cql2-json",
-            limit=100,
+            limit=page_size,
         )
     selected: list[str] = []
     excluded = 0
@@ -283,6 +294,16 @@ def main() -> None:
         "--delay", type=float, default=1.0, help="Delay between window submissions in seconds"
     )
     parser.add_argument(
+        "--page-size",
+        type=stac_auth.page_size_arg,
+        default=stac_auth.DEFAULT_PAGE_SIZE,
+        help=(
+            f"Items per /search request while walking a window (default: "
+            f'{stac_auth.DEFAULT_PAGE_SIZE}, max {stac_auth.MAX_PAGE_SIZE}; "" means the '
+            "default). A page, not a cap. Lower it if the tier-down cron keeps 500ing."
+        ),
+    )
+    parser.add_argument(
         "--exclude-file",
         default=None,
         help=(
@@ -349,6 +370,7 @@ def main() -> None:
             date_field,
             target_storage_ref,
             exclude_ids=exclude_ids,
+            page_size=args.page_size,
         )
         if not item_ids:
             logger.info("  Found 0 items — skipping")

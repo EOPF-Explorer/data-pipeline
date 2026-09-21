@@ -8,6 +8,7 @@ boto3 and the STAC session are mocked — no network.
 """
 
 import json
+import logging
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,6 +19,7 @@ import pytest
 import requests
 from botocore.exceptions import ClientError, EndpointConnectionError
 from cleanup_expired_items import (
+    DEFAULT_PAGE_SIZE,
     MAX_BUDGET_SECONDS,
     MAX_ITEMS_CEILING,
     _monotonic,
@@ -86,6 +88,26 @@ def test_build_search_kwargs_sorts_and_caps() -> None:
     # pagination silently under-returns across pages without a total order.
     assert kwargs["sortby"] == ["+properties.expires", "+id"]
     assert kwargs["max_items"] == 25
+
+
+def test_build_search_kwargs_passes_an_explicit_page_size() -> None:
+    """`limit` is sent, so the server's default page (10) never sets the request count.
+
+    This script and query_storage_tier_items were the two fleet searches that omitted
+    `limit`. Not evidence that 100 avoids the gateway's 15 s upstream timeout: the
+    tier-down cron that died on it 2026-09-18 runs submit_storage_tier_workflows, which
+    already passed limit=100; the retry is the fix, the knob is for measuring which
+    direction helps. Page size is NOT the cap: `max_items` stays what bounds the run.
+    """
+    kwargs = build_search_kwargs("sentinel-2-l2a-staging", NOW, 130)
+    assert kwargs["limit"] == DEFAULT_PAGE_SIZE == 100
+    assert kwargs["max_items"] == 130
+
+    # Overridable, and never larger than the cap: a page past `max_items` is rows the
+    # client discards on arrival.
+    assert build_search_kwargs("c", NOW, 130, page_size=500)["limit"] == 130
+    assert build_search_kwargs("c", NOW, 5)["limit"] == 5
+    assert build_search_kwargs("c", NOW, 5)["max_items"] == 5
 
 
 # === Guards ===
@@ -413,6 +435,7 @@ def _args(
     execute: bool = False,
     max_items: int = 100,
     max_runtime_seconds: int | None = None,
+    page_size: int = DEFAULT_PAGE_SIZE,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         stac_api_url="https://stac.example.com",
@@ -420,6 +443,7 @@ def _args(
         s3_endpoint=None,
         allowed_bucket=BUCKET,
         max_items=max_items,
+        page_size=page_size,
         max_runtime_seconds=max_runtime_seconds,
         exclude_file=None,
         execute=execute,
@@ -452,7 +476,7 @@ def _run_with(
     s3 = s3 or MagicMock()
 
     with (
-        patch("cleanup_expired_items.Client.open", return_value=client),
+        patch("cleanup_expired_items.stac_auth.open_resilient_client", return_value=client),
         patch("cleanup_expired_items._session", return_value=session),
         patch("cleanup_expired_items._s3_client", return_value=s3),
     ):
@@ -548,7 +572,7 @@ def test_run_cleanup_paginates_fully_before_deleting(expired_item) -> None:
     s3.get_paginator.return_value = paginator
 
     with (
-        patch("cleanup_expired_items.Client.open", return_value=client),
+        patch("cleanup_expired_items.stac_auth.open_resilient_client", return_value=client),
         patch("cleanup_expired_items._session", return_value=session),
         patch("cleanup_expired_items._s3_client", return_value=s3),
     ):
@@ -593,7 +617,7 @@ def test_run_cleanup_survives_a_stac_delete_timeout(expired_item, capsys) -> Non
     ]
 
     with (
-        patch("cleanup_expired_items.Client.open", return_value=client),
+        patch("cleanup_expired_items.stac_auth.open_resilient_client", return_value=client),
         patch("cleanup_expired_items._session", return_value=session),
         patch("cleanup_expired_items._s3_client", return_value=s3),
     ):
@@ -699,7 +723,7 @@ def _run_budgeted(stale_items, *, budget, clock_values, search_ticks=0):
     s3.get_paginator.return_value = _paginator([["a"]] * (2 * len(stale_items)))
 
     with (
-        patch("cleanup_expired_items.Client.open", return_value=client),
+        patch("cleanup_expired_items.stac_auth.open_resilient_client", return_value=client),
         patch("cleanup_expired_items._session", return_value=session),
         patch("cleanup_expired_items._s3_client", return_value=s3),
         patch("cleanup_expired_items._monotonic", side_effect=tick),
@@ -722,8 +746,21 @@ def test_run_cleanup_stops_at_the_item_boundary_when_the_budget_is_spent(
     code, session = _run_budgeted(
         items,
         budget=100,
-        # deadline=BOOT+100 · post-discovery · item1 · item2 · item3 (spent)
-        clock_values=[BOOT, BOOT + 10, BOOT + 20, BOOT + 30, BOOT + 150],
+        # deadline=BOOT+100 · discovery x3 (one per item read) · post-discovery ·
+        # item1 · item2 · item3 (spent). The discovery checks are the in-tool bound
+        # added 2026-09-18: a page that retries a transient 5xx can stall for minutes,
+        # and the budget must be consulted before the pod's activeDeadlineSeconds kills
+        # it mid-discovery with no cleanup_summary.
+        clock_values=[
+            BOOT,
+            BOOT + 1,
+            BOOT + 2,
+            BOOT + 3,
+            BOOT + 10,
+            BOOT + 20,
+            BOOT + 30,
+            BOOT + 150,
+        ],
     )
 
     records = _capture_lines(capsys)
@@ -736,6 +773,74 @@ def test_run_cleanup_stops_at_the_item_boundary_when_the_budget_is_spent(
     assert [r["item_id"] for r in records[:-1]] == [items[0]["id"], items[1]["id"]]
     # The third item was not even re-fetched: nothing about it was begun.
     assert session.get.call_count == 2
+
+
+def test_budget_stops_discovery_itself_not_only_the_delete_loop(expired_item, capsys) -> None:
+    """Discovery yields to the budget mid-pagination, instead of running to completion.
+
+    Before 2026-09-18 discovery was `list(search.items_as_dicts())` and the budget was
+    only consulted afterwards, so pagination was unbounded. That was survivable while a
+    failed page raised in ~15 s; it stopped being survivable once a page can retry a
+    transient 5xx for minutes (stac_auth.resilient_stac_io). An unbounded discovery runs
+    the pod past activeDeadlineSeconds, and THAT kill emits no cleanup_summary at all —
+    the silent-failure shape the summary guard exists to prevent.
+
+    Partial discovery is safe because the query is oldest-expiry-first: a short read is
+    the front of the queue, and the remainder is re-found next tick.
+    """
+    items = _items(expired_item, 5)
+    code, _session = _run_budgeted(
+        items,
+        budget=100,
+        # deadline · discovery item1 (ok) · discovery item2 (SPENT -> stop reading) ·
+        # post-discovery · loop item1 (spent, processes nothing)
+        clock_values=[BOOT, BOOT + 10, BOOT + 150, BOOT + 151, BOOT + 152],
+    )
+
+    summary = _capture_lines(capsys)[-1]
+    assert code == 0, "a spent budget is a clean yield, not a failure"
+    assert summary["discovered"] == 2, "discovery stopped reading once the budget was spent"
+    assert summary["processed"] == 0
+    assert summary["time_budget_reached"] is True
+    # The run still reported itself: this is the whole point versus being SIGKILLed.
+    assert summary["event"] == "cleanup_summary"
+    # Not one of the two items read was started: the budget is monotone, so the
+    # delete loop's first check stops it too.
+    assert _session.get.call_count == 0
+
+
+def test_budget_spent_during_discovery_says_it_processes_nothing(
+    expired_item, caplog, capsys
+) -> None:
+    """The log must not promise work the run cannot do.
+
+    An earlier draft logged "processing what was found" on this path. It never did:
+    `budget_spent()` is monotone, so whatever discovery read is dropped at the loop's
+    first check and `processed` is 0 — while the README names `time_budget_reached: true`
+    + `processed: 0` as THE stalled-cron alert. A log line claiming otherwise argues
+    against the alert. The summary must also stay distinguishable from a quiet tick,
+    which is `time_budget_reached: false`.
+    """
+    items = _items(expired_item, 5)
+    with caplog.at_level(logging.WARNING, logger="cleanup_expired_items"):
+        code, session = _run_budgeted(
+            items,
+            budget=100,
+            clock_values=[BOOT, BOOT + 10, BOOT + 150, BOOT + 151, BOOT + 152],
+        )
+
+    summary = _capture_lines(capsys)[-1]
+    assert code == 0
+    assert session.get.call_count == 0
+    assert (summary["time_budget_reached"], summary["processed"]) == (True, 0)
+    assert summary["discovered"] == 2
+
+    discovery_warnings = [
+        r.getMessage() for r in caplog.records if "spent during discovery" in r.getMessage()
+    ]
+    assert len(discovery_warnings) == 1
+    assert "processing none of them" in discovery_warnings[0]
+    assert "processing what was found" not in discovery_warnings[0]
 
 
 def test_run_cleanup_budget_covers_discovery_not_just_the_loop(expired_item) -> None:
@@ -794,7 +899,7 @@ def test_run_cleanup_without_a_budget_never_reads_the_clock(expired_item, capsys
     s3.get_paginator.return_value = _paginator([["a"]] * 6)
 
     with (
-        patch("cleanup_expired_items.Client.open", return_value=client),
+        patch("cleanup_expired_items.stac_auth.open_resilient_client", return_value=client),
         patch("cleanup_expired_items._session", return_value=session),
         patch("cleanup_expired_items._s3_client", return_value=s3),
         patch("cleanup_expired_items._monotonic", side_effect=tick) as monotonic,
@@ -841,7 +946,9 @@ def test_budget_boundary_leaves_no_item_half_deleted(expired_item, capsys) -> No
     item 1 is deleted in BOTH stores, item 2 in neither.
     """
     items = _items(expired_item, 2)
-    tick = _clock([BOOT, BOOT + 10, BOOT + 20, BOOT + 150])
+    # deadline · discovery x2 (the in-tool bound added 2026-09-18) · post-discovery ·
+    # item1 · item2 (spent) — item 1 completes in both stores, item 2 is never begun.
+    tick = _clock([BOOT, BOOT + 1, BOOT + 2, BOOT + 10, BOOT + 20, BOOT + 150])
 
     client = MagicMock()
     client.self_href = "https://stac.example.com"
@@ -865,7 +972,7 @@ def test_budget_boundary_leaves_no_item_half_deleted(expired_item, capsys) -> No
     s3.delete_objects.return_value = {"Deleted": [{"Key": "a"}], "Errors": []}
 
     with (
-        patch("cleanup_expired_items.Client.open", return_value=client),
+        patch("cleanup_expired_items.stac_auth.open_resilient_client", return_value=client),
         patch("cleanup_expired_items._session", return_value=session),
         patch("cleanup_expired_items._s3_client", return_value=s3),
         patch("cleanup_expired_items._monotonic", side_effect=tick),
@@ -903,7 +1010,7 @@ def test_run_cleanup_refuses_a_budget_below_one_second(budget: int) -> None:
     # stac.example.com (5 urllib3 retries, ~4.5 s) and reports as a timeout
     # rather than an assertion failure. The file's contract is "no network".
     with (
-        patch("cleanup_expired_items.Client.open") as client_open,
+        patch("cleanup_expired_items.stac_auth.open_resilient_client") as client_open,
         patch("cleanup_expired_items._session"),
         patch("cleanup_expired_items._s3_client"),
         pytest.raises(ValueError, match="max_runtime_seconds"),
@@ -1079,7 +1186,7 @@ def test_a_transport_error_costs_one_item_not_the_run(expired_item, capsys) -> N
     s3.delete_objects.return_value = {"Deleted": [{"Key": "a"}], "Errors": []}
 
     with (
-        patch("cleanup_expired_items.Client.open", return_value=client),
+        patch("cleanup_expired_items.stac_auth.open_resilient_client", return_value=client),
         patch("cleanup_expired_items._session", return_value=session),
         patch("cleanup_expired_items._s3_client", return_value=s3),
     ):
@@ -1100,7 +1207,7 @@ def test_a_transport_error_costs_one_item_not_the_run(expired_item, capsys) -> N
 def test_run_cleanup_refuses_a_max_items_below_one() -> None:
     """`--max-items 0` removes the cap; the tool must refuse it, not obey it."""
     with (
-        patch("cleanup_expired_items.Client.open") as client_open,
+        patch("cleanup_expired_items.stac_auth.open_resilient_client") as client_open,
         patch("cleanup_expired_items._session"),
         patch("cleanup_expired_items._s3_client"),
         pytest.raises(ValueError, match=r"max_items must be 1\.\."),
@@ -1143,7 +1250,7 @@ def test_run_cleanup_enforces_the_budget_ceiling_not_just_the_cli() -> None:
     failure the ceiling is documented to prevent.
     """
     with (
-        patch("cleanup_expired_items.Client.open") as client_open,
+        patch("cleanup_expired_items.stac_auth.open_resilient_client") as client_open,
         patch("cleanup_expired_items._session"),
         patch("cleanup_expired_items._s3_client"),
         pytest.raises(ValueError, match=r"max_runtime_seconds must be 1\.\."),
@@ -1152,7 +1259,7 @@ def test_run_cleanup_enforces_the_budget_ceiling_not_just_the_cli() -> None:
     client_open.assert_not_called()
 
     with (
-        patch("cleanup_expired_items.Client.open"),
+        patch("cleanup_expired_items.stac_auth.open_resilient_client"),
         patch("cleanup_expired_items._session"),
         patch("cleanup_expired_items._s3_client"),
         pytest.raises(ValueError),
@@ -1163,7 +1270,7 @@ def test_run_cleanup_enforces_the_budget_ceiling_not_just_the_cli() -> None:
 def test_run_cleanup_enforces_the_item_ceiling() -> None:
     """The item cap is also the memory cap; an OOMKill cannot be yielded on."""
     with (
-        patch("cleanup_expired_items.Client.open") as client_open,
+        patch("cleanup_expired_items.stac_auth.open_resilient_client") as client_open,
         patch("cleanup_expired_items._session"),
         patch("cleanup_expired_items._s3_client"),
         pytest.raises(ValueError, match=r"max_items must be 1\.\."),
@@ -1180,6 +1287,136 @@ def test_cli_rejects_an_item_cap_above_the_ceiling(capsys) -> None:
     err = capsys.readouterr().err
     assert "memory cap" in err
     assert "_item_cap" not in err
+
+
+def test_cli_page_size_defaults_and_reaches_the_search(capsys) -> None:
+    """`--page-size` lands in the search kwargs as `limit`, default 100, cap-bounded."""
+    with patch("cleanup_expired_items.run_cleanup", return_value=0) as run:
+        main(_CLI_BASE)
+        assert run.call_args.args[0].page_size == DEFAULT_PAGE_SIZE
+        main([*_CLI_BASE, "--page-size", "250"])
+        assert run.call_args.args[0].page_size == 250
+
+    for bad in ("0", "10001", "ten"):
+        with pytest.raises(SystemExit) as exc:
+            main([*_CLI_BASE, "--page-size", bad])
+        assert exc.value.code == 2
+    assert "page_size_arg" not in capsys.readouterr().err
+
+    client = MagicMock()
+    client.self_href = "https://stac.example.com"
+    client.search.return_value.items_as_dicts.return_value = iter([])
+    with (
+        patch("cleanup_expired_items.stac_auth.open_resilient_client", return_value=client),
+        patch("cleanup_expired_items._session"),
+        patch("cleanup_expired_items._s3_client"),
+    ):
+        run_cleanup(_args(max_items=130, page_size=250))
+    assert client.search.call_args.kwargs["limit"] == 130
+    assert client.search.call_args.kwargs["max_items"] == 130
+
+
+@pytest.mark.parametrize("raw", ["", "  "], ids=["empty", "blank"])
+def test_cli_treats_an_empty_page_size_as_the_default(raw: str) -> None:
+    """`--page-size ""` is this fleet's spelling of an unset optional Argo parameter.
+
+    `_budget_seconds` already maps it to "off" for exactly this reason; a sibling flag
+    that rejects it is exit 2 with no cleanup_summary, every tick, the moment a template
+    splices the parameter unconditionally.
+    """
+    with patch("cleanup_expired_items.run_cleanup", return_value=0) as run:
+        main([*_CLI_BASE, "--page-size", raw])
+    assert run.call_args.args[0].page_size == DEFAULT_PAGE_SIZE
+
+
+def test_summary_carries_discovery_seconds(expired_item, capsys) -> None:
+    """`time_budget_reached: true, processed: 0` has two causes — a real backlog, or
+    every page burning its retry ladder on gateway 500s — and only the time discovery
+    took tells them apart. Measured with `time.monotonic` directly, not the `_monotonic`
+    budget seam: a run without a budget must still not read that clock (pinned above).
+    """
+    clock = MagicMock()
+    # Two reads: the start right before the read client opens (after the write session
+    # and S3 client are built, so a boto3 credential stall is excluded), and the end of
+    # discovery. Nothing reads the clock before the guard: a third tick here would go
+    # unconsumed and the test would still pass, so the list is exactly two.
+    clock.monotonic.side_effect = [1000.0, 1007.5]
+    s3 = MagicMock()
+    s3.get_paginator.return_value = _paginator([["a", "b"]])
+    with patch("cleanup_expired_items.time", clock):
+        _run_with([expired_item], get_status=200, s3=s3)
+
+    summary = _capture_lines(capsys)[-1]
+    assert summary["discovery_seconds"] == 7.5
+
+
+def test_aborted_summary_still_carries_discovery_seconds(capsys) -> None:
+    """A page that fails after its whole ladder is the case the field exists to show, so
+    a discovery that raises must report the time to the abort rather than lose it."""
+    client = MagicMock()
+    client.self_href = "https://stac.example.com"
+    client.search.return_value.items_as_dicts.side_effect = requests.ConnectionError("boom")
+    clock = MagicMock()
+    # 9 x 15 s attempts + 90 s of sleeps: the gateway ladder, exhausted. Ticks: the
+    # start before the read client opens, the abort.
+    clock.monotonic.side_effect = [1000.0, 1225.0]
+
+    with (
+        patch("cleanup_expired_items.stac_auth.open_resilient_client", return_value=client),
+        patch("cleanup_expired_items._session", return_value=MagicMock()),
+        patch("cleanup_expired_items._s3_client", return_value=MagicMock()),
+        patch("cleanup_expired_items.time", clock),
+    ):
+        code = run_cleanup(_args(execute=True))
+
+    summary = _capture_lines(capsys)[-1]
+    assert code == 1
+    assert summary["aborted"] is True
+    assert summary["discovery_seconds"] == 225.0
+
+
+def test_discovery_seconds_is_null_when_the_read_client_never_opened(capsys) -> None:
+    """A boto3 credential-chain stall that aborts the run must not be reported as
+    STAC time: the README promises the field never includes it, so it is null.
+
+    The clock RETURNS a value rather than raising: `run_cleanup`'s broad `except` would
+    swallow an AssertionError from the mock and print `null` for the wrong reason, so a
+    clock read moved above `_s3_client()` would pass unnoticed. With a readable clock
+    that regression reports `0.0` here and fails."""
+    clock = MagicMock()
+    clock.monotonic.return_value = 1000.0
+
+    with (
+        patch("cleanup_expired_items.stac_auth.open_resilient_client") as open_client,
+        patch("cleanup_expired_items._session", return_value=MagicMock()),
+        patch("cleanup_expired_items._s3_client", side_effect=RuntimeError("IMDS stall")),
+        patch("cleanup_expired_items.time", clock),
+    ):
+        code = run_cleanup(_args(execute=True))
+
+    summary = _capture_lines(capsys)[-1]
+    assert code == 1
+    assert summary["aborted"] is True
+    assert summary["discovered"] is None
+    assert summary["discovery_seconds"] is None
+    open_client.assert_not_called()
+
+
+@pytest.mark.parametrize("raw", ["abc", "6000"])
+def test_bad_stac_http_timeout_aborts_inside_the_guard(monkeypatch, capsys, raw) -> None:
+    """Contract: unlike a bad flag (exit 2, no summary), a bad STAC_HTTP_TIMEOUT is read
+    when the search client opens, so the tick exits 1 WITH an aborted summary."""
+    monkeypatch.setenv("STAC_HTTP_TIMEOUT", raw)
+    with (
+        patch("cleanup_expired_items._session", return_value=MagicMock()),
+        patch("cleanup_expired_items._s3_client", return_value=MagicMock()),
+    ):
+        code = run_cleanup(_args(execute=True))
+
+    summary = _capture_lines(capsys)[-1]
+    assert code == 1
+    assert summary["aborted"] is True
+    assert summary["discovered"] is None
 
 
 # === The auth hook raises RuntimeError, not RequestException (issue #364) ===
@@ -1242,7 +1479,7 @@ def test_run_cleanup_survives_an_auth_hook_failure_on_the_delete(expired_item, c
     ]
 
     with (
-        patch("cleanup_expired_items.Client.open", return_value=client),
+        patch("cleanup_expired_items.stac_auth.open_resilient_client", return_value=client),
         patch("cleanup_expired_items._session", return_value=session),
         patch("cleanup_expired_items._s3_client", return_value=s3),
     ):
@@ -1267,7 +1504,7 @@ def test_run_cleanup_survives_an_auth_hook_failure_on_the_refetch(expired_item, 
     session.get.side_effect = RuntimeError("Failed to fetch OIDC token: 503")
 
     with (
-        patch("cleanup_expired_items.Client.open", return_value=client),
+        patch("cleanup_expired_items.stac_auth.open_resilient_client", return_value=client),
         patch("cleanup_expired_items._session", return_value=session),
         patch("cleanup_expired_items._s3_client", return_value=MagicMock()),
     ):
@@ -1295,7 +1532,7 @@ def test_run_cleanup_emits_an_aborted_summary_when_discovery_raises(capsys) -> N
     client.search.return_value.items_as_dicts.side_effect = requests.ConnectionError("boom")
 
     with (
-        patch("cleanup_expired_items.Client.open", return_value=client),
+        patch("cleanup_expired_items.stac_auth.open_resilient_client", return_value=client),
         patch("cleanup_expired_items._session", return_value=MagicMock()),
         patch("cleanup_expired_items._s3_client", return_value=MagicMock()),
     ):

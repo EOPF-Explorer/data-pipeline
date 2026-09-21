@@ -1,7 +1,6 @@
 import copy
 import json
 import logging
-import os
 import sys
 import threading
 from collections.abc import Iterator
@@ -13,9 +12,6 @@ from typing import Any
 import click
 import pystac
 import requests
-from pystac_client import Client
-from pystac_client.stac_api_io import StacApiIO
-from urllib3.util.retry import Retry
 
 from _migrate_catalog.types import MigrationFn, MigrationResult
 
@@ -28,30 +24,11 @@ import stac_auth  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-# Resilience for the search-pagination client on long backfills. Two failures
-# seen live against the prod STAC API:
-#   - no timeout -> a stalled socket hangs the whole run forever (4.5h wall /
-#     26s CPU, never past "Found N items").
-#   - weak default retries -> a transient ConnectionReset mid-pagination aborts
-#     the entire run (crashed at ~20% of a 23k-item staging backfill).
-# _resilient_stac_io gives the pagination client a per-request timeout plus
-# urllib3 retries with exponential backoff on connection errors and 5xx, for GET
-# and the POST /search pagination. urllib3 cannot always retry a reset mid-body,
-# so this is best-effort; the migration is idempotent (skips already-stamped),
-# so anything that still slips through is recovered by simply re-running.
-# Override the timeout via STAC_HTTP_TIMEOUT.
-_SEARCH_TIMEOUT = float(os.getenv("STAC_HTTP_TIMEOUT", "60"))
-
-
-def _resilient_stac_io() -> StacApiIO:
-    retry = Retry(
-        total=8,
-        backoff_factor=1.0,
-        status_forcelist=(429, 502, 503, 504),
-        allowed_methods=frozenset({"GET", "POST"}),
-        raise_on_status=False,
-    )
-    return StacApiIO(timeout=_SEARCH_TIMEOUT, max_retries=retry)
+# Pagination resilience now lives in stac_auth.resilient_stac_io(), shared with the crons
+# that failed the same way. Three changes for this caller: the timeout is finally real
+# (Client.open used to reset it to None), 500 is retried, and the ladder is shorter.
+# urllib3 cannot always retry a reset mid-body, so it stays best-effort — the migration is
+# idempotent, so whatever slips through is recovered by re-running.
 
 
 def _transaction_body(item_dict: dict[str, Any]) -> dict[str, Any] | None:
@@ -241,7 +218,7 @@ class STACMigrationRunner:
             errors=[],
         )
 
-        catalog = Client.open(self.api_url, stac_io=_resilient_stac_io())
+        catalog = stac_auth.open_resilient_client(self.api_url)
         # `ids` restricts the run to specific items (the canary path) via the same code path,
         # recovery JSONL, and history as the full run. Omitted from the call when unset so the
         # full-collection search stays byte-identical (backcompat).
@@ -372,7 +349,7 @@ class STACMigrationRunner:
 
     def _fetch_existing_ids(self, collection_id: str, page_size: int) -> set[str]:
         """Return the set of item IDs already present in collection_id."""
-        catalog = Client.open(self.api_url, stac_io=_resilient_stac_io())
+        catalog = stac_auth.open_resilient_client(self.api_url)
         search = catalog.search(
             collections=[collection_id],
             max_items=None,
@@ -407,7 +384,7 @@ class STACMigrationRunner:
             existing_ids = self._fetch_existing_ids(target_id, page_size)
             click.echo(f"Found {len(existing_ids)} items already in '{target_id}', skipping them.")
 
-        catalog = Client.open(self.api_url, stac_io=_resilient_stac_io())
+        catalog = stac_auth.open_resilient_client(self.api_url)
         search = catalog.search(collections=[source_id], max_items=None, limit=page_size)
 
         total = search.matched()
