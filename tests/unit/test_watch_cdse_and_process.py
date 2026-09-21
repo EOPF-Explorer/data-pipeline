@@ -433,3 +433,65 @@ def test_run_watch_rejects_env_mismatch_before_querying_cdse() -> None:
     ):
         run_watch(args)
     mock_query.assert_not_called()
+
+
+# --- ingest order is load-bearing -------------------------------------------------------------
+# The writer appends one acquisition per Script-B call under a monotonicity guard, so the order
+# this watcher walks CDSE results in decides whether a run succeeds or wedges permanently.
+
+
+def test_query_returns_products_oldest_first() -> None:
+    """CDSE sets no `sortby` and answers newest-first in practice; we must hand back oldest-first.
+
+    Newest-first means every older product in the same run is an out-of-order append: each fails,
+    none is marked processed, and the next run repeats the identical order.
+    """
+    items = [
+        _item("newest", dt.datetime(2025, 2, 9, 6, 29, tzinfo=dt.UTC)),
+        _item("oldest", dt.datetime(2025, 2, 5, 6, 30, tzinfo=dt.UTC)),
+        _item("middle", dt.datetime(2025, 2, 7, 6, 31, tzinfo=dt.UTC)),
+    ]
+    with patch(f"{_MOD}.Client.open", return_value=_patched_client(items)):
+        products = query_cdse("https://cdse/stac", [0.5, 42.4, 1.8, 43.3], "descending", 7)
+    assert [p["product_id"] for p in products] == ["oldest", "middle", "newest"]
+
+
+def test_query_keeps_same_date_products_in_source_order() -> None:
+    """Same-date ties keep CDSE's own order — the sort adds ordering, it does not invent any."""
+    items = [
+        _item("first", dt.datetime(2025, 2, 5, 6, 29, tzinfo=dt.UTC)),
+        _item("second", dt.datetime(2025, 2, 5, 18, 3, tzinfo=dt.UTC)),
+    ]
+    with patch(f"{_MOD}.Client.open", return_value=_patched_client(items)):
+        products = query_cdse("https://cdse/stac", [0.5, 42.4, 1.8, 43.3], "descending", 7)
+    assert [p["product_id"] for p in products] == ["first", "second"]
+
+
+def test_script_b_does_not_get_allow_out_of_order_by_default() -> None:
+    from watch_cdse_and_process import _script_b_cmd
+
+    assert "--allow-out-of-order" not in _script_b_cmd(_args(), "31TCH", "s3://b/in/")
+
+
+def test_script_b_forwards_allow_out_of_order() -> None:
+    """The backfill escape hatch has to reach Script B, which forwards it to the writer."""
+    from watch_cdse_and_process import _script_b_cmd
+
+    cmd = _script_b_cmd(_args(allow_out_of_order=True), "31TCH", "s3://b/in/")
+    assert "--allow-out-of-order" in cmd
+
+
+def test_run_watch_rejects_a_bad_tile_before_running_script_a() -> None:
+    """A tile-id typo must fail before Script A burns hours of orthorectification on it.
+
+    Script B validates the tile id too, but only after s1tiling has already written GeoTIFFs to S3
+    — the same reason check_env_consistency is hoisted here.
+    """
+    with (
+        patch(f"{_MOD}.query_cdse") as mock_query,
+        patch(f"{_MOD}.subprocess.run") as mock_run,
+        pytest.raises(ValueError, match="MGRS tile id"),
+    ):
+        run_watch(_args(tiles="31TCH,not-a-tile"))
+    mock_query.assert_not_called()
+    mock_run.assert_not_called()

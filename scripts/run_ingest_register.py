@@ -75,6 +75,21 @@ def check_env_consistency(collection: str, s3_output_bucket: str) -> None:
         )
 
 
+def check_tile_id(tile_id: str) -> None:
+    """Reject a tile id the STAC builder would refuse, before anything is written.
+
+    Raises ``ValueError`` on anything that is not an MGRS tile id. Callable on its own because the
+    watcher runs Script A (hours of orthorectification, writing GeoTIFFs to S3) *before* Script B
+    reaches ``run_pipeline`` — checking only here would mean a typo still burns a full s1tiling run.
+    """
+    if not _MGRS_TILE_RE.fullmatch(tile_id):
+        raise ValueError(
+            f"tile_id must be an MGRS tile id such as '31TCH', got: {tile_id!r}. Ingest would write "
+            f"the cube to s1-rtc-{tile_id}.zarr and only fail afterwards, when the STAC builder "
+            "rejects the store name -- leaving an orphaned cube behind."
+        )
+
+
 def run_pipeline(
     s3_geotiff_prefix: str,
     tile_id: str,
@@ -85,17 +100,13 @@ def run_pipeline(
     stac_api_url: str,
     raster_api_url: str,
     acquisitions_collection: str = "sentinel-1-grd-rtc-acquisitions",
+    allow_out_of_order: bool = False,
 ) -> int:
     if not collection or "/" in collection:
         raise ValueError(
             f"collection must be a non-empty single path segment (no '/'), got: {collection!r}"
         )
-    if not _MGRS_TILE_RE.fullmatch(tile_id):
-        raise ValueError(
-            f"tile_id must be an MGRS tile id such as '31TCH', got: {tile_id!r}. Ingest would write "
-            f"the cube to s1-rtc-{tile_id}.zarr and only fail afterwards, when the STAC builder "
-            "rejects the store name -- leaving an orphaned cube behind."
-        )
+    check_tile_id(tile_id)
     check_env_consistency(collection, s3_output_bucket)
     # TEMPORARY (#246): write the cube directly at titiler-eopf's reconstructed render path
     # — s3://{bucket}/tests-output/{collection}/{item_id}.zarr where item_id == s1-rtc-{tile} —
@@ -121,6 +132,11 @@ def run_pipeline(
         tile_id,
         "--orbit-direction",
         orbit_direction,
+        # From eopf-geozarr 0.11.0 the writer refuses an append whose acquisition predates the
+        # cube's last time slice. Without this passthrough the guard has no operator escape hatch
+        # here, and a backfill (or any newest-first source ordering) wedges: every older product
+        # fails, is never marked processed, and the next run repeats the same failure forever.
+        *(["--allow-out-of-order"] if allow_out_of_order else []),
     ]
     result = subprocess.run(ingest_cmd)  # noqa: S603  # nosec B603 -- fixed argv, no shell
     if result.returncode == 2:
@@ -195,6 +211,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default="sentinel-1-grd-rtc-acquisitions",
         help="STAC collection for the per-acquisition items (registered alongside the cube item)",
     )
+    parser.add_argument(
+        "--allow-out-of-order",
+        action="store_true",
+        help="Forward to the writer's monotonicity guard: accept an acquisition older than the "
+        "cube's last time slice. OFF by default so a routine cron inversion still fails loudly.",
+    )
     return parser
 
 
@@ -212,6 +234,7 @@ def main() -> None:
             stac_api_url=args.stac_api_url,
             raster_api_url=args.raster_api_url,
             acquisitions_collection=args.acquisitions_collection,
+            allow_out_of_order=args.allow_out_of_order,
         )
     )
 
