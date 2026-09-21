@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.17.1 (2026-09-21)
+
+## What's Changed
+* fix(storage-tier): refuse to write back proxy-corrupted raster links by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/406
+* chore(demo): protect carbonplan/zarr-layer scene from expiry by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/414
+* fix(stac): point S2 AOT/WVP assets at the store root (titiler-eopf#163) by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/412
+* chore(deps): bump anyio and pillow for the critical and high advisories by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/419
+* fix(s1-rtc): prepare the registration and validation paths for the data-model v0.11.0 pin by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/413
+* fix(stac): retry transient 5xx on search pagination, including the gateway's 500 by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/418
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.17.0...v1.17.1
+
 ## 1.17.0 (2026-09-08)
 
 ## What's Changed
