@@ -157,10 +157,34 @@ class TestUpsertItemBuildsBodyOffline:
     """
 
     @staticmethod
-    def _source_item() -> Item:
-        """A real EODC source item, cloned the way ``register_v1`` clones it."""
+    def _source_dict() -> dict:
         fixture = Path(__file__).parents[1] / "fixtures/stac_to_register" / SOURCE_ITEM_FIXTURE
-        return Item.from_dict(json.loads(fixture.read_text())).clone()
+        return json.loads(fixture.read_text())
+
+    @classmethod
+    def _source_item(cls) -> Item:
+        """A real EODC source item, carrying the ``root`` link that would be resolved.
+
+        Not a full stand-in for production's clone: ``register_v1`` strips href-less assets from
+        the source JSON before ``Item.from_dict`` (which would otherwise raise ``KeyError``), and
+        this fixture has none to strip. What matters here is the root link, not the assets.
+        """
+        return Item.from_dict(cls._source_dict()).clone()
+
+    def test_the_no_network_guard_has_teeth(self, no_network):
+        """Positive control, without which every test below could pass for the wrong reason.
+
+        pystac's *default* ``to_dict()`` must trip the guard. The root href is rewritten to
+        ``127.0.0.1:9`` — a host that resolves — so a failure here comes from the guard rather
+        than from DNS, which a live or ``.invalid`` host could not distinguish.
+        """
+        item = self._source_dict()
+        for link in item["links"]:
+            if link["rel"] == "root":
+                link["href"] = "http://127.0.0.1:9/"
+
+        with pytest.raises(AssertionError, match="network I/O during body build"), no_network():
+            Item.from_dict(item).to_dict()
 
     def test_body_build_opens_no_socket(self, no_network):
         client = _make_client()
