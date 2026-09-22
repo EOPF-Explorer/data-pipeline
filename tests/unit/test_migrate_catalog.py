@@ -1,10 +1,13 @@
 """Unit tests for the migrate_catalog package."""
 
+import copy
 import json
-from pathlib import Path
+import traceback
 from contextlib import contextmanager
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pystac
 import pytest
 from _migrate_catalog.history import load_history, record_run, was_migration_run
 from _migrate_catalog.migrations.add_acquisitions_filter_link import add_acquisitions_filter_link
@@ -13,7 +16,7 @@ from _migrate_catalog.migrations.align_visualization_links import align_visualiz
 from _migrate_catalog.migrations.fix_url_encoding import fix_url_encoding
 from _migrate_catalog.migrations.fix_zarr_media_type import fix_zarr_media_type
 from _migrate_catalog.migrations.repoint_atmosphere_assets import repoint_atmosphere_assets
-from _migrate_catalog.runner import STACMigrationRunner, compose_migrations
+from _migrate_catalog.runner import STACMigrationRunner, _transaction_body, compose_migrations
 from _migrate_catalog.types import MigrationResult
 
 FIXTURES_DIR = Path(__file__).parent.parent / "fixtures" / "migrate_catalog"
@@ -3211,11 +3214,6 @@ class TestVerifyCanFail:
 # the PUT it preceded, and never parallelised. These tests pin the body build to pure
 # computation: any socket opened while building a body is a failure.
 
-import copy  # noqa: E402
-
-import pystac  # noqa: E402
-from _migrate_catalog.runner import _transaction_body  # noqa: E402
-
 
 def _prod_shaped_item(item_id: str = "S2B_MSIL2A_20260921T141029_N0513_R053_T25WFQ") -> dict:
     """An item as ``/search`` returns it: absolute hierarchical links (collection, parent,
@@ -3296,13 +3294,8 @@ class TestTransactionBodyIsOffline:
                 link["href"] = "http://127.0.0.1:9/"
         with _no_network(), pytest.raises(Exception) as exc:
             pystac.Item.from_dict(item).to_dict()
-        chain, err = [], exc.value
-        while err is not None and err not in chain:
-            chain.append(err)
-            err = err.__cause__ or err.__context__
-        assert any("network I/O during body build" in str(e) for e in chain), (
-            f"guard never fired; chain was {[type(e).__name__ for e in chain]}"
-        )
+        trace = "".join(traceback.format_exception(exc.value))
+        assert "network I/O during body build" in trace, f"guard never fired; chain was {trace}"
 
     def test_body_build_opens_no_socket(self):
         with _no_network():
