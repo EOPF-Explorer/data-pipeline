@@ -1,9 +1,13 @@
 """Unit tests for the migrate_catalog package."""
 
+import copy
 import json
+import traceback
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pystac
 import pytest
 from _migrate_catalog.history import load_history, record_run, was_migration_run
 from _migrate_catalog.migrations.add_acquisitions_filter_link import add_acquisitions_filter_link
@@ -12,7 +16,7 @@ from _migrate_catalog.migrations.align_visualization_links import align_visualiz
 from _migrate_catalog.migrations.fix_url_encoding import fix_url_encoding
 from _migrate_catalog.migrations.fix_zarr_media_type import fix_zarr_media_type
 from _migrate_catalog.migrations.repoint_atmosphere_assets import repoint_atmosphere_assets
-from _migrate_catalog.runner import STACMigrationRunner, compose_migrations
+from _migrate_catalog.runner import STACMigrationRunner, _transaction_body, compose_migrations
 from _migrate_catalog.types import MigrationResult
 
 FIXTURES_DIR = Path(__file__).parent.parent / "fixtures" / "migrate_catalog"
@@ -3199,3 +3203,214 @@ class TestVerifyCanFail:
         res = CliRunner().invoke(climod.cli, ["verify", "coll", "--migration", "fix_url_encoding"])
         assert res.exit_code == 0, res.output
         assert called == ["reset"]
+
+
+# === The write body is built OFFLINE (the 2026-09-22 T8 D4 halt) ===
+#
+# pystac's ``Item.to_dict()`` defaults to ``transform_hrefs=True``, which resolves the item's
+# ``root`` link over HTTP (no timeout, no retry, a fresh fetch per ``from_dict``) to decide
+# whether hrefs should be relativised. Every prod item carries an absolute root link, so the
+# D2 restamp paid one landing-page GET per item on the main thread — ~0.36 s each, more than
+# the PUT it preceded, and never parallelised. These tests pin the body build to pure
+# computation: any socket opened while building a body is a failure.
+
+
+def _prod_shaped_item(item_id: str = "S2B_MSIL2A_20260921T141029_N0513_R053_T25WFQ") -> dict:
+    """An item as ``/search`` returns it: absolute hierarchical links (collection, parent,
+    root, self) — exactly what sends pystac's default ``to_dict`` to fetch the root."""
+    api = "https://api.example.com/stac"
+    return {
+        "type": "Feature",
+        "stac_version": "1.1.0",
+        "id": item_id,
+        "collection": "sentinel-2-l2a",
+        "geometry": {"type": "Point", "coordinates": [0.0, 0.0]},
+        "bbox": [0.0, 0.0, 0.0, 0.0],
+        "properties": {
+            "datetime": "2026-09-21T14:10:29.024000Z",
+            "expires": "2026-12-21T00:00:30Z",
+        },
+        "stac_extensions": [TIMESTAMPS_EXTENSION],
+        "links": [
+            {
+                "rel": "collection",
+                "type": "application/json",
+                "href": f"{api}/collections/sentinel-2-l2a",
+            },
+            {
+                "rel": "parent",
+                "type": "application/json",
+                "href": f"{api}/collections/sentinel-2-l2a",
+            },
+            {"rel": "root", "type": "application/json", "href": f"{api}/"},
+            {
+                "rel": "self",
+                "type": "application/geo+json",
+                "href": f"{api}/collections/sentinel-2-l2a/items/{item_id}",
+            },
+            {
+                "rel": "store",
+                "href": "https://s3.example.com/bucket/x.zarr",
+                "type": "application/octet-stream",
+                "title": "Zarr Store",
+            },
+        ],
+        "assets": {
+            "product": {
+                "href": "https://s3.example.com/bucket/x.zarr",
+                "type": "application/vnd+zarr; version=3",
+                "roles": ["data"],
+            }
+        },
+    }
+
+
+@contextmanager
+def _no_network():
+    """Fail ANY outbound network attempt: a body build must be pure computation.
+
+    Patching only ``socket.socket`` silently weakens this: urllib3 resolves the host first,
+    so a DNS-unresolvable href raises in ``getaddrinfo`` and the socket is never built --
+    the test then passes for the wrong reason, and would keep passing if a regression
+    reached the network over a pooled keep-alive connection.
+    """
+    boom = AssertionError("network I/O during body build")
+    with (
+        patch("socket.socket", side_effect=boom),
+        patch("socket.getaddrinfo", side_effect=boom),
+        patch("socket.create_connection", side_effect=boom),
+    ):
+        yield
+
+
+class TestTransactionBodyIsOffline:
+    def test_the_guard_catches_pystac_default_behaviour(self):
+        # First prove the guard has teeth: pystac's default to_dict() on a prod-shaped item
+        # does reach for the network. This is the original bug, expressed as a test.
+        # 127.0.0.1 resolves, so a failure here comes from the guard, not from DNS.
+        item = _prod_shaped_item()
+        for link in item["links"]:
+            if link.get("rel") == "root":
+                link["href"] = "http://127.0.0.1:9/"
+        with _no_network(), pytest.raises(Exception) as exc:
+            pystac.Item.from_dict(item).to_dict()
+        trace = "".join(traceback.format_exception(exc.value))
+        assert "network I/O during body build" in trace, f"guard never fired; chain was {trace}"
+
+    def test_body_build_opens_no_socket(self):
+        with _no_network():
+            body = _transaction_body(_prod_shaped_item())
+        assert body["id"] == _prod_shaped_item()["id"]
+
+    def test_body_is_the_item_as_read(self):
+        # Nothing invented: no title copied onto the root link from a fetched landing page,
+        # hrefs untouched, properties re-materialised to the same values.
+        item = _prod_shaped_item()
+        with _no_network():
+            body = _transaction_body(item)
+        assert body == item
+
+    def test_datacube_null_datetime_is_still_materialised(self):
+        # The reason pystac is in the loop at all: the transaction API needs the key present.
+        item = _prod_shaped_item()
+        item["properties"] = {
+            "start_datetime": "2026-06-01T00:00:00Z",
+            "end_datetime": "2026-07-01T00:00:00Z",
+        }
+        with _no_network():
+            body = _transaction_body(item)
+        assert body["properties"]["datetime"] is None
+
+    def test_unmodelable_item_raises_with_the_cause(self):
+        item = _prod_shaped_item()
+        item["assets"]["vv"] = {"roles": ["data"]}  # no href — pystac cannot model it
+        with _no_network(), pytest.raises(KeyError, match="href"):
+            _transaction_body(item)
+
+    def test_run_migration_builds_every_body_offline(self):
+        # The runner-level statement of the same rule, at the concurrency D4 uses. Only the
+        # PUT is pooled; the body build runs on this thread, so a per-item GET here would
+        # serialise the whole run behind it.
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        runner._update_item = MagicMock()
+        items = [_prod_shaped_item(f"item-{i}") for i in range(5)]
+        mock_search = MagicMock()
+        mock_search.matched.return_value = len(items)
+        mock_search.pages_as_dicts.return_value = [{"features": items}]
+
+        def shorten(item: dict) -> dict:
+            out = copy.deepcopy(item)
+            out["properties"]["expires"] = "2026-12-20T14:10:29Z"
+            return out
+
+        with (
+            patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open,
+            _no_network(),
+        ):
+            mock_open.return_value.search.return_value = mock_search
+            result = runner.run_migration(
+                "sentinel-2-l2a", shorten, "restamp_expires", concurrency=8
+            )
+
+        assert (result.items_modified, result.items_failed) == (5, 0)
+        bodies = [call.args[2] for call in runner._update_item.call_args_list]
+        assert {b["properties"]["expires"] for b in bodies} == {"2026-12-20T14:10:29Z"}
+        assert all(
+            "title" not in next(lk for lk in b["links"] if lk["rel"] == "root") for b in bodies
+        )
+
+    def test_unmodelable_item_is_failed_with_the_cause_and_not_written(self):
+        # A body-build failure never trips the circuit breaker, so the error text is the only
+        # thing an operator has to triage it against anything new.
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        runner._update_item = MagicMock()
+        bad = _prod_shaped_item("hrefless")
+        bad["assets"]["vv"] = {"roles": ["data"]}
+        mock_search = MagicMock()
+        mock_search.matched.return_value = 1
+        mock_search.pages_as_dicts.return_value = [{"features": [bad]}]
+
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = mock_search
+            result = runner.run_migration("sentinel-2-l2a", lambda item: dict(item), "x")
+
+        assert (result.items_modified, result.items_failed) == (0, 1)
+        runner._update_item.assert_not_called()
+        assert "KeyError" in result.errors[0]["error"]
+        assert "href" in result.errors[0]["error"]
+
+
+class TestHistoryIgnoresRunsThatWroteNothing:
+    """A run whose every write failed walks the whole collection, trips no breaker
+    (body-build failures are not consecutive write failures) and ends with neither
+    ``aborted`` nor ``reached_max_writes`` set — so it used to be recorded as the
+    migration having been applied, and the next invocation's 'Run again? [N]' would
+    abandon the backfill on its safe-looking default."""
+
+    def test_a_run_where_every_write_failed_is_not_applied(self, tmp_path, migration_result):
+        history_file = tmp_path / "history.json"
+        migration_result.items_modified = 0
+        migration_result.items_failed = 100
+        record_run(history_file, migration_result)
+
+        assert not was_migration_run(history_file, "fix_zarr_media_type", "sentinel-2-l2a")
+
+    def test_a_no_op_second_pass_still_counts_as_applied(self, tmp_path, migration_result):
+        # Nothing to write and nothing failed: that is what "already applied" looks like.
+        history_file = tmp_path / "history.json"
+        migration_result.items_modified = 0
+        migration_result.items_failed = 0
+        migration_result.items_skipped = 100
+        record_run(history_file, migration_result)
+
+        assert was_migration_run(history_file, "fix_zarr_media_type", "sentinel-2-l2a")
+
+    def test_a_run_with_some_failures_still_counts(self, tmp_path, migration_result):
+        # The warning is the operator's cue to re-run for the few that failed; only a run
+        # that changed nothing is excluded.
+        history_file = tmp_path / "history.json"
+        migration_result.items_modified = 97
+        migration_result.items_failed = 3
+        record_run(history_file, migration_result)
+
+        assert was_migration_run(history_file, "fix_zarr_media_type", "sentinel-2-l2a")
