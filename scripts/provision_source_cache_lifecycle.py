@@ -47,6 +47,7 @@ import json
 import logging
 import os
 import sys
+import time
 from typing import Any
 
 import boto3
@@ -59,6 +60,11 @@ RULE_ID = "expire-source-cache"
 DEFAULT_BUCKET = "esa-zarr-sentinel-explorer-fra"
 DEFAULT_PREFIX = "source-cache/"
 DEFAULT_DAYS = 7
+
+# Lifecycle configuration is eventually consistent, so the read-back gets a few tries
+# before it calls a write failed. Tests set _VERIFY_ATTEMPTS = 1.
+_VERIFY_ATTEMPTS = 3
+_VERIFY_DELAY_S = 1.5
 
 
 def expiration_rule(prefix: str, days: int) -> dict:
@@ -103,7 +109,9 @@ def _describe(rule: dict) -> str:
     the point of the dry run."""
     rule_filter = rule.get("Filter", {})
     scope = rule_filter.get("And", rule_filter) or {"Prefix": rule.get("Prefix")}
-    prefix = scope.get("Prefix") or "<none>"
+    # An empty prefix matches EVERY object. It must not print like an absent one.
+    prefix = scope.get("Prefix", None)
+    prefix = '"" (whole bucket)' if prefix == "" else (prefix or "<none>")
     line = f"  {rule.get('ID')}  status={rule.get('Status')}  prefix={prefix}"
     if "ObjectSizeGreaterThan" in scope:
         line += f"  size>{scope['ObjectSizeGreaterThan']}B"
@@ -140,15 +148,23 @@ def _verify_stored(client: Any, bucket: str, proposed: list[dict]) -> list[dict]
     this exists to catch. Rules are compared by ID so a server that reorders them does
     not read as a mismatch.
     """
-    stored = read_rules(client, bucket)
-    want = {rule["ID"]: rule for rule in proposed}
-    got = {rule.get("ID"): rule for rule in stored}
-    if got == want and len(stored) == len(proposed):
-        return stored
+    want = {rule.get("ID"): rule for rule in proposed}
+    # Lifecycle configuration propagates: a GET straight after the PUT can still answer with
+    # the old config. Re-read a few times before calling it a failure, so a rollback that
+    # actually worked does not report a false alarm at the worst possible moment.
+    for attempt in range(_VERIFY_ATTEMPTS):
+        stored = read_rules(client, bucket)
+        got = {rule.get("ID"): rule for rule in stored}
+        if got == want and len(stored) == len(proposed):
+            return stored
+        if attempt + 1 < _VERIFY_ATTEMPTS:
+            time.sleep(_VERIFY_DELAY_S)
 
-    dropped = sorted(want.keys() - got.keys())
-    added = sorted(got.keys() - want.keys())
-    changed = sorted(rid for rid in want.keys() & got.keys() if want[rid] != got[rid])
+    dropped = sorted(k for k in want.keys() - got.keys() if k is not None)
+    added = sorted(k for k in got.keys() - want.keys() if k is not None)
+    changed = sorted(
+        rid for rid in want.keys() & got.keys() if rid is not None and want[rid] != got[rid]
+    )
     detail = ", ".join(
         part
         for part in (
@@ -162,8 +178,8 @@ def _verify_stored(client: Any, bucket: str, proposed: list[dict]) -> list[dict]
         if part
     )
     raise RuntimeError(
-        f"verification failed: {detail}\n"
-        f"sent:   {json.dumps(proposed, indent=2, sort_keys=True)}\n"
+        f"verification failed after {_VERIFY_ATTEMPTS} read(s): {detail}\n"
+        f"sent:   {json.dumps(proposed, indent=2, sort_keys=True, default=str)}\n"
         f"stored: {json.dumps(stored, indent=2, sort_keys=True, default=str)}"
     )
 
@@ -184,9 +200,17 @@ def _commit(
         logger.info("\nDRY RUN — nothing written. Re-run with --apply to commit.")
         return current
 
-    client.put_bucket_lifecycle_configuration(
-        Bucket=bucket, LifecycleConfiguration={"Rules": proposed}
-    )
+    if proposed:
+        client.put_bucket_lifecycle_configuration(
+            Bucket=bucket, LifecycleConfiguration={"Rules": proposed}
+        )
+    else:
+        # S3 has no "configuration with zero rules": a put of an empty Rules list is
+        # MalformedXML, and botocore does not catch it. Removing the last rule means
+        # deleting the configuration. Without this the documented rollback fails exactly
+        # when ours is the only rule — leaving the transition rule installed and moving.
+        logger.info("no rules left — deleting the bucket's lifecycle configuration")
+        client.delete_bucket_lifecycle(Bucket=bucket)
     return _verify_stored(client, bucket, proposed)
 
 

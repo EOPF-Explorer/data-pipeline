@@ -11,6 +11,7 @@ No network: the S3 client is an in-memory fake, so read/merge/put/verify run for
 from __future__ import annotations
 
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,10 @@ sys.path.insert(0, str(scripts_dir))
 
 import provision_source_cache_lifecycle as lc  # noqa: E402
 import provision_tier_down_lifecycle as td  # noqa: E402
+
+# The read-back retries for eventual consistency; an in-memory fake is consistent, so a
+# retry here would only make the failure tests sleep.
+lc._VERIFY_ATTEMPTS = 1
 
 BUCKET = "esa-zarr-sentinel-explorer-fra"
 
@@ -52,6 +57,7 @@ class FakeS3:
         self.rules = rules
         self.read_error = read_error
         self.puts: list[list[dict]] = []
+        self.deletes = 0
 
     def get_bucket_lifecycle_configuration(self, Bucket: str):  # noqa: N803 (boto3 kwarg)
         if self.read_error:
@@ -63,8 +69,16 @@ class FakeS3:
     def put_bucket_lifecycle_configuration(  # noqa: N803 (boto3 kwarg)
         self, Bucket: str, LifecycleConfiguration: dict
     ):
+        # S3 rejects a configuration with zero rules; the fake must too, or the tests
+        # would bless a call that fails in production.
+        if not LifecycleConfiguration["Rules"]:
+            raise _client_error("MalformedXML")
         self.puts.append(LifecycleConfiguration["Rules"])
         self.rules = LifecycleConfiguration["Rules"]
+
+    def delete_bucket_lifecycle(self, Bucket: str):  # noqa: N803 (boto3 kwarg)
+        self.deletes += 1
+        self.rules = None  # back to NoSuchLifecycleConfiguration
 
 
 def _ids(rules: list[dict]) -> set[str]:
@@ -334,6 +348,51 @@ def test_remove_dry_run_writes_nothing():
     fake = FakeS3(rules=[EXPIRE_SOURCE_CACHE, _transition()])
     lc.deprovision(fake, BUCKET, td.RULE_ID, apply=False)
     assert fake.puts == []
+    assert fake.deletes == 0
+
+
+def test_removing_the_last_rule_deletes_the_configuration():
+    """S3 has no configuration with zero rules: putting an empty Rules list is
+    MalformedXML. On a bucket where ours is the only rule — the tests bucket during the
+    scratch probe — a put-based rollback fails and leaves the transition rule live."""
+    fake = FakeS3(rules=[_transition()])
+    lc.deprovision(fake, BUCKET, td.RULE_ID, apply=True)
+    assert fake.deletes == 1
+    assert fake.puts == []  # never attempted the invalid empty put
+    assert lc.read_rules(fake, BUCKET) == []
+
+
+def test_verification_survives_a_date_based_rule_on_the_bucket():
+    """botocore parses Expiration.Date into a datetime. If the failure diagnostic cannot
+    serialise it, a real verification failure turns into a TypeError traceback and the
+    operator loses the one message that says which rule was dropped."""
+    dated: dict[str, Any] = {
+        "ID": "archive-by-date",
+        "Status": "Enabled",
+        "Filter": {"Prefix": "archive/"},
+        "Expiration": {"Date": datetime(2027, 1, 1, tzinfo=UTC)},
+    }
+    fake = _StoresSomethingElse([dated])  # our rule vanished; dated rule survives
+    fake.rules = [dated]
+    with pytest.raises(RuntimeError, match="dropped"):
+        lc.provision(fake, BUCKET, _transition(), apply=True)
+
+
+def test_verification_tolerates_a_rule_with_no_id():
+    """read_rules returns whatever the server sends, and OVH is not guaranteed to assign
+    an ID. An ID-less rule must not turn the read-back into a KeyError after the put."""
+    anonymous: dict[str, Any] = {"Status": "Enabled", "Filter": {"Prefix": "misc/"}}
+    fake = FakeS3(rules=[anonymous])
+    stored = lc.provision(fake, BUCKET, _transition(), apply=True)
+    assert anonymous in stored
+    assert len(stored) == 2
+
+
+def test_an_empty_prefix_is_not_printed_like_an_absent_one():
+    """Filter.Prefix "" matches every object in the bucket. Printing it as <none> would
+    understate the blast radius in the one place an operator checks it."""
+    whole_bucket = {"ID": "abort-mpu", "Status": "Enabled", "Filter": {"Prefix": ""}}
+    assert "whole bucket" in lc._describe(whole_bucket)
 
 
 # --- the CLI contract ----------------------------------------------------------------
