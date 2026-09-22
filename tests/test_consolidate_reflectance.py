@@ -256,13 +256,21 @@ class TestAddStoreLink:
         assert len(store_links) == 1, "Should have exactly one store link"
 
     def test_store_link_has_correct_href(self, stac_item):
-        """Test that store link points to the correct HTTPS URL."""
+        """Test that store link points to the correct HTTPS URL.
+
+        ``get_href(transform_href=False)`` reads the href as stored, which is what
+        ``add_store_link`` is being tested on. The plain ``.href`` property instead resolves the
+        item's ``root`` link — EODC's landing page, in these fixtures — over HTTP, so this test
+        used to make a live third-party call and failed outright without network access.
+        """
         add_store_link(stac_item, "s3://test-bucket/test-prefix/sentinel-2-l2a/test-item.zarr")
 
         store_link = next(link for link in stac_item.links if link.rel == "store")
-        assert store_link.href.startswith("https://"), "Store link should use HTTPS"
-        assert "test-bucket" in store_link.href, "Store link should contain bucket name"
-        assert ".zarr" in store_link.href, "Store link should point to zarr store"
+        href = store_link.get_href(transform_href=False)
+        assert href is not None, "Store link should have an href"
+        assert href.startswith("https://"), "Store link should use HTTPS"
+        assert "test-bucket" in href, "Store link should contain bucket name"
+        assert ".zarr" in href, "Store link should point to zarr store"
 
     @pytest.mark.skip(reason="Media type enforcement may change in future versions")
     def test_store_link_has_correct_media_type(self, stac_item):

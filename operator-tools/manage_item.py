@@ -113,10 +113,19 @@ def extract_s3_object_counts(
 
 
 def _replace_item(session: requests.Session, api_url: str, collection_id: str, item: Item) -> None:
-    """Replace a STAC item in place with a single idempotent PUT."""
+    """Replace a STAC item in place with a single idempotent PUT.
+
+    ``transform_hrefs=False`` is load-bearing (#428, and register_v1's ``upsert_item``). Callers
+    build the item with ``Item.from_dict(...)`` and no ``root=``, so the root link is unresolved;
+    pystac's default resolves it over HTTP through its own IO — un-pooled, no timeout, no retry,
+    no bearer — once per item. This runs inside collection-wide loops, so an N-item repair made N
+    such calls serially, and one stalled connection wedges the run mid-collection with the S3
+    objects already moved and the STAC metadata never written back: exactly the drift this tool
+    exists to repair.
+    """
     response = session.put(
         f"{api_url}/collections/{collection_id}/items/{item.id}",
-        json=item.to_dict(),
+        json=item.to_dict(transform_hrefs=False),
         timeout=30,
     )
     response.raise_for_status()

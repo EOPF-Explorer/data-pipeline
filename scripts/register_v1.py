@@ -134,13 +134,27 @@ def upsert_item(client: Client, collection_id: str, item: Item) -> None:
     existence pre-check, which can mis-read transient/conformance errors as "absent"
     and then 409 (#186). Replacing via a single PUT (#352) means no code path can
     leave an item deleted-but-not-recreated, unlike the previous DELETE-then-POST.
+
+    ``transform_hrefs=False`` is load-bearing, same as in the migrate runner (#428). pystac's
+    default resolves the item's ``root`` link over HTTP to learn whether the catalogue is
+    relative-published. Here that root is *EODC's* landing page, inherited from the source item
+    we cloned — so every registration made one un-pooled, un-timed-out, un-retried GET against a
+    third party, on the calling thread, before the write it belongs to. EODC's 502s then failed
+    registrations whose actual write would have succeeded.
+
+    Skipping the transformation cannot introduce a relative href: ``Item.to_dict`` never forwards
+    the flag to assets, and ``Link.get_href`` only ever converts absolute → relative (for a
+    relative-published root), never the reverse. The one thing resolution did change is the same
+    one #428 recorded: ``Link.title`` falls through to the resolved catalogue's title, so the root
+    link gained ``"title": "EOPF Sentinel Zarr Samples Service STAC API"``. pgstac discards
+    hierarchical links on read, so dropping it is inert — but it is a difference, not parity.
     """
     io = client._stac_io
     assert io is not None  # noqa: S101  # nosec B101 -- pystac-client always sets this after open()
     session = io.session
     base_url = str(client.self_href).rstrip("/")
     create_url = f"{base_url}/collections/{collection_id}/items"
-    item_dict = item.to_dict()
+    item_dict = item.to_dict(transform_hrefs=False)
     headers = {"Content-Type": "application/json"}
 
     resp = session.post(create_url, json=item_dict, headers=headers, timeout=30)

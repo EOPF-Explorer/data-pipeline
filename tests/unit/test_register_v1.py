@@ -1,10 +1,11 @@
 """Unit tests for register_v1.py — upsert_item + expires stamping."""
 
 import contextlib
+import json
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import MagicMock, Mock
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 import requests
@@ -140,6 +141,120 @@ class TestUpsertItemPutFailure:
         # only the first POST (the 409) was made; no re-POST after the PUT failed
         assert client._stac_io.session.post.call_count == 1
         client._stac_io.session.delete.assert_not_called()
+
+
+SOURCE_ITEM_FIXTURE = "S2A_MSIL2A_20251113T102311_N0511_R065_T32TNQ_20251113T142515.json"
+
+
+class TestUpsertItemBuildsBodyOffline:
+    """Building the write body must not touch the network (the #428 bug, on this path).
+
+    Items are cloned from the EODC source item, so they carry its ``root`` link. pystac's
+    default ``to_dict(transform_hrefs=True)`` resolves that link over HTTP to decide whether
+    the catalogue is relative-published: one un-pooled, un-timed-out, un-retried GET against
+    *EODC* per registration, on the calling thread, ahead of the write it belongs to.
+    """
+
+    @staticmethod
+    def _source_item() -> Item:
+        """A real EODC source item, cloned the way ``register_v1`` clones it."""
+        fixture = Path(__file__).parents[1] / "fixtures/stac_to_register" / SOURCE_ITEM_FIXTURE
+        return Item.from_dict(json.loads(fixture.read_text())).clone()
+
+    def test_body_build_opens_no_socket(self):
+        """Patching all three entry points matters: urllib3 resolves the host first, so
+        watching only ``socket.socket`` would miss a call that dies in ``getaddrinfo``.
+
+        These are recording mocks rather than raising ones because pystac wraps every
+        resolution failure (``link.py``: ``except Exception as e: raise STACError(...) from e``).
+        A raised sentinel would surface as "HREF ... does not resolve to a STAC object" — which
+        reads like a stale fixture URL or EODC being down, and whose obvious "fix" is to edit the
+        fixture, leaving the bug in place. Asserting on the calls names the real failure.
+        """
+        client = _make_client()
+        client._stac_io.session.post.return_value = _make_response(201)
+
+        with (
+            patch("socket.socket") as sock,
+            patch("socket.getaddrinfo") as getaddrinfo,
+            patch("socket.create_connection") as create_connection,
+        ):
+            upsert_item(client, "sentinel-2-l2a", self._source_item())
+
+        assert not (
+            sock.called or getaddrinfo.called or create_connection.called
+        ), "building the write body opened a socket"
+        client._stac_io.session.post.assert_called_once()
+
+    def test_409_replace_also_builds_its_body_offline(self):
+        """The PUT branch re-registers an item that already exists — the common case for a
+        re-run — and is only offline today because one ``item_dict`` serves both verbs."""
+        client = _make_client()
+        client._stac_io.session.post.return_value = _make_response(409)
+        client._stac_io.session.put.return_value = _make_response(200)
+
+        with (
+            patch("socket.socket") as sock,
+            patch("socket.getaddrinfo") as getaddrinfo,
+            patch("socket.create_connection") as create_connection,
+        ):
+            upsert_item(client, "sentinel-2-l2a", self._source_item())
+
+        assert not (
+            sock.called or getaddrinfo.called or create_connection.called
+        ), "the 409 replace opened a socket"
+        client._stac_io.session.put.assert_called_once()
+
+    def test_root_link_is_the_one_that_would_be_fetched(self):
+        """Guards the premise: without this link there would be nothing to resolve, and the
+        no-socket test above would pass for the wrong reason.
+
+        ``transform_href=False`` is needed here for the same reason as in ``upsert_item``:
+        the plain ``link.href`` property resolves the root to decide whether to return an
+        absolute or relative href, so reading it would itself make the call this test is
+        about — an easy way to reintroduce the bug in a test that looks read-only.
+        """
+        root_links = [link for link in self._source_item().links if link.rel == "root"]
+
+        assert [link.get_href(transform_href=False) for link in root_links] == [
+            "https://stac.core.eopf.eodc.eu/"
+        ]
+
+    def test_written_body_keeps_absolute_hrefs_and_carries_no_resolved_title(self):
+        """Pins the two observables directly, rather than diffing against a stand-in root.
+
+        A locally built stand-in is worthless here: it gets ``title=None`` and
+        ``ABSOLUTE_PUBLISHED``, which are exactly the properties that make the transformation a
+        no-op, so the comparison passes whatever the code does. The real landing page *does*
+        carry a title, and resolution copies it onto the root link (``Link.title`` falls through
+        to the resolved catalogue) — so its absence is the evidence that no fetch happened.
+        """
+        client = _make_client()
+        client._stac_io.session.post.return_value = _make_response(201)
+        upsert_item(client, "sentinel-2-l2a", self._source_item())
+        written = client._stac_io.session.post.call_args.kwargs["json"]
+
+        root_link = next(link for link in written["links"] if link["rel"] == "root")
+        assert "title" not in root_link, "a resolved root copies the landing page's title"
+        assert root_link["href"] == "https://stac.core.eopf.eodc.eu/"
+        assert all(
+            link["href"].startswith(("http://", "https://", "s3://")) for link in written["links"]
+        )
+        assert all(
+            asset["href"].startswith(("http://", "https://", "s3://"))
+            for asset in written["assets"].values()
+        )
+
+    def test_to_dict_is_asked_not_to_transform_hrefs(self):
+        """The kwarg itself, so a future refactor cannot drop it and still pass the tests
+        above — a MagicMock item returns the same dict whatever it is called with."""
+        client = _make_client()
+        client._stac_io.session.post.return_value = _make_response(201)
+        item = _make_item()
+
+        upsert_item(client, "my-collection", item)
+
+        item.to_dict.assert_called_once_with(transform_hrefs=False)
 
 
 # =============================================================================
