@@ -149,10 +149,13 @@ def upsert_item(client: Client, collection_id: str, item: Item) -> None:
     relative-published root), never the reverse. Note the flag means "emit as stored *unless the
     link is already resolved*" — ``Link.get_href`` returns the target's self href before it
     consults the flag — so it does not protect a path that resolved the link earlier.
-    The one thing resolution did change is the same
-    one #428 recorded: ``Link.title`` falls through to the resolved catalogue's title, so the root
-    link gained ``"title": "EOPF Sentinel Zarr Samples Service STAC API"``. pgstac discards
-    hierarchical links on read, so dropping it is inert — but it is a difference, not parity.
+    Resolution does not merely annotate the root link, it **replaces it wholesale**: measured on
+    the real fixture against a stubbed landing page, the emitted link gains the catalogue's
+    ``title`` ("EOPF Sentinel Zarr Samples Service STAC API", via ``Link.title`` falling through to
+    the resolved object) *and loses* any extra field the source stored on it — an ``hreflang`` on
+    the source root link is dropped. Every difference favours writing what was stored, and pgstac
+    discards hierarchical links on read either way, so this is inert in practice — but it is not
+    parity, and #428's "byte-identical" phrasing overstated it.
     """
     io = client._stac_io
     assert io is not None  # noqa: S101  # nosec B101 -- pystac-client always sets this after open()

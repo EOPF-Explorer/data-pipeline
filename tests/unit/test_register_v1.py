@@ -50,9 +50,20 @@ def _make_response(status_code: int) -> Mock:
 
 
 def _make_item(item_id: str = "test-item-001") -> MagicMock:
+    """A mock item whose ``to_dict`` records which ``transform_hrefs`` it was asked for.
+
+    A kwarg-blind ``return_value`` made the write-body assertions below vacuous: they compared the
+    posted body against ``item.to_dict()`` — the *old* contract — and passed either way, so they
+    would have kept passing if ``upsert_item`` dropped ``transform_hrefs=False``, and would read as
+    an instruction to revert it.
+    """
     item = MagicMock()
     item.id = item_id
-    item.to_dict.return_value = {"id": item_id, "type": "Feature"}
+    item.to_dict.side_effect = lambda transform_hrefs=True: {
+        "id": item_id,
+        "type": "Feature",
+        "hrefs_transformed": transform_hrefs,
+    }
     return item
 
 
@@ -69,7 +80,9 @@ class TestUpsertItemNewItem:
         client._stac_io.session.delete.assert_not_called()
         client._stac_io.session.put.assert_not_called()
         client._stac_io.session.post.assert_called_once()
-        assert client._stac_io.session.post.call_args.kwargs["json"] == item.to_dict()
+        assert client._stac_io.session.post.call_args.kwargs["json"] == item.to_dict(
+            transform_hrefs=False
+        )
 
     def test_post_url_for_new_item(self):
         client = _make_client(base_url="https://stac.example.com")
@@ -113,7 +126,7 @@ class TestUpsertItemExistingItem:
         assert put_call.args[0] == (
             "https://stac.example.com/collections/my-collection/items/existing-item"
         )
-        assert put_call.kwargs["json"] == item.to_dict()
+        assert put_call.kwargs["json"] == item.to_dict(transform_hrefs=False)
 
 
 class TestUpsertItemPutFailure:
