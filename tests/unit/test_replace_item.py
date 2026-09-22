@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, Mock, patch
 import pytest
 import requests
 from click.testing import CliRunner
+from pystac import Item
 
 # ---------------------------------------------------------------------------
 # Module loading
@@ -130,6 +131,36 @@ class TestManageItemReplaceItemHelper:
 
         with pytest.raises(requests.HTTPError):
             manage_item_module._replace_item(session, API_URL, COLLECTION_ID, _make_item())
+
+    def test_builds_the_body_without_resolving_the_root_link(self):
+        """The helper runs inside collection-wide loops, so a per-item root resolution is an
+        N-item serial stall on a run that must not stop half-written (#428).
+
+        Callers pass an item from ``Item.from_dict(...)`` with no ``root=``, so the root link is
+        unresolved and pystac's default ``to_dict()`` would fetch it through its own IO — no
+        timeout, no retry, no bearer. Recording mocks rather than raising ones: pystac rewraps a
+        raised sentinel as "HREF ... does not resolve to a STAC object", which misreads as a bad
+        URL.
+        """
+        root_href = "https://api.example.invalid/stac"
+        session = MagicMock(spec=requests.Session)
+        session.put.return_value = _make_response(200)
+        item = Item.from_dict({**FAKE_ITEM_DICT, "links": [{"rel": "root", "href": root_href}]})
+
+        with (
+            patch("socket.socket") as sock,
+            patch("socket.getaddrinfo") as getaddrinfo,
+            patch("socket.create_connection") as create_connection,
+        ):
+            manage_item_module._replace_item(session, API_URL, COLLECTION_ID, item)
+
+        assert not (
+            sock.called or getaddrinfo.called or create_connection.called
+        ), "building the replace body opened a socket"
+        root_link = next(
+            link for link in session.put.call_args.kwargs["json"]["links"] if link["rel"] == "root"
+        )
+        assert root_link["href"] == root_href
 
 
 # ---------------------------------------------------------------------------
