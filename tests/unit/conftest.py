@@ -1,12 +1,15 @@
 """Shared fixtures for unit tests.
 
-Currently just the OIDC-auth scaffolding used by test_stac_auth.py and
-test_write_sites_authenticated.py (the shared stac_auth helper's token cache + env).
+The OIDC-auth scaffolding used by test_stac_auth.py and test_write_sites_authenticated.py
+(the shared stac_auth helper's token cache + env), plus the ``no_network`` guard used by the
+body-build tests.
 """
 
 import sys
+import traceback
+from contextlib import contextmanager
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -40,6 +43,45 @@ def oidc_env(monkeypatch):
     for key, value in OIDC_ENV.items():
         monkeypatch.setenv(key, value)
     return OIDC_ENV
+
+
+NO_NETWORK_SENTINEL = "network I/O during body build"
+
+
+@contextmanager
+def _no_network():
+    """Fail ANY outbound network attempt inside the block, with a legible message.
+
+    All three entry points are patched deliberately: urllib3 resolves the host first, so
+    watching only ``socket.socket`` would miss a call that dies in ``getaddrinfo``, and a
+    regression reaching the network over a pooled keep-alive connection would skip both.
+
+    The sentinel is re-surfaced because pystac swallows the cause: ``link.py`` rewraps every
+    resolution failure as ``STACError: HREF ... does not resolve to a STAC object``, which reads
+    like a stale fixture URL whose obvious "fix" is to edit the fixture, leaving the bug in
+    place. Raising here rather than recording also keeps the diagnosis reachable — an assertion
+    placed *after* the call never runs, because the rewrapped error escapes the block first.
+    """
+    boom = AssertionError(NO_NETWORK_SENTINEL)
+    try:
+        with (
+            patch("socket.socket", side_effect=boom),
+            patch("socket.getaddrinfo", side_effect=boom),
+            patch("socket.create_connection", side_effect=boom),
+        ):
+            yield
+    except Exception as exc:
+        if NO_NETWORK_SENTINEL in "".join(traceback.format_exception(exc)):
+            raise AssertionError(
+                f"{NO_NETWORK_SENTINEL} (surfaced as {type(exc).__name__})"
+            ) from exc
+        raise
+
+
+@pytest.fixture
+def no_network():
+    """The ``_no_network()`` guard, as a fixture: ``with no_network(): ...``."""
+    return _no_network
 
 
 @pytest.fixture
