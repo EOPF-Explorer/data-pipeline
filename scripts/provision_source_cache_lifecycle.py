@@ -131,12 +131,10 @@ def _report(
 ) -> None:
     """Show what is there now and what would replace it — the whole point of the dry run."""
     logger.info("=== target: s3://%s via %s ===", bucket, endpoint or "<default AWS endpoint>")
-    logger.info("=== current rules ===")
-    for rule in current or [None]:
-        logger.info("%s", _describe(rule) if rule else "  (none)")
-    logger.info("=== proposed ===")
-    for rule in proposed or [None]:
-        logger.info("%s", _describe(rule) if rule else "  (none)")
+    for heading, rules in (("current rules", current), ("proposed", proposed)):
+        logger.info("=== %s ===", heading)
+        for line in [_describe(rule) for rule in rules] or ["  (none)"]:
+            logger.info("%s", line)
     logger.info("=== keeping %d pre-existing rule(s) ===", len(remove_rule(proposed, rule_id)))
 
 
