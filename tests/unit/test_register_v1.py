@@ -5,7 +5,7 @@ import json
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock, Mock
 
 import pytest
 import requests
@@ -150,9 +150,10 @@ class TestUpsertItemBuildsBodyOffline:
     """Building the write body must not touch the network (the #428 bug, on this path).
 
     Items are cloned from the EODC source item, so they carry its ``root`` link. pystac's
-    default ``to_dict(transform_hrefs=True)`` resolves that link over HTTP to decide whether
-    the catalogue is relative-published: one un-pooled, un-timed-out, un-retried GET against
-    *EODC* per registration, on the calling thread, ahead of the write it belongs to.
+    default ``to_dict(transform_hrefs=True)`` resolves that link over HTTP to decide whether the
+    catalogue is relative-published: per registration, on the calling thread, ahead of the write
+    it belongs to, and with urllib3's default ``Retry(3)`` and no timeout — so up to four
+    untimed connect attempts against *EODC*, not one.
     """
 
     @staticmethod
@@ -161,48 +162,25 @@ class TestUpsertItemBuildsBodyOffline:
         fixture = Path(__file__).parents[1] / "fixtures/stac_to_register" / SOURCE_ITEM_FIXTURE
         return Item.from_dict(json.loads(fixture.read_text())).clone()
 
-    def test_body_build_opens_no_socket(self):
-        """Patching all three entry points matters: urllib3 resolves the host first, so
-        watching only ``socket.socket`` would miss a call that dies in ``getaddrinfo``.
-
-        These are recording mocks rather than raising ones because pystac wraps every
-        resolution failure (``link.py``: ``except Exception as e: raise STACError(...) from e``).
-        A raised sentinel would surface as "HREF ... does not resolve to a STAC object" — which
-        reads like a stale fixture URL or EODC being down, and whose obvious "fix" is to edit the
-        fixture, leaving the bug in place. Asserting on the calls names the real failure.
-        """
+    def test_body_build_opens_no_socket(self, no_network):
         client = _make_client()
         client._stac_io.session.post.return_value = _make_response(201)
 
-        with (
-            patch("socket.socket") as sock,
-            patch("socket.getaddrinfo") as getaddrinfo,
-            patch("socket.create_connection") as create_connection,
-        ):
+        with no_network():
             upsert_item(client, "sentinel-2-l2a", self._source_item())
 
-        assert not (
-            sock.called or getaddrinfo.called or create_connection.called
-        ), "building the write body opened a socket"
         client._stac_io.session.post.assert_called_once()
 
-    def test_409_replace_also_builds_its_body_offline(self):
+    def test_409_replace_also_builds_its_body_offline(self, no_network):
         """The PUT branch re-registers an item that already exists — the common case for a
         re-run — and is only offline today because one ``item_dict`` serves both verbs."""
         client = _make_client()
         client._stac_io.session.post.return_value = _make_response(409)
         client._stac_io.session.put.return_value = _make_response(200)
 
-        with (
-            patch("socket.socket") as sock,
-            patch("socket.getaddrinfo") as getaddrinfo,
-            patch("socket.create_connection") as create_connection,
-        ):
+        with no_network():
             upsert_item(client, "sentinel-2-l2a", self._source_item())
 
-        assert not (
-            sock.called or getaddrinfo.called or create_connection.called
-        ), "the 409 replace opened a socket"
         client._stac_io.session.put.assert_called_once()
 
     def test_root_link_is_the_one_that_would_be_fetched(self):
@@ -220,30 +198,35 @@ class TestUpsertItemBuildsBodyOffline:
             "https://stac.core.eopf.eodc.eu/"
         ]
 
-    def test_written_body_keeps_absolute_hrefs_and_carries_no_resolved_title(self):
-        """Pins the two observables directly, rather than diffing against a stand-in root.
+    def test_written_body_keeps_the_root_link_exactly_as_stored(self, no_network):
+        """Pins the written root link, rather than diffing against a stand-in root.
 
         A locally built stand-in is worthless here: it gets ``title=None`` and
         ``ABSOLUTE_PUBLISHED``, which are exactly the properties that make the transformation a
-        no-op, so the comparison passes whatever the code does. The real landing page *does*
-        carry a title, and resolution copies it onto the root link (``Link.title`` falls through
-        to the resolved catalogue) — so its absence is the evidence that no fetch happened.
+        no-op, so the comparison passes whatever the code does. Pinning the whole link instead of
+        asserting ``"title" not in root_link`` also keeps the assertion honest: title-absence is
+        a property of the *fixture* (``Link.title`` returns ``_title`` before consulting the
+        target, and this repo has source items that do carry one), so on its own it is not
+        evidence that no fetch happened. The ``no_network`` guard is that evidence.
         """
         client = _make_client()
         client._stac_io.session.post.return_value = _make_response(201)
-        upsert_item(client, "sentinel-2-l2a", self._source_item())
-        written = client._stac_io.session.post.call_args.kwargs["json"]
 
+        with no_network():
+            upsert_item(client, "sentinel-2-l2a", self._source_item())
+
+        written = client._stac_io.session.post.call_args.kwargs["json"]
         root_link = next(link for link in written["links"] if link["rel"] == "root")
-        assert "title" not in root_link, "a resolved root copies the landing page's title"
-        assert root_link["href"] == "https://stac.core.eopf.eodc.eu/"
+        assert root_link == {
+            "rel": "root",
+            "type": "application/json",
+            "href": "https://stac.core.eopf.eodc.eu/",
+        }
         assert all(
-            link["href"].startswith(("http://", "https://", "s3://")) for link in written["links"]
-        )
-        assert all(
-            asset["href"].startswith(("http://", "https://", "s3://"))
-            for asset in written["assets"].values()
-        )
+            href.startswith(("http://", "https://", "s3://"))
+            for href in [link["href"] for link in written["links"]]
+            + [asset["href"] for asset in written["assets"].values()]
+        ), "a relative href reached the write body"
 
     def test_to_dict_is_asked_not_to_transform_hrefs(self):
         """The kwarg itself, so a future refactor cannot drop it and still pass the tests
