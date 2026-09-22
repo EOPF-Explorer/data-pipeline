@@ -108,10 +108,11 @@ def _describe(rule: dict) -> str:
     of it has to be visible here — a rule whose prefix printed as '<none>' would defeat
     the point of the dry run."""
     rule_filter = rule.get("Filter", {})
-    scope = rule_filter.get("And", rule_filter) or {"Prefix": rule.get("Prefix")}
-    # An empty prefix matches EVERY object. It must not print like an absent one.
-    prefix = scope.get("Prefix", None)
-    prefix = '"" (whole bucket)' if prefix == "" else (prefix or "<none>")
+    scope = rule_filter.get("And") or rule_filter or {"Prefix": rule.get("Prefix")}
+    # A rule scopes to the WHOLE bucket in three shapes: Filter {} (what the AWS console
+    # emits), no Filter at all, and an explicit empty Prefix. None of them may print like
+    # a narrow rule — this line is the operator's only view of the blast radius.
+    prefix = scope.get("Prefix") or "(whole bucket)"
     line = f"  {rule.get('ID')}  status={rule.get('Status')}  prefix={prefix}"
     if "ObjectSizeGreaterThan" in scope:
         line += f"  size>{scope['ObjectSizeGreaterThan']}B"
@@ -138,26 +139,40 @@ def _report(
     logger.info("=== keeping %d pre-existing rule(s) ===", len(remove_rule(proposed, rule_id)))
 
 
+def _fingerprint(rules: list[dict]) -> list[str]:
+    """Rules as a comparable multiset: order-independent and ID-agnostic."""
+    return sorted(json.dumps(rule, sort_keys=True, default=str) for rule in rules)
+
+
 def _verify_stored(client: Any, bucket: str, proposed: list[dict]) -> list[dict]:
     """Read back what the put actually stored, and insist it is exactly what we sent.
 
     A put that reports success but stores something else — a filter silently stripped of
     its size predicate, a transition retargeted, another rule dropped — is exactly what
-    this exists to catch. Rules are compared by ID so a server that reorders them does
-    not read as a mismatch.
+    this exists to catch.
+
+    Deliberately strict: it compares whole rules, not a few fields. A server that
+    NORMALISES what it stores (echoing a defaulted sub-field, say) therefore reads as a
+    failure even though the write landed. That is the safe direction to be wrong in, but
+    read the sent/stored diff before concluding a rule was lost: extra fields on the
+    stored side are a normalisation, not a loss.
     """
+    stored: list[dict] = []
     want = {rule.get("ID"): rule for rule in proposed}
     # Lifecycle configuration propagates: a GET straight after the PUT can still answer with
     # the old config. Re-read a few times before calling it a failure, so a rollback that
     # actually worked does not report a false alarm at the worst possible moment.
-    for attempt in range(_VERIFY_ATTEMPTS):
+    for attempt in range(max(_VERIFY_ATTEMPTS, 1)):
         stored = read_rules(client, bucket)
-        got = {rule.get("ID"): rule for rule in stored}
-        if got == want and len(stored) == len(proposed):
+        # Compared as a multiset of whole rules: order-independent, and not reliant on
+        # IDs, which a server is not obliged to assign. Two ID-less rules would collapse
+        # onto one key in a by-ID comparison and hide an edit to one of them.
+        if _fingerprint(stored) == _fingerprint(proposed):
             return stored
         if attempt + 1 < _VERIFY_ATTEMPTS:
             time.sleep(_VERIFY_DELAY_S)
 
+    got = {rule.get("ID"): rule for rule in stored}
     dropped = sorted(k for k in want.keys() - got.keys() if k is not None)
     added = sorted(k for k in got.keys() - want.keys() if k is not None)
     changed = sorted(
@@ -198,6 +213,12 @@ def _commit(
         logger.info("\nDRY RUN — nothing written. Re-run with --apply to commit.")
         return current
 
+    if _fingerprint(current) == _fingerprint(proposed):
+        # Re-running a converged provision, or rolling back a rule that is already gone.
+        # Writing anyway would be a no-op write on a shared bucket that nobody asked for.
+        logger.info("already as proposed — nothing to write.")
+        return current
+
     if proposed:
         client.put_bucket_lifecycle_configuration(
             Bucket=bucket, LifecycleConfiguration={"Rules": proposed}
@@ -209,7 +230,17 @@ def _commit(
         # when ours is the only rule — leaving the transition rule installed and moving.
         logger.info("no rules left — deleting the bucket's lifecycle configuration")
         client.delete_bucket_lifecycle(Bucket=bucket)
-    return _verify_stored(client, bucket, proposed)
+
+    try:
+        return _verify_stored(client, bucket, proposed)
+    except ClientError as exc:
+        # The write already landed; only the read-back failed. Saying just "AccessDenied"
+        # here would leave the operator thinking nothing happened — worst on a rollback,
+        # where "did it take?" is the entire question.
+        raise RuntimeError(
+            f"the write was issued and may have succeeded, but reading it back failed: {exc}"
+            " — re-run without --apply to see the bucket's current rules before acting."
+        ) from exc
 
 
 def provision(

@@ -11,6 +11,7 @@ No network: the S3 client is an in-memory fake, so read/merge/put/verify run for
 from __future__ import annotations
 
 import sys
+from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -58,13 +59,18 @@ class FakeS3:
         self.read_error = read_error
         self.puts: list[list[dict]] = []
         self.deletes = 0
+        self.gets = 0
 
     def get_bucket_lifecycle_configuration(self, Bucket: str):  # noqa: N803 (boto3 kwarg)
+        self.gets += 1
         if self.read_error:
             raise _client_error(self.read_error)
         if self.rules is None:
             raise _client_error("NoSuchLifecycleConfiguration")
-        return {"Rules": self.rules}
+        # A real server re-parses the document it stored; it never hands back the very
+        # objects we sent. Deep-copying keeps the round-trip assertions honest instead of
+        # letting them pass by object identity.
+        return {"Rules": deepcopy(self.rules)}
 
     def put_bucket_lifecycle_configuration(  # noqa: N803 (boto3 kwarg)
         self, Bucket: str, LifecycleConfiguration: dict
@@ -73,8 +79,8 @@ class FakeS3:
         # would bless a call that fails in production.
         if not LifecycleConfiguration["Rules"]:
             raise _client_error("MalformedXML")
-        self.puts.append(LifecycleConfiguration["Rules"])
-        self.rules = LifecycleConfiguration["Rules"]
+        self.puts.append(deepcopy(LifecycleConfiguration["Rules"]))
+        self.rules = deepcopy(LifecycleConfiguration["Rules"])
 
     def delete_bucket_lifecycle(self, Bucket: str):  # noqa: N803 (boto3 kwarg)
         self.deletes += 1
@@ -128,6 +134,17 @@ def test_a_read_error_is_never_mistaken_for_an_empty_config(code):
             fake, BUCKET, lc.expiration_rule(lc.DEFAULT_PREFIX, lc.DEFAULT_DAYS), apply=True
         )
     assert fake.puts == []  # nothing was written
+
+
+@pytest.mark.parametrize("code", ["AccessDenied", "NoSuchBucket", "InvalidAccessKeyId"])
+def test_a_read_error_never_reaches_the_delete_path_either(code):
+    """The same wipe scenario, but via removal: swallowing a 403 into "no rules" would
+    make the proposed set empty and DELETE the bucket's whole lifecycle configuration."""
+    fake = FakeS3(rules=[UNRELATED_RULE], read_error=code)
+    with pytest.raises(ClientError):
+        lc.deprovision(fake, BUCKET, "expire-source-cache", apply=True)
+    assert fake.puts == []
+    assert fake.deletes == 0
 
 
 def test_dry_run_writes_nothing():
@@ -388,11 +405,100 @@ def test_verification_tolerates_a_rule_with_no_id():
     assert len(stored) == 2
 
 
-def test_an_empty_prefix_is_not_printed_like_an_absent_one():
-    """Filter.Prefix "" matches every object in the bucket. Printing it as <none> would
+@pytest.mark.parametrize(
+    ("rule", "why"),
+    [
+        ({"ID": "r", "Status": "Enabled", "Filter": {"Prefix": ""}}, "explicit empty prefix"),
+        ({"ID": "r", "Status": "Enabled", "Filter": {}}, "empty filter, the AWS-console form"),
+        ({"ID": "r", "Status": "Enabled"}, "no filter at all"),
+    ],
+)
+def test_every_whole_bucket_shape_says_so(rule, why):
+    """All three of these match EVERY object. Printing any of them as <none> would
     understate the blast radius in the one place an operator checks it."""
-    whole_bucket = {"ID": "abort-mpu", "Status": "Enabled", "Filter": {"Prefix": ""}}
-    assert "whole bucket" in lc._describe(whole_bucket)
+    assert "whole bucket" in lc._describe(rule), why
+
+
+def test_a_scoped_rule_still_shows_its_prefix():
+    assert "tests-output/" in lc._describe(_transition())
+
+
+# --- the read-back's own behaviour ---------------------------------------------------
+
+
+def test_readback_retries_until_the_config_propagates(monkeypatch):
+    """Lifecycle config is eventually consistent: the first GET after a PUT can still
+    answer with the old config. That must not read as a lost rule."""
+    monkeypatch.setattr(lc, "_VERIFY_ATTEMPTS", 3)
+    monkeypatch.setattr(lc, "_VERIFY_DELAY_S", 0)
+
+    class StaleThenFresh(FakeS3):
+        def get_bucket_lifecycle_configuration(self, Bucket: str):  # noqa: N803
+            self.gets += 1
+            if self.gets <= 2:  # the pre-PUT config, twice
+                return {"Rules": [deepcopy(EXPIRE_SOURCE_CACHE)]}
+            return super().get_bucket_lifecycle_configuration(Bucket)
+
+    fake = StaleThenFresh(rules=[deepcopy(EXPIRE_SOURCE_CACHE)])
+    stored = lc.provision(fake, BUCKET, _transition(), apply=True)
+    assert len(stored) == 2
+    assert fake.gets > 2  # it really did re-read
+
+
+def test_readback_gives_up_after_the_configured_attempts(monkeypatch):
+    monkeypatch.setattr(lc, "_VERIFY_ATTEMPTS", 2)
+    monkeypatch.setattr(lc, "_VERIFY_DELAY_S", 0)
+    fake = _StoresSomethingElse([_transition()])  # permanently missing the other rule
+    with pytest.raises(RuntimeError, match="after 2 read"):
+        lc.provision(fake, BUCKET, _transition(), apply=True)
+
+
+def test_readback_notices_an_edit_to_a_rule_that_has_no_id():
+    """Comparing by ID alone collapses every ID-less rule onto one key, so an edit to one
+    of two such rules would slip through. The comparison is ID-agnostic for that reason."""
+    a = {"Status": "Enabled", "Filter": {"Prefix": "a/"}, "Expiration": {"Days": 1}}
+    b = {"Status": "Enabled", "Filter": {"Prefix": "b/"}, "Expiration": {"Days": 1}}
+    tampered = [{**a, "Expiration": {"Days": 99}}, deepcopy(b), _transition()]
+    fake = _StoresSomethingElse(tampered)
+    fake.rules = [deepcopy(a), deepcopy(b)]
+    with pytest.raises(RuntimeError, match="[Vv]erif"):
+        lc.provision(fake, BUCKET, _transition(), apply=True)
+
+
+def test_a_readback_failure_says_the_write_already_happened():
+    """Reporting a bare AccessDenied here would leave the operator believing nothing was
+    written — worst on the rollback, where "did it take?" is the whole question."""
+
+    class WriteThenBlindRead(FakeS3):
+        def get_bucket_lifecycle_configuration(self, Bucket: str):  # noqa: N803
+            self.gets += 1
+            if self.puts:  # only the read-back fails, not the initial read
+                raise _client_error("ServiceUnavailable")
+            return super().get_bucket_lifecycle_configuration(Bucket)
+
+    fake = WriteThenBlindRead(rules=[deepcopy(EXPIRE_SOURCE_CACHE)])
+    with pytest.raises(RuntimeError, match="was issued"):
+        lc.provision(fake, BUCKET, _transition(), apply=True)
+    assert fake.puts  # the write did go out
+
+
+# --- no-op runs must not write -------------------------------------------------------
+
+
+def test_reprovisioning_an_identical_rule_writes_nothing():
+    fake = FakeS3(rules=[deepcopy(EXPIRE_SOURCE_CACHE)])
+    lc.provision(fake, BUCKET, _transition(), apply=True)
+    fake.puts.clear()
+    lc.provision(fake, BUCKET, _transition(), apply=True)
+    assert fake.puts == []  # a no-op write on a shared bucket nobody asked for
+
+
+def test_removing_an_absent_rule_writes_nothing():
+    fake = FakeS3(rules=[deepcopy(EXPIRE_SOURCE_CACHE)])
+    lc.deprovision(fake, BUCKET, td.RULE_ID, apply=True)
+    assert fake.puts == []
+    assert fake.deletes == 0
+    assert fake.rules == [EXPIRE_SOURCE_CACHE]
 
 
 # --- the CLI contract ----------------------------------------------------------------
@@ -426,6 +532,22 @@ def test_tier_down_cli_remove_does_not_need_a_prefix(no_client, monkeypatch):
     """The rollback path must not make an operator type a prefix that does nothing."""
     monkeypatch.setattr(td.boto3, "client", lambda *a, **k: FakeS3(rules=[EXPIRE_SOURCE_CACHE]))
     assert td.main(["--bucket", BUCKET, "--remove"]) == 0
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--prefix", "tests-output/"],
+        ["--transition-days", "5"],
+        ["--min-object-size", "128"],
+    ],
+)
+def test_tier_down_cli_refuses_remove_with_rule_shaping_flags(extra, no_client):
+    """Removal is by rule ID and bucket-wide. An operator who typed a prefix thinks it is
+    scoped by that prefix; silently ignoring it is how the wrong thing gets removed."""
+    with pytest.raises(SystemExit) as exc:
+        td.main(["--bucket", BUCKET, "--remove", *extra])
+    assert exc.value.code == 2
 
 
 def test_tier_down_cli_refuses_an_unset_endpoint(monkeypatch):

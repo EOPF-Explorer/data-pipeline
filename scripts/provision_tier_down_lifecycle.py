@@ -83,20 +83,38 @@ def transition_rule(prefix: str, transition_days: int, min_object_size: int) -> 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description=__doc__.split("\n")[0] if __doc__ else None,
-        epilog=__doc__,
+        epilog=__doc__,  # the whole docstring, landmines included
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     # No defaults for the target: this rule rewrites storage classes, so the bucket and
     # the prefix are always typed out in full by whoever runs it.
     parser.add_argument("--bucket", required=True)
     parser.add_argument("--prefix", help="Required unless --remove.")
-    parser.add_argument("--transition-days", type=int, default=DEFAULT_TRANSITION_DAYS)
-    parser.add_argument("--min-object-size", type=int, default=DEFAULT_MIN_OBJECT_SIZE)
+    parser.add_argument("--transition-days", type=int, default=DEFAULT_TRANSITION_DAYS, dest="days")
+    parser.add_argument(
+        "--min-object-size", type=int, default=DEFAULT_MIN_OBJECT_SIZE, dest="min_size"
+    )
     parser.add_argument("--remove", action="store_true", help=f"Delete the '{RULE_ID}' rule.")
     parser.add_argument("--apply", action="store_true", help="Actually write; omit for a dry run.")
     args = parser.parse_args(argv)
-    if not args.remove and not args.prefix:
+    if args.remove:
+        # Removal is by rule ID and is bucket-wide. An operator who typed a prefix or a
+        # rule shape believes it is scoped by them; say so rather than silently ignoring.
+        shaping = [
+            flag
+            for flag, given in (
+                ("--prefix", args.prefix is not None),
+                ("--transition-days", args.days != DEFAULT_TRANSITION_DAYS),
+                ("--min-object-size", args.min_size != DEFAULT_MIN_OBJECT_SIZE),
+            )
+            if given
+        ]
+        if shaping:
+            parser.error(
+                f"--remove deletes the '{RULE_ID}' rule from the whole bucket by ID; "
+                f"it is not scoped by {', '.join(shaping)}. Drop them and re-run."
+            )
+    elif not args.prefix:
         parser.error("--prefix is required unless --remove is given")
 
     endpoint = os.getenv("AWS_ENDPOINT_URL")
@@ -112,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.remove:
             deprovision(client, args.bucket, RULE_ID, apply=args.apply, endpoint=endpoint)
         else:
-            rule = transition_rule(args.prefix, args.transition_days, args.min_object_size)
+            rule = transition_rule(args.prefix, args.days, args.min_size)
             provision(client, args.bucket, rule, apply=args.apply, endpoint=endpoint)
     except (ClientError, RuntimeError, ValueError) as exc:
         logger.error("%s", exc)
