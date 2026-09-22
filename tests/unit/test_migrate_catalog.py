@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -3266,17 +3267,42 @@ def _prod_shaped_item(item_id: str = "S2B_MSIL2A_20260921T141029_N0513_R053_T25W
     }
 
 
+@contextmanager
 def _no_network():
-    """Fail the creation of ANY socket: a body build must be pure computation."""
-    return patch("socket.socket", side_effect=AssertionError("network I/O during body build"))
+    """Fail ANY outbound network attempt: a body build must be pure computation.
+
+    Patching only ``socket.socket`` silently weakens this: urllib3 resolves the host first,
+    so a DNS-unresolvable href raises in ``getaddrinfo`` and the socket is never built --
+    the test then passes for the wrong reason, and would keep passing if a regression
+    reached the network over a pooled keep-alive connection.
+    """
+    boom = AssertionError("network I/O during body build")
+    with (
+        patch("socket.socket", side_effect=boom),
+        patch("socket.getaddrinfo", side_effect=boom),
+        patch("socket.create_connection", side_effect=boom),
+    ):
+        yield
 
 
 class TestTransactionBodyIsOffline:
     def test_the_guard_catches_pystac_default_behaviour(self):
         # First prove the guard has teeth: pystac's default to_dict() on a prod-shaped item
         # does reach for the network. This is the original bug, expressed as a test.
-        with _no_network(), pytest.raises(Exception, match="network I/O|does not resolve"):
-            pystac.Item.from_dict(_prod_shaped_item()).to_dict()
+        # 127.0.0.1 resolves, so a failure here comes from the guard, not from DNS.
+        item = _prod_shaped_item()
+        for link in item["links"]:
+            if link.get("rel") == "root":
+                link["href"] = "http://127.0.0.1:9/"
+        with _no_network(), pytest.raises(Exception) as exc:
+            pystac.Item.from_dict(item).to_dict()
+        chain, err = [], exc.value
+        while err is not None and err not in chain:
+            chain.append(err)
+            err = err.__cause__ or err.__context__
+        assert any("network I/O during body build" in str(e) for e in chain), (
+            f"guard never fired; chain was {[type(e).__name__ for e in chain]}"
+        )
 
     def test_body_build_opens_no_socket(self):
         with _no_network():
