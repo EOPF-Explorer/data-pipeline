@@ -118,10 +118,14 @@ def _replace_item(session: requests.Session, api_url: str, collection_id: str, i
     ``transform_hrefs=False`` is load-bearing (#428, and register_v1's ``upsert_item``). Most
     callers build the item with ``Item.from_dict(...)`` and no ``root=``, so the root link is
     unresolved; pystac's default resolves it over HTTP through its own IO — un-pooled, no timeout,
-    no bearer, and urllib3's default ``Retry(3)`` — once per item. This runs inside
-    collection-wide loops, so an N-item repair made N such calls serially, and one stalled
-    connection wedges the run mid-collection with the S3 objects already moved and the STAC
-    metadata never written back: exactly the drift this tool exists to repair.
+    no bearer, and urllib3's default ``Retry(3)`` — once per item. What that costs depends on the
+    caller: the two ``manage-item`` commands are single-item, while
+    ``manage_collections.sync_storage_tiers`` and ``change_storage_tier`` loop over a collection
+    and so made N such calls serially. A resolution *failure* is not the danger on any of them —
+    both loops catch it, report "Failed to update item", count it and continue. The danger is a
+    *stall*: the resolution GET carried no timeout at all, while the PUT below it has
+    ``timeout=30``. (The remaining unbounded stall on these paths is ``get_item``'s untimed
+    ``session.get``, one line above this call, not the call this fixes.)
 
     Not every caller is rootless: ``manage_collections.sync_storage_tiers`` feeds items whose
     dicts came from pystac-client (rooted, hence already carrying the landing page's title), so
