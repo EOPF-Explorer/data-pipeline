@@ -58,7 +58,7 @@ def was_migration_run(history_file: Path, migration_name: str, collection_id: st
             and not run.get("dry_run", True)
             and not run.get("reached_max_writes", False)
             and not run.get("aborted", False)
-            and not (run.get("items_modified", 1) == 0 and run.get("items_failed", 0) > 0)
+            and not (run.get("items_modified") == 0 and (run.get("items_failed") or 0) > 0)
         ):
             return True
     return False
