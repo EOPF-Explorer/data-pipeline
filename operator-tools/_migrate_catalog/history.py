@@ -41,6 +41,13 @@ def was_migration_run(history_file: Path, migration_name: str, collection_id: st
     defaulting to *No* — so counting a partial run here would tell the operator the
     work was done and let the safe-looking default abandon the rest of the backfill.
 
+    - every write failed (``items_modified == 0`` with ``items_failed > 0``) — the run
+      walked the whole collection and changed nothing. A body-build failure never
+      trips the circuit breaker, so such a run ends with ``aborted`` unset and would
+      otherwise be recorded as the migration having been applied. A run that wrote
+      nothing because nothing needed writing (no failures either) still counts: that
+      is what "already applied" looks like on a second pass.
+
     Entries written before these fields existed have neither key; they were full runs,
     so the defaults below keep them counting as applied.
     """
@@ -51,6 +58,7 @@ def was_migration_run(history_file: Path, migration_name: str, collection_id: st
             and not run.get("dry_run", True)
             and not run.get("reached_max_writes", False)
             and not run.get("aborted", False)
+            and not (run.get("items_modified", 1) == 0 and run.get("items_failed", 0) > 0)
         ):
             return True
     return False
