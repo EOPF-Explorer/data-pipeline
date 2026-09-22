@@ -3199,3 +3199,199 @@ class TestVerifyCanFail:
         res = CliRunner().invoke(climod.cli, ["verify", "coll", "--migration", "fix_url_encoding"])
         assert res.exit_code == 0, res.output
         assert called == ["reset"]
+
+
+# === The write body is built OFFLINE (the 2026-09-22 T8 D4 halt) ===
+#
+# pystac's ``Item.to_dict()`` defaults to ``transform_hrefs=True``, which resolves the item's
+# ``root`` link over HTTP (no timeout, no retry, a fresh fetch per ``from_dict``) to decide
+# whether hrefs should be relativised. Every prod item carries an absolute root link, so the
+# D2 restamp paid one landing-page GET per item on the main thread — ~0.36 s each, more than
+# the PUT it preceded, and never parallelised. These tests pin the body build to pure
+# computation: any socket opened while building a body is a failure.
+
+import copy  # noqa: E402
+
+import pystac  # noqa: E402
+from _migrate_catalog.runner import _transaction_body  # noqa: E402
+
+
+def _prod_shaped_item(item_id: str = "S2B_MSIL2A_20260921T141029_N0513_R053_T25WFQ") -> dict:
+    """An item as ``/search`` returns it: absolute hierarchical links (collection, parent,
+    root, self) — exactly what sends pystac's default ``to_dict`` to fetch the root."""
+    api = "https://api.example.com/stac"
+    return {
+        "type": "Feature",
+        "stac_version": "1.1.0",
+        "id": item_id,
+        "collection": "sentinel-2-l2a",
+        "geometry": {"type": "Point", "coordinates": [0.0, 0.0]},
+        "bbox": [0.0, 0.0, 0.0, 0.0],
+        "properties": {
+            "datetime": "2026-09-21T14:10:29.024000Z",
+            "expires": "2026-12-21T00:00:30Z",
+        },
+        "stac_extensions": [TIMESTAMPS_EXTENSION],
+        "links": [
+            {
+                "rel": "collection",
+                "type": "application/json",
+                "href": f"{api}/collections/sentinel-2-l2a",
+            },
+            {
+                "rel": "parent",
+                "type": "application/json",
+                "href": f"{api}/collections/sentinel-2-l2a",
+            },
+            {"rel": "root", "type": "application/json", "href": f"{api}/"},
+            {
+                "rel": "self",
+                "type": "application/geo+json",
+                "href": f"{api}/collections/sentinel-2-l2a/items/{item_id}",
+            },
+            {
+                "rel": "store",
+                "href": "https://s3.example.com/bucket/x.zarr",
+                "type": "application/octet-stream",
+                "title": "Zarr Store",
+            },
+        ],
+        "assets": {
+            "product": {
+                "href": "https://s3.example.com/bucket/x.zarr",
+                "type": "application/vnd+zarr; version=3",
+                "roles": ["data"],
+            }
+        },
+    }
+
+
+def _no_network():
+    """Fail the creation of ANY socket: a body build must be pure computation."""
+    return patch("socket.socket", side_effect=AssertionError("network I/O during body build"))
+
+
+class TestTransactionBodyIsOffline:
+    def test_the_guard_catches_pystac_default_behaviour(self):
+        # First prove the guard has teeth: pystac's default to_dict() on a prod-shaped item
+        # does reach for the network. This is the original bug, expressed as a test.
+        with _no_network(), pytest.raises(Exception, match="network I/O|does not resolve"):
+            pystac.Item.from_dict(_prod_shaped_item()).to_dict()
+
+    def test_body_build_opens_no_socket(self):
+        with _no_network():
+            body = _transaction_body(_prod_shaped_item())
+        assert body["id"] == _prod_shaped_item()["id"]
+
+    def test_body_is_the_item_as_read(self):
+        # Nothing invented: no title copied onto the root link from a fetched landing page,
+        # hrefs untouched, properties re-materialised to the same values.
+        item = _prod_shaped_item()
+        with _no_network():
+            body = _transaction_body(item)
+        assert body == item
+
+    def test_datacube_null_datetime_is_still_materialised(self):
+        # The reason pystac is in the loop at all: the transaction API needs the key present.
+        item = _prod_shaped_item()
+        item["properties"] = {
+            "start_datetime": "2026-06-01T00:00:00Z",
+            "end_datetime": "2026-07-01T00:00:00Z",
+        }
+        with _no_network():
+            body = _transaction_body(item)
+        assert body["properties"]["datetime"] is None
+
+    def test_unmodelable_item_raises_with_the_cause(self):
+        item = _prod_shaped_item()
+        item["assets"]["vv"] = {"roles": ["data"]}  # no href — pystac cannot model it
+        with _no_network(), pytest.raises(KeyError, match="href"):
+            _transaction_body(item)
+
+    def test_run_migration_builds_every_body_offline(self):
+        # The runner-level statement of the same rule, at the concurrency D4 uses. Only the
+        # PUT is pooled; the body build runs on this thread, so a per-item GET here would
+        # serialise the whole run behind it.
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        runner._update_item = MagicMock()
+        items = [_prod_shaped_item(f"item-{i}") for i in range(5)]
+        mock_search = MagicMock()
+        mock_search.matched.return_value = len(items)
+        mock_search.pages_as_dicts.return_value = [{"features": items}]
+
+        def shorten(item: dict) -> dict:
+            out = copy.deepcopy(item)
+            out["properties"]["expires"] = "2026-12-20T14:10:29Z"
+            return out
+
+        with (
+            patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open,
+            _no_network(),
+        ):
+            mock_open.return_value.search.return_value = mock_search
+            result = runner.run_migration(
+                "sentinel-2-l2a", shorten, "restamp_expires", concurrency=8
+            )
+
+        assert (result.items_modified, result.items_failed) == (5, 0)
+        bodies = [call.args[2] for call in runner._update_item.call_args_list]
+        assert {b["properties"]["expires"] for b in bodies} == {"2026-12-20T14:10:29Z"}
+        assert all(
+            "title" not in next(lk for lk in b["links"] if lk["rel"] == "root") for b in bodies
+        )
+
+    def test_unmodelable_item_is_failed_with_the_cause_and_not_written(self):
+        # A body-build failure never trips the circuit breaker, so the error text is the only
+        # thing an operator has to triage it against anything new.
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        runner._update_item = MagicMock()
+        bad = _prod_shaped_item("hrefless")
+        bad["assets"]["vv"] = {"roles": ["data"]}
+        mock_search = MagicMock()
+        mock_search.matched.return_value = 1
+        mock_search.pages_as_dicts.return_value = [{"features": [bad]}]
+
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = mock_search
+            result = runner.run_migration("sentinel-2-l2a", lambda item: dict(item), "x")
+
+        assert (result.items_modified, result.items_failed) == (0, 1)
+        runner._update_item.assert_not_called()
+        assert "KeyError" in result.errors[0]["error"]
+        assert "href" in result.errors[0]["error"]
+
+
+class TestHistoryIgnoresRunsThatWroteNothing:
+    """A run whose every write failed walks the whole collection, trips no breaker
+    (body-build failures are not consecutive write failures) and ends with neither
+    ``aborted`` nor ``reached_max_writes`` set — so it used to be recorded as the
+    migration having been applied, and the next invocation's 'Run again? [N]' would
+    abandon the backfill on its safe-looking default."""
+
+    def test_a_run_where_every_write_failed_is_not_applied(self, tmp_path, migration_result):
+        history_file = tmp_path / "history.json"
+        migration_result.items_modified = 0
+        migration_result.items_failed = 100
+        record_run(history_file, migration_result)
+
+        assert not was_migration_run(history_file, "fix_zarr_media_type", "sentinel-2-l2a")
+
+    def test_a_no_op_second_pass_still_counts_as_applied(self, tmp_path, migration_result):
+        # Nothing to write and nothing failed: that is what "already applied" looks like.
+        history_file = tmp_path / "history.json"
+        migration_result.items_modified = 0
+        migration_result.items_failed = 0
+        migration_result.items_skipped = 100
+        record_run(history_file, migration_result)
+
+        assert was_migration_run(history_file, "fix_zarr_media_type", "sentinel-2-l2a")
+
+    def test_a_run_with_some_failures_still_counts(self, tmp_path, migration_result):
+        # The warning is the operator's cue to re-run for the few that failed; only a run
+        # that changed nothing is excluded.
+        history_file = tmp_path / "history.json"
+        migration_result.items_modified = 97
+        migration_result.items_failed = 3
+        record_run(history_file, migration_result)
+
+        assert was_migration_run(history_file, "fix_zarr_media_type", "sentinel-2-l2a")
