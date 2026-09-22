@@ -31,20 +31,27 @@ logger = logging.getLogger(__name__)
 # idempotent, so whatever slips through is recovered by re-running.
 
 
-def _transaction_body(item_dict: dict[str, Any]) -> dict[str, Any] | None:
-    """A transaction-valid write body for a raw STAC-API item dict, or ``None`` if one can't be built.
+def _transaction_body(item_dict: dict[str, Any]) -> dict[str, Any]:
+    """A transaction-valid write body for a raw STAC-API item dict.
 
     The GET/search representation omits nullable-but-required fields — notably
     ``properties.datetime`` on datacube items (null datetime) — which the transaction API
-    rejects with 400. pystac re-materializes them (and preserves link order). Returns ``None`` for
-    items pystac can't model (e.g. an asset with no href): the caller must report the item failed
-    and write nothing — the item stays untouched in the catalogue (writes are a single atomic PUT),
+    rejects with 400. pystac re-materializes them (and preserves link order). Raises for items
+    pystac can't model (e.g. an asset with no href): the caller must report the item failed and
+    write nothing — the item stays untouched in the catalogue (writes are a single atomic PUT),
     and a PUT the API is guaranteed to 400 would only burn write budget.
+
+    ``transform_hrefs=False`` is load-bearing. pystac's default (``True``) resolves the item's
+    ``root`` link over HTTP to learn whether the catalogue is relative-published: one landing-page
+    GET per item, on the calling thread, with no timeout, no retry and no cross-item cache
+    (``from_dict`` builds fresh Link objects each call). Every prod item carries an absolute root
+    link, so the D2 restamp paid ~0.36 s/item for it, serialised ahead of the write pool — more
+    than the PUT itself — and a run of 175k items would have spent ~18 h on landing pages. The
+    only effect on the body was a ``title`` copied onto the root link, which pgstac discards
+    (hierarchical links are regenerated on read); otherwise byte-identical over 400 live items.
+    This function must never do network I/O — see the "no socket" test.
     """
-    try:
-        return pystac.Item.from_dict(item_dict).to_dict()
-    except Exception:
-        return None
+    return pystac.Item.from_dict(item_dict).to_dict(transform_hrefs=False)
 
 
 def compose_migrations(fns: list[MigrationFn]) -> MigrationFn:
@@ -282,17 +289,22 @@ class STACMigrationRunner:
                             budget_used += 1
                             bar.update(1)
                         else:
-                            body = _transaction_body(modified)
-                            if body is None:
+                            try:
+                                body = _transaction_body(modified)
+                            except Exception as e:
                                 # Can't build a transaction-valid write body (pystac can't
                                 # model the item) — report it failed, write nothing. No
-                                # budget spent: no write was attempted.
+                                # budget spent: no write was attempted. The cause goes in
+                                # the record: this is the only failure class the breaker
+                                # never sees, so the operator's triage must be able to
+                                # tell a hrefless asset from anything new.
                                 result.items_failed += 1
                                 result.errors.append(
                                     {
                                         "item_id": item_id,
                                         "error": "cannot build a transaction-valid body "
-                                        "(pystac can't model it); skipped without writing",
+                                        f"(pystac can't model it: {type(e).__name__}: {e}); "
+                                        "skipped without writing",
                                     }
                                 )
                                 bar.update(1)
