@@ -494,3 +494,18 @@ def test_a_non_https_store_root_base_is_refused(source):
         )
     assert rc == 1
     fetch.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("flag", "value"),
+    [("--store-root-base", OVH_BASE), ("--s3-endpoint", "https://s3.de.io.cloud.ovh.net")],
+)
+@patch("register_proxy.fetch_source_item")
+@patch("register_proxy.upsert_item")
+@patch("register_proxy.stac_auth.open_client")
+def test_a_track_b_flag_on_its_own_is_refused(client, upsert, fetch, flag, value):
+    """Alone, one registers unreclaimable OVH stores, the other bogus `s3://collections/…`."""
+    assert cli("--item-id", "a", "--max-items", "1", flag, value) == 1
+    client.assert_not_called()
+    fetch.assert_not_called()
+    upsert.assert_not_called()

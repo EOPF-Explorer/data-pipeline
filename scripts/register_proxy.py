@@ -130,10 +130,10 @@ ROOT_HREF_ASSETS = {
 # `now + N days`: the proxy answers coordination#287 once and the whole collection goes
 # away with it, so re-registering an item must not push the date out.
 #
-# For Track A this expires the STAC item only; the stores are EODC's and carry no S3
-# alternate, so nothing of theirs is reachable by the deleter. The cron is `--collection`
-# scoped and does not target these collections today — this makes the cleanup *possible*,
-# it does not schedule it.
+# Track A items carry no S3 alternate (the stores are EODC's), so even a cron pointed at
+# them would skip each one as `no_s3_urls` — data assets, no s3:// URL — and never delete
+# it: remove them with `manage_item.py delete`. For Track B this makes the cleanup
+# *possible*; the cron is `--collection` scoped and does not target these collections today.
 PROXY_EXPIRES = datetime(2026, 11, 1, tzinfo=UTC)
 
 # What a finished proxy item must advertise. Checked before the item is written, because
@@ -511,6 +511,13 @@ def main(argv: list[str] | None = None) -> int:
         if url is not None and urlparse(url).scheme != "https":
             logger.error("Error: %s must be an HTTPS URL, got: %r", name, url)
             return 1
+
+    # Track B needs both. --store-root-base alone registers OVH stores with no alternate,
+    # which no deleter can ever reclaim; --s3-endpoint alone derives alternates from EODC's
+    # host, and `https_to_s3` then reads its first path segment (`collections`) as a bucket.
+    if bool(args.store_root_base) != bool(args.s3_endpoint):
+        logger.error("--store-root-base and --s3-endpoint go together (Track B) or not at all")
+        return 1
 
     item_ids = list(args.item_id)
     if args.item_ids_file:
