@@ -24,7 +24,6 @@ from scripts.copy_zarr3_samples import (
     copy_object,
     copy_store,
     main,
-    parse_confinement,
     plan_store,
 )
 
@@ -130,17 +129,10 @@ class TestPlanStore:
 
 
 class TestConfinement:
-    def test_parse_requires_s3_scheme_and_bucket(self):
-        with pytest.raises(ValueError, match="s3:// URL"):
-            parse_confinement("https://bucket/prefix")
-        with pytest.raises(ValueError, match="missing a bucket"):
-            parse_confinement("s3:///prefix")
-
-    def test_parse_appends_trailing_slash(self):
-        assert parse_confinement("s3://b/samples-zarr3-proxy") == ("b", "samples-zarr3-proxy/")
+    # Parsing is s3_item_cleanup.parse_s3_prefix, tested in test_s3_item_cleanup.py.
 
     def test_refuses_a_different_bucket(self):
-        with pytest.raises(CopyError, match="refusing to write to bucket"):
+        with pytest.raises(CopyError, match="outside s3://mine/samples/"):
             assert_writes_confined("other", ["samples/x"], ("mine", "samples/"))
 
     def test_refuses_a_key_outside_the_prefix(self):

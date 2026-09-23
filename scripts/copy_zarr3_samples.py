@@ -43,6 +43,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import boto3
+from s3_item_cleanup import check_urls_confined, parse_s3_prefix
 
 logger = logging.getLogger("copy_zarr3_samples")
 
@@ -158,32 +159,19 @@ def plan_store(root: str) -> StorePlan:
     return StorePlan(root=root, name=name, keys=keys, required_keys=required)
 
 
-def parse_confinement(spec: str) -> tuple[str, str]:
-    """Split ``s3://bucket/prefix`` into ``(bucket, prefix)`` with a trailing slash."""
-    parsed = urlparse(spec)
-    if parsed.scheme != "s3":
-        raise ValueError(f"confinement must be an s3:// URL, got: {spec!r}")
-    if not parsed.netloc:
-        raise ValueError(f"confinement is missing a bucket: {spec!r}")
-    prefix = parsed.path.lstrip("/")
-    if prefix and not prefix.endswith("/"):
-        prefix += "/"
-    return parsed.netloc, prefix
-
-
 def assert_writes_confined(bucket: str, keys: list[str], allowed: tuple[str, str]) -> None:
     """Refuse the whole run unless every destination key sits under ``allowed``.
 
     Checked before the first PUT, not per object, so a misaimed prefix cannot
-    write a single stray key before anything notices.
+    write a single stray key before anything notices. The check is the cleanup's own
+    (``check_urls_confined``), so a fix to one confinement reaches both.
     """
-    allowed_bucket, allowed_prefix = allowed
-    if bucket != allowed_bucket:
-        raise CopyError(f"refusing to write to bucket {bucket!r}, confined to {allowed_bucket!r}")
-    stray = [k for k in keys if not k.startswith(allowed_prefix)]
-    if stray:
+    violations = check_urls_confined({f"s3://{bucket}/{key}" for key in keys}, [allowed])
+    if violations:
+        url, reason = violations[0]
         raise CopyError(
-            f"refusing to write {len(stray)} key(s) outside {allowed_prefix!r}, first: {stray[0]!r}"
+            f"refusing to write {len(violations)} key(s) outside s3://{allowed[0]}/{allowed[1]}, "
+            f"first: {url!r} ({reason})"
         )
 
 
@@ -341,8 +329,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        bucket, prefix = parse_confinement(args.dest)
-        allowed = parse_confinement(args.confine_to)
+        bucket, prefix = parse_s3_prefix(args.dest)
+        allowed = parse_s3_prefix(args.confine_to)
     except ValueError as exc:
         logger.error("%s", exc)
         return 2
