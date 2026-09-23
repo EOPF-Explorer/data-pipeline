@@ -19,9 +19,11 @@ Read this before running it
 * **Objects of 128 KB or less are never transitioned** by S3 unless the rule carries an
   ``ObjectSizeGreaterThan`` predicate. Without ``--min-object-size`` every ``zarr.json``
   would stay in High Performance and the convergence check would never reach zero. Note
-  the predicate is *strictly* greater-than, so the default of 1 also leaves 0- and 1-byte
-  objects (directory markers) behind; ``--min-object-size 0`` includes them, but whether
-  OVH honours an explicit 0 is unverified — probe it on a scratch bucket first.
+  the predicate is *strictly* greater-than: the default of 1 leaves 0- and 1-byte objects
+  (directory markers) behind, and ``--min-object-size 0`` reaches only the 1-byte ones —
+  no ``ObjectSizeGreaterThan`` value matches a 0-byte object, so those always need a
+  per-key copy. Whether OVH honours an explicit 0, rather than reading it as unset and
+  restoring the 128 KB floor, is unverified; 1 is the value OVH's own example uses.
 * **``PutBucketLifecycleConfiguration`` replaces the bucket's entire configuration.** It
   is not a merge. This script therefore reads the current rules, keeps every rule that is
   not ours, puts the union, and reads it back to confirm nothing was dropped or altered.
