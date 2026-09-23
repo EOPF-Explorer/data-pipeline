@@ -241,6 +241,26 @@ def test_s3_endpoint_adds_alternates_and_their_extensions(_tier, source):
 
 
 @patch("register_v1.get_s3_storage_class", return_value="STANDARD")
+def test_s3_alternates_use_the_storage_v2_layout_the_extension_declares(_tier, source):
+    """Storage v2 requires item-level `storage:schemes`; the live -ovh items had none and
+    failed STAC validation (2026-09-23). Each ref must name a scheme on OUR bucket."""
+    proxy = build_proxy_item(
+        source,
+        f"{COLLECTION}-ovh",
+        RASTER,
+        STAC_API,
+        store_root_base=OVH_BASE,
+        s3_endpoint="https://s3.de.io.cloud.ovh.net",
+    ).to_dict()
+    schemes = proxy["properties"]["storage:schemes"]
+    assert {s["bucket"] for s in schemes.values()} == {"esa-zarr-sentinel-explorer-tests"}
+    for key in ("reflectance", "AOT_10m", "WVP_10m", "SCL_20m"):
+        s3 = proxy["assets"][key]["alternate"]["s3"]
+        assert s3["storage:refs"] == ["standard"]
+        assert "storage:scheme" not in s3
+
+
+@patch("register_v1.get_s3_storage_class", return_value="STANDARD")
 def test_the_two_consumers_each_get_the_slash_form_they_need(_tier, source):
     """titiler wants a bare `.zarr` href; s3_item_cleanup wants a trailing slash.
 

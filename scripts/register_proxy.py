@@ -73,6 +73,8 @@ from register_v1 import (
     upsert_item,
 )
 from s3_item_cleanup import format_expires
+from storage_tier_utils import extract_region_from_endpoint
+from update_stac_storage_tier import _build_storage_schemes, _tier_to_scheme_ref
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -348,6 +350,34 @@ def slash_bare_zarr_alternates(item: Item) -> None:
             s3["href"] += "/"
 
 
+def storage_to_v2(item: Item, s3_endpoint: str) -> None:
+    """Move the S3 alternates' storage metadata to the storage extension v2 layout.
+
+    ``add_alternate_s3_assets`` writes a legacy inline ``storage:scheme`` per alternate
+    but declares storage v2, whose schema requires item-level ``storage:schemes`` and
+    per-alternate ``storage:refs``. Prod items get converted later by
+    ``update_stac_storage_tier.py``; proxy items never pass through it, so without this
+    they fail STAC validation (measured on the live -ovh items, 2026-09-23).
+    """
+    alternates = [
+        asset.extra_fields["alternate"]["s3"]
+        for asset in item.assets.values()
+        if isinstance(asset.extra_fields.get("alternate", {}).get("s3"), dict)
+    ]
+    buckets = {urlparse(s3["href"]).netloc for s3 in alternates}
+    if len(buckets) != 1:
+        raise ValueError(f"{item.id}: S3 alternates span buckets {sorted(buckets)}")
+    (bucket,) = buckets
+    # The builder names prod's bucket; the Track B copies live elsewhere.
+    schemes = _build_storage_schemes(extract_region_from_endpoint(s3_endpoint))
+    for scheme in schemes.values():
+        scheme["bucket"] = bucket
+    item.properties["storage:schemes"] = schemes
+    for s3 in alternates:
+        legacy = s3.pop("storage:scheme", {})
+        s3["storage:refs"] = [_tier_to_scheme_ref(legacy.get("tier"), None)]
+
+
 def source_self_href(source_item: dict) -> str:
     """The source item's ``self`` href — the provenance link, read before it is dropped."""
     self_href = next(
@@ -435,6 +465,7 @@ def build_proxy_item(
                 f"can ever select."
             )
         slash_bare_zarr_alternates(item)
+        storage_to_v2(item, s3_endpoint)
 
     return item
 
