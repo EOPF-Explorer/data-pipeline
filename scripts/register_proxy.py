@@ -8,6 +8,10 @@ those source items into a *proxy* collection on the Explorer STAC API so the
 Explorer's TiTiler, STAC browser and eodash can be pointed at Samples Service data
 without copying it.
 
+``--mirror-explorer`` (coordination#304) runs the same loop on the Explorer's own items:
+it copies ``sentinel-2-l2a`` items into a ``*mirror-rstaging*`` collection with the same
+``/rstaging`` links, so our GeoZarr renders next to the proxies. See ``build_mirror_item``.
+
 It deliberately does NOT convert or upload anything: ``build_proxy_item`` is a pure
 dict-in/Item-out transform, and the only write is the STAC upsert. It does stamp a
 fixed ``expires`` (see ``PROXY_EXPIRES``) — without one the items would be structurally
@@ -79,10 +83,12 @@ logger = logging.getLogger(__name__)
 DEFAULT_SOURCE_STAC_API = "https://stac.core.eopf.eodc.eu"
 DEFAULT_SOURCE_COLLECTION = "sentinel-2-l2a-zarr3"
 
-# Only collections whose id carries this marker may be written to. The proxy holds
-# third-party data under an Explorer-looking id; a typo that aimed it at
-# ``sentinel-2-l2a`` would overwrite real Explorer items.
+# Only collections whose id carries the mode's marker may be written to. The proxy holds
+# third-party data under an Explorer-looking id, and a mirror item reuses a prod item's
+# id; a typo that aimed either at ``sentinel-2-l2a`` would overwrite real Explorer items
+# (``upsert_item`` PUTs over an existing id).
 COLLECTION_ID_MARKER = "samples-zarr3"
+MIRROR_COLLECTION_ID_MARKER = "mirror-rstaging"
 
 # The probe strings used by the T1 reader gate, T3's rehearsal and T4, verbatim, so
 # the evidence files and the registered items cannot drift apart. An unqualified
@@ -144,6 +150,12 @@ EXPECTED_ASSET_KEYS = frozenset({"reflectance", *ROOT_HREF_ASSETS})
 # pointing at the proxy collection: the STAC item schema refuses a ``collection``
 # field without a matching link, so dropping it outright makes the item invalid.
 DROPPED_LINK_RELS = frozenset({"root", "self", "parent", "collection", "alternate"})
+
+# What a mirror item keeps of its prod source's links. A keep-list, not a drop-list: the
+# rest are the source catalogue's, the /raster render links the /rstaging ones replace,
+# or the Explorer `via` that 404s (see add_proxy_visualization) — and a rel prod gains
+# later is dropped rather than copied blind. `derived_from` is the EODC lineage.
+MIRROR_KEPT_LINK_RELS = frozenset({"store", "cite-as", "license", "derived_from"})
 
 EO_EXTENSION = "https://stac-extensions.github.io/eo/v2.0.0/schema.json"
 RASTER_EXTENSION = "https://stac-extensions.github.io/raster/v2.0.0/schema.json"
@@ -336,6 +348,27 @@ def slash_bare_zarr_alternates(item: Item) -> None:
             s3["href"] += "/"
 
 
+def source_self_href(source_item: dict) -> str:
+    """The source item's ``self`` href — the provenance link, read before it is dropped."""
+    self_href = next(
+        (link["href"] for link in source_item.get("links", []) if link.get("rel") == "self"),
+        None,
+    )
+    if not self_href:
+        raise ValueError(f"{source_item.get('id')}: source item has no self link")
+    return str(self_href)
+
+
+def collection_link(stac_api_url: str, collection: str) -> Link:
+    """The ``collection`` link — the item schema refuses a ``collection`` field without it."""
+    return Link(
+        "collection",
+        f"{stac_api_url.rstrip('/')}/collections/{collection}",
+        "application/json",
+        collection,
+    )
+
+
 def build_proxy_item(
     source_item: dict,
     collection: str,
@@ -350,12 +383,7 @@ def build_proxy_item(
     exception — Track B passes it and ``add_alternate_s3_assets`` then queries the
     object's storage class.
     """
-    self_href = next(
-        (link["href"] for link in source_item.get("links", []) if link.get("rel") == "self"),
-        None,
-    )
-    if not self_href:
-        raise ValueError(f"{source_item.get('id')}: source item has no self link")
+    self_href = source_self_href(source_item)
 
     # from_dict deep-copies, so the caller's dict is never mutated. Stripping the
     # source catalogue's links (self included) is also what keeps to_dict() offline:
@@ -363,14 +391,7 @@ def build_proxy_item(
     item = Item.from_dict(source_item)
     item.links = [link for link in item.links if link.rel not in DROPPED_LINK_RELS]
     item.collection_id = collection
-    item.add_link(
-        Link(
-            "collection",
-            f"{stac_api_url.rstrip('/')}/collections/{collection}",
-            "application/json",
-            collection,
-        )
-    )
+    item.add_link(collection_link(stac_api_url, collection))
 
     root = rebase_store_root(item, store_root_base) if store_root_base else store_root(item)
 
@@ -418,6 +439,49 @@ def build_proxy_item(
     return item
 
 
+def build_mirror_item(
+    source_item: dict, collection: str, raster_api_url: str, stac_api_url: str
+) -> Item:
+    """Copy an Explorer item into a mirror item whose render links target ``/rstaging``.
+
+    The assets stay as published — our own stores — and none of the EODC-shaped steps of
+    ``build_proxy_item`` run: ``build_root_href_assets`` would repoint SCL at the store
+    root, which 500s on our stores (data-model#262). What goes is everything a deleter
+    could use to find those stores, which prod still owns: with no ``alternate.s3`` and
+    HTTPS hrefs, ``extract_s3_urls_from_item`` finds nothing, so deleting a mirror item
+    removes the STAC record only. ``update_stac_storage_tier.py --add-missing`` would
+    re-derive the alternates from the hrefs — never run it on a mirror collection.
+
+    Pure, like ``build_proxy_item``: no network access.
+    """
+    self_href = source_self_href(source_item)
+
+    item = Item.from_dict(source_item)
+    item.links = [link for link in item.links if link.rel in MIRROR_KEPT_LINK_RELS]
+    item.collection_id = collection
+    item.add_link(collection_link(stac_api_url, collection))
+    # STAC best practices: a copy of another STAC item points back at it with `canonical`.
+    item.add_link(Link("canonical", self_href, "application/geo+json"))
+
+    item.assets.pop("thumbnail", None)  # none on the proxy either (Loïc, 2026-09-11)
+    for asset in item.assets.values():
+        asset.extra_fields.pop("alternate", None)
+    item.properties.pop("storage:schemes", None)
+    # Not `reconcile_extensions`: it also declares datacube, which prod does not, and our
+    # reflectance asset then fails the datacube v2.3.0 schema (validated 2026-09-23).
+    item.stac_extensions = [
+        ext for ext in item.stac_extensions if not ext.startswith(DROPPED_EXTENSION_PREFIXES)
+    ]
+
+    missing = EXPECTED_ASSET_KEYS - set(item.assets)
+    if missing:
+        raise ValueError(f"{item.id}: mirror item is missing asset(s) {sorted(missing)}")
+
+    stamp_proxy_expires(item)
+    add_proxy_visualization(item, raster_api_url, collection)
+    return item
+
+
 def read_item_ids(path: Path) -> list[str]:
     """Read item ids one per line, ignoring blanks and ``#`` comments."""
     return [
@@ -458,7 +522,12 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--source-stac-api", default=DEFAULT_SOURCE_STAC_API)
     parser.add_argument("--source-collection", default=DEFAULT_SOURCE_COLLECTION)
-    parser.add_argument("--collection", required=True, help="Target proxy collection id")
+    parser.add_argument("--collection", required=True, help="Target collection id")
+    parser.add_argument(
+        "--mirror-explorer",
+        action="store_true",
+        help="Mirror Explorer items into a *mirror-rstaging* collection (build_mirror_item)",
+    )
     parser.add_argument("--stac-api-url", required=True, help="Target STAC API")
     parser.add_argument("--raster-api-url", required=True, help="TiTiler base URL for links")
     parser.add_argument("--item-id", action="append", default=[], help="Repeatable")
@@ -491,11 +560,12 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
 
-    if COLLECTION_ID_MARKER not in args.collection:
+    marker = MIRROR_COLLECTION_ID_MARKER if args.mirror_explorer else COLLECTION_ID_MARKER
+    if marker not in args.collection or args.collection == args.source_collection:
         logger.error(
-            "Refusing --collection %r: a proxy collection id must contain %r",
+            "Refusing --collection %r: it must contain %r and differ from --source-collection",
             args.collection,
-            COLLECTION_ID_MARKER,
+            marker,
         )
         return 1
 
@@ -517,6 +587,9 @@ def main(argv: list[str] | None = None) -> int:
     # host, and `https_to_s3` then reads its first path segment (`collections`) as a bucket.
     if bool(args.store_root_base) != bool(args.s3_endpoint):
         logger.error("--store-root-base and --s3-endpoint go together (Track B) or not at all")
+        return 1
+    if args.mirror_explorer and args.store_root_base:
+        logger.error("--mirror-explorer keeps the source's asset hrefs: no Track B flags")
         return 1
 
     item_ids = list(args.item_id)
@@ -547,14 +620,19 @@ def main(argv: list[str] | None = None) -> int:
     for item_id in item_ids:
         try:
             source = fetch_source_item(args.source_stac_api, args.source_collection, item_id)
-            item = build_proxy_item(
-                source,
-                args.collection,
-                args.raster_api_url,
-                args.stac_api_url,
-                store_root_base=args.store_root_base,
-                s3_endpoint=args.s3_endpoint,
-            )
+            if args.mirror_explorer:
+                item = build_mirror_item(
+                    source, args.collection, args.raster_api_url, args.stac_api_url
+                )
+            else:
+                item = build_proxy_item(
+                    source,
+                    args.collection,
+                    args.raster_api_url,
+                    args.stac_api_url,
+                    store_root_base=args.store_root_base,
+                    s3_endpoint=args.s3_endpoint,
+                )
             if client is None:
                 # `item_id`, never `item.id`: the id names a file under --dry-run, and a
                 # path-bearing id would write outside that directory.

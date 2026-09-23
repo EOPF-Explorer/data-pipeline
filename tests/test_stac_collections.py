@@ -323,6 +323,7 @@ BASELAYER_COLLECTIONS = [
     "sentinel-2-l2a-staging.json",
     "proxy/sentinel-2-l2a-samples-zarr3.json",
     "proxy/sentinel-2-l2a-samples-zarr3-ovh.json",
+    "proxy/sentinel-2-l2a-mirror-rstaging.json",
 ]
 
 
@@ -372,6 +373,7 @@ EODASH_COLLECTIONS = [
     "sentinel-2-l2a-staging.json",
     "proxy/sentinel-2-l2a-samples-zarr3.json",
     "proxy/sentinel-2-l2a-samples-zarr3-ovh.json",
+    "proxy/sentinel-2-l2a-mirror-rstaging.json",
 ]
 
 STYLE_HREF = (
@@ -462,6 +464,7 @@ EXPECTED_RASTERFORMS = {
     "sentinel-2-l2a-staging.json": RASTERFORM_BASE + "bandsform.json",
     "proxy/sentinel-2-l2a-samples-zarr3.json": RASTERFORM_BASE + "bandsform.json",
     "proxy/sentinel-2-l2a-samples-zarr3-ovh.json": RASTERFORM_BASE + "bandsform.json",
+    "proxy/sentinel-2-l2a-mirror-rstaging.json": RASTERFORM_BASE + "bandsform.json",
     "sentinel-1-grd-rtc-acquisitions-staging.json": RASTERFORM_BASE + "s1-bandsform.json",
 }
 
@@ -489,11 +492,16 @@ def test_rasterform_absent_everywhere_else() -> None:
 def test_proxy_templates_are_not_in_the_batch_create_glob() -> None:
     """`batch-create stac/` globs *.json non-recursively behind ONE confirmation.
 
-    These two advertise third-party data we neither host nor convert, so a routine prod
-    re-apply must not create them (coordination#287). Keeping them in a subdirectory is
-    the whole mechanism — this test is what stops them drifting back.
+    The two proxies advertise third-party data we neither host nor convert
+    (coordination#287), and the mirror re-publishes prod items under their prod ids
+    (coordination#304): a routine prod re-apply must create none of them. Keeping them
+    in a subdirectory is the whole mechanism — this test is what stops them drifting back.
     """
     top_level = {path.name for path in STAC_DIR.glob("*.json")}
-    for name in ("sentinel-2-l2a-samples-zarr3.json", "sentinel-2-l2a-samples-zarr3-ovh.json"):
+    for name in (
+        "sentinel-2-l2a-samples-zarr3.json",
+        "sentinel-2-l2a-samples-zarr3-ovh.json",
+        "sentinel-2-l2a-mirror-rstaging.json",
+    ):
         assert name not in top_level, f"{name} would be created by `batch-create stac/`"
         assert (STAC_DIR / "proxy" / name).exists()

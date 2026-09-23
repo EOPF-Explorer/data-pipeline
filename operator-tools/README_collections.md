@@ -322,6 +322,12 @@ uv run operator-tools/manage_collections.py batch-create stac/ --pattern "*-stag
 > ```bash
 > uv run operator-tools/manage_collections.py create stac/proxy/sentinel-2-l2a-samples-zarr3.json
 > ```
+>
+> `stac/proxy/sentinel-2-l2a-mirror-rstaging.json` (coordination#304) lives there too: it
+> re-publishes four prod `sentinel-2-l2a` items, under their prod ids, with `/rstaging`
+> links (`scripts/register_proxy.py --mirror-explorer`). Its assets are the prod stores,
+> so **never run `update_stac_storage_tier.py --add-missing` on it** (it would rebuild the
+> S3 alternates the mirror strips), and remove its items with `manage_item.py delete`.
 
 **Features:**
 - Processes all matching JSON files in directory

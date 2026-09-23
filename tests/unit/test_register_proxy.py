@@ -7,6 +7,7 @@ reaching the source catalogue.
 """
 
 import json
+from copy import deepcopy
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -15,13 +16,16 @@ import pystac.stac_io
 import pytest
 from register_proxy import (
     AOT_PROBE,
+    DROPPED_EXTENSION_PREFIXES,
     SCL_PROBE,
     WVP_PROBE,
+    build_mirror_item,
     build_proxy_item,
     fetch_source_item,
     main,
     read_item_ids,
 )
+from s3_item_cleanup import extract_s3_urls_from_item
 
 FIXTURE = (
     Path(__file__).parent.parent
@@ -509,3 +513,143 @@ def test_a_track_b_flag_on_its_own_is_refused(client, upsert, fetch, flag, value
     client.assert_not_called()
     fetch.assert_not_called()
     upsert.assert_not_called()
+
+
+# --- --mirror-explorer: Explorer items re-rendered on /rstaging (coordination#304) ---
+
+MIRROR = "sentinel-2-l2a-mirror-rstaging"
+PROD_FIXTURE = (
+    Path(__file__).parent.parent
+    / "fixtures/explorer/S2B_MSIL2A_20260920T112109_N0512_R037_T29SPB_20260920T151606.json"
+)
+
+
+@pytest.fixture
+def prod_item():
+    return json.loads(PROD_FIXTURE.read_text())
+
+
+@pytest.fixture
+def mirror(prod_item):
+    return build_mirror_item(prod_item, MIRROR, RASTER, STAC_API).to_dict()
+
+
+def mirror_cli(*args):
+    return main(
+        [
+            "--mirror-explorer",
+            "--source-stac-api",
+            STAC_API,
+            "--source-collection",
+            "sentinel-2-l2a",
+            "--raster-api-url",
+            RASTER,
+            "--stac-api-url",
+            STAC_API,
+            *args,
+        ]
+    )
+
+
+def test_mirror_keeps_the_prod_assets_and_hrefs_minus_the_thumbnail(prod_item, mirror):
+    assert set(mirror["assets"]) == set(prod_item["assets"]) - {"thumbnail"}
+    for key, asset in mirror["assets"].items():
+        assert asset["href"] == prod_item["assets"][key]["href"]
+
+
+def test_no_deleter_can_reach_the_prod_stores_through_a_mirror_item(prod_item, mirror):
+    """The stores are prod's: an S3 URL on a mirror item would let its cleanup delete them."""
+    assert extract_s3_urls_from_item(prod_item), "control: the prod item does resolve"
+    assert extract_s3_urls_from_item(mirror) == set()
+    assert "storage:schemes" not in mirror["properties"]
+    assert not any(ext.startswith(DROPPED_EXTENSION_PREFIXES) for ext in mirror["stac_extensions"])
+
+
+def test_mirror_declares_the_prod_extensions_minus_storage_and_nothing_new(prod_item, mirror):
+    """Declaring datacube, as the proxy does, makes our reflectance asset fail its schema.
+
+    Validated 2026-09-23: the prod item is valid as published, and a mirror that also
+    declares datacube v2.3.0 is not. Schema validation needs the network, so pin the set.
+    """
+    expected = [
+        ext
+        for ext in prod_item["stac_extensions"]
+        if not ext.startswith(DROPPED_EXTENSION_PREFIXES)
+    ]
+    assert mirror["stac_extensions"] == expected
+
+
+def test_mirror_links_point_at_the_mirror_and_back_at_prod_only_via_canonical(prod_item, mirror):
+    rels = sorted(link["rel"] for link in mirror["links"])
+    assert rels == sorted(
+        ["collection", "canonical", "store", "cite-as", "license", "derived_from"]
+        + ["viewer", "xyz", "tilejson"]
+    ), "one of each: no /raster render link, no dead `via`"
+    assert link_href(mirror, "collection") == f"{STAC_API}/collections/{MIRROR}"
+    assert link_href(mirror, "canonical") == link_href(prod_item, "self")
+    prod_hrefs = [
+        link["rel"]
+        for link in mirror["links"]
+        if link["href"].startswith(f"{STAC_API}/collections/sentinel-2-l2a/")
+    ]
+    assert prod_hrefs == ["canonical"]
+    # The EODC lineage survives: `canonical` is added, it does not replace `derived_from`.
+    assert link_href(mirror, "derived_from") == link_href(prod_item, "derived_from")
+
+
+def test_mirror_render_links_are_the_proxy_form_on_rstaging(mirror):
+    base = f"{RASTER}/collections/{MIRROR}/items/{mirror['id']}"
+    assert link_href(mirror, "viewer").startswith(f"{base}/WebMercatorQuad/map.html?")
+    assert link_href(mirror, "xyz").startswith(f"{base}/tiles/WebMercatorQuad/")
+    assert "assets=reflectance%7Cbands%3Db04%2Cb03%2Cb02" in link_href(mirror, "tilejson")
+
+
+def test_mirror_expires_on_the_fixed_proxy_date(mirror):
+    assert mirror["properties"]["expires"] == "2026-11-01T00:00:00Z"
+
+
+def test_mirror_does_not_mutate_the_source(prod_item):
+    before = deepcopy(prod_item)
+    build_mirror_item(prod_item, MIRROR, RASTER, STAC_API)
+    assert prod_item == before
+
+
+@pytest.mark.parametrize("collection", ["sentinel-2-l2a", COLLECTION, "sentinel-2-l2a-staging"])
+@patch("register_proxy.fetch_source_item")
+@patch("register_proxy.upsert_item")
+@patch("register_proxy.stac_auth.open_client")
+def test_a_mirror_run_refuses_a_non_mirror_collection(client, upsert, fetch, collection):
+    """Mirror ids ARE prod ids: aimed at prod, the upsert's PUT would replace live items."""
+    assert mirror_cli("--collection", collection, "--item-id", "a", "--max-items", "1") == 1
+    client.assert_not_called()
+    fetch.assert_not_called()
+    upsert.assert_not_called()
+
+
+@patch("register_proxy.fetch_source_item")
+@patch("register_proxy.upsert_item")
+@patch("register_proxy.stac_auth.open_client")
+def test_a_mirror_run_refuses_its_source_collection_and_track_b_flags(client, upsert, fetch):
+    base = ["--item-id", "a", "--max-items", "1"]
+    same = ["--source-collection", MIRROR, "--collection", MIRROR]
+    assert mirror_cli(*same, *base) == 1
+    track_b = ["--store-root-base", OVH_BASE, "--s3-endpoint", "https://s3.de.io.cloud.ovh.net"]
+    assert mirror_cli("--collection", MIRROR, *track_b, *base) == 1
+    client.assert_not_called()
+    fetch.assert_not_called()
+    upsert.assert_not_called()
+
+
+@patch("register_proxy.upsert_item")
+def test_a_mirror_dry_run_writes_the_mirror_item(upsert, prod_item, tmp_path):
+    with patch("register_proxy.fetch_source_item", return_value=prod_item) as fetch:
+        rc = mirror_cli(
+            "--collection", MIRROR, "--item-id", prod_item["id"], "--max-items", "1",
+            "--dry-run", str(tmp_path),
+        )  # fmt: skip
+    assert rc == 0
+    fetch.assert_called_once_with(STAC_API, "sentinel-2-l2a", prod_item["id"])
+    upsert.assert_not_called()
+    written = json.loads((tmp_path / f"{prod_item['id']}.json").read_text())
+    assert written["collection"] == MIRROR
+    assert link_href(written, "canonical") == link_href(prod_item, "self")
