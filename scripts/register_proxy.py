@@ -59,7 +59,6 @@ import stac_auth
 from pystac import Asset, Item, Link
 from register_v1 import (
     DEFAULT_S3_GATEWAY,
-    EXPLORER_BASE,
     TIMESTAMPS_EXTENSION,
     add_alternate_s3_assets,
     add_derived_from_link,
@@ -266,7 +265,11 @@ def reconcile_extensions(item: Item) -> None:
 
 
 def add_proxy_visualization(item: Item, raster_api_url: str, collection: str) -> None:
-    """Add the viz links in the 0.12 notation, plus the Explorer ``via`` link.
+    """Add the viz links in the 0.12 notation.
+
+    **No ``via`` link.** ``register_v1`` points it at
+    ``{EXPLORER_BASE}/collections/<c>/items/<id>``, which 404s: the Explorer is a static
+    site with no collection or item pages (measured 2026-09-23).
 
     **No ``thumbnail`` asset** (Loïc, 2026-09-11). A STAC browser renders one inline, and
     this collection is a temporary proxy that must not look like a user-facing product.
@@ -303,13 +306,6 @@ def add_proxy_visualization(item: Item, raster_api_url: str, collection: str) ->
             f"{base}/WebMercatorQuad/tilejson.json?{RGB_QUERY}",
             "application/json",
             f"TileJSON for {item.id}",
-        )
-    )
-    item.add_link(
-        Link(
-            "via",
-            f"{EXPLORER_BASE}/collections/{collection}/items/{item.id}",
-            title="EOPF Explorer",
         )
     )
 
@@ -504,15 +500,13 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     # Every URL that decides where data is read from or written to, not just the three
-    # the operator types most often: --store-root-base rewrites every asset href, and
-    # EXPLORER_BASE ends up in the `via` link (register_v1.main validates its own).
+    # the operator types most often: --store-root-base rewrites every asset href.
     for url, name in [
         (args.source_stac_api, "--source-stac-api"),
         (args.raster_api_url, "--raster-api-url"),
         (args.stac_api_url, "--stac-api-url"),
         (args.store_root_base, "--store-root-base"),
         (args.s3_endpoint, "--s3-endpoint"),
-        (EXPLORER_BASE, "EXPLORER_BASE_URL"),
     ]:
         if url is not None and urlparse(url).scheme != "https":
             logger.error("Error: %s must be an HTTPS URL, got: %r", name, url)

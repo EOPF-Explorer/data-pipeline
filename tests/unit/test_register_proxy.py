@@ -155,8 +155,10 @@ def test_source_catalogue_links_are_stripped(proxy):
 
 def test_proxy_links_are_present_and_collection_scoped(proxy):
     base = f"{RASTER}/collections/{COLLECTION}/items/{proxy['id']}"
-    for rel in ("store", "derived_from", "viewer", "xyz", "tilejson", "via"):
+    for rel in ("store", "derived_from", "viewer", "xyz", "tilejson"):
         assert link_href(proxy, rel), f"missing {rel} link"
+    # register_v1's Explorer `via` target 404s (the Explorer has no item pages).
+    assert link_href(proxy, "via") is None
     assert link_href(proxy, "xyz").startswith(f"{base}/tiles/WebMercatorQuad/")
     assert link_href(proxy, "tilejson").startswith(f"{base}/WebMercatorQuad/tilejson.json?")
     assert "/rstaging/" in link_href(proxy, "xyz")
