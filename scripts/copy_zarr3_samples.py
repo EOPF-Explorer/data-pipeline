@@ -34,6 +34,7 @@ import json
 import logging
 import math
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -54,6 +55,13 @@ DEFAULT_S3_ENDPOINT = "https://s3.de.io.cloud.ovh.net"
 MAX_STORES_CEILING = 12
 
 HTTP_TIMEOUT = 300
+
+# Each object streams through a spooled file, so at most SPOOL_BYTES of it sits in
+# memory and peak RSS stays near workers x SPOOL_BYTES however big a shard is (a
+# lightly compressed 10 m band is one object of up to ~250 MB). The PUT sends the same
+# aws-chunked request for a file body as for bytes (botocore 1.42, checked 2026-09-23).
+SPOOL_BYTES = 64 * 2**20
+READ_BYTES = 2**20
 
 
 class CopyError(RuntimeError):
@@ -187,25 +195,31 @@ def copy_object(
     Returns the byte count, or ``None`` when an optional object is absent.
     Raises when a required object is missing or the stored digest disagrees.
     """
-    try:
-        with _open(source_url, timeout=HTTP_TIMEOUT) as response:
-            body = response.read()
-    except urllib.error.HTTPError as exc:
-        if exc.code == 404 and optional:
-            return None
-        raise CopyError(f"GET {source_url} failed: HTTP {exc.code}") from exc
-
     # md5 because that is what S3 returns as the ETag; this is an integrity
     # comparison against the source bytes, not a security hash.
-    digest = hashlib.md5(body, usedforsecurity=False).hexdigest()
-    result = s3_client.put_object(Bucket=bucket, Key=dest_key, Body=body)
+    md5 = hashlib.md5(usedforsecurity=False)
+    with tempfile.SpooledTemporaryFile(max_size=SPOOL_BYTES) as body:
+        try:
+            with _open(source_url, timeout=HTTP_TIMEOUT) as response:
+                while block := response.read(READ_BYTES):
+                    md5.update(block)
+                    body.write(block)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404 and optional:
+                return None
+            raise CopyError(f"GET {source_url} failed: HTTP {exc.code}") from exc
+        size = body.tell()
+        body.seek(0)
+        result = s3_client.put_object(Bucket=bucket, Key=dest_key, Body=body, ContentLength=size)
+
+    digest = md5.hexdigest()
     etag = (result.get("ETag") or "").strip('"')
     if etag != digest:
         raise CopyError(
             f"{dest_key}: stored ETag {etag!r} != source md5 {digest!r} -- "
             "the bytes that landed are not the bytes we read"
         )
-    return len(body)
+    return size
 
 
 def copy_store(

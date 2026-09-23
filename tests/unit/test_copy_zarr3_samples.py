@@ -5,6 +5,8 @@ cap, the write confinement, and the digest check -- rather than the happy path.
 A bound that has never been fired is not a bound.
 """
 
+import hashlib
+import io
 import urllib.error
 import urllib.request
 from unittest.mock import MagicMock
@@ -165,6 +167,25 @@ class TestCopyObject:
         )
         with pytest.raises(CopyError, match="not the bytes we read"):
             copy_object(self._client("deadbeef"), "https://x/k", "b", "k", optional=False)
+
+    def test_objects_stream_through_a_spooled_file_not_memory(self, monkeypatch):
+        """A whole shard in memory per worker is ~2 GB at 8 workers; stream it instead."""
+        payload = bytes(range(256)) * 40
+        monkeypatch.setattr("scripts.copy_zarr3_samples.READ_BYTES", 1000)
+        monkeypatch.setattr("scripts.copy_zarr3_samples.SPOOL_BYTES", 1024)  # forces rollover
+        monkeypatch.setattr("scripts.copy_zarr3_samples._open", lambda *a, **k: _resp(payload))
+        seen = {}
+
+        def put_object(**kwargs):
+            seen["streamed"] = not isinstance(kwargs["Body"], bytes)
+            seen["body"] = kwargs["Body"].read()
+            seen["length"] = kwargs["ContentLength"]
+            return {"ETag": f'"{hashlib.md5(payload, usedforsecurity=False).hexdigest()}"'}
+
+        client = MagicMock()
+        client.put_object.side_effect = put_object
+        assert copy_object(client, "https://x/k", "b", "k", optional=False) == len(payload)
+        assert seen == {"streamed": True, "body": payload, "length": len(payload)}
 
     def test_absent_chunk_is_not_an_error(self, monkeypatch):
         """Zarr reads a missing chunk as the fill value; 4 non-scalar chunks and 19
@@ -396,10 +417,10 @@ class TestFailures:
 
 class _resp:
     def __init__(self, body):
-        self._body = body
+        self._body = io.BytesIO(body)
 
-    def read(self):
-        return self._body
+    def read(self, size=-1):
+        return self._body.read(size)
 
     def __enter__(self):
         return self
