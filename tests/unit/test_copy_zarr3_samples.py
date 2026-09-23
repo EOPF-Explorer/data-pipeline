@@ -319,20 +319,79 @@ class TestDryRun:
         )
         client = MagicMock()
         monkeypatch.setattr("scripts.copy_zarr3_samples.boto3.client", lambda *a, **k: client)
-        with pytest.raises(CopyError, match="outside"):
-            main(
-                [
-                    "--dest",
-                    "s3://b/tests-output/",
-                    "--confine-to",
-                    "s3://b/samples-zarr3-proxy/",
-                    "--store-root",
-                    "https://x/A.zarr",
-                    "--max-stores",
-                    "1",
-                ]
-            )
+        code = main(
+            [
+                "--dest",
+                "s3://b/tests-output/",
+                "--confine-to",
+                "s3://b/samples-zarr3-proxy/",
+                "--store-root",
+                "https://x/A.zarr",
+                "--max-stores",
+                "1",
+            ]
+        )
+        assert code == 2, "a misaimed destination is an operator error"
         client.put_object.assert_not_called()
+
+
+class TestFailures:
+    ARGS = ["--dest", "s3://b/p/", "--confine-to", "s3://b/p/", "--max-stores", "2"]
+    PLAN = StorePlan(
+        root="https://x/A.zarr",
+        name="A.zarr",
+        keys=["zarr.json", *(f"arr/c/{i}" for i in range(6))],
+        required_keys={"zarr.json"},
+    )
+
+    def test_a_store_stops_at_its_first_failure(self, monkeypatch):
+        """pool.map queued every copy; leaving the pool then waited for all of them."""
+        calls = []
+
+        def failing(_c, url, _b, _k, optional):
+            calls.append(url)
+            raise CopyError("HTTP 500")
+
+        monkeypatch.setattr("scripts.copy_zarr3_samples.copy_object", failing)
+        with pytest.raises(CopyError, match="A.zarr: HTTP 500"):
+            copy_store(MagicMock(), self.PLAN, "b", "p/", workers=1, dry_run=False)
+        assert len(calls) <= 2, f"{len(calls)} of 7 copies ran after the first failure"
+
+    def test_a_failed_store_is_reported_partial_and_the_next_store_still_runs(self, monkeypatch):
+        monkeypatch.setattr(
+            "scripts.copy_zarr3_samples.plan_store",
+            lambda root: StorePlan(root=root, name=root.rsplit("/", 1)[-1], keys=["zarr.json"]),
+        )
+        copied = []
+
+        def copy_store_stub(_client, plan, *_a, **_k):
+            if plan.name == "A.zarr":
+                raise CopyError("A.zarr: HTTP 500")
+            copied.append(plan.name)
+            return 1, 0, 10
+
+        monkeypatch.setattr("scripts.copy_zarr3_samples.copy_store", copy_store_stub)
+        monkeypatch.setattr("scripts.copy_zarr3_samples.boto3.client", lambda *a, **k: MagicMock())
+        roots = ["--store-root", "https://x/A.zarr", "--store-root", "https://x/B.zarr"]
+        assert main([*self.ARGS, *roots]) == 1
+        assert copied == ["B.zarr"]
+
+    def test_a_planning_failure_writes_nothing_and_exits_1(self, monkeypatch):
+        def unreachable(_url):
+            raise urllib.error.URLError("connection refused")
+
+        monkeypatch.setattr("scripts.copy_zarr3_samples.fetch_json", unreachable)
+        client = MagicMock()
+        monkeypatch.setattr("scripts.copy_zarr3_samples.boto3.client", lambda *a, **k: client)
+        assert main([*self.ARGS, "--store-root", "https://x/A.zarr"]) == 1
+        client.put_object.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "extra",
+        [["--workers", "0"], ["--dest", "bucket/p/"], ["--confine-to", "s3:///p/"]],
+    )
+    def test_operator_errors_exit_2_not_a_traceback(self, extra):
+        assert main([*self.ARGS, "--store-root", "https://x/A.zarr", *extra]) == 2
 
 
 class _resp:

@@ -36,7 +36,7 @@ import math
 import sys
 import urllib.error
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
@@ -230,12 +230,20 @@ def copy_store(
 
     copied = absent = total = 0
     with ThreadPoolExecutor(workers) as pool:
-        for size in pool.map(one, plan.keys):
-            if size is None:
-                absent += 1
-            else:
-                copied += 1
-                total += size
+        futures = [pool.submit(one, key) for key in plan.keys]
+        try:
+            for future in as_completed(futures):
+                size = future.result()
+                if size is None:
+                    absent += 1
+                else:
+                    copied += 1
+                    total += size
+        except Exception as exc:
+            # Cancel what has not started, or leaving the `with` would wait for every
+            # queued copy to run into a store that is already broken.
+            pool.shutdown(cancel_futures=True)
+            raise CopyError(f"{plan.name}: {exc}") from exc
     # Every chunk absent is not a fill-value store: it is a key form the source does not
     # use, or a source that lost its data. Either way the copy is metadata over nothing.
     chunks = len(plan.keys) - len(plan.required_keys)
@@ -314,24 +322,47 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("Refusing to run: store name(s) given more than once: %s", repeated)
         return 2
 
-    bucket, prefix = parse_confinement(args.dest)
-    allowed = parse_confinement(args.confine_to)
+    if args.workers < 1:
+        logger.error("--workers must be at least 1, got %d", args.workers)
+        return 2
+
+    try:
+        bucket, prefix = parse_confinement(args.dest)
+        allowed = parse_confinement(args.confine_to)
+    except ValueError as exc:
+        logger.error("%s", exc)
+        return 2
 
     logger.info("📦 Planning %d store(s)", len(roots))
-    plans = [plan_store(root) for root in roots]
+    try:
+        plans = [plan_store(root) for root in roots]
+    except (CopyError, OSError, ValueError, KeyError) as exc:
+        logger.error("Planning failed, nothing written: %s", exc)
+        return 1
 
     all_keys = [f"{prefix}{plan.name}/{key}" for plan in plans for key in plan.keys]
-    assert_writes_confined(bucket, all_keys, allowed)
+    try:
+        assert_writes_confined(bucket, all_keys, allowed)
+    except CopyError as exc:
+        logger.error("%s", exc)
+        return 2
     logger.info(
         "🔒 %d destination keys all confined to s3://%s/%s", len(all_keys), allowed[0], allowed[1]
     )
 
     client = boto3.client("s3", endpoint_url=args.s3_endpoint)
     copied = absent = total = 0
+    partial: list[str] = []
     for plan in plans:
-        one_copied, one_absent, one_total = copy_store(
-            client, plan, bucket, prefix, workers=args.workers, dry_run=args.dry_run
-        )
+        try:
+            one_copied, one_absent, one_total = copy_store(
+                client, plan, bucket, prefix, workers=args.workers, dry_run=args.dry_run
+            )
+        except CopyError as exc:
+            # Not deleted here: a re-run over a good earlier copy would take it with it.
+            partial.append(f"s3://{bucket}/{prefix}{plan.name}/")
+            logger.error("   ❌ %s", exc)
+            continue
         copied += one_copied
         absent += one_absent
         total += one_total
@@ -339,11 +370,17 @@ def main(argv: list[str] | None = None) -> int:
     logger.info(
         "🏁 %s%d store(s): %d objects, %d absent, %.1f MiB",
         "[dry-run] " if args.dry_run else "",
-        len(plans),
+        len(plans) - len(partial),
         copied,
         absent,
         total / 2**20,
     )
+    if partial:
+        logger.error(
+            "PARTIAL store(s) -- delete before registering anything against them: %s",
+            ", ".join(partial),
+        )
+        return 1
     return 0
 
 
