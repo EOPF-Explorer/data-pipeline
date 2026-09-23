@@ -17,6 +17,7 @@ from scripts.copy_zarr3_samples import (
     assert_writes_confined,
     chunk_keys_for_array,
     copy_object,
+    copy_store,
     main,
     parse_confinement,
     plan_store,
@@ -57,6 +58,26 @@ class TestChunkKeys:
         }
         keys = chunk_keys_for_array("a", meta)
         assert keys == ["a/c.0", "a/c.1"]
+
+    def test_v2_encoding_has_no_c_prefix_and_dots_by_default(self):
+        """A `c/0/0` guess 404s on every v2 chunk, and each 404 would read as fill."""
+        meta = {
+            "shape": [2, 2],
+            "chunk_grid": {"configuration": {"chunk_shape": [1, 2]}},
+            "chunk_key_encoding": {"name": "v2"},
+        }
+        assert chunk_keys_for_array("a", meta) == ["a/0.0", "a/1.0"]
+        scalar = {**meta, "shape": [], "chunk_grid": {"configuration": {"chunk_shape": []}}}
+        assert chunk_keys_for_array("s", scalar) == ["s/0"]
+
+    def test_unknown_encoding_is_refused(self):
+        meta = {
+            "shape": [1],
+            "chunk_grid": {"configuration": {"chunk_shape": [1]}},
+            "chunk_key_encoding": {"name": "future"},
+        }
+        with pytest.raises(CopyError, match="unknown chunk_key_encoding"):
+            chunk_keys_for_array("a", meta)
 
 
 class TestPlanStore:
@@ -153,6 +174,35 @@ class TestCopyObject:
         monkeypatch.setattr("scripts.copy_zarr3_samples.urllib.request.urlopen", _raise_404)
         with pytest.raises(CopyError, match="HTTP 404"):
             copy_object(MagicMock(), "https://x/k", "b", "k", optional=False)
+
+
+class TestCopyStore:
+    PLAN = StorePlan(
+        root="https://x/A.zarr",
+        name="A.zarr",
+        keys=["zarr.json", "arr/zarr.json", "arr/c/0", "arr/c/1"],
+        required_keys={"zarr.json", "arr/zarr.json"},
+    )
+
+    def test_a_store_whose_every_chunk_is_absent_fails(self, monkeypatch):
+        """Metadata over nothing is what a wrong key form produces, reported as success."""
+        monkeypatch.setattr(
+            "scripts.copy_zarr3_samples.copy_object",
+            lambda _c, url, _b, _k, optional: None if optional else 10,
+        )
+        with pytest.raises(CopyError, match="all 2 chunk keys were absent"):
+            copy_store(MagicMock(), self.PLAN, "b", "p/", workers=1, dry_run=False)
+
+    def test_some_absent_chunks_are_fill_values(self, monkeypatch):
+        monkeypatch.setattr(
+            "scripts.copy_zarr3_samples.copy_object",
+            lambda _c, url, _b, _k, optional: None if url.endswith("c/1") else 10,
+        )
+        assert copy_store(MagicMock(), self.PLAN, "b", "p/", workers=1, dry_run=False) == (
+            3,
+            1,
+            30,
+        )
 
 
 class TestStoreCap:

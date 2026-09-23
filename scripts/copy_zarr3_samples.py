@@ -84,18 +84,24 @@ def chunk_keys_for_array(path: str, meta: dict[str, Any]) -> list[str]:
     array's fill value. Measured on a real store: 23 of 187 chunks are absent, 19
     of them 0-d coordinate arrays and 4 whole ``quality/mask`` arrays that are
     entirely fill. So absence is copied as absence rather than treated as an error.
+
+    That tolerance is also why the key form must follow ``chunk_key_encoding``
+    exactly: a wrong form 404s on every chunk, and every 404 reads as "absent".
     """
+    encoding = meta.get("chunk_key_encoding", {})
+    name = encoding.get("name", "default")
+    if name not in ("default", "v2"):
+        raise CopyError(f"{path}: unknown chunk_key_encoding {name!r}")
+    default_separator = "/" if name == "default" else "."
+    separator = encoding.get("configuration", {}).get("separator", default_separator)
     chunk_shape = meta["chunk_grid"]["configuration"]["chunk_shape"]
-    separator = meta.get("chunk_key_encoding", {}).get("configuration", {}).get("separator", "/")
     shape = meta["shape"]
     if not shape:
-        return [f"{path}/c"]
+        return [f"{path}/c" if name == "default" else f"{path}/0"]
 
     grid = (math.ceil(size / chunk) for size, chunk in zip(shape, chunk_shape, strict=True))
-    return [
-        f"{path}/c{separator}{separator.join(map(str, ix))}"
-        for ix in itertools.product(*(range(extent) for extent in grid))
-    ]
+    indices = (separator.join(map(str, ix)) for ix in itertools.product(*map(range, grid)))
+    return [f"{path}/c{separator}{ix}" if name == "default" else f"{path}/{ix}" for ix in indices]
 
 
 def plan_store(root: str) -> StorePlan:
@@ -217,6 +223,14 @@ def copy_store(
             else:
                 copied += 1
                 total += size
+    # Every chunk absent is not a fill-value store: it is a key form the source does not
+    # use, or a source that lost its data. Either way the copy is metadata over nothing.
+    chunks = len(plan.keys) - len(plan.required_keys)
+    if chunks and absent == chunks:
+        raise CopyError(
+            f"{plan.name}: all {chunks} chunk keys were absent -- the derived key form "
+            "is wrong or the source holds no data"
+        )
     logger.info(
         "   ✅ %s: %d objects, %s absent-by-fill-value, %.1f MiB",
         plan.name,
