@@ -1,7 +1,6 @@
 import copy
 import json
 import logging
-import os
 import sys
 import threading
 from collections.abc import Iterator
@@ -13,9 +12,6 @@ from typing import Any
 import click
 import pystac
 import requests
-from pystac_client import Client
-from pystac_client.stac_api_io import StacApiIO
-from urllib3.util.retry import Retry
 
 from _migrate_catalog.types import MigrationFn, MigrationResult
 
@@ -28,46 +24,34 @@ import stac_auth  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-# Resilience for the search-pagination client on long backfills. Two failures
-# seen live against the prod STAC API:
-#   - no timeout -> a stalled socket hangs the whole run forever (4.5h wall /
-#     26s CPU, never past "Found N items").
-#   - weak default retries -> a transient ConnectionReset mid-pagination aborts
-#     the entire run (crashed at ~20% of a 23k-item staging backfill).
-# _resilient_stac_io gives the pagination client a per-request timeout plus
-# urllib3 retries with exponential backoff on connection errors and 5xx, for GET
-# and the POST /search pagination. urllib3 cannot always retry a reset mid-body,
-# so this is best-effort; the migration is idempotent (skips already-stamped),
-# so anything that still slips through is recovered by simply re-running.
-# Override the timeout via STAC_HTTP_TIMEOUT.
-_SEARCH_TIMEOUT = float(os.getenv("STAC_HTTP_TIMEOUT", "60"))
+# Pagination resilience now lives in stac_auth.resilient_stac_io(), shared with the crons
+# that failed the same way. Three changes for this caller: the timeout is finally real
+# (Client.open used to reset it to None), 500 is retried, and the ladder is shorter.
+# urllib3 cannot always retry a reset mid-body, so it stays best-effort — the migration is
+# idempotent, so whatever slips through is recovered by re-running.
 
 
-def _resilient_stac_io() -> StacApiIO:
-    retry = Retry(
-        total=8,
-        backoff_factor=1.0,
-        status_forcelist=(429, 502, 503, 504),
-        allowed_methods=frozenset({"GET", "POST"}),
-        raise_on_status=False,
-    )
-    return StacApiIO(timeout=_SEARCH_TIMEOUT, max_retries=retry)
-
-
-def _transaction_body(item_dict: dict[str, Any]) -> dict[str, Any] | None:
-    """A transaction-valid write body for a raw STAC-API item dict, or ``None`` if one can't be built.
+def _transaction_body(item_dict: dict[str, Any]) -> dict[str, Any]:
+    """A transaction-valid write body for a raw STAC-API item dict.
 
     The GET/search representation omits nullable-but-required fields — notably
     ``properties.datetime`` on datacube items (null datetime) — which the transaction API
-    rejects with 400. pystac re-materializes them (and preserves link order). Returns ``None`` for
-    items pystac can't model (e.g. an asset with no href): the caller must report the item failed
-    and write nothing — the item stays untouched in the catalogue (writes are a single atomic PUT),
+    rejects with 400. pystac re-materializes them (and preserves link order). Raises for items
+    pystac can't model (e.g. an asset with no href): the caller must report the item failed and
+    write nothing — the item stays untouched in the catalogue (writes are a single atomic PUT),
     and a PUT the API is guaranteed to 400 would only burn write budget.
+
+    ``transform_hrefs=False`` is load-bearing. pystac's default (``True``) resolves the item's
+    ``root`` link over HTTP to learn whether the catalogue is relative-published: one landing-page
+    GET per item, on the calling thread, with no timeout, no retry and no cross-item cache
+    (``from_dict`` builds fresh Link objects each call). Every prod item carries an absolute root
+    link, so the D2 restamp paid ~0.36 s/item for it, serialised ahead of the write pool — more
+    than the PUT itself — and a run of 175k items would have spent ~18 h on landing pages. The
+    only effect on the body was a ``title`` copied onto the root link, which pgstac discards
+    (hierarchical links are regenerated on read); otherwise byte-identical over 400 live items.
+    This function must never do network I/O — see the "no socket" test.
     """
-    try:
-        return pystac.Item.from_dict(item_dict).to_dict()
-    except Exception:
-        return None
+    return pystac.Item.from_dict(item_dict).to_dict(transform_hrefs=False)
 
 
 def compose_migrations(fns: list[MigrationFn]) -> MigrationFn:
@@ -241,7 +225,7 @@ class STACMigrationRunner:
             errors=[],
         )
 
-        catalog = Client.open(self.api_url, stac_io=_resilient_stac_io())
+        catalog = stac_auth.open_resilient_client(self.api_url)
         # `ids` restricts the run to specific items (the canary path) via the same code path,
         # recovery JSONL, and history as the full run. Omitted from the call when unset so the
         # full-collection search stays byte-identical (backcompat).
@@ -305,17 +289,22 @@ class STACMigrationRunner:
                             budget_used += 1
                             bar.update(1)
                         else:
-                            body = _transaction_body(modified)
-                            if body is None:
+                            try:
+                                body = _transaction_body(modified)
+                            except Exception as e:
                                 # Can't build a transaction-valid write body (pystac can't
                                 # model the item) — report it failed, write nothing. No
-                                # budget spent: no write was attempted.
+                                # budget spent: no write was attempted. The cause goes in
+                                # the record: this is the only failure class the breaker
+                                # never sees, so the operator's triage must be able to
+                                # tell a hrefless asset from anything new.
                                 result.items_failed += 1
                                 result.errors.append(
                                     {
                                         "item_id": item_id,
                                         "error": "cannot build a transaction-valid body "
-                                        "(pystac can't model it); skipped without writing",
+                                        f"(pystac can't model it: {type(e).__name__}: {e}); "
+                                        "skipped without writing",
                                     }
                                 )
                                 bar.update(1)
@@ -372,7 +361,7 @@ class STACMigrationRunner:
 
     def _fetch_existing_ids(self, collection_id: str, page_size: int) -> set[str]:
         """Return the set of item IDs already present in collection_id."""
-        catalog = Client.open(self.api_url, stac_io=_resilient_stac_io())
+        catalog = stac_auth.open_resilient_client(self.api_url)
         search = catalog.search(
             collections=[collection_id],
             max_items=None,
@@ -407,7 +396,7 @@ class STACMigrationRunner:
             existing_ids = self._fetch_existing_ids(target_id, page_size)
             click.echo(f"Found {len(existing_ids)} items already in '{target_id}', skipping them.")
 
-        catalog = Client.open(self.api_url, stac_io=_resilient_stac_io())
+        catalog = stac_auth.open_resilient_client(self.api_url)
         search = catalog.search(collections=[source_id], max_items=None, limit=page_size)
 
         total = search.matched()

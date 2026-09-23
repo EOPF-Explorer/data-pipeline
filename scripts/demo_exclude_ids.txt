@@ -5,9 +5,18 @@
 #   - cleanup_expired_items.py -> never deletes these ids (skipped even if expired)
 # so reconverting/re-registering a demo scene can never re-arm it for deletion.
 #
-# Source of truth for "what is a demo": EOPF-Explorer/narratives + the OpenLayers
-# geozarr.html example. Ids are ESA product ids => stable across reconversion.
-# Verified against the live catalog 2026-07-14. Blank lines / '#' comments ignored.
+# Source of truth for "what is a demo": EOPF-Explorer/narratives, the OpenLayers
+# geozarr.html example, EOPF-Explorer/foss4g-eu-26-workshop, and carbonplan/zarr-layer.
+# Ids are ESA product ids => stable across reconversion.
+# Verified against the live catalog 2026-07-14; re-audited across the sibling repos
+# 2026-09-21. Blank lines / '#' comments ignored.
+#
+# 🔴 WHEN YOU ADD A DEMO SCENE ANYWHERE, ADD IT HERE IN THE SAME CHANGE. The 09-21
+# audit found six prod ids hard-coded in live material and missing from this file;
+# four of them were already past acq+90d, so the next T8 restamp would have handed
+# them to the cleanup cron on its following tick. The bucket has no versioning.
+# To re-audit: grep the sibling repos for `esa-zarr-sentinel-explorer-fra` store URLs
+# and reconcile the ids against this file.
 
 # --- Lava Flow (La Palma), tile T28RBS, prod ---
 S2B_MSIL2A_20210925T120319_N0500_R023_T28RBS_20230109T005655
@@ -32,3 +41,30 @@ S2B_MSIL2A_20260225T095029_N0512_R079_T33TVF_20260225T141422
 # --- OpenLayers geozarr.html example (read as raw .zarr), prod ---
 S2C_MSIL2A_20260120T084301_N0511_R064_T36UXA_20260120T122910
 S2B_MSIL2A_20260120T125339_N0511_R138_T27VWL_20260120T131151
+
+# --- carbonplan/zarr-layer demo (sentinel_2_eopf dataset), tile T37TBG, prod ---
+S2C_MSIL2A_20251218T083401_N0511_R021_T37TBG_20251218T112007
+
+# --- FOSS4G-EU 2026 workshop, prod — live teaching material, ids hard-coded in JS ---
+# 02-eox-advanced/main.js (+ solution/main.js), tile T33UVQ
+S2C_MSIL2A_20260606T100551_N0512_R022_T33UVQ_20260606T152612
+# shared/utils.js + 07-jupyter/notebook.ipynb, tile T33TVF
+S2B_MSIL2A_20260608T100029_N0512_R122_T33TVF_20260608T135005
+# landing/zarr-tree.js, tile T37WDU
+S2B_MSIL2A_20260618T100029_N0512_R122_T37WDU_20260618T135307
+
+# --- FOSS4G-EU 2026 workshop, 05-eox-storytelling — STAGING collection, tile T33TVF ---
+# Referenced from README.md, main.js and public/story.md. The staging purge spared it
+# deliberately; keep it listed so no future sweep of that collection re-arms it.
+S2A_MSIL2A_20251227T100441_N0511_R122_T33TVF_20251227T121715
+
+# --- narratives/cloud-native-eo.md, prod, tile T32TQR ---
+# On narratives main today, and already past acq+90d.
+S2A_MSIL2A_20251107T100231_N0511_R122_T32TQR_20251107T115310
+
+# --- narratives NDVI stories, prod — pending EOPF-Explorer/narratives PR #27 ---
+# Not on narratives main yet ("fix(stories): replace purged and expired scenes"), but
+# on a deploy preview and destined for main. Both expire mid-November; listed now so
+# the merge does not race the cron.
+S2B_MSIL2A_20260814T095029_N0512_R079_T33TVF_20260814T134634
+S2C_MSIL2A_20260815T101021_N0512_R022_T32TQR_20260815T152913

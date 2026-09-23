@@ -2,8 +2,10 @@
 
 Slice 1 covers the R5 writer-pin guard (`assert_writer_pinned`): the migration re-derives vv/vh +
 overviews with the data-model writer's private `_downsample_2d`/`OVERVIEW_CHAIN`, so it must refuse to
-run unless the writer is at the pinned, value-identical behavior (eopf-geozarr 0.10.2 == data-model
-9ede8c3, whose s1_ingest is byte-identical to the originally validated f882a3f writer).
+run unless the writer is at the pinned, value-identical behavior (eopf-geozarr 0.11.0 == data-model
+tag `v0.11.0`). At 0.11.0 the byte-identity argument that carried the earlier pins no longer holds --
+`s1_ingest.py` was substantially rewritten -- so the guard also probes `_downsample_2d`'s average
+behaviour numerically, which is the only numerical routine the re-derive borrows.
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ _SPEC.loader.exec_module(s1_store_meta)  # type: ignore[union-attr]
 
 
 def test_passes_on_the_pinned_env() -> None:
-    """The worktree pins 9ede8c3 / 0.10.2, so the guard must accept it (no raise)."""
+    """The worktree pins v0.11.0 / 0.11.0, so the guard must accept it (no raise)."""
     s1_store_meta.assert_writer_pinned()
 
 
@@ -44,6 +46,31 @@ def test_rejects_changed_overview_chain(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(s1_ingest, "OVERVIEW_CHAIN", s1_ingest.OVERVIEW_CHAIN[:-1])
     with pytest.raises(RuntimeError, match="OVERVIEW_CHAIN"):
         s1_store_meta.assert_writer_pinned()
+
+
+def test_rejects_changed_downsample_average_behaviour(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The version compare cannot see inside `_downsample_2d`, so the guard probes it directly.
+
+    v0.11.0 is the case in point: it rewrote that function (adding a `max` branch and a ValueError)
+    while leaving the average path byte-identical. A version bump alone could not tell that apart
+    from a change to the average path the re-derive depends on.
+    """
+    monkeypatch.setattr(s1_ingest, "_downsample_2d", lambda data, factor, method="average": data)
+    with pytest.raises(RuntimeError, match="_downsample_2d"):
+        s1_store_meta.assert_writer_pinned()
+
+
+def test_downsample_probe_is_nan_aware() -> None:
+    """The probe must pin `nanmean`, not `mean` -- the re-derive masks out-of-swath pixels to NaN
+    before downsampling, so a switch to plain `mean` would silently poison every overview.
+
+    The top-right 2x2 block is (NaN, 5, 5, 5): `nanmean` gives 5.0, plain `mean` gives NaN. A probe
+    without a NaN could not tell the two apart.
+    """
+    import numpy as np
+
+    assert np.isnan(np.array(s1_store_meta.DOWNSAMPLE_PROBE_INPUT, dtype="float32")).any()
+    assert s1_store_meta.EXPECTED_DOWNSAMPLE_PROBE_OUTPUT[0][1] == 5.0
 
 
 def test_drop_consolidated_metadata_works_on_a_remote_scheme() -> None:

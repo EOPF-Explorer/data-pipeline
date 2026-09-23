@@ -83,8 +83,8 @@ class TestQueryStacItems:
         mock_catalog = MagicMock()
         mock_catalog.search.return_value = mock_search
 
-        with patch("submit_storage_tier_workflows.Client") as mock_client:
-            mock_client.open.return_value = mock_catalog
+        with patch("submit_storage_tier_workflows.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value = mock_catalog
             result = query_stac_items(
                 "https://stac.example.com",
                 "sentinel-2",
@@ -93,7 +93,10 @@ class TestQueryStacItems:
             )
 
         assert result == ["item-a", "item-b"]
-        mock_client.open.assert_called_once_with("https://stac.example.com")
+        # open_resilient_client, not Client.open: it is the only form that keeps BOTH the
+        # retries and the timeout (see stac_auth.resilient_stac_io). Without the retries one
+        # transient 5xx mid-pagination aborts the tier-down run (prod, 2026-09-18T04:00).
+        mock_open.assert_called_once_with("https://stac.example.com")
         mock_catalog.search.assert_called_once_with(
             collections=["sentinel-2"],
             datetime="2024-01-01T00:00:00Z/2024-01-02T00:00:00Z",
@@ -107,8 +110,8 @@ class TestQueryStacItems:
         mock_catalog = MagicMock()
         mock_catalog.search.return_value = mock_search
 
-        with patch("submit_storage_tier_workflows.Client") as mock_client:
-            mock_client.open.return_value = mock_catalog
+        with patch("submit_storage_tier_workflows.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value = mock_catalog
             result = query_stac_items(
                 "https://stac.example.com",
                 "sentinel-2",
@@ -128,8 +131,8 @@ class TestQueryStacItems:
         mock_catalog = MagicMock()
         mock_catalog.search.return_value = mock_search
 
-        with patch("submit_storage_tier_workflows.Client") as mock_client:
-            mock_client.open.return_value = mock_catalog
+        with patch("submit_storage_tier_workflows.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value = mock_catalog
             result = query_stac_items(
                 "https://stac.example.com",
                 "sentinel-2",
@@ -160,8 +163,8 @@ class TestQueryStacItems:
         mock_catalog = MagicMock()
         mock_catalog.search.return_value = mock_search
 
-        with patch("submit_storage_tier_workflows.Client") as mock_client:
-            mock_client.open.return_value = mock_catalog
+        with patch("submit_storage_tier_workflows.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value = mock_catalog
             query_stac_items(
                 "https://stac.example.com",
                 "sentinel-2",
@@ -306,8 +309,8 @@ class TestQueryStacItemsTierFilter:
         mock_catalog = MagicMock()
         mock_catalog.search.return_value = mock_search
 
-        with patch("submit_storage_tier_workflows.Client") as mock_client:
-            mock_client.open.return_value = mock_catalog
+        with patch("submit_storage_tier_workflows.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value = mock_catalog
             result = query_stac_items(
                 "https://stac.example.com",
                 "sentinel-2",
@@ -329,8 +332,8 @@ class TestQueryStacItemsTierFilter:
         mock_catalog = MagicMock()
         mock_catalog.search.return_value = mock_search
 
-        with patch("submit_storage_tier_workflows.Client") as mock_client:
-            mock_client.open.return_value = mock_catalog
+        with patch("submit_storage_tier_workflows.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value = mock_catalog
             result = query_stac_items(
                 "https://stac.example.com",
                 "sentinel-2",
@@ -351,8 +354,8 @@ class TestQueryStacItemsTierFilter:
         mock_catalog = MagicMock()
         mock_catalog.search.return_value = mock_search
 
-        with patch("submit_storage_tier_workflows.Client") as mock_client:
-            mock_client.open.return_value = mock_catalog
+        with patch("submit_storage_tier_workflows.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value = mock_catalog
             result = query_stac_items(
                 "https://stac.example.com",
                 "sentinel-2",
@@ -375,8 +378,8 @@ class TestQueryStacItemsTierFilter:
         mock_catalog = MagicMock()
         mock_catalog.search.return_value = mock_search
 
-        with patch("submit_storage_tier_workflows.Client") as mock_client:
-            mock_client.open.return_value = mock_catalog
+        with patch("submit_storage_tier_workflows.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value = mock_catalog
             result = query_stac_items(
                 "https://stac.example.com",
                 "sentinel-2",
@@ -394,8 +397,8 @@ class TestQueryStacItemsTierFilter:
         mock_catalog = MagicMock()
         mock_catalog.search.return_value = mock_search
 
-        with patch("submit_storage_tier_workflows.Client") as mock_client:
-            mock_client.open.return_value = mock_catalog
+        with patch("submit_storage_tier_workflows.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value = mock_catalog
             query_stac_items(
                 "https://stac.example.com",
                 "sentinel-2",
@@ -564,6 +567,7 @@ class TestMainDateFieldForwarding:
             date_field: str,
             target_storage_ref: str | None,
             exclude_ids: set[str] | frozenset[str] = frozenset(),
+            page_size: int = 100,
         ) -> list[str]:
             captured.append(date_field)
             return []
@@ -607,6 +611,7 @@ class TestMainDateFieldForwarding:
             date_field: str,
             target_storage_ref: str | None,
             exclude_ids: set[str] | frozenset[str] = frozenset(),
+            page_size: int = 100,
         ) -> list[str]:
             captured.append(date_field)
             return []
@@ -671,6 +676,51 @@ class TestMainDateFieldForwarding:
         assert submitted_payloads[0]["storage_class"] == "STANDARD"
 
 
+class TestMainPageSizeForwarding:
+    def test_page_size_forwarded_to_query(self) -> None:
+        """A NON-default `--page-size` reaches query_stac_items. The other stubs declare
+        `page_size: int = 100` themselves, so they pass whether or not main() forwards
+        the flag; only a value the default cannot produce pins the forwarding."""
+        captured: list[int] = []
+
+        def capture_query(
+            stac_api_url: str,
+            collection: str,
+            window_start: str,
+            window_end: str,
+            date_field: str,
+            target_storage_ref: str | None,
+            exclude_ids: set[str] | frozenset[str] = frozenset(),
+            page_size: int = 100,
+        ) -> list[str]:
+            captured.append(page_size)
+            return []
+
+        with (
+            patch(
+                "sys.argv",
+                [
+                    "submit_storage_tier_workflows.py",
+                    "--start-date",
+                    "2024-01-01",
+                    "--end-date",
+                    "2024-01-02",
+                    "--collection",
+                    "sentinel-2-l2a",
+                    "--page-size",
+                    "250",
+                    "--dry-run",
+                ],
+            ),
+            patch("submit_storage_tier_workflows.query_stac_items", side_effect=capture_query),
+        ):
+            from submit_storage_tier_workflows import main
+
+            main()
+
+        assert captured == [250]
+
+
 class TestMainMinAgeMode:
     def test_min_age_days_issues_single_sided_tier_aware_query(self) -> None:
         """--min-age-days runs one open-lower-bound query with the target tier ref."""
@@ -684,6 +734,7 @@ class TestMainMinAgeMode:
             date_field: str,
             target_storage_ref: str | None,
             exclude_ids: set[str] | frozenset[str] = frozenset(),
+            page_size: int = 100,
         ) -> list[str]:
             captured.append(
                 {
@@ -742,6 +793,7 @@ class TestMainMinAgeMode:
             date_field: str,
             target_storage_ref: str | None,
             exclude_ids: set[str] | frozenset[str] = frozenset(),
+            page_size: int = 100,
         ) -> list[str]:
             captured.append(date_field)
             return []
@@ -827,6 +879,7 @@ class TestMainMinAgeMode:
             date_field: str,
             target_storage_ref: str | None,
             exclude_ids: set[str] | frozenset[str] = frozenset(),
+            page_size: int = 100,
         ) -> list[str]:
             captured.append(
                 {

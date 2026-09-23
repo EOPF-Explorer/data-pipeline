@@ -8,6 +8,7 @@ result reproduces the fresh cube exactly (NaN-aware values + CF attrs + standalo
 
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 from pathlib import Path
@@ -311,3 +312,163 @@ def test_redrive_does_not_mangle_an_s3_uri(monkeypatch) -> None:
     migrate.redrive_store("s3://bucket/sentinel-1-grd-rtc-staging/s1-rtc-X.zarr", dry_run=True)
 
     assert seen == ["s3://bucket/sentinel-1-grd-rtc-staging/s1-rtc-X.zarr"]  # not s3:/bucket/...
+
+
+# =============================================================================
+# The v0.11.0 pin bump: the completion marker must not be coupled to the writer version, and the
+# library's new root rewrite must not happen as a side effect of a "re-derive the bands" run.
+# =============================================================================
+
+
+def test_marker_is_stable_across_writer_versions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The marker must NOT be the running release's version.
+
+    This is the regression that made the 0.10.2 -> 0.11.0 bump dangerous: a version-valued marker
+    stops matching the moment the pin moves, so every already-migrated cube in the fleet gets its
+    bulk vv/vh re-derived from scratch for no reason.
+    """
+    import eopf_geozarr
+
+    before = migrate._marker_value()
+    monkeypatch.setattr(eopf_geozarr, "__version__", "99.9.9")
+    assert migrate._marker_value() == before
+
+
+@pytest.mark.parametrize("legacy", ["0.10.1", "0.10.2"])
+def test_a_store_marked_by_an_older_run_is_not_re_derived(fresh_cube: Path, legacy: str) -> None:
+    """A cube migrated under 0.10.1/0.10.2 carries a version-valued marker; it must still count as
+    migrated, or the pin bump silently re-derives the whole fleet."""
+    _demigrate(fresh_cube)
+    s1_store_meta.set_root_attr(str(fresh_cube), migrate.MIGRATION_MARKER_KEY, legacy)
+    before = _snapshot_bands(fresh_cube)
+
+    report = migrate.redrive_store(fresh_cube)
+
+    assert report.already_current is True
+    for key, vals in _snapshot_bands(fresh_cube).items():
+        np.testing.assert_array_equal(vals, before[key])
+
+
+def test_an_unknown_marker_value_is_migrated(fresh_cube: Path) -> None:
+    """Only the known markers mean "done"; anything else must be treated as needing the re-derive."""
+    _demigrate(fresh_cube)
+    s1_store_meta.set_root_attr(str(fresh_cube), migrate.MIGRATION_MARKER_KEY, "something-else")
+
+    report = migrate.redrive_store(fresh_cube)
+
+    assert report.already_current is False
+    assert report.bands_rewritten > 0
+
+
+def test_default_run_consolidates_but_does_not_rewrite_the_root(
+    fresh_cube: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#203 still satisfied, root metadata untouched.
+
+    From 0.11.0 the library's `consolidate_s1_store` also rewrites the store ROOT (proj:code ->
+    EPSG:4326, lon/lat spatial:bbox). This migration runs against s3:// production cubes, so that
+    must not happen unless asked for.
+    """
+    calls: list[tuple] = []
+    monkeypatch.setattr(migrate, "consolidate_s1_store", lambda *a, **k: calls.append(a))
+    _demigrate(fresh_cube)
+
+    migrate.redrive_store(fresh_cube)
+
+    assert calls == []  # the library's root-rewriting helper was never reached
+    for orbit in ("ascending", "descending"):  # but #203 consolidation still happened
+        assert "consolidated_metadata" in (fresh_cube / orbit / "zarr.json").read_text()
+    assert "consolidated_metadata" in (fresh_cube / "zarr.json").read_text()
+
+
+def test_rewrite_root_geo_opt_in_calls_the_library(
+    fresh_cube: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The opt-in flag is what routes consolidation through the library's root refinement."""
+    calls: list[tuple] = []
+    monkeypatch.setattr(migrate, "consolidate_s1_store", lambda *a, **k: calls.append(a))
+    _demigrate(fresh_cube)
+
+    migrate.redrive_store(fresh_cube, rewrite_root_geo=True)
+
+    assert len(calls) == 1
+
+
+# --- enumeration must not run through a stale consolidated root -------------------------------
+
+
+def _legacy_bands_keeping_consolidated(store: Path) -> None:
+    """Legacy-ise vv/vh but LEAVE the consolidated metadata in place (unlike `_demigrate`).
+
+    `_demigrate` drops it, so every other test enters `redrive_store` with no consolidated block at
+    all — which is exactly the condition under which a stale one cannot be noticed.
+    """
+    root = zarr.open_group(str(store), mode="r+", zarr_format=3, use_consolidated=False)
+    for _orbit, og in root.groups():
+        for level in _all_levels():
+            for band in ("vv", "vh"):
+                arr = og[level][band]
+                arr[:] = np.nan_to_num(arr[:], nan=0.0) if level == "r10m" else 0.0
+                for k in ("_FillValue", "standard_name", "units"):
+                    arr.attrs.pop(k, None)
+
+
+def _drop_from_consolidated_root(store: Path, orbit: str) -> None:
+    """Remove `orbit` from the ROOT's consolidated block, leaving the group itself on disk.
+
+    This is the state the library's `consolidate_s1_store` docstring warns about — "an orbit group
+    created since the last consolidation is absent from a stale root block". It is written by hand
+    here because the local writer path happens to refresh the root when it appends a new orbit
+    group; the invariant under test is our own enumeration, not how a store came to be stale.
+    """
+    root_json = store / "zarr.json"
+    meta = json.loads(root_json.read_text())
+    members = meta["consolidated_metadata"]["metadata"]
+    # The block is a FLAT map ("descending", "descending/r10m", "descending/r10m/vv", ...); leaving
+    # the children behind would orphan them and zarr refuses to open the store at all.
+    for key in [k for k in members if k == orbit or k.startswith(f"{orbit}/")]:
+        del members[key]
+    root_json.write_text(json.dumps(meta))
+
+
+def test_consolidates_an_orbit_absent_from_the_stale_root(fresh_cube: Path) -> None:
+    """#203 for real: an orbit missing from the consolidated root still gets consolidated.
+
+    Enumerating orbits through a stale block re-derives that orbit anyway (the re-derive walks a
+    post-drop handle) and then silently skips consolidating it — readers opening it standalone fall
+    back to a listing. The library re-enumerates with `use_consolidated=False` for exactly this
+    reason; so must this script.
+    """
+    _drop_from_consolidated_root(fresh_cube, "descending")
+    stale = zarr.open_group(str(fresh_cube), mode="r", zarr_format=3)
+    assert [name for name, _ in stale.groups()] == ["ascending"], "fixture: root is not stale"
+
+    _legacy_bands_keeping_consolidated(fresh_cube)
+    report = migrate.redrive_store(fresh_cube)
+
+    assert set(report.orbits) == {"ascending", "descending"}, "the newest orbit was not enumerated"
+    for orbit in ("ascending", "descending"):
+        assert (
+            "consolidated_metadata" in (fresh_cube / orbit / "zarr.json").read_text()
+        ), f"{orbit} was re-derived but left unconsolidated"
+
+
+def test_rewrite_root_geo_on_an_already_migrated_store_is_reported_not_silent(
+    fresh_cube: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The marker short-circuits the store, so --rewrite-root-geo cannot take effect — say so.
+
+    Once the fleet has been migrated every store carries the marker, and an operator passing
+    --rewrite-root-geo gets `already-current=N, derived=0` with no root rewrite. Silently ignoring
+    an explicitly-passed flag on a production run is how an operator concludes it happened.
+    """
+    s1_store_meta.set_root_attr(str(fresh_cube), migrate.MIGRATION_MARKER_KEY, "1")
+
+    with caplog.at_level("WARNING"):
+        report = migrate.redrive_store(fresh_cube, rewrite_root_geo=True)
+
+    assert report.already_current is True
+    assert any(
+        "rewrite-root-geo" in rec.getMessage() and "IGNORED" in rec.getMessage()
+        for rec in caplog.records
+    ), f"no warning about the ignored flag; got: {[r.getMessage() for r in caplog.records]}"

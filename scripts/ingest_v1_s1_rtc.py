@@ -148,12 +148,31 @@ def _acquisition_has_data(acq: dict) -> bool:
     return _band_has_data(acq["vv"]) or _band_has_data(acq["vh"])
 
 
-def ingest_all(s3_geotiff_prefix: str, store_path: str, orbit_direction: str) -> int:
+def ingest_all(
+    s3_geotiff_prefix: str,
+    store_path: str,
+    orbit_direction: str,
+    *,
+    allow_out_of_order: bool = False,
+) -> int:
     """Run the 5-step S1 ingest pipeline, appending new acquisitions to the per-tile cube.
 
     Each new acquisition is appended as a ``time`` slice (``ingest_s1tiling_acquisition`` opens the
     store ``mode=r+``); acquisitions whose ``time`` is already in the cube are skipped, so a re-run
     is a no-op (T4 idempotency).
+
+    ``allow_out_of_order`` forwards to the writer's monotonicity guard, which from eopf-geozarr
+    0.11.0 REFUSES an append whose ``time`` precedes the cube's last slice. Two real cases need the
+    escape hatch, and neither is an error:
+
+      - backfilling an older scene into an existing cube;
+      - appending to a cube built by the OLD discovery order, which sorted by
+        ``(platform, tile, orbit_dir, rel_orbit, acq_stamp)``. Platform dominated the timestamp, so a
+        mixed S1A/S1C archive produced a cube whose slices are not chronological — and every future
+        append to it is out-of-order by construction.
+
+    Left False the guard stands, which is what a routine cron run wants: an unexpected time inversion
+    there means the discovery order changed under us, and that should fail loudly.
 
     Returns exit code: 0 = success (or nothing new to ingest), 1 = ingest error, 2 = no acquisitions.
     """
@@ -209,6 +228,7 @@ def ingest_all(s3_geotiff_prefix: str, store_path: str, orbit_direction: str) ->
                 border_mask_path=acq["vv_mask"],
                 store_path=store_path,
                 orbit_direction=orbit_direction,
+                allow_out_of_order=allow_out_of_order,
             )
         except Exception:
             log.exception(
@@ -543,7 +563,13 @@ def _upload_store_to_s3(local_store: str, s3_uri: str) -> None:
     _sync_tree(fs, local_store, dest)
 
 
-def run_ingest(s3_geotiff_prefix: str, store: str, orbit_direction: str) -> int:
+def run_ingest(
+    s3_geotiff_prefix: str,
+    store: str,
+    orbit_direction: str,
+    *,
+    allow_out_of_order: bool = False,
+) -> int:
     """Ingest into ``store``, handling ``s3://`` destinations.
 
     eopf_geozarr writes the store via ``pathlib.Path``, which collapses ``s3://``
@@ -552,7 +578,9 @@ def run_ingest(s3_geotiff_prefix: str, store: str, orbit_direction: str) -> int:
     straight through.
     """
     if not store.startswith("s3://"):
-        return ingest_all(s3_geotiff_prefix, store, orbit_direction)
+        return ingest_all(
+            s3_geotiff_prefix, store, orbit_direction, allow_out_of_order=allow_out_of_order
+        )
 
     tmp_dir = tempfile.mkdtemp(prefix="s1-ingest-")
     local_store = os.path.join(tmp_dir, os.path.basename(store.rstrip("/")))
@@ -560,7 +588,9 @@ def run_ingest(s3_geotiff_prefix: str, store: str, orbit_direction: str) -> int:
         _fetch_store_from_s3(store, local_store)  # append to the existing per-tile cube (T4)
         _drop_consolidated_metadata(local_store)  # so eopf_geozarr can resize `time` on append
         _ensure_level_time_coords(local_store, orbit_direction)  # heal a level missing `time` (T2)
-        rc = ingest_all(s3_geotiff_prefix, local_store, orbit_direction)
+        rc = ingest_all(
+            s3_geotiff_prefix, local_store, orbit_direction, allow_out_of_order=allow_out_of_order
+        )
         if rc != 0:
             return rc
         log.info("Uploading store %s -> %s", local_store, store)
@@ -593,13 +623,28 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=["ascending", "descending"],
         help="Orbit direction",
     )
+    parser.add_argument(
+        "--allow-out-of-order",
+        action="store_true",
+        help="accept an acquisition whose time precedes the cube's last slice. Needed to backfill an "
+        "older scene, and to append at all to a cube built by the pre-0.11.0 discovery order (which "
+        "sorted platform before timestamp, so mixed S1A/S1C cubes are not chronological). Off by "
+        "default so an unexpected inversion in a routine run still fails loudly.",
+    )
     return parser
 
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
     args = _build_parser().parse_args()
-    sys.exit(run_ingest(args.s3_geotiff_prefix, args.s3_zarr_store, args.orbit_direction))
+    sys.exit(
+        run_ingest(
+            args.s3_geotiff_prefix,
+            args.s3_zarr_store,
+            args.orbit_direction,
+            allow_out_of_order=args.allow_out_of_order,
+        )
+    )
 
 
 if __name__ == "__main__":

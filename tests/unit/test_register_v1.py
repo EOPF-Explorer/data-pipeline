@@ -1,10 +1,11 @@
 """Unit tests for register_v1.py — upsert_item + expires stamping."""
 
 import contextlib
+import json
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import MagicMock, Mock
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 import requests
@@ -21,6 +22,8 @@ from register_v1 import (  # noqa: E402
     add_expires,
     add_thumbnail_asset,
     add_visualization_links,
+    https_to_s3,
+    repoint_root_assets,
     resolve_exclude_ids,
     resolve_retention_days,
     upsert_item,
@@ -140,6 +143,120 @@ class TestUpsertItemPutFailure:
         client._stac_io.session.delete.assert_not_called()
 
 
+SOURCE_ITEM_FIXTURE = "S2A_MSIL2A_20251113T102311_N0511_R065_T32TNQ_20251113T142515.json"
+
+
+class TestUpsertItemBuildsBodyOffline:
+    """Building the write body must not touch the network (the #428 bug, on this path).
+
+    Items are cloned from the EODC source item, so they carry its ``root`` link. pystac's
+    default ``to_dict(transform_hrefs=True)`` resolves that link over HTTP to decide whether
+    the catalogue is relative-published: one un-pooled, un-timed-out, un-retried GET against
+    *EODC* per registration, on the calling thread, ahead of the write it belongs to.
+    """
+
+    @staticmethod
+    def _source_item() -> Item:
+        """A real EODC source item, cloned the way ``register_v1`` clones it."""
+        fixture = Path(__file__).parents[1] / "fixtures/stac_to_register" / SOURCE_ITEM_FIXTURE
+        return Item.from_dict(json.loads(fixture.read_text())).clone()
+
+    def test_body_build_opens_no_socket(self):
+        """Patching all three entry points matters: urllib3 resolves the host first, so
+        watching only ``socket.socket`` would miss a call that dies in ``getaddrinfo``.
+
+        These are recording mocks rather than raising ones because pystac wraps every
+        resolution failure (``link.py``: ``except Exception as e: raise STACError(...) from e``).
+        A raised sentinel would surface as "HREF ... does not resolve to a STAC object" — which
+        reads like a stale fixture URL or EODC being down, and whose obvious "fix" is to edit the
+        fixture, leaving the bug in place. Asserting on the calls names the real failure.
+        """
+        client = _make_client()
+        client._stac_io.session.post.return_value = _make_response(201)
+
+        with (
+            patch("socket.socket") as sock,
+            patch("socket.getaddrinfo") as getaddrinfo,
+            patch("socket.create_connection") as create_connection,
+        ):
+            upsert_item(client, "sentinel-2-l2a", self._source_item())
+
+        assert not (
+            sock.called or getaddrinfo.called or create_connection.called
+        ), "building the write body opened a socket"
+        client._stac_io.session.post.assert_called_once()
+
+    def test_409_replace_also_builds_its_body_offline(self):
+        """The PUT branch re-registers an item that already exists — the common case for a
+        re-run — and is only offline today because one ``item_dict`` serves both verbs."""
+        client = _make_client()
+        client._stac_io.session.post.return_value = _make_response(409)
+        client._stac_io.session.put.return_value = _make_response(200)
+
+        with (
+            patch("socket.socket") as sock,
+            patch("socket.getaddrinfo") as getaddrinfo,
+            patch("socket.create_connection") as create_connection,
+        ):
+            upsert_item(client, "sentinel-2-l2a", self._source_item())
+
+        assert not (
+            sock.called or getaddrinfo.called or create_connection.called
+        ), "the 409 replace opened a socket"
+        client._stac_io.session.put.assert_called_once()
+
+    def test_root_link_is_the_one_that_would_be_fetched(self):
+        """Guards the premise: without this link there would be nothing to resolve, and the
+        no-socket test above would pass for the wrong reason.
+
+        ``transform_href=False`` is needed here for the same reason as in ``upsert_item``:
+        the plain ``link.href`` property resolves the root to decide whether to return an
+        absolute or relative href, so reading it would itself make the call this test is
+        about — an easy way to reintroduce the bug in a test that looks read-only.
+        """
+        root_links = [link for link in self._source_item().links if link.rel == "root"]
+
+        assert [link.get_href(transform_href=False) for link in root_links] == [
+            "https://stac.core.eopf.eodc.eu/"
+        ]
+
+    def test_written_body_keeps_absolute_hrefs_and_carries_no_resolved_title(self):
+        """Pins the two observables directly, rather than diffing against a stand-in root.
+
+        A locally built stand-in is worthless here: it gets ``title=None`` and
+        ``ABSOLUTE_PUBLISHED``, which are exactly the properties that make the transformation a
+        no-op, so the comparison passes whatever the code does. The real landing page *does*
+        carry a title, and resolution copies it onto the root link (``Link.title`` falls through
+        to the resolved catalogue) — so its absence is the evidence that no fetch happened.
+        """
+        client = _make_client()
+        client._stac_io.session.post.return_value = _make_response(201)
+        upsert_item(client, "sentinel-2-l2a", self._source_item())
+        written = client._stac_io.session.post.call_args.kwargs["json"]
+
+        root_link = next(link for link in written["links"] if link["rel"] == "root")
+        assert "title" not in root_link, "a resolved root copies the landing page's title"
+        assert root_link["href"] == "https://stac.core.eopf.eodc.eu/"
+        assert all(
+            link["href"].startswith(("http://", "https://", "s3://")) for link in written["links"]
+        )
+        assert all(
+            asset["href"].startswith(("http://", "https://", "s3://"))
+            for asset in written["assets"].values()
+        )
+
+    def test_to_dict_is_asked_not_to_transform_hrefs(self):
+        """The kwarg itself, so a future refactor cannot drop it and still pass the tests
+        above — a MagicMock item returns the same dict whatever it is called with."""
+        client = _make_client()
+        client._stac_io.session.post.return_value = _make_response(201)
+        item = _make_item()
+
+        upsert_item(client, "my-collection", item)
+
+        item.to_dict.assert_called_once_with(transform_hrefs=False)
+
+
 # =============================================================================
 # Render-extension visualization
 # =============================================================================
@@ -191,6 +308,22 @@ class TestSelectRender:
     def test_falls_back_to_first_render(self):
         renders = {"only": {"expression": "z"}}
         assert _select_render(_real_item(renders))["expression"] == "z"
+
+    def test_reads_renders_from_the_item_root(self):
+        """The render extension puts `renders` on the item, not in `properties` (data-model #216).
+
+        Reading only `properties` silently lost the config once data-model moved it, which drops
+        every visualization link from the item.
+        """
+        item = _real_item()
+        item.extra_fields["renders"] = {"rgb": {"expression": "root"}}
+        assert _select_render(item)["expression"] == "root"
+
+    def test_item_root_wins_over_the_properties_mirror(self):
+        """While both exist the root is authoritative — the mirror is the compatibility copy."""
+        item = _real_item({"rgb": {"expression": "mirror"}})
+        item.extra_fields["renders"] = {"rgb": {"expression": "root"}}
+        assert _select_render(item)["expression"] == "root"
 
 
 class TestRenderToQuery:
@@ -419,3 +552,160 @@ class TestResolveRetentionDays:
         # An empty value in a manifest must not crash the registration hot path.
         monkeypatch.setenv("EXPIRES_RETENTION_DAYS", "")
         assert resolve_retention_days() == 183
+
+
+_GEOZARR = "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-2-l2a/S2B_T32TQR.zarr"
+_GEOZARR_HTTPS = "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-2-l2a/S2B_T32TQR.zarr"
+
+
+def _atmosphere_item() -> Item:
+    """A real pystac Item as it looks after step 2 (hrefs rewritten to the output store)."""
+    item = _expires_item()
+    for key, var in (("AOT_10m", "aot"), ("WVP_10m", "wvp")):
+        item.add_asset(
+            key,
+            Asset(
+                href=f"{_GEOZARR_HTTPS}/quality/atmosphere/r10m/{var}",
+                media_type="application/vnd.zarr; version=3",
+                roles=["data"],
+                extra_fields={"gsd": 10},
+            ),
+        )
+    item.add_asset(
+        "SCL_20m",
+        Asset(href=f"{_GEOZARR_HTTPS}/conditions/mask/l2a_classification/r20m/scl"),
+    )
+    return item
+
+
+class TestRepointGroupAssets:
+    """repoint_root_assets points AOT/WVP at the store root."""
+
+    def test_rewrites_href_and_media_type(self) -> None:
+        item = _atmosphere_item()
+        repoint_root_assets(item, _GEOZARR, "sentinel-2-l2a")
+        for key in ("AOT_10m", "WVP_10m"):
+            asset = item.assets[key]
+            assert asset.href == f"{_GEOZARR_HTTPS}/"
+            assert asset.media_type == "application/vnd.zarr; version=3"
+
+    def test_keeps_other_asset_fields(self) -> None:
+        item = _atmosphere_item()
+        repoint_root_assets(item, _GEOZARR, "sentinel-2-l2a")
+        assert item.assets["AOT_10m"].roles == ["data"]
+        assert item.assets["AOT_10m"].extra_fields["gsd"] == 10
+
+    def test_leaves_scl_alone(self) -> None:
+        item = _atmosphere_item()
+        scl_href = item.assets["SCL_20m"].href
+        repoint_root_assets(item, _GEOZARR, "sentinel-2-l2a")
+        assert item.assets["SCL_20m"].href == scl_href
+
+    def test_skips_items_without_the_assets(self) -> None:
+        item = _expires_item()
+        repoint_root_assets(item, _GEOZARR, "sentinel-2-l2a")
+        assert item.assets == {}
+
+    def test_idempotent(self) -> None:
+        item = _atmosphere_item()
+        repoint_root_assets(item, _GEOZARR, "sentinel-2-l2a")
+        repoint_root_assets(item, _GEOZARR, "sentinel-2-l2a")
+        assert item.assets["AOT_10m"].href == f"{_GEOZARR_HTTPS}/"
+
+    def test_skips_non_sentinel2_collections(self) -> None:
+        item = _atmosphere_item()
+        before = item.assets["AOT_10m"].href
+        repoint_root_assets(item, _GEOZARR, "sentinel-1-grd-rtc")
+        assert item.assets["AOT_10m"].href == before
+
+    def test_skips_assets_still_on_the_source_href(self) -> None:
+        # Step 2 found no source zarr and left the hrefs alone: an unconverted item
+        # must not be made to look registered against the output store.
+        item = _atmosphere_item()
+        source = "https://objects.eodc.eu/x/SRC.zarr/quality/atmosphere/r10m/aot"
+        item.assets["AOT_10m"].href = source
+        repoint_root_assets(item, _GEOZARR, "sentinel-2-l2a")
+        assert item.assets["AOT_10m"].href == source
+        assert item.assets["WVP_10m"].href == f"{_GEOZARR_HTTPS}/"
+
+    def test_href_survives_the_s3_delete_confinement_guard(self) -> None:
+        """A bare `…/X.zarr` href is rejected as `bare_zarr_store`, which would make
+        every S2 item permanently undeletable by the retention cron."""
+        from s3_item_cleanup import check_urls_confined
+
+        item = _atmosphere_item()
+        repoint_root_assets(item, _GEOZARR, "sentinel-2-l2a")
+        urls = {https_to_s3(item.assets[k].href) or "" for k in ("AOT_10m", "WVP_10m")}
+        allowed = [("esa-zarr-sentinel-explorer-fra", "tests-output/sentinel-2-l2a/")]
+        assert check_urls_confined(urls, allowed) == []
+
+    def test_logs_at_info(self, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level("INFO", logger="register_v1"):
+            repoint_root_assets(_atmosphere_item(), _GEOZARR, "sentinel-2-l2a")
+        assert "Repointed 2 asset(s)" in caplog.text
+
+
+def _s2_source_item_dict() -> dict:
+    """A minimal S2 L2A source item with the array-level AOT/WVP assets."""
+    src = "https://objects.eodc.eu/x/SRC_ITEM.zarr"
+    return {
+        "type": "Feature",
+        "stac_version": "1.0.0",
+        "id": "SRC_ITEM",
+        "geometry": {"type": "Point", "coordinates": [0.0, 0.0]},
+        "bbox": [0.0, 0.0, 0.0, 0.0],
+        "properties": {"datetime": "2020-01-01T00:00:00Z"},
+        "links": [],
+        "assets": {
+            "AOT_10m": {
+                "href": f"{src}/quality/atmosphere/r10m/aot",
+                "type": "application/vnd+zarr",
+            },
+            "WVP_10m": {
+                "href": f"{src}/quality/atmosphere/r10m/wvp",
+                "type": "application/vnd+zarr",
+            },
+        },
+        "collection": "src-collection",
+    }
+
+
+def test_run_registration_keeps_the_array_s3_alternate(monkeypatch) -> None:
+    """The repoint runs AFTER add_alternate_s3_assets, so alternate.s3.href keeps the
+    array path while href moves to the store root — the S3 tooling wants the narrow
+    prefix, titiler wants the root."""
+    import register_v1
+
+    resp = MagicMock()
+    resp.json.return_value = _s2_source_item_dict()
+    http = MagicMock()
+    http.get.return_value = resp
+    http.__enter__ = MagicMock(return_value=http)
+    http.__exit__ = MagicMock(return_value=False)
+    monkeypatch.setattr(register_v1.httpx, "Client", MagicMock(return_value=http))
+    monkeypatch.setattr(register_v1.zarr, "open", MagicMock(side_effect=OSError("offline")))
+    monkeypatch.setattr(register_v1, "get_s3_storage_class", lambda *a: "STANDARD")
+    monkeypatch.setattr(register_v1, "warm_thumbnail_cache", lambda item: None)
+    monkeypatch.setattr(register_v1.stac_auth, "open_client", MagicMock())
+    upsert = MagicMock()
+    monkeypatch.setattr(register_v1, "upsert_item", upsert)
+
+    register_v1.run_registration(
+        "https://src/SRC_ITEM.json",
+        "sentinel-2-l2a",
+        "https://api.test/stac",
+        "https://raster.test",
+        "https://s3.de.io.cloud.ovh.net",
+        "bucket",
+        "prefix",
+    )
+
+    item = upsert.call_args.args[2]
+    root = "bucket/prefix/sentinel-2-l2a/SRC_ITEM.zarr"
+    for key, var in (("AOT_10m", "aot"), ("WVP_10m", "wvp")):
+        asset = item.assets[key]
+        assert asset.href == f"https://s3.explorer.eopf.copernicus.eu/{root}/"
+        assert (
+            asset.extra_fields["alternate"]["s3"]["href"]
+            == f"s3://{root}/quality/atmosphere/r10m/{var}"
+        )

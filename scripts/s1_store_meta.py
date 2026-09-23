@@ -12,6 +12,19 @@ Re-pin history: originally validated at 0.10.1 / `f882a3f` (the live `v0.8.0-s1r
 re-pinned to `b0d31be` (#216 head) and to `9ede8c3` (#216 + v0.10.2 merge) — at each step
 `s1_ingest.py` was byte-identical to the previously validated writer, so the overview math and
 encodings are unchanged.
+
+Re-pinned to **0.11.0** (data-model #216 merged, tag `v0.11.0`). Byte-identity no longer holds —
+`s1_ingest.py` gained 679 lines and lost 92 — so that argument is replaced by a narrower one about
+the symbols this migration actually reuses, each checked at v0.11.0:
+
+  - `OVERVIEW_CHAIN` — identical (same six levels and factors);
+  - `FLOAT32_NAN_FILL_VALUE` / `BACKSCATTER_CF_ATTRS` — identical;
+  - `_downsample_2d(..., "average")` — the average path is byte-identical. v0.11.0 *added* a `"max"`
+    branch (for the border mask) and a `ValueError` on an unrecognised method; it changed nothing on
+    the average path, which is the only one the re-derive calls.
+
+Because a version string cannot distinguish "added a branch" from "changed the branch I depend on",
+`assert_writer_pinned` now probes `_downsample_2d`'s average behaviour numerically as well.
 """
 
 from __future__ import annotations
@@ -22,10 +35,10 @@ from pathlib import Path
 
 import fsspec
 
-# Pinned writer invariants (R5). `9ede8c3` == eopf-geozarr 0.10.2 (s1_ingest byte-identical to the
-# validated f882a3f writer); the float32 NaN fill is the S2-parity encoding (data-model #201); the
-# overview chain is the level/factor ladder the re-derive walks.
-PINNED_EOPF_GEOZARR_VERSION = "0.10.2"
+# Pinned writer invariants (R5). `v0.11.0` is the released data-model with #216 merged; the float32
+# NaN fill is the S2-parity encoding (data-model #201); the overview chain is the level/factor ladder
+# the re-derive walks; the downsample probe pins the one numerical routine the re-derive borrows.
+PINNED_EOPF_GEOZARR_VERSION = "0.11.0"
 EXPECTED_FLOAT32_NAN_FILL_VALUE = "AAAAAAAA+H8="
 EXPECTED_OVERVIEW_CHAIN = [
     ("r10m", None, 1),
@@ -36,21 +49,37 @@ EXPECTED_OVERVIEW_CHAIN = [
     ("r720m", "r360m", 2),
 ]
 
+# Behavioural pin for `_downsample_2d(..., "average")` — the re-derive's only numerical reuse. The
+# NaN in the top-right block is deliberate: the re-derive masks out-of-swath pixels to NaN before
+# downsampling, so `nanmean` (not `mean`) is the behaviour that must hold. A version compare cannot
+# catch a change here; v0.11.0 rewrote this function while leaving the average path intact, which is
+# exactly the shape of edit that would otherwise slip through.
+DOWNSAMPLE_PROBE_INPUT = [
+    [1.0, 3.0, float("nan"), 5.0],
+    [1.0, 3.0, 5.0, 5.0],
+    [2.0, 2.0, 4.0, 4.0],
+    [2.0, 2.0, 4.0, 4.0],
+]
+EXPECTED_DOWNSAMPLE_PROBE_OUTPUT = [[2.0, 5.0], [2.0, 4.0]]
+
 
 def assert_writer_pinned() -> None:
     """Refuse to run unless the data-model writer is at the pinned, value-identical behavior (R5).
 
     Reads the live values at call time (not import time) so a drifted dependency is caught on every
-    run. Raises ``RuntimeError`` naming the invariant that drifted.
+    run. Checks the version, the float32 NaN fill, the overview chain, and — because a version string
+    cannot see inside a rewritten function — ``_downsample_2d``'s average behaviour numerically.
+    Raises ``RuntimeError`` naming the invariant that drifted.
     """
     import eopf_geozarr
+    import numpy as np
     from eopf_geozarr.conversion import s1_ingest
 
     if eopf_geozarr.__version__ != PINNED_EOPF_GEOZARR_VERSION:
         raise RuntimeError(
             f"eopf-geozarr {eopf_geozarr.__version__} != pinned {PINNED_EOPF_GEOZARR_VERSION} "
-            "(data-model 9ede8c3); the re-derive is only value-identical to a fresh re-ingest at the "
-            "pinned writer. Re-pin or re-validate before migrating."
+            "(data-model tag v0.11.0); the re-derive is only value-identical to a fresh re-ingest at "
+            "the pinned writer. Re-pin or re-validate before migrating."
         )
     if s1_ingest.FLOAT32_NAN_FILL_VALUE != EXPECTED_FLOAT32_NAN_FILL_VALUE:
         raise RuntimeError(
@@ -61,6 +90,15 @@ def assert_writer_pinned() -> None:
         raise RuntimeError(
             f"OVERVIEW_CHAIN changed: {list(s1_ingest.OVERVIEW_CHAIN)} != {EXPECTED_OVERVIEW_CHAIN}; "
             "overview levels/factors differ from the pinned writer."
+        )
+    probe = s1_ingest._downsample_2d(
+        np.array(DOWNSAMPLE_PROBE_INPUT, dtype="float32"), 2, "average"
+    )
+    if not np.array_equal(probe, np.array(EXPECTED_DOWNSAMPLE_PROBE_OUTPUT, dtype="float32")):
+        raise RuntimeError(
+            f"_downsample_2d average behaviour changed: got {probe.tolist()} != expected "
+            f"{EXPECTED_DOWNSAMPLE_PROBE_OUTPUT}; the overview math the re-derive borrows differs "
+            "from the pinned writer."
         )
 
 

@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.18.0 (2026-09-23)
+
+## What's Changed
+* fix(deploy): pin the S1 RTC migration at v1.17.1 and allowlist immutable image tags by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/421
+* chore(deps): bump jupyter-server and soupsieve, clearing the last advisories by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/425
+* fix(operator-tools): move the collection walker onto the resilient read client by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/426
+* fix(cleanup): protect 7 demo scenes missing from the denylist by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/427
+* fix(migrate): build write bodies offline — no per-item root-link GET by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/428
+* fix(register,manage-item): build write bodies offline — no per-item landing-page GET by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/429
+* feat(cleanup): add --order newest-first to drain the most recently expired items first by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/431
+* fix(s1-rtc): order the deployed CDSE discovery oldest-first by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/424
+* build(deps): bump the all group across 1 directory with 3 updates by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/423
+* build(deps): bump the minor-and-patch group across 1 directory with 4 updates by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/420
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.17.1...v1.18.0
+
+## 1.17.1 (2026-09-21)
+
+## What's Changed
+* fix(storage-tier): refuse to write back proxy-corrupted raster links by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/406
+* chore(demo): protect carbonplan/zarr-layer scene from expiry by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/414
+* fix(stac): point S2 AOT/WVP assets at the store root (titiler-eopf#163) by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/412
+* chore(deps): bump anyio and pillow for the critical and high advisories by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/419
+* fix(s1-rtc): prepare the registration and validation paths for the data-model v0.11.0 pin by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/413
+* fix(stac): retry transient 5xx on search pagination, including the gateway's 500 by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/418
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.17.0...v1.17.1
+
 ## 1.17.0 (2026-09-08)
 
 ## What's Changed

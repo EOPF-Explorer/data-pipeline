@@ -136,13 +136,27 @@ def upsert_item(client: Client, collection_id: str, item: Item) -> None:
     existence pre-check, which can mis-read transient/conformance errors as "absent"
     and then 409 (#186). Replacing via a single PUT (#352) means no code path can
     leave an item deleted-but-not-recreated, unlike the previous DELETE-then-POST.
+
+    ``transform_hrefs=False`` is load-bearing, same as in the migrate runner (#428). pystac's
+    default resolves the item's ``root`` link over HTTP to learn whether the catalogue is
+    relative-published. Here that root is *EODC's* landing page, inherited from the source item
+    we cloned — so every registration made one un-pooled, un-timed-out, un-retried GET against a
+    third party, on the calling thread, before the write it belongs to. EODC's 502s then failed
+    registrations whose actual write would have succeeded.
+
+    Skipping the transformation cannot introduce a relative href: ``Item.to_dict`` never forwards
+    the flag to assets, and ``Link.get_href`` only ever converts absolute → relative (for a
+    relative-published root), never the reverse. The one thing resolution did change is the same
+    one #428 recorded: ``Link.title`` falls through to the resolved catalogue's title, so the root
+    link gained ``"title": "EOPF Sentinel Zarr Samples Service STAC API"``. pgstac discards
+    hierarchical links on read, so dropping it is inert — but it is a difference, not parity.
     """
     io = client._stac_io
     assert io is not None  # noqa: S101  # nosec B101 -- pystac-client always sets this after open()
     session = io.session
     base_url = str(client.self_href).rstrip("/")
     create_url = f"{base_url}/collections/{collection_id}/items"
-    item_dict = item.to_dict()
+    item_dict = item.to_dict(transform_hrefs=False)
     headers = {"Content-Type": "application/json"}
 
     resp = session.post(create_url, json=item_dict, headers=headers, timeout=30)
@@ -182,17 +196,38 @@ def add_projection_from_zarr(item: Item) -> None:
 _PREFERRED_RENDERS = ("rgb", "visual", "thumbnail", "default")
 
 
+def renders_blocks(item: Item | dict) -> list[dict]:
+    """Every live copy of an item's ``renders`` block, item root first.
+
+    The render extension puts ``renders`` at the item ROOT — its Item branch requires it on the
+    item object, not in ``properties``. data-model moved it there (#216) and still writes a
+    temporary duplicate under ``properties`` so consumers pinned to the old location keep working.
+    Reading the root first survives the mirror's removal; still reading ``properties`` keeps the
+    items registered before the move readable. Returning *every* copy also lets a caller that
+    rewrites a render update both, so the two can never disagree.
+
+    Accepts a pystac ``Item`` (root fields land in ``extra_fields``) or a raw item dict.
+    """
+    sources = (
+        (item.extra_fields, item.properties)
+        if isinstance(item, Item)
+        else (item, item.get("properties") or {})
+    )
+    return [r for src in sources if isinstance(r := src.get("renders"), dict) and r]
+
+
 def _select_render(item: Item) -> dict | None:
     """Return the preferred render config from a render-extension ``renders`` dict.
 
-    Items built with the render extension carry ``properties.renders`` mapping a
-    render name to a config (expression/variables, rescale, bidx, ...). This lets
-    the data producer own the visualization rather than hardcoding it here.
+    Items built with the render extension carry a ``renders`` block mapping a render
+    name to a config (expression/variables, rescale, bidx, ...). This lets the data
+    producer own the visualization rather than hardcoding it here.
     Returns ``None`` when no usable renders are present.
     """
-    renders = item.properties.get("renders")
-    if not isinstance(renders, dict) or not renders:
+    blocks = renders_blocks(item)
+    if not blocks:
         return None
+    renders = blocks[0]
     candidates = [renders.get(name) for name in _PREFERRED_RENDERS]
     candidates.append(next(iter(renders.values())))
     for candidate in candidates:
@@ -825,6 +860,52 @@ def consolidate_reflectance_assets(item: Item, geozarr_url: str) -> None:
     )
 
 
+# S2 L2A assets whose source href points at a Zarr *array* (quality/atmosphere/r10m/aot).
+# titiler's GeoZarrReader opens every asset as a DataTree with no fallback to the store
+# root (titiler/eopf/reader.py:168), so the href must name a node carrying consolidated
+# metadata — over HTTP there is no listing, and a group is only discoverable through its
+# own `consolidated_metadata`. The converter consolidates exactly two nodes, the store
+# root and measurements/reflectance (eopf-geozarr s2_optimization/s2_converter.py:322,325),
+# so `quality/atmosphere` is NOT openable and only the root is. Hence: point the asset at
+# the root and let the client select with `assets=AOT_10m|variables=/quality/atmosphere/r10m:aot`.
+# SCL is deliberately absent, and the reason survives the move to the root: verified
+# 2026-09-11 against a prod store, the reader exposes `/quality/atmosphere/r10m` with
+# real bounds (so AOT/WVP georeference through the root today) but omits
+# `/conditions/mask/l2a_classification/r20m` entirely — `get_bounds` raises "does not
+# have spatial attributes". SCL is unrenderable wherever its href points until
+# data-model#262 writes the geo metadata (titiler-eopf#163).
+_ATMOSPHERE_ASSET_KEYS = ("AOT_10m", "WVP_10m")
+
+
+def repoint_root_assets(item: Item, geozarr_url: str, collection: str) -> None:
+    """Point S2 AOT/WVP assets at the store root so titiler can open them.
+
+    Only touches assets already rewritten to the output store (step 2): an item whose
+    assets still point at the source must not be made to look converted.
+    """
+    if not collection.lower().startswith(("sentinel-2", "sentinel2")):
+        return
+    store = s3_to_https(geozarr_url)
+    repointed = 0
+    for key in _ATMOSPHERE_ASSET_KEYS:
+        asset = item.assets.get(key)
+        if asset is None or not (asset.href or "").startswith(f"{store}/"):
+            continue
+        # Trailing slash is load-bearing, not cosmetic. `s3_item_cleanup` prefers
+        # `alternate.s3.href` but falls back to this href whenever it is an `s3://`
+        # URL, and `check_urls_confined` rejects any key ending in a bare `.zarr` as
+        # `bare_zarr_store` — which would make the item undeletable by the retention
+        # cron. With the slash the key still contains `.zarr/`, so
+        # `_partition_by_bucket` collapses it to the store prefix exactly as the
+        # reflectance asset does. (Step 8 no longer derives the alternate from this
+        # href — 8b runs after it, on purpose; see the call site.)
+        asset.href = f"{store}/"
+        asset.media_type = "application/vnd.zarr; version=3"
+        repointed += 1
+    if repointed > 0:
+        logger.info(f"   🔗 Repointed {repointed} asset(s) to the store root")
+
+
 # === Registration Workflow ===
 
 
@@ -918,6 +999,16 @@ def run_registration(
     # 8. Add alternate S3 URLs to assets (alternate-assets + storage extensions)
     # This also queries and adds storage:tier to each asset's alternate
     add_alternate_s3_assets(item, s3_endpoint)
+
+    # 8b. Point AOT/WVP at the store root (array hrefs are unreadable by titiler).
+    # After step 6 so the projection probe still opens the array it opens today, and
+    # deliberately *after* step 8 so `alternate.s3.href` keeps the array path: that is
+    # what the S3 tooling consumes, and it wants the narrowest accurate prefix.
+    # Deriving the alternate from the root href instead would make
+    # `update_stac_storage_tier` list the entire store twice per item and report
+    # MIXED for any straggler anywhere in it, pinning these assets to
+    # `storage:refs: ["mixed"]` and re-selecting the item on every tier-cron run.
+    repoint_root_assets(item, geozarr_url, collection)
 
     # 9. Add visualization links (viewer, xyz, tilejson)
     add_visualization_links(item, raster_api_url, collection)

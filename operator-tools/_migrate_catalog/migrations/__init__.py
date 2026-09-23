@@ -7,6 +7,7 @@ from _migrate_catalog.migrations import (
     align_visualization_links,  # noqa: F401
     fix_url_encoding,  # noqa: F401
     fix_zarr_media_type,  # noqa: F401
+    repoint_atmosphere_assets,  # noqa: F401
     restamp_expires,  # noqa: F401
     stamp_expires,  # noqa: F401
 )

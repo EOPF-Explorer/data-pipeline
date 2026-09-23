@@ -1,9 +1,13 @@
 """Unit tests for the migrate_catalog package."""
 
+import copy
 import json
+import traceback
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pystac
 import pytest
 from _migrate_catalog.history import load_history, record_run, was_migration_run
 from _migrate_catalog.migrations.add_acquisitions_filter_link import add_acquisitions_filter_link
@@ -11,7 +15,8 @@ from _migrate_catalog.migrations.add_xyz_link import add_xyz_link
 from _migrate_catalog.migrations.align_visualization_links import align_visualization_links
 from _migrate_catalog.migrations.fix_url_encoding import fix_url_encoding
 from _migrate_catalog.migrations.fix_zarr_media_type import fix_zarr_media_type
-from _migrate_catalog.runner import STACMigrationRunner, compose_migrations
+from _migrate_catalog.migrations.repoint_atmosphere_assets import repoint_atmosphere_assets
+from _migrate_catalog.runner import STACMigrationRunner, _transaction_body, compose_migrations
 from _migrate_catalog.types import MigrationResult
 
 FIXTURES_DIR = Path(__file__).parent.parent / "fixtures" / "migrate_catalog"
@@ -178,6 +183,180 @@ class TestFixZarrMediaType:
         assert result2 is None
 
 
+_S2_STORE = "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-2-l2a/S2B_T32TQR.zarr"
+_S2_STORE_S3 = "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-2-l2a/S2B_T32TQR.zarr"
+
+
+def _atmosphere_item(with_alternate: bool = True) -> dict:
+    """An S2 L2A item as registered today: AOT/WVP point at the r10m arrays."""
+    assets: dict = {
+        "reflectance": {
+            "href": f"{_S2_STORE}/measurements/reflectance",
+            "type": "application/vnd.zarr; version=3; profile=multiscales",
+        },
+        "SCL_20m": {
+            "href": f"{_S2_STORE}/conditions/mask/l2a_classification/r20m/scl",
+            "type": "application/vnd.zarr; version=3",
+        },
+    }
+    for key, var in (("AOT_10m", "aot"), ("WVP_10m", "wvp")):
+        assets[key] = {
+            "href": f"{_S2_STORE}/quality/atmosphere/r10m/{var}",
+            "type": "application/vnd.zarr; version=3",
+            "gsd": 10,
+            "roles": ["data"],
+        }
+        if with_alternate:
+            assets[key]["alternate"] = {
+                "s3": {
+                    "href": f"{_S2_STORE_S3}/quality/atmosphere/r10m/{var}",
+                    "storage:scheme": {"platform": "OVHcloud", "tier": "STANDARD"},
+                }
+            }
+    return {"id": "S2B_T32TQR", "assets": assets, "links": []}
+
+
+class TestRepointAtmosphereAssets:
+    def test_rewrites_href_to_store_root(self):
+        result = repoint_atmosphere_assets(_atmosphere_item())
+        assert result is not None
+        for key in ("AOT_10m", "WVP_10m"):
+            assert result["assets"][key]["href"] == f"{_S2_STORE}/"
+
+    def test_leaves_alternate_s3_href_on_the_array(self):
+        """Only `href` moves. `alternate.s3.href` is what `s3_item_cleanup` and
+        `update_stac_storage_tier` consume, and they want the narrowest accurate
+        prefix — the store root would list the whole store and report MIXED."""
+        item = _atmosphere_item()
+        result = repoint_atmosphere_assets(item)
+        assert result is not None
+        for key in ("AOT_10m", "WVP_10m"):
+            s3 = result["assets"][key]["alternate"]["s3"]
+            assert s3["href"] == item["assets"][key]["alternate"]["s3"]["href"]
+            assert "/quality/atmosphere/r10m/" in s3["href"]
+            assert s3["storage:scheme"]["tier"] == "STANDARD"
+
+    def test_keeps_other_asset_fields(self):
+        result = repoint_atmosphere_assets(_atmosphere_item())
+        assert result is not None
+        aot = result["assets"]["AOT_10m"]
+        assert aot["type"] == "application/vnd.zarr; version=3"
+        assert aot["gsd"] == 10
+        assert aot["roles"] == ["data"]
+
+    def test_never_touches_scl_or_reflectance(self):
+        item = _atmosphere_item()
+        result = repoint_atmosphere_assets(item)
+        assert result is not None
+        assert result["assets"]["SCL_20m"] == item["assets"]["SCL_20m"]
+        assert result["assets"]["reflectance"] == item["assets"]["reflectance"]
+
+    def test_skips_assets_without_an_s3_alternate(self, caplog):
+        """No alternate means no narrow S3 pointer, and `update_stac_storage_tier
+        --add-missing` would later derive one from the store-root href — listing the
+        whole store and stamping `storage:refs: ["mixed"]`. Leave the item alone."""
+        with caplog.at_level("WARNING"):
+            assert repoint_atmosphere_assets(_atmosphere_item(with_alternate=False)) is None
+        assert "no alternate.s3.href" in caplog.text
+
+    def test_host_agnostic(self):
+        item = _atmosphere_item()
+        old_host = "https://esa-zarr-sentinel-explorer-fra.s3.de.io.cloud.ovh.net/x/y.zarr"
+        item["assets"]["AOT_10m"]["href"] = f"{old_host}/quality/atmosphere/r10m/aot"
+        result = repoint_atmosphere_assets(item)
+        assert result is not None
+        assert result["assets"]["AOT_10m"]["href"] == f"{old_host}/"
+
+    def test_returns_none_when_already_migrated(self):
+        migrated = repoint_atmosphere_assets(_atmosphere_item())
+        assert migrated is not None
+        assert repoint_atmosphere_assets(migrated) is None
+
+    def test_returns_none_without_atmosphere_assets(self):
+        # S1-shaped item: no AOT/WVP keys at all
+        item = {"id": "s1-rtc-31TCG", "assets": {"vv": {"href": f"{_S2_STORE}/descending"}}}
+        assert repoint_atmosphere_assets(item) is None
+
+    def test_does_not_mutate_input(self):
+        item = _atmosphere_item()
+        original_href = item["assets"]["AOT_10m"]["href"]
+        repoint_atmosphere_assets(item)
+        assert item["assets"]["AOT_10m"]["href"] == original_href
+
+    def test_accepts_bare_and_trailing_slash_layouts(self):
+        item = _atmosphere_item()
+        item["assets"]["AOT_10m"]["href"] = f"{_S2_STORE}/quality/atmosphere/aot"
+        item["assets"]["WVP_10m"]["href"] = f"{_S2_STORE}/quality/atmosphere/r10m/wvp/"
+        result = repoint_atmosphere_assets(item)
+        assert result is not None
+        for key in ("AOT_10m", "WVP_10m"):
+            assert result["assets"][key]["href"] == f"{_S2_STORE}/"
+
+    def test_unrecognised_href_is_skipped_and_logged(self, caplog):
+        item = _atmosphere_item()
+        item["assets"]["AOT_10m"]["href"] = f"{_S2_STORE}/quality/atmosphere/r20m/aot"
+        with caplog.at_level("WARNING"):
+            result = repoint_atmosphere_assets(item)
+        # WVP still rewritten; AOT left alone and reported, not silently skipped
+        assert result is not None
+        assert result["assets"]["AOT_10m"]["href"] == item["assets"]["AOT_10m"]["href"]
+        assert result["assets"]["WVP_10m"]["href"] == f"{_S2_STORE}/"
+        assert "S2B_T32TQR/AOT_10m" in caplog.text and "r20m/aot" in caplog.text
+
+    def test_an_unrelated_alternate_is_never_disturbed(self):
+        # The alternate is out of scope entirely, whatever it points at.
+        item = _atmosphere_item()
+        item["assets"]["AOT_10m"]["alternate"]["s3"]["href"] = f"{_S2_STORE_S3}/somewhere/else"
+        result = repoint_atmosphere_assets(item)
+        assert result is not None
+        s3 = result["assets"]["AOT_10m"]["alternate"]["s3"]
+        assert s3["href"] == f"{_S2_STORE_S3}/somewhere/else"
+
+    def test_null_members_do_not_raise(self):
+        # Malformed alternates are skipped (no narrow S3 pointer), never crash.
+        item = _atmosphere_item()
+        item["assets"]["AOT_10m"]["alternate"] = None
+        item["assets"]["WVP_10m"]["alternate"] = {"s3": "not-a-dict"}
+        assert repoint_atmosphere_assets(item) is None
+        assert repoint_atmosphere_assets({"id": "x", "assets": None}) is None
+        assert repoint_atmosphere_assets({"id": "x", "assets": {"AOT_10m": None}}) is None
+
+    def test_rewritten_hrefs_survive_the_s3_delete_confinement_guard(self):
+        """A bare `…/X.zarr` is rejected as `bare_zarr_store` and would stall the
+        purge drain (`manage_collections clean` aborts the whole batch). The store
+        root must therefore keep its trailing slash."""
+        from s3_item_cleanup import check_urls_confined
+
+        result = repoint_atmosphere_assets(_atmosphere_item())
+        assert result is not None
+        bucket = "esa-zarr-sentinel-explorer-fra"
+        prefix = "tests-output/sentinel-2-l2a/"
+        urls = {result["assets"][k]["alternate"]["s3"]["href"] for k in ("AOT_10m", "WVP_10m")}
+        assert check_urls_confined(urls, [(bucket, prefix)]) == []
+        # and the href, on the cleanup fallback path, must be safe too
+        roots = {
+            result["assets"][k]["href"].replace(_S2_STORE, _S2_STORE_S3)
+            for k in ("AOT_10m", "WVP_10m")
+        }
+        assert check_urls_confined(roots, [(bucket, prefix)]) == []
+
+    def test_refuses_to_strip_an_href_with_no_zarr_root(self, caplog):
+        """A non-zarr / source-store layout matches on suffix alone and would be
+        mangled into `…/product/` and written back."""
+        item = _atmosphere_item()
+        item["assets"]["AOT_10m"]["href"] = "https://host/x/product/quality/atmosphere/r10m/aot"
+        with caplog.at_level("WARNING"):
+            result = repoint_atmosphere_assets(item)
+        assert result is not None  # WVP still migrates
+        assert result["assets"]["AOT_10m"]["href"] == item["assets"]["AOT_10m"]["href"]
+        assert "does not strip to a .zarr store root" in caplog.text
+
+    def test_registered_in_migrations(self):
+        from _migrate_catalog.migrations import MIGRATIONS
+
+        assert "repoint_atmosphere_assets" in MIGRATIONS
+
+
 _TJ_BASE = (
     "https://api.example.com/raster/collections/sentinel-1-grd-rtc-staging"
     "/items/s1-rtc-31TCG/WebMercatorQuad/tilejson.json"
@@ -240,6 +419,15 @@ class TestAddXyzLink:
 
     def test_title_from_renders_when_no_viewer(self):
         result = add_xyz_link(_item_with_tilejson(render_title="VV, VH, VV/VH composite"))
+        assert result is not None
+        xyz = next(lk for lk in result["links"] if lk["rel"] == "xyz")
+        assert xyz["title"] == "VV, VH, VV/VH composite"
+
+    def test_title_from_renders_at_the_item_root(self):
+        """data-model #216 moved `renders` to the item root; reading `properties` alone loses it."""
+        item = _item_with_tilejson(render_title="VV, VH, VV/VH composite")
+        item["renders"] = item["properties"].pop("renders")
+        result = add_xyz_link(item)
         assert result is not None
         xyz = next(lk for lk in result["links"] if lk["rel"] == "xyz")
         assert xyz["title"] == "VV, VH, VV/VH composite"
@@ -389,6 +577,15 @@ class TestAlignVisualizationLinks:
     def test_skips_item_without_renders(self):
         item = {"id": "s2", "properties": {}, "links": _nav_links(), "assets": {}}
         assert align_visualization_links(item) is None
+
+    def test_reads_renders_from_the_item_root(self):
+        """Without the root read this silently reports "nothing to align" for every item."""
+        item = _old_acq_item()
+        item["renders"] = item["properties"].pop("renders")
+        result = align_visualization_links(item)
+        assert result is not None
+        by_rel = {lk["rel"]: lk for lk in result["links"]}
+        assert by_rel["viewer"]["title"] == "VV, VH, VV/VH composite"
 
     def test_retitles_even_when_xyz_absent(self):
         item = _old_acq_item()
@@ -546,8 +743,8 @@ class TestSTACMigrationRunner:
         runner = self._make_runner()
         mock_search = _make_mock_search([item_with_wrong_media_type], total=1)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = mock_search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = mock_search
             result = runner.run_migration(
                 "test-col", fix_zarr_media_type, "fix_zarr_media_type", dry_run=True
             )
@@ -562,8 +759,8 @@ class TestSTACMigrationRunner:
         runner = self._make_runner()
         mock_search = _make_mock_search([item_with_wrong_media_type], total=1)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = mock_search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = mock_search
             result = runner.run_migration("test-col", fix_zarr_media_type, "fix_zarr_media_type")
 
         assert result.items_modified == 1
@@ -576,8 +773,8 @@ class TestSTACMigrationRunner:
         runner = self._make_runner()
         mock_search = _make_mock_search([item_clean], total=1)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = mock_search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = mock_search
             result = runner.run_migration("test-col", fix_zarr_media_type, "fix_zarr_media_type")
 
         assert result.items_skipped == 1
@@ -589,8 +786,8 @@ class TestSTACMigrationRunner:
         mock_search = _make_mock_search([item_with_wrong_media_type], total=1)
         runner._update_item.side_effect = Exception("API error")
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = mock_search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = mock_search
             result = runner.run_migration("test-col", fix_zarr_media_type, "fix_zarr_media_type")
 
         assert result.items_failed == 1
@@ -602,8 +799,8 @@ class TestSTACMigrationRunner:
         runner = self._make_runner()
         mock_search = _make_mock_search([item_with_wrong_media_type, item_clean], total=2)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = mock_search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = mock_search
             result = runner.run_migration("test-col", fix_zarr_media_type, "fix_zarr_media_type")
 
         assert result.items_processed == 2
@@ -617,13 +814,13 @@ class TestSTACMigrationRunner:
         runner = self._make_runner()
         mock_search = _make_mock_search([item_clean], total=1)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = mock_search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = mock_search
             runner.run_migration(
                 "test-col", fix_zarr_media_type, "fix_zarr_media_type", ids=["item-a", "item-b"]
             )
 
-        mock_client.open.return_value.search.assert_called_once_with(
+        mock_open.return_value.search.assert_called_once_with(
             collections=["test-col"], ids=["item-a", "item-b"], max_items=None, limit=100
         )
 
@@ -632,11 +829,11 @@ class TestSTACMigrationRunner:
         runner = self._make_runner()
         mock_search = _make_mock_search([item_clean], total=1)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = mock_search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = mock_search
             runner.run_migration("test-col", fix_zarr_media_type, "fix_zarr_media_type")
 
-        mock_client.open.return_value.search.assert_called_once_with(
+        mock_open.return_value.search.assert_called_once_with(
             collections=["test-col"], max_items=None, limit=100
         )
 
@@ -669,8 +866,8 @@ class TestSTACMigrationRunner:
         mock_search.matched.return_value = 1
         mock_search.pages_as_dicts.return_value = [{"features": [item]}]
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = mock_search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = mock_search
             runner.run_migration("test-col", add_xyz_link, "add_xyz_link")
 
         runner._update_item.assert_called_once()
@@ -703,8 +900,8 @@ class TestSTACMigrationRunner:
         # Prove the runner does NOT touch the pystac-parsing path.
         mock_search.pages.side_effect = KeyError("href")
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = mock_search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = mock_search
             result = runner.run_migration("test-col", add_xyz_link, "add_xyz_link")
 
         assert result.items_processed == 1
@@ -734,9 +931,9 @@ class TestSTACMigrationRunner:
         with (
             patch.object(runner.session, "get", return_value=mock_resp),
             patch.object(runner.session, "post", return_value=mock_resp) as mock_post,
-            patch("_migrate_catalog.runner.Client") as mock_client,
+            patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open,
         ):
-            mock_client.open.return_value.search.return_value = mock_search
+            mock_open.return_value.search.return_value = mock_search
             copied, skipped, failed = runner.clone_collection("source-col", "target-col")
 
         assert copied == 2
@@ -773,9 +970,9 @@ class TestSTACMigrationRunner:
         with (
             patch.object(runner.session, "get", return_value=mock_resp),
             patch.object(runner.session, "post", side_effect=post_side_effect),
-            patch("_migrate_catalog.runner.Client") as mock_client,
+            patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open,
         ):
-            mock_client.open.return_value.search.return_value = mock_search
+            mock_open.return_value.search.return_value = mock_search
             copied, skipped, failed = runner.clone_collection("source-col", "target-col")
 
         assert copied == 0
@@ -796,12 +993,12 @@ class TestFetchExistingIds:
         mock_search = MagicMock()
         mock_search.pages.return_value = [mock_page]
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = mock_search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = mock_search
             result = runner._fetch_existing_ids("my-col", page_size=100)
 
         assert result == {"item-1", "item-2"}
-        mock_client.open.return_value.search.assert_called_once_with(
+        mock_open.return_value.search.assert_called_once_with(
             collections=["my-col"], max_items=None, limit=100
         )
 
@@ -833,9 +1030,9 @@ class TestCloneResume:
             patch.object(runner.session, "get", return_value=mock_resp),
             patch.object(runner.session, "post", return_value=mock_resp) as mock_post,
             patch.object(runner, "_fetch_existing_ids", return_value={"item-1"}),
-            patch("_migrate_catalog.runner.Client") as mock_client,
+            patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open,
         ):
-            mock_client.open.return_value.search.return_value = mock_source_search
+            mock_open.return_value.search.return_value = mock_source_search
             copied, skipped, failed = runner.clone_collection(
                 "source-col", "target-col", resume=True
             )
@@ -861,9 +1058,9 @@ class TestCloneResume:
             patch.object(runner.session, "get", return_value=mock_resp),
             patch.object(runner.session, "post", return_value=mock_resp) as mock_post,
             patch.object(runner, "_fetch_existing_ids", return_value=set()),
-            patch("_migrate_catalog.runner.Client") as mock_client,
+            patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open,
         ):
-            mock_client.open.return_value.search.return_value = mock_source_search
+            mock_open.return_value.search.return_value = mock_source_search
             copied, skipped, failed = runner.clone_collection(
                 "source-col", "target-col", resume=True
             )
@@ -927,8 +1124,8 @@ class TestAtomicUpdate:
         runner._session = MagicMock(return_value=session)  # type: ignore[method-assign]
 
         search = _make_mock_search([_dirty_item(0)], total=1)
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             result = runner.run_migration("test-col", fix_zarr_media_type, "m")
 
         assert result.items_failed == 1
@@ -1825,14 +2022,20 @@ def test_search_client_is_resilient() -> None:
     stalled socket or a transient reset can't kill a long backfill (runner
     defects seen live: a 4.5h hang, then a ConnectionReset abort at ~20%). The
     migration's idempotent re-run is the final backstop."""
-    from _migrate_catalog.runner import _SEARCH_TIMEOUT, _resilient_stac_io
+    import stac_auth  # on the path via pyproject's pytest `pythonpath`
 
-    io = _resilient_stac_io()
-    assert io.timeout == _SEARCH_TIMEOUT
+    # Moved to stac_auth.resilient_stac_io() 2026-09-18 so the cleanup and storage-tier
+    # crons, which failed the same way, share one policy. See tests/unit/test_stac_read_retry.py
+    # for the behavioural coverage (this asserts configuration only).
+    io = stac_auth.resilient_stac_io()
+    assert io.timeout == stac_auth._search_timeout_s()
     retry = io.session.get_adapter("https://example.com").max_retries
     assert retry.total and retry.total >= 5
     assert retry.backoff_factor and retry.backoff_factor > 0
     assert "POST" in retry.allowed_methods  # /search pagination uses POST
+    # 500 added 2026-09-18: the prod gateway surfaces an upstream ReadTimeout as 500,
+    # not 504, so a policy without it did not fire (six prod ticks lost).
+    assert 500 in retry.status_forcelist
 
 
 # === Parallel writes (--concurrency) ===
@@ -1888,8 +2091,8 @@ class TestRunMigrationConcurrency:
 
     def _run(self, runner, items, concurrency, dry_run=False):  # noqa: ANN001, ANN202
         mock_search = _make_mock_search(items, total=len(items))
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = mock_search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = mock_search
             return runner.run_migration(
                 "test-col",
                 fix_zarr_media_type,
@@ -2006,8 +2209,8 @@ class TestRunMigrationConcurrency:
             return fix_zarr_media_type(item)
 
         mock_search = _make_mock_search([_dirty_item(i) for i in range(30)], total=30)
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = mock_search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = mock_search
             runner.run_migration("test-col", tracking_fn, "tracking", concurrency=8)
 
         assert fn_threads == {threading.get_ident()}
@@ -2039,8 +2242,8 @@ class TestConcurrencyAcrossPages:
         pages = [[_dirty_item(pg * 20 + i) for i in range(20)] for pg in range(5)]
         search = _multi_page_search(pages, total=100)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             result = runner.run_migration(
                 "test-col", fix_zarr_media_type, "fix_zarr_media_type", concurrency=8
             )
@@ -2077,8 +2280,8 @@ class TestCircuitBreaker:
         pages = [[_dirty_item(pg * 10 + i) for i in range(10)] for pg in range(20)]
         search = _multi_page_search(pages, total=200)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             result = runner.run_migration(
                 "test-col",
                 fix_zarr_media_type,
@@ -2111,8 +2314,8 @@ class TestCircuitBreaker:
         pages = [[_dirty_item(pg * 20 + i) for i in range(20)] for pg in range(10)]
         search = _multi_page_search(pages, total=200)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             result = runner.run_migration(
                 "test-col",
                 fix_zarr_media_type,
@@ -2129,8 +2332,8 @@ class TestCircuitBreaker:
         pages = [[_dirty_item(pg * 10 + i) for i in range(10)] for pg in range(5)]
         search = _multi_page_search(pages, total=50)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             result = runner.run_migration(
                 "test-col", fix_zarr_media_type, "fix_zarr_media_type", max_consecutive_failures=0
             )
@@ -2144,8 +2347,8 @@ class TestCircuitBreaker:
         runner._update_item = MagicMock()  # type: ignore[method-assign]
         search = _multi_page_search([[_dirty_item(i) for i in range(10)]], total=10)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             result = runner.run_migration("test-col", fix_zarr_media_type, "fix_zarr_media_type")
 
         assert result.aborted is False
@@ -2154,16 +2357,16 @@ class TestCircuitBreaker:
     def test_negative_threshold_rejected(self) -> None:
         runner = STACMigrationRunner("https://api.example.com/stac")
         search = _make_mock_search([_dirty_item(0)], total=1)
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             with pytest.raises(ValueError, match="max_consecutive_failures must be >= 0"):
                 runner.run_migration("c", fix_zarr_media_type, "m", max_consecutive_failures=-1)
 
     def test_negative_concurrency_rejected(self) -> None:
         runner = STACMigrationRunner("https://api.example.com/stac")
         search = _make_mock_search([_dirty_item(0)], total=1)
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             with pytest.raises(ValueError, match="concurrency must be >= 1"):
                 runner.run_migration("c", fix_zarr_media_type, "m", concurrency=0)
 
@@ -2197,8 +2400,8 @@ class TestMaxWrites:
         pages = [[_dirty_item(pg * 20 + i) for i in range(20)] for pg in range(10)]
         search = _multi_page_search(pages, total=200)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             result = runner.run_migration(
                 "test-col",
                 fix_zarr_media_type,
@@ -2229,8 +2432,8 @@ class TestMaxWrites:
         page = unmodelable + [_dirty_item(0)]
         search = _multi_page_search([page], total=len(page))
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             result = runner.run_migration(
                 "test-col",
                 fix_zarr_media_type,
@@ -2253,8 +2456,8 @@ class TestMaxWrites:
         pages = [[_dirty_item(pg * 20 + i) for i in range(20)] for pg in range(10)]
         search = _multi_page_search(pages, total=200)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             result = runner.run_migration(
                 "test-col", fix_zarr_media_type, "fix_zarr_media_type", max_writes=25
             )
@@ -2283,8 +2486,8 @@ class TestMaxWrites:
         pages = [[_stampable_item(item_id=f"s-{pg}-{i}") for i in range(20)] for pg in range(10)]
         search = _multi_page_search(pages, total=200)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             result = runner.run_migration(
                 "test-col", stamp_expires, "stamp_expires", concurrency=4, max_writes=30
             )
@@ -2300,8 +2503,8 @@ class TestMaxWrites:
         pages = [[_dirty_item(pg * 20 + i) for i in range(20)] for pg in range(5)]
         search = _multi_page_search(pages, total=100)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             result = runner.run_migration(
                 "test-col", fix_zarr_media_type, "fix_zarr_media_type", max_writes=None
             )
@@ -2313,8 +2516,8 @@ class TestMaxWrites:
         runner, written = self._runner_recording()
         search = _multi_page_search([[_dirty_item(i) for i in range(10)]], total=10)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             result = runner.run_migration(
                 "test-col", fix_zarr_media_type, "fix_zarr_media_type", max_writes=999
             )
@@ -2328,8 +2531,8 @@ class TestMaxWrites:
         runner, written = self._runner_recording()
         search = _multi_page_search([[_dirty_item(i) for i in range(10)]], total=10)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             result = runner.run_migration(
                 "test-col", fix_zarr_media_type, "fix_zarr_media_type", max_writes=10
             )
@@ -2357,8 +2560,8 @@ class TestMaxWrites:
         pages = [[_dirty_item(pg * 20 + i) for i in range(20)] for pg in range(10)]
         search = _multi_page_search(pages, total=200)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             result = runner.run_migration(
                 "test-col",
                 fix_zarr_media_type,
@@ -2394,8 +2597,8 @@ class TestMaxWrites:
         search.matched.return_value = 1000
         search.pages_as_dicts.side_effect = lambda: page_gen()
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             runner.run_migration(
                 "test-col", fix_zarr_media_type, "fix_zarr_media_type", max_writes=25
             )
@@ -2411,8 +2614,8 @@ class TestMaxWrites:
         page = [_clean_item(i) for i in range(50)] + [_dirty_item(i) for i in range(20)]
         search = _multi_page_search([page], total=70)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             result = runner.run_migration(
                 "test-col", fix_zarr_media_type, "fix_zarr_media_type", max_writes=5
             )
@@ -2425,8 +2628,8 @@ class TestMaxWrites:
         pages = [[_dirty_item(pg * 20 + i) for i in range(20)] for pg in range(10)]
         search = _multi_page_search(pages, total=200)
 
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             result = runner.run_migration(
                 "test-col",
                 fix_zarr_media_type,
@@ -2442,8 +2645,8 @@ class TestMaxWrites:
     def test_negative_max_writes_rejected(self) -> None:
         runner = STACMigrationRunner("https://api.example.com/stac")
         search = _make_mock_search([_dirty_item(0)], total=1)
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = search
             with pytest.raises(ValueError, match="max_writes must be >= 1"):
                 runner.run_migration("c", fix_zarr_media_type, "m", max_writes=0)
 
@@ -2490,10 +2693,10 @@ class TestInterruptCancelsQueuedWrites:
 
         search = _make_mock_search([_dirty_item(i) for i in range(n_items)], total=n_items)
         with (
-            patch("_migrate_catalog.runner.Client") as mock_client,
+            patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open,
             patch("_migrate_catalog.runner.click.progressbar") as mock_pb,
         ):
-            mock_client.open.return_value.search.return_value = search
+            mock_open.return_value.search.return_value = search
             mock_pb.return_value.__enter__.return_value = bar
             with pytest.raises(KeyboardInterrupt):
                 runner.run_migration(
@@ -2542,8 +2745,8 @@ class TestStampExpiresUnderConcurrency:
         runner = STACMigrationRunner("https://api.example.com/stac")
         runner._update_item = MagicMock()  # type: ignore[method-assign]
         mock_search = _make_mock_search(items, total=len(items))
-        with patch("_migrate_catalog.runner.Client") as mock_client:
-            mock_client.open.return_value.search.return_value = mock_search
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = mock_search
             result = runner.run_migration("test-col", stamp_expires, "stamp_expires", concurrency=4)
 
         assert result.items_modified == 20
@@ -3000,3 +3203,214 @@ class TestVerifyCanFail:
         res = CliRunner().invoke(climod.cli, ["verify", "coll", "--migration", "fix_url_encoding"])
         assert res.exit_code == 0, res.output
         assert called == ["reset"]
+
+
+# === The write body is built OFFLINE (the 2026-09-22 T8 D4 halt) ===
+#
+# pystac's ``Item.to_dict()`` defaults to ``transform_hrefs=True``, which resolves the item's
+# ``root`` link over HTTP (no timeout, no retry, a fresh fetch per ``from_dict``) to decide
+# whether hrefs should be relativised. Every prod item carries an absolute root link, so the
+# D2 restamp paid one landing-page GET per item on the main thread — ~0.36 s each, more than
+# the PUT it preceded, and never parallelised. These tests pin the body build to pure
+# computation: any socket opened while building a body is a failure.
+
+
+def _prod_shaped_item(item_id: str = "S2B_MSIL2A_20260921T141029_N0513_R053_T25WFQ") -> dict:
+    """An item as ``/search`` returns it: absolute hierarchical links (collection, parent,
+    root, self) — exactly what sends pystac's default ``to_dict`` to fetch the root."""
+    api = "https://api.example.com/stac"
+    return {
+        "type": "Feature",
+        "stac_version": "1.1.0",
+        "id": item_id,
+        "collection": "sentinel-2-l2a",
+        "geometry": {"type": "Point", "coordinates": [0.0, 0.0]},
+        "bbox": [0.0, 0.0, 0.0, 0.0],
+        "properties": {
+            "datetime": "2026-09-21T14:10:29.024000Z",
+            "expires": "2026-12-21T00:00:30Z",
+        },
+        "stac_extensions": [TIMESTAMPS_EXTENSION],
+        "links": [
+            {
+                "rel": "collection",
+                "type": "application/json",
+                "href": f"{api}/collections/sentinel-2-l2a",
+            },
+            {
+                "rel": "parent",
+                "type": "application/json",
+                "href": f"{api}/collections/sentinel-2-l2a",
+            },
+            {"rel": "root", "type": "application/json", "href": f"{api}/"},
+            {
+                "rel": "self",
+                "type": "application/geo+json",
+                "href": f"{api}/collections/sentinel-2-l2a/items/{item_id}",
+            },
+            {
+                "rel": "store",
+                "href": "https://s3.example.com/bucket/x.zarr",
+                "type": "application/octet-stream",
+                "title": "Zarr Store",
+            },
+        ],
+        "assets": {
+            "product": {
+                "href": "https://s3.example.com/bucket/x.zarr",
+                "type": "application/vnd+zarr; version=3",
+                "roles": ["data"],
+            }
+        },
+    }
+
+
+@contextmanager
+def _no_network():
+    """Fail ANY outbound network attempt: a body build must be pure computation.
+
+    Patching only ``socket.socket`` silently weakens this: urllib3 resolves the host first,
+    so a DNS-unresolvable href raises in ``getaddrinfo`` and the socket is never built --
+    the test then passes for the wrong reason, and would keep passing if a regression
+    reached the network over a pooled keep-alive connection.
+    """
+    boom = AssertionError("network I/O during body build")
+    with (
+        patch("socket.socket", side_effect=boom),
+        patch("socket.getaddrinfo", side_effect=boom),
+        patch("socket.create_connection", side_effect=boom),
+    ):
+        yield
+
+
+class TestTransactionBodyIsOffline:
+    def test_the_guard_catches_pystac_default_behaviour(self):
+        # First prove the guard has teeth: pystac's default to_dict() on a prod-shaped item
+        # does reach for the network. This is the original bug, expressed as a test.
+        # 127.0.0.1 resolves, so a failure here comes from the guard, not from DNS.
+        item = _prod_shaped_item()
+        for link in item["links"]:
+            if link.get("rel") == "root":
+                link["href"] = "http://127.0.0.1:9/"
+        with _no_network(), pytest.raises(Exception) as exc:
+            pystac.Item.from_dict(item).to_dict()
+        trace = "".join(traceback.format_exception(exc.value))
+        assert "network I/O during body build" in trace, f"guard never fired; chain was {trace}"
+
+    def test_body_build_opens_no_socket(self):
+        with _no_network():
+            body = _transaction_body(_prod_shaped_item())
+        assert body["id"] == _prod_shaped_item()["id"]
+
+    def test_body_is_the_item_as_read(self):
+        # Nothing invented: no title copied onto the root link from a fetched landing page,
+        # hrefs untouched, properties re-materialised to the same values.
+        item = _prod_shaped_item()
+        with _no_network():
+            body = _transaction_body(item)
+        assert body == item
+
+    def test_datacube_null_datetime_is_still_materialised(self):
+        # The reason pystac is in the loop at all: the transaction API needs the key present.
+        item = _prod_shaped_item()
+        item["properties"] = {
+            "start_datetime": "2026-06-01T00:00:00Z",
+            "end_datetime": "2026-07-01T00:00:00Z",
+        }
+        with _no_network():
+            body = _transaction_body(item)
+        assert body["properties"]["datetime"] is None
+
+    def test_unmodelable_item_raises_with_the_cause(self):
+        item = _prod_shaped_item()
+        item["assets"]["vv"] = {"roles": ["data"]}  # no href — pystac cannot model it
+        with _no_network(), pytest.raises(KeyError, match="href"):
+            _transaction_body(item)
+
+    def test_run_migration_builds_every_body_offline(self):
+        # The runner-level statement of the same rule, at the concurrency D4 uses. Only the
+        # PUT is pooled; the body build runs on this thread, so a per-item GET here would
+        # serialise the whole run behind it.
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        runner._update_item = MagicMock()
+        items = [_prod_shaped_item(f"item-{i}") for i in range(5)]
+        mock_search = MagicMock()
+        mock_search.matched.return_value = len(items)
+        mock_search.pages_as_dicts.return_value = [{"features": items}]
+
+        def shorten(item: dict) -> dict:
+            out = copy.deepcopy(item)
+            out["properties"]["expires"] = "2026-12-20T14:10:29Z"
+            return out
+
+        with (
+            patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open,
+            _no_network(),
+        ):
+            mock_open.return_value.search.return_value = mock_search
+            result = runner.run_migration(
+                "sentinel-2-l2a", shorten, "restamp_expires", concurrency=8
+            )
+
+        assert (result.items_modified, result.items_failed) == (5, 0)
+        bodies = [call.args[2] for call in runner._update_item.call_args_list]
+        assert {b["properties"]["expires"] for b in bodies} == {"2026-12-20T14:10:29Z"}
+        assert all(
+            "title" not in next(lk for lk in b["links"] if lk["rel"] == "root") for b in bodies
+        )
+
+    def test_unmodelable_item_is_failed_with_the_cause_and_not_written(self):
+        # A body-build failure never trips the circuit breaker, so the error text is the only
+        # thing an operator has to triage it against anything new.
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        runner._update_item = MagicMock()
+        bad = _prod_shaped_item("hrefless")
+        bad["assets"]["vv"] = {"roles": ["data"]}
+        mock_search = MagicMock()
+        mock_search.matched.return_value = 1
+        mock_search.pages_as_dicts.return_value = [{"features": [bad]}]
+
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = mock_search
+            result = runner.run_migration("sentinel-2-l2a", lambda item: dict(item), "x")
+
+        assert (result.items_modified, result.items_failed) == (0, 1)
+        runner._update_item.assert_not_called()
+        assert "KeyError" in result.errors[0]["error"]
+        assert "href" in result.errors[0]["error"]
+
+
+class TestHistoryIgnoresRunsThatWroteNothing:
+    """A run whose every write failed walks the whole collection, trips no breaker
+    (body-build failures are not consecutive write failures) and ends with neither
+    ``aborted`` nor ``reached_max_writes`` set — so it used to be recorded as the
+    migration having been applied, and the next invocation's 'Run again? [N]' would
+    abandon the backfill on its safe-looking default."""
+
+    def test_a_run_where_every_write_failed_is_not_applied(self, tmp_path, migration_result):
+        history_file = tmp_path / "history.json"
+        migration_result.items_modified = 0
+        migration_result.items_failed = 100
+        record_run(history_file, migration_result)
+
+        assert not was_migration_run(history_file, "fix_zarr_media_type", "sentinel-2-l2a")
+
+    def test_a_no_op_second_pass_still_counts_as_applied(self, tmp_path, migration_result):
+        # Nothing to write and nothing failed: that is what "already applied" looks like.
+        history_file = tmp_path / "history.json"
+        migration_result.items_modified = 0
+        migration_result.items_failed = 0
+        migration_result.items_skipped = 100
+        record_run(history_file, migration_result)
+
+        assert was_migration_run(history_file, "fix_zarr_media_type", "sentinel-2-l2a")
+
+    def test_a_run_with_some_failures_still_counts(self, tmp_path, migration_result):
+        # The warning is the operator's cue to re-run for the few that failed; only a run
+        # that changed nothing is excluded.
+        history_file = tmp_path / "history.json"
+        migration_result.items_modified = 97
+        migration_result.items_failed = 3
+        record_run(history_file, migration_result)
+
+        assert was_migration_run(history_file, "fix_zarr_media_type", "sentinel-2-l2a")

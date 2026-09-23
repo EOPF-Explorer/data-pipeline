@@ -37,7 +37,6 @@ from manage_item import (
     parse_s3_prefix,
 )
 from pystac import Collection, Item
-from pystac_client import Client
 
 # Add scripts directory to path for storage tier utilities
 scripts_dir = Path(__file__).parent.parent / "scripts"
@@ -179,8 +178,12 @@ class STACCollectionManager:
         items = []
 
         try:
-            catalog = Client.open(self.api_url)
-            search = catalog.search(collections=[collection_id], max_items=None)
+            catalog = stac_auth.open_resilient_client(self.api_url)
+            search = catalog.search(
+                collections=[collection_id],
+                max_items=None,
+                limit=stac_auth.DEFAULT_PAGE_SIZE,
+            )
 
             for item in search.items():
                 items.append(item.to_dict())
@@ -1052,7 +1055,7 @@ def info(
     api_url: str = ctx.obj["api_url"]
 
     try:
-        catalog = Client.open(api_url)
+        catalog = stac_auth.open_resilient_client(api_url)
         collection = catalog.get_collection(collection_id)
 
         click.echo(f"\n{'=' * 60}")
@@ -1522,7 +1525,7 @@ def change_storage_tier(
 
     try:
         # Search items with optional date filter
-        catalog = Client.open(api_url)
+        catalog = stac_auth.open_resilient_client(api_url)
         if start_date or end_date:
             start_str = f"{start_date}T00:00:00Z" if start_date else "1900-01-01T00:00:00Z"
             end_str = f"{end_date}T23:59:59Z" if end_date else "2100-12-31T23:59:59Z"
@@ -1534,7 +1537,11 @@ def change_storage_tier(
                 max_items=None,
             )
         else:
-            search = catalog.search(collections=[collection_id], max_items=None)
+            search = catalog.search(
+                collections=[collection_id],
+                max_items=None,
+                limit=stac_auth.DEFAULT_PAGE_SIZE,
+            )
 
         items = list(search.items())
 

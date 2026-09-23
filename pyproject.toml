@@ -7,7 +7,7 @@ allow-direct-references = true
 
 [project]
 name = "data-pipeline"
-version = "1.17.0"
+version = "1.18.0"
 description = "Minimal event-driven Argo Workflows pipeline for Sentinel-2 GeoZarr conversion and STAC registration"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -40,9 +40,12 @@ dependencies = [
     # This branch needs BOTH: S1 registration/ingest and open_source_datatree.
     # Chunk-alignment was split out to data-model#221, so quality/atmosphere
     # aot/wvp ship unsharded until that lands.
-    "eopf-geozarr @ git+https://github.com/EOPF-Explorer/data-model.git@9ede8c34dfe534727e93d80e278ad4390f5656d0",
+    "eopf-geozarr @ git+https://github.com/EOPF-Explorer/data-model.git@v0.11.0",
     "mgrs==1.5.4",
     "requests==2.34.2",
+    # scripts/stac_auth.py imports urllib3.util.retry directly: Retry(backoff_max=...)
+    # is 2.x-only and _LoggedRetry.increment forwards six arguments positionally.
+    "urllib3>=2,<3",
 ]
 
 [tool.uv]
@@ -55,10 +58,10 @@ constraint-dependencies = ["aiohttp>=3.14.3", "pillow>=12.2.0", "pip>=26.2"]
 
 [dependency-groups]
 dev = [
-    "ruff==0.16.4",
+    "ruff==0.16.7",
     "mypy==2.3.1",
     "pre-commit==4.6.2",
-    "types-boto3==1.43.81",
+    "types-boto3==1.43.93",
     "types-requests==2.33.0.20260518",
     "pip-audit==2.10.1",
 ]
@@ -71,7 +74,7 @@ notebooks = [
     "notebook==7.6.2",
     "ipykernel==7.3.0",
     "pandas==3.0.5",
-    "matplotlib==3.11.1",
+    "matplotlib==3.11.2",
     "shapely==2.1.2",
     "python-dotenv==1.2.3",
 ]

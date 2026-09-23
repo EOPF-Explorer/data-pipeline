@@ -21,8 +21,13 @@ import os
 import sys
 from datetime import UTC, datetime, timedelta
 
+# The page-size parser and default come from stac_auth, not from cleanup_expired_items:
+# that module deletes S3 objects and calls logging.basicConfig at import, and
+# `page_size_arg("")` must resolve to the same constant in both. Neither this script nor
+# submit_storage_tier_workflows has an in-tool runtime budget — the walk is bounded by
+# the query window and the pod's deadline only.
+import stac_auth
 from pystac import Item
-from pystac_client import Client
 from s3_item_cleanup import resolve_exclude_ids
 from update_stac_storage_tier import TIER_TO_SCHEME
 
@@ -94,6 +99,7 @@ def query_items(
     target_storage_ref: str,
     max_batch_size: int,
     exclude_ids: set[str] | frozenset[str] = frozenset(),
+    page_size: int = stac_auth.DEFAULT_PAGE_SIZE,
 ) -> list[str]:
     """Query STAC and return item IDs needing storage tier change.
 
@@ -108,6 +114,7 @@ def query_items(
         target_storage_ref: The storage:refs value indicating target tier.
         max_batch_size: Maximum number of items to return.
         exclude_ids: Item IDs that must never be selected (demo denylist).
+        page_size: Items per /search request while walking the window.
 
     Returns:
         List of item IDs needing storage tier change.
@@ -121,10 +128,16 @@ def query_items(
     logger.info(f"Time window: {window_start.isoformat()}Z to {window_end.isoformat()}Z")
     logger.info(f"Target storage ref: {target_storage_ref}, max batch: {max_batch_size}")
 
-    catalog = Client.open(stac_api_url)
+    # Hardened by symmetry, not because this script failed — no manifest runs it. The cron
+    # that died runs submit_storage_tier_workflows, which shares this client.
+    catalog = stac_auth.open_resilient_client(stac_api_url)
+    # `limit` is the page size, not a cap. Deliberately not clamped to max_batch_size:
+    # that is an output cap applied after the tier filter, and coupling them would
+    # silently change the page whenever someone raises the batch.
     search = catalog.search(
         collections=[collection],
         datetime=f"{window_start.isoformat()}Z/{window_end.isoformat()}Z",
+        limit=page_size,
     )
 
     total_found = 0
@@ -173,6 +186,20 @@ def main(argv: list[str] | None = None) -> int:
         help="Maximum number of items to return (default: 100)",
     )
     parser.add_argument(
+        "--page-size",
+        # The cleanup cron's validator, so a typo (0, -5, 20000) is a usage error at
+        # parse time rather than pystac-client's bare Exception after a network round
+        # trip, and `""` (the fleet's unset-Argo-parameter idiom) means the default.
+        type=stac_auth.page_size_arg,
+        default=stac_auth.DEFAULT_PAGE_SIZE,
+        help=(
+            f"Items per /search request while walking the window (default: "
+            f"{stac_auth.DEFAULT_PAGE_SIZE}, max {stac_auth.MAX_PAGE_SIZE}). A page, not a "
+            "cap: --max-batch-size still bounds the output, and the page is NOT clamped to "
+            "it — one page of items is held in memory at a time (~45 KB each)."
+        ),
+    )
+    parser.add_argument(
         "--exclude-file",
         default=None,
         help=(
@@ -192,6 +219,7 @@ def main(argv: list[str] | None = None) -> int:
             target_storage_ref=target_storage_ref,
             max_batch_size=args.max_batch_size,
             exclude_ids=resolve_exclude_ids(args.exclude_file),
+            page_size=args.page_size,
         )
         sys.stdout.write(json.dumps(items))
         sys.stdout.flush()

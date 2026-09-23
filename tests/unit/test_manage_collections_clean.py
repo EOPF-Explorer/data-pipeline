@@ -301,3 +301,40 @@ def test_cli_refuses_an_unparseable_threshold(monkeypatch: pytest.MonkeyPatch) -
     )
     assert result.exit_code != 0
     assert "--datetime-before" in result.output
+
+
+def test_the_collection_walk_uses_the_shared_resilient_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The purge walk must page /search on the retrying client, not bare Client.open.
+
+    This is the deployed destructive walker (the 6-hourly s2-staging-purge, --max-items
+    2000), and it was the last read path left on a client with no timeout and no status
+    retries -- the follow-up named in #418.
+    """
+    import manage_collections
+    import stac_auth
+
+    catalog = MagicMock()
+    catalog.search.return_value.items.return_value = []
+    opened: list[str] = []
+
+    def _open(url: str):
+        opened.append(url)
+        return catalog
+
+    monkeypatch.setattr(manage_collections.stac_auth, "open_resilient_client", _open)
+
+    STACCollectionManager("https://stac.example.com").get_collection_items("c")
+
+    assert opened == ["https://stac.example.com"], "did not go through open_resilient_client"
+    # A page, not the server's default of 10, which is what made a walk 30+ round trips.
+    assert catalog.search.call_args.kwargs["limit"] == stac_auth.DEFAULT_PAGE_SIZE
+
+
+def test_the_resilient_client_never_carries_the_write_session() -> None:
+    """Retries must not reach a DELETE/PUT: the write session is built separately."""
+    manager = STACCollectionManager("https://stac.example.com")
+    # The session used for every write carries no urllib3 status-retry policy.
+    for adapter in manager.session.adapters.values():
+        assert not getattr(adapter.max_retries, "status_forcelist", None)

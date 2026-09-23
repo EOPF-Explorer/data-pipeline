@@ -16,10 +16,9 @@
 #      `backup_prefix` is given (C2 rollback safety).
 #   3. ROLLBACK (only if a backup_prefix was used): -p rollback=true -p backup_prefix=<s3://…>
 #
-# pipeline_image_version MUST be an RC build that contains scripts/migrate_s1_rtc_datamodel.py
-# (verify: `docker run --rm <image> python /app/scripts/migrate_s1_rtc_datamodel.py --help`). The live
-# v0.8.0-s1rtc-rc2 predates this script — cut a new RC from feat--s1_grd_phase5 after the migration
-# code merges.
+# pipeline_image_version MUST contain scripts/migrate_s1_rtc_datamodel.py AND the eopf-geozarr
+# v0.11.0 pin (verify: `docker run --rm <image> python /app/scripts/migrate_s1_rtc_datamodel.py
+# --help`). That means v1.17.1 or later; every tag before it predates #413.
 apiVersion: argoproj.io/v1alpha1
 kind: Workflow
 metadata:
@@ -34,8 +33,19 @@ spec:
     secondsAfterFailure: 259200
   arguments:
     parameters:
-    - name: pipeline_image_version          # REQUIRED — RC tag containing migrate_s1_rtc_datamodel.py
-      value: v0.8.0-s1rtc-rc3
+    # `v1.17.1` is the first release containing #413 (the eopf-geozarr v0.11.0 pin, the writer
+    # behavioural probe, the stable completion marker and `--rewrite-root-geo`). Release tags are
+    # immutable and are published by the tag build (`type=ref,event=tag`), which is what a run
+    # against production cubes needs — the bucket has S3 versioning OFF, so a run on an image other
+    # than the one the dry run validated is not recoverable.
+    #
+    # It replaces `pr-413`, used for the 2026-09-18 dry runs. A `pr-<N>` tag FOLLOWS THE PR HEAD, so
+    # it is fine for a dry run and never acceptable for a write. So are `latest` and `main`, both of
+    # which the main-branch build republishes on every merge. The template enforces this rather than
+    # trusting the comment: anything that is not a `v*` release tag or an immutable `sha-*` tag exits
+    # 1 when dry_run=false, before the driver starts.
+    - name: pipeline_image_version          # REQUIRED — build containing migrate_s1_rtc_datamodel.py
+      value: v1.17.1
     - name: stac_api_url
       value: https://api.explorer.eopf.copernicus.eu/stac
     - name: cube_collection
@@ -56,6 +66,8 @@ spec:
       value: "false"
     - name: allow_no_backup                 # "true" → real run with NO backup (recovery = re-ingest)
       value: "false"
+    - name: rewrite_root_geo                # "true" → ALSO rewrite each store's root geo metadata
+      value: "false"                        # SAFE DEFAULT: re-derive vv/vh + consolidate, nothing else
   templates:
   - name: migrate
     activeDeadlineSeconds: 21600            # 6h ceiling for the whole fleet
@@ -73,6 +85,22 @@ spec:
       command: [bash]
       source: |
         set -uo pipefail
+        # A real run must be reproducible, so it may only use an IMMUTABLE tag: a `v*` release tag
+        # or a `sha-*` commit tag. Everything else -- `pr-<N>` (follows the PR head), `latest` and
+        # `main` (republished on every merge), a branch name -- is refused unless this is a dry run.
+        # An allowlist, not a denylist: a new mutable tag shape must be admitted deliberately.
+        # The cube bucket has S3 versioning OFF, so a run on an image other than the one the dry run
+        # validated is not recoverable.
+        if [ "$DRY_RUN" != "true" ]; then
+          case "$PIPELINE_IMAGE_VERSION" in
+            v*|sha-*) ;;
+            *)
+              echo "REFUSING: image tag '$PIPELINE_IMAGE_VERSION' is not immutable and dry_run=false." >&2
+              echo "Use a v<release> or sha-<commit> tag for a real run (see the manifest header)." >&2
+              exit 1
+              ;;
+          esac
+        fi
         args=(
           --stac-api-url "$STAC_API_URL"
           --cube-collection "$CUBE_COLLECTION"
@@ -82,6 +110,7 @@ spec:
         [ "$DRY_RUN" = "true" ] && args+=(--dry-run)
         [ "$ROLLBACK" = "true" ] && args+=(--rollback)
         [ "$ALLOW_NO_BACKUP" = "true" ] && args+=(--allow-no-backup)
+        [ "$REWRITE_ROOT_GEO" = "true" ] && args+=(--rewrite-root-geo)
         [ -n "$BACKUP_PREFIX" ] && args+=(--backup-prefix "$BACKUP_PREFIX")
         [ -n "$ITEM" ] && args+=(--item "$ITEM")
         [ -n "$SKIP_TILES" ] && args+=(--skip-tiles $SKIP_TILES)
@@ -105,6 +134,8 @@ spec:
         value: "{{workflow.parameters.s3_endpoint}}"
       - name: DRY_RUN
         value: "{{workflow.parameters.dry_run}}"
+      - name: PIPELINE_IMAGE_VERSION
+        value: "{{workflow.parameters.pipeline_image_version}}"
       - name: ROLLBACK
         value: "{{workflow.parameters.rollback}}"
       - name: BACKUP_PREFIX
@@ -115,6 +146,8 @@ spec:
         value: "{{workflow.parameters.item}}"
       - name: ALLOW_NO_BACKUP
         value: "{{workflow.parameters.allow_no_backup}}"
+      - name: REWRITE_ROOT_GEO
+        value: "{{workflow.parameters.rewrite_root_geo}}"
       - name: AWS_ACCESS_KEY_ID
         valueFrom:
           secretKeyRef:

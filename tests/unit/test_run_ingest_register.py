@@ -18,7 +18,12 @@ import pytest
 scripts_dir = Path(__file__).parent.parent.parent / "scripts"
 sys.path.insert(0, str(scripts_dir))
 
-from run_ingest_register import check_env_consistency, run_pipeline  # noqa: E402
+from run_ingest_register import (  # noqa: E402
+    _build_parser,
+    check_env_consistency,
+    check_tile_id,
+    run_pipeline,
+)
 
 _MOD = "run_ingest_register"
 
@@ -145,6 +150,32 @@ def test_invalid_collection_rejected(bad_collection: str) -> None:
     mock_run.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    # "31TCH\n" is the `$`-matches-before-a-final-newline hole: it would have landed as
+    # `s1-rtc-31TCH\n.zarr` and `grid:code: "MGRS-31TCH\n"`.
+    "bad_tile",
+    ["", "3TCH", "310TCH", "61TCH", "31tch", "31TIH", "31TCH.zarr", "../31TCH", "31TCH\n"],
+)
+def test_invalid_tile_id_rejected(bad_tile: str) -> None:
+    """A malformed --tile-id must be refused before anything is written.
+
+    The store path is built straight from it (`s1-rtc-{tile}.zarr`) and the STAC builder only
+    rejects the name at register time -- i.e. after a multi-hour ingest has already created the
+    cube. The guard must fire before any subprocess runs, so a typo leaves nothing behind.
+    """
+    with patch(f"{_MOD}.subprocess.run") as mock_run, pytest.raises(ValueError, match="MGRS"):
+        run_pipeline(**{**_KWARGS, "tile_id": bad_tile})
+    mock_run.assert_not_called()
+
+
+@pytest.mark.parametrize("good_tile", ["31TCH", "01CAA", "60XVV", "33UWT"])
+def test_valid_tile_ids_accepted(good_tile: str) -> None:
+    """A false rejection blocks a real ingest, which is worse than the bug being guarded against."""
+    with patch(f"{_MOD}.subprocess.run", side_effect=[_mock_proc(0)] * 3) as mock_run:
+        assert run_pipeline(**{**_KWARGS, "tile_id": good_tile}) == 0
+    assert mock_run.call_count == 3
+
+
 def test_store_prefix_tracks_collection() -> None:
     """Store key prefix must be derived from --collection, not a fixed value.
 
@@ -205,3 +236,57 @@ def test_matched_env_pairs_allowed(collection: str, bucket: str) -> None:
 def test_unrecognized_names_pass_through(collection: str, bucket: str) -> None:
     """When either name isn't a known per-env value, the guard can't infer env and stays out."""
     check_env_consistency(collection, bucket)  # must not raise
+
+
+# --- the writer's monotonicity guard needs an operator escape hatch HERE ----------------------
+# `--allow-out-of-order` exists on ingest_v1_s1_rtc.py, but this is the only entry point the
+# watcher and the Argo templates ever call. Unreachable from here == unreachable in production.
+
+
+def test_allow_out_of_order_is_not_passed_by_default() -> None:
+    """Default OFF: a routine cron inversion must still fail loudly rather than append silently."""
+    with patch(f"{_MOD}.subprocess.run", side_effect=[_mock_proc(0)] * 3) as mock_run:
+        run_pipeline(**_KWARGS)
+    assert "--allow-out-of-order" not in mock_run.call_args_list[0][0][0]
+
+
+def test_allow_out_of_order_reaches_the_ingest_command() -> None:
+    """Set, it must appear on the ingest argv — otherwise a cube that already holds a newer scene
+    can never be backfilled: every older product fails, is never marked processed, and the next run
+    repeats the same failure."""
+    with patch(f"{_MOD}.subprocess.run", side_effect=[_mock_proc(0)] * 3) as mock_run:
+        run_pipeline(**_KWARGS, allow_out_of_order=True)
+    ingest_cmd = mock_run.call_args_list[0][0][0]
+    assert "--allow-out-of-order" in ingest_cmd
+    assert ingest_cmd[2:4] == ["python", "scripts/ingest_v1_s1_rtc.py"]  # on ingest, not register
+
+
+def test_cli_exposes_allow_out_of_order() -> None:
+    """The flag is reachable from the command line, not just the function signature."""
+    args = _build_parser().parse_args(
+        [
+            "--s3-geotiff-prefix", "s3://b/in/",
+            "--tile-id", "31TCH",
+            "--orbit-direction", "descending",
+            "--collection", "c",
+            "--s3-output-bucket", "b",
+            "--s3-endpoint", "https://s3",
+            "--stac-api-url", "https://stac",
+            "--raster-api-url", "https://raster",
+            "--allow-out-of-order",
+        ]
+    )  # fmt: skip
+    assert args.allow_out_of_order is True
+
+
+# --- the tile-id guard is callable on its own (the watcher needs it before Script A) ----------
+
+
+def test_check_tile_id_accepts_an_mgrs_tile() -> None:
+    check_tile_id("31TCH")
+
+
+@pytest.mark.parametrize("bad", ["31tch", "3TCH", "31TC", "31TCHX", "", "../etc"])
+def test_check_tile_id_rejects_non_mgrs(bad: str) -> None:
+    with pytest.raises(ValueError, match="MGRS tile id"):
+        check_tile_id(bad)

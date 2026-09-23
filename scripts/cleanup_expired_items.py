@@ -40,7 +40,6 @@ import boto3
 import requests
 import stac_auth
 from botocore.exceptions import BotoCoreError, ClientError
-from pystac_client import Client
 from s3_item_cleanup import (
     UnconfinedS3URLError,
     count_s3_objects_for_item,
@@ -84,13 +83,13 @@ def _now() -> datetime:
 # when added to a float deadline.
 MAX_BUDGET_SECONDS = 86_400
 
-# The item cap is also the MEMORY cap: `stale_items` is fully materialised before
-# the first delete, at roughly 45 KB per S2 L2A item dict. At a 4Gi pod limit the
-# real ceiling is ~90k, so this fences the plausible typo (100000 for 10000)
-# without constraining any real run — the live cron uses 130. An OOMKill is a
-# SIGKILL, which lands wherever it lands, including between the S3 delete and the
-# STAC delete: exactly the tear --max-runtime-seconds exists to prevent.
-MAX_ITEMS_CEILING = 10_000
+# The item cap is also the MEMORY cap: `stale_items` is fully materialised before the
+# first delete, ~45 KB per item, in a 512Mi pod. So 10000 is a typo fence (100000 for
+# 10000), NOT a value that pod survives — it sits at the OOM point, and the live cron
+# uses 300. Raise --max-items in steps and watch the pod. An OOMKill is a SIGKILL and
+# can land between the S3 delete and the STAC delete: the tear --max-runtime-seconds
+# exists to prevent. Shared with the /search page ceiling, which is materialised alike.
+MAX_ITEMS_CEILING = stac_auth.MAX_PAGE_SIZE
 
 
 def _item_cap(raw: str) -> int:
@@ -160,9 +159,33 @@ def _monotonic() -> float:
     return time.monotonic()
 
 
-def build_search_kwargs(collection: str, now: datetime, max_items: int) -> dict[str, Any]:
-    """CQL2 discovery query for items whose ``expires`` is before ``now``,
-    oldest-first, capped at ``max_items``."""
+# Items per /search page during discovery — a page, NOT the cap; the rationale for
+# 100 (and its counter-hypothesis) sits on the constant in stac_auth, shared with the
+# tier-down cron.
+DEFAULT_PAGE_SIZE = stac_auth.DEFAULT_PAGE_SIZE
+
+# Discovery order by `expires`. `id` is a unique tiebreaker, in the same direction: a
+# whole backfill batch can share one `expires` day, and keyset pagination silently
+# under-returns across pages when the sort has no total order. newest-first reaches the
+# most recently expired items first (during the T8 drain, the T7 leftovers still in the
+# High Performance class); it delays the oldest ones only while items keep expiring
+# faster than runs drain them.
+SORT_ORDERS = {
+    "oldest-first": ["+properties.expires", "+id"],
+    "newest-first": ["-properties.expires", "-id"],
+}
+DEFAULT_ORDER = "oldest-first"
+
+
+def build_search_kwargs(
+    collection: str,
+    now: datetime,
+    max_items: int,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    order: str = DEFAULT_ORDER,
+) -> dict[str, Any]:
+    """CQL2 discovery query for items whose ``expires`` is before ``now``, sorted by
+    ``order``, capped at ``max_items`` and read ``page_size`` items per request."""
     return {
         "collections": [collection],
         "filter_lang": "cql2-json",
@@ -170,11 +193,10 @@ def build_search_kwargs(collection: str, now: datetime, max_items: int) -> dict[
             "op": "<",
             "args": [{"property": "expires"}, format_expires(now)],
         },
-        # Oldest-expiry first. `id` is a unique tiebreaker: a whole backfill batch
-        # can share one `expires` day, and keyset pagination silently under-returns
-        # across pages when the sort has no total order.
-        "sortby": ["+properties.expires", "+id"],
+        "sortby": list(SORT_ORDERS[order]),
         "max_items": max_items,
+        # A page larger than the cap is rows the client discards on arrival.
+        "limit": min(page_size, max_items),
     }
 
 
@@ -395,6 +417,14 @@ def run_cleanup(args: argparse.Namespace) -> int:
             f"max_items must be 1..{MAX_ITEMS_CEILING}, got {args.max_items} "
             "(0 removes the cap entirely; above the ceiling risks an OOMKill)"
         )
+    page_size = args.page_size
+    # stac_auth.MAX_PAGE_SIZE, the same authority as the argparse validator
+    # (stac_auth.page_size_arg) and the --page-size help string, so the flag has one
+    # ceiling even once the page gets a smaller one than the batch.
+    if not 1 <= page_size <= stac_auth.MAX_PAGE_SIZE:
+        raise ValueError(f"page_size must be 1..{stac_auth.MAX_PAGE_SIZE}, got {page_size}")
+    if args.order not in SORT_ORDERS:
+        raise ValueError(f"order must be one of {sorted(SORT_ORDERS)}, got {args.order!r}")
     budget = args.max_runtime_seconds
     if budget is not None and not 1 <= budget <= MAX_BUDGET_SECONDS:
         raise ValueError(
@@ -418,8 +448,20 @@ def run_cleanup(args: argparse.Namespace) -> int:
     processed = 0
     discovered: int | None = None
     time_budget_reached = False
+    # Wall clock over the discovery read, started after the write session and S3 client so
+    # a boto3 credential stall is excluded. Reads time.monotonic() directly, NOT
+    # _monotonic(): that seam is the budget clock, which an unbudgeted run must not read.
+    discovery_started: float | None = None
+    discovery_seconds: float | None = None
 
     def emit_summary(*, aborted: bool = False) -> None:
+        # Set at the end of the discovery read, or measured here if discovery is what
+        # raised — a page that failed after burning the whole ladder is the case this
+        # field exists to show, so it must not be lost with the run.
+        elapsed = discovery_seconds
+        if elapsed is None and discovery_started is not None:
+            elapsed = round(time.monotonic() - discovery_started, 1)
+
         summary: dict[str, Any] = {
             "ts": format_expires(_now()),
             "event": "cleanup_summary",
@@ -433,6 +475,7 @@ def run_cleanup(args: argparse.Namespace) -> int:
             "by_status": counts,
             "failures": failures,
             "time_budget_reached": time_budget_reached,
+            "discovery_seconds": elapsed,
         }
         if aborted:
             # ADDITIVE, and present only on an aborted run: dashboards keyed on
@@ -442,36 +485,66 @@ def run_cleanup(args: argparse.Namespace) -> int:
             summary["aborted"] = True
         print(json.dumps(summary), flush=True)
 
-    # Guarded from here down. Everything ABOVE -- the two config checks and
+    # Guarded from here down. Everything ABOVE -- the three config checks and
     # resolve_exclude_ids -- is a configuration error that exits 2 and writes no
     # summary; README_cleanup_expired_items.md documents that as the one case
     # where a missing summary line is harmless. Everything below talks to a live
     # endpoint and can fail at runtime, and those failures must stay visible in
     # the audit stream instead of ending the process silently.
     try:
-        client = Client.open(args.stac_api_url)
+        # Discovery used to page at the server's default of 10 — 10-30 unretried POSTs a
+        # tick, one of which past the gateway's UPSTREAM_TIMEOUT aborted the run. Now 1-3
+        # pages, each retried on a transient 5xx. Reads only: the item DELETEs use
+        # _session(), which must NOT retry (non-atomic unit).
         session = _session(args.stac_api_url)
         s3_client = _s3_client(args.s3_endpoint)
+        discovery_started = time.monotonic()
+        client = stac_auth.open_resilient_client(args.stac_api_url)
         stac_base_url = str(client.self_href).rstrip("/")
 
+        # page_size is logged because discovery_seconds cannot be read without knowing
+        # whether it covered 100-row pages or 10-row ones.
         logger.info(
-            "Cleanup start: collection=%s dry_run=%s max_items=%d allowed_bucket=%s "
-            "max_runtime_seconds=%s",
+            "Cleanup start: collection=%s dry_run=%s max_items=%d page_size=%d order=%s "
+            "allowed_bucket=%s max_runtime_seconds=%s",
             args.collection,
             dry_run,
             args.max_items,
+            page_size,
+            args.order,
             args.allowed_bucket,
             budget,
         )
 
-        search = client.search(**build_search_kwargs(args.collection, now, args.max_items))
+        search = client.search(
+            **build_search_kwargs(args.collection, now, args.max_items, page_size, args.order)
+        )
 
-        # Materialise the whole result set BEFORE deleting anything. The search
-        # paginates with a keyset token anchored on the last item returned; deleting
-        # items mid-iteration removes that anchor, so the next page fails with
-        # "Could not find item using token". max_items bounds this list.
-        stale_items = list(search.items_as_dicts())
+        # Materialise the whole result set BEFORE deleting anything. The search paginates
+        # with a keyset token anchored on the last item returned; deleting items
+        # mid-iteration removes that anchor and the next page fails.
+        #
+        # Iterated lazily, not list(...), so the budget is checked during discovery — at
+        # every page boundary, never inside a page. Without it an unbounded discovery gets
+        # the pod killed mid-read, which emits no cleanup_summary at all. Nothing read this
+        # way is processed (the budget is monotone, so the delete loop stops too) and
+        # nothing is lost: the query is sorted, so a short read is the front of the queue
+        # and the rest is re-found next run. The resulting
+        # `time_budget_reached: true` + `processed: 0` is the README's alert pair, on
+        # purpose: a budget spent by discovery IS the stalled-cron condition.
+        stale_items: list[dict[str, Any]] = []
+        for stale_item in search.items_as_dicts():
+            stale_items.append(stale_item)
+            if budget_spent():
+                logger.warning(
+                    "Runtime budget of %ds spent during discovery after %d items — "
+                    "processing none of them; they are re-discovered next run",
+                    budget,
+                    len(stale_items),
+                )
+                break
         discovered = len(stale_items)
+        discovery_seconds = round(time.monotonic() - discovery_started, 1)
 
         # Checked here as well as in the loop: discovery alone can spend the budget,
         # and when it also returns zero rows the loop never runs. Without this, that
@@ -490,8 +563,7 @@ def run_cleanup(args: argparse.Namespace) -> int:
         for stale in stale_items:
             # Checked at the TOP of the loop only. Stopping here leaves the previous
             # item fully done and audited, and the next one entirely untouched; the
-            # items we skip are simply re-discovered by the next run (oldest-expiry
-            # first, so nothing starves).
+            # items we skip are simply re-discovered by the next run.
             if budget_spent():
                 time_budget_reached = True
                 logger.warning(
@@ -610,6 +682,28 @@ def main(argv: list[str] | None = None) -> int:
         type=_item_cap,
         default=DEFAULT_MAX_ITEMS,
         help="Cap on items processed per run",
+    )
+    parser.add_argument(
+        "--page-size",
+        type=stac_auth.page_size_arg,
+        default=DEFAULT_PAGE_SIZE,
+        help=(
+            f"Items per /search request during discovery (1..{stac_auth.MAX_PAGE_SIZE}; "
+            '"" means the default). A page, not a cap: --max-items still bounds the run, '
+            "and the page is clamped to it."
+        ),
+    )
+    parser.add_argument(
+        "--order",
+        # `""` is this fleet's spelling of an unset Argo parameter (see _budget_seconds);
+        # argparse checks `choices` after `type`, so it maps to the default first.
+        type=lambda raw: raw.strip() or DEFAULT_ORDER,
+        choices=tuple(SORT_ORDERS),
+        default=DEFAULT_ORDER,
+        help=(
+            'Discovery order by `expires` ("" means the default, oldest-first). '
+            "newest-first drains the most recently expired items first."
+        ),
     )
     parser.add_argument(
         "--max-runtime-seconds",
