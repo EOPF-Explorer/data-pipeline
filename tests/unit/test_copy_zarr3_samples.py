@@ -6,6 +6,7 @@ A bound that has never been fired is not a bound.
 """
 
 import urllib.error
+import urllib.request
 from unittest.mock import MagicMock
 
 import pytest
@@ -14,6 +15,8 @@ from scripts.copy_zarr3_samples import (
     MAX_STORES_CEILING,
     CopyError,
     StorePlan,
+    _open,
+    _RefuseRedirects,
     assert_writes_confined,
     chunk_keys_for_array,
     copy_object,
@@ -157,7 +160,7 @@ class TestCopyObject:
     def test_refuses_when_the_stored_digest_disagrees(self, monkeypatch):
         """The one check that would catch a truncated or corrupted transfer."""
         monkeypatch.setattr(
-            "scripts.copy_zarr3_samples.urllib.request.urlopen",
+            "scripts.copy_zarr3_samples._open",
             lambda *a, **k: _resp(b"payload"),
         )
         with pytest.raises(CopyError, match="not the bytes we read"):
@@ -166,12 +169,12 @@ class TestCopyObject:
     def test_absent_chunk_is_not_an_error(self, monkeypatch):
         """Zarr reads a missing chunk as the fill value; 4 non-scalar chunks and 19
         scalar ones are genuinely absent in a real store, so absence is copied."""
-        monkeypatch.setattr("scripts.copy_zarr3_samples.urllib.request.urlopen", _raise_404)
+        monkeypatch.setattr("scripts.copy_zarr3_samples._open", _raise_404)
         assert copy_object(MagicMock(), "https://x/k", "b", "k", optional=True) is None
 
     def test_absent_required_object_fails_the_run(self, monkeypatch):
         """A node's zarr.json is named in the consolidated metadata: it must exist."""
-        monkeypatch.setattr("scripts.copy_zarr3_samples.urllib.request.urlopen", _raise_404)
+        monkeypatch.setattr("scripts.copy_zarr3_samples._open", _raise_404)
         with pytest.raises(CopyError, match="HTTP 404"):
             copy_object(MagicMock(), "https://x/k", "b", "k", optional=False)
 
@@ -246,6 +249,43 @@ class TestStoreCap:
 
     def test_no_roots_is_rejected(self):
         assert main(["--dest", "s3://b/s/", "--confine-to", "s3://b/s/", "--max-stores", "1"]) == 2
+
+
+class TestSourceSafety:
+    ARGS = ["--dest", "s3://b/samples/", "--confine-to", "s3://b/samples/", "--max-stores", "2"]
+
+    @pytest.mark.parametrize("root", ["http://x/A.zarr", "file:///etc/A.zarr"])
+    def test_a_non_https_root_is_refused_before_planning(self, monkeypatch, root):
+        called = []
+        monkeypatch.setattr("scripts.copy_zarr3_samples.plan_store", called.append)
+        assert main([*self.ARGS, "--store-root", root]) == 2
+        assert called == []
+
+    def test_two_roots_with_one_store_name_are_refused_before_planning(self, monkeypatch):
+        """The copy is flat: both would write <prefix>/A.zarr/, mixing two sources."""
+        called = []
+        monkeypatch.setattr("scripts.copy_zarr3_samples.plan_store", called.append)
+        roots = ["--store-root", "https://x/2026/09/A.zarr", "--store-root", "https://x/A.zarr/"]
+        assert main([*self.ARGS, *roots]) == 2
+        assert called == []
+
+    def test_a_redirect_is_refused_not_followed(self):
+        """A 3xx could downgrade to http or change host; its bytes would still be uploaded."""
+        request = urllib.request.Request("https://x/A.zarr/zarr.json")
+        with pytest.raises(urllib.error.HTTPError, match="redirect to http://elsewhere/"):
+            _RefuseRedirects().redirect_request(
+                request, None, 302, "Found", {}, "http://elsewhere/"
+            )
+        # ...and it is the handler every source read goes through.
+        assert any(isinstance(h, _RefuseRedirects) for h in _open.__self__.handlers)
+
+    def test_a_redirected_object_fails_the_copy(self, monkeypatch):
+        def redirected(*_a, **_k):
+            raise urllib.error.HTTPError("https://x/k", 302, "redirect to http://e/", {}, None)
+
+        monkeypatch.setattr("scripts.copy_zarr3_samples._open", redirected)
+        with pytest.raises(CopyError, match="HTTP 302"):
+            copy_object(MagicMock(), "https://x/k", "b", "k", optional=True)
 
 
 class TestDryRun:

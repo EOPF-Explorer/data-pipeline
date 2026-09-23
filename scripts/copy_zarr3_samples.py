@@ -60,6 +60,21 @@ class CopyError(RuntimeError):
     """A copy could not be completed safely."""
 
 
+class _RefuseRedirects(urllib.request.HTTPRedirectHandler):
+    """Fail on any 3xx, as ``register_proxy.fetch_source_item`` does.
+
+    A redirect could downgrade to http or move to another host, and the bytes would
+    still be uploaded as if they came from the store that was asked for: the ETag
+    check only proves the upload matches what was read, not where it was read from.
+    """
+
+    def redirect_request(self, req, fp, code, _msg, headers, newurl):  # type: ignore[no-untyped-def]
+        raise urllib.error.HTTPError(req.full_url, code, f"redirect to {newurl}", headers, fp)
+
+
+_open = urllib.request.build_opener(_RefuseRedirects).open
+
+
 @dataclass
 class StorePlan:
     """The exact object list for one store, derived before anything is written."""
@@ -72,7 +87,7 @@ class StorePlan:
 
 def fetch_json(url: str) -> dict[str, Any]:
     """GET and parse a JSON document. Whole object, never ranged."""
-    with urllib.request.urlopen(url, timeout=HTTP_TIMEOUT) as response:  # noqa: S310  # nosec B310 -- https source store
+    with _open(url, timeout=HTTP_TIMEOUT) as response:
         parsed: dict[str, Any] = json.loads(response.read())
         return parsed
 
@@ -173,9 +188,7 @@ def copy_object(
     Raises when a required object is missing or the stored digest disagrees.
     """
     try:
-        with urllib.request.urlopen(  # noqa: S310  # nosec B310 -- https source store
-            source_url, timeout=HTTP_TIMEOUT
-        ) as response:
+        with _open(source_url, timeout=HTTP_TIMEOUT) as response:
             body = response.read()
     except urllib.error.HTTPError as exc:
         if exc.code == 404 and optional:
@@ -287,6 +300,18 @@ def main(argv: list[str] | None = None) -> int:
         logger.error(
             "Refusing to run: %d store roots exceed --max-stores %d", len(roots), args.max_stores
         )
+        return 2
+    # Only HTTPS sources: an http or file:// root would be read and uploaded as-is.
+    not_https = [root for root in roots if urlparse(root).scheme != "https"]
+    if not_https:
+        logger.error("--store-root must be an HTTPS URL, got: %r", not_https[0])
+        return 2
+    # The copy is flat (<prefix>/<store>.zarr/), so two roots with one store name would
+    # write the same keys, mixing chunks from two sources under one store.
+    names = [root.rstrip("/").rsplit("/", 1)[-1] for root in roots]
+    repeated = sorted({name for name in names if names.count(name) > 1})
+    if repeated:
+        logger.error("Refusing to run: store name(s) given more than once: %s", repeated)
         return 2
 
     bucket, prefix = parse_confinement(args.dest)
