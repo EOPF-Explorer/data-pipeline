@@ -364,10 +364,8 @@ def storage_to_v2(item: Item, s3_endpoint: str) -> None:
         for asset in item.assets.values()
         if isinstance(asset.extra_fields.get("alternate", {}).get("s3"), dict)
     ]
-    buckets = {urlparse(s3["href"]).netloc for s3 in alternates}
-    if len(buckets) != 1:
-        raise ValueError(f"{item.id}: S3 alternates span buckets {sorted(buckets)}")
-    (bucket,) = buckets
+    # One store root, so one bucket; the unpack refuses anything else.
+    (bucket,) = {urlparse(s3["href"]).netloc for s3 in alternates}
     # The builder names prod's bucket; the Track B copies live elsewhere.
     schemes = _build_storage_schemes(extract_region_from_endpoint(s3_endpoint))
     for scheme in schemes.values():
