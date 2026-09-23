@@ -384,3 +384,57 @@ def test_main_writes_json_array_to_output(tmp_path: Path) -> None:
     written = json.loads(out.read_text())
     assert [p["product_id"] for p in written] == ["S1A_new"]
     assert written[0]["tile"] == "31TCH"
+
+
+def test_query_products_returns_oldest_first() -> None:
+    """The deployed discovery path must hand the cron products oldest-first.
+
+    CDSE sets no `sortby` and answers newest-first in practice. Ingest appends one acquisition per
+    pipeline under the writer's monotonicity guard, so a newest-first run makes every older product
+    fail, never be marked registered, and fail identically next run. `query_cdse` (the local
+    watcher's mirror of this function) sorts for the same reason.
+    """
+    items = [
+        _item("S1A_newest", dt.datetime(2026, 6, 9, 5, 52, tzinfo=dt.UTC)),
+        _item("S1A_oldest", dt.datetime(2026, 6, 5, 5, 52, tzinfo=dt.UTC)),
+        _item("S1A_middle", dt.datetime(2026, 6, 7, 5, 52, tzinfo=dt.UTC)),
+    ]
+    with patch(f"{_MOD}.Client.open", return_value=_patched_client(items)):
+        products = query_products("https://cdse/stac", [0.5, 42.4, 1.8, 43.3], "descending", 7)
+    assert [p["product_id"] for p in products] == ["S1A_oldest", "S1A_middle", "S1A_newest"]
+
+
+def test_query_products_sort_is_stable_for_same_instant_frames() -> None:
+    """Adjacent frames of one pass share an instant; the sort must not reshuffle them, because
+    `collapse_same_pass` keeps the first-seen representative of each (date, platform)."""
+    when = dt.datetime(2026, 6, 7, 5, 52, 48, tzinfo=dt.UTC)
+    items = [_item("S1A_frame1", when), _item("S1A_frame2", when)]
+    with patch(f"{_MOD}.Client.open", return_value=_patched_client(items)):
+        products = query_products("https://cdse/stac", [0.5, 42.4, 1.8, 43.3], "descending", 7)
+    assert [p["product_id"] for p in products] == ["S1A_frame1", "S1A_frame2"]
+
+
+def test_collapse_same_pass_preserves_the_oldest_first_order() -> None:
+    """The collapse must not undo the ordering `query_products` establishes — it is what the
+    writer's monotonicity guard depends on downstream."""
+    products = [
+        {
+            "product_id": "a",
+            "platform": "S1A",
+            "datetime": "2026-06-05T05:52:00+00:00",
+            "date": "2026-06-05",
+        },
+        {
+            "product_id": "b",
+            "platform": "S1A",
+            "datetime": "2026-06-07T05:52:00+00:00",
+            "date": "2026-06-07",
+        },
+        {
+            "product_id": "c",
+            "platform": "S1A",
+            "datetime": "2026-06-09T05:52:00+00:00",
+            "date": "2026-06-09",
+        },
+    ]
+    assert [p["product_id"] for p in collapse_same_pass(products)] == ["a", "b", "c"]

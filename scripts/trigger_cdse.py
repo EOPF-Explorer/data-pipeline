@@ -71,10 +71,21 @@ def query_products(
 ) -> list[dict[str, str]]:
     """Query CDSE for S1 GRD products over `bbox` in the last `lookback_days`.
 
-    Returns ``[{"product_id", "platform", "datetime"(ISO, to seconds), "date"}, ...]``. Mirrors
-    ``watch_cdse_and_process.query_cdse``'s filter but keeps the per-second ``datetime`` (needed for
-    the per-acquisition item-id dedup) and the parsed ``platform``. Items without a datetime are
-    skipped (logged).
+    Returns ``[{"product_id", "platform", "datetime"(ISO, to seconds), "date"}, ...]`` **oldest
+    first**. Mirrors ``watch_cdse_and_process.query_cdse``'s filter but keeps the per-second
+    ``datetime`` (needed for the per-acquisition item-id dedup) and the parsed ``platform``. Items
+    without a datetime are skipped (logged).
+
+    The sort matters because ingest appends one acquisition per pipeline under the writer's
+    monotonicity guard (eopf-geozarr >= 0.11.0), which rejects an append older than the store's last
+    slice. The CDSE search sets no ``sortby``, so its order is unspecified — in practice
+    datetime-descending, which makes every older product of a run fail, never be marked registered,
+    and fail again on the next run.
+
+    Ordering here is necessary but NOT sufficient in the deployed cron: the CronWorkflow fans out
+    `parallelism: 6` children and the ingest template serialises same-tile writes with a mutex whose
+    acquisition order is not the acquisition datetime. A same-tile inversion therefore remains
+    possible, and `ingest_v1_s1_rtc.py --allow-out-of-order` is the operator escape hatch for it.
     """
     now = dt.datetime.now(dt.UTC)
     start = now - dt.timedelta(days=lookback_days)
@@ -98,6 +109,8 @@ def query_products(
                 "date": when.date().isoformat(),
             }
         )
+    # Stable: same-instant frames keep CDSE's order, which `collapse_same_pass` then reduces.
+    products.sort(key=lambda p: p["datetime"])
     return products
 
 
@@ -130,8 +143,9 @@ def collapse_same_pass(products: list[dict[str, str]]) -> list[dict[str, str]]:
     a fixed orbit direction, so group by ``(date, platform)`` and keep the earliest-datetime frame.
     """
     # Keep one product per (date, platform); the dict preserves first-seen pass order, and within a
-    # pass the earliest-datetime frame wins (the representative). No global re-sort — that would reorder
-    # distinct acquisitions relative to the CDSE query order.
+    # pass the earliest-datetime frame wins (the representative). No re-sort here: `query_products`
+    # already returns oldest-first, so preserving input order preserves that — which is what the
+    # writer's monotonicity guard needs downstream.
     by_pass: dict[tuple[str, str], dict[str, str]] = {}
     for product in products:
         key = (product["date"], product["platform"])
