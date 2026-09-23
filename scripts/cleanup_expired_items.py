@@ -164,12 +164,28 @@ def _monotonic() -> float:
 # tier-down cron.
 DEFAULT_PAGE_SIZE = stac_auth.DEFAULT_PAGE_SIZE
 
+# Discovery order by `expires`. `id` is a unique tiebreaker, in the same direction: a
+# whole backfill batch can share one `expires` day, and keyset pagination silently
+# under-returns across pages when the sort has no total order. newest-first reaches the
+# most recently expired items first (during the T8 drain, the T7 leftovers still in the
+# High Performance class); it delays the oldest ones only while items keep expiring
+# faster than runs drain them.
+SORT_ORDERS = {
+    "oldest-first": ["+properties.expires", "+id"],
+    "newest-first": ["-properties.expires", "-id"],
+}
+DEFAULT_ORDER = "oldest-first"
+
 
 def build_search_kwargs(
-    collection: str, now: datetime, max_items: int, page_size: int = DEFAULT_PAGE_SIZE
+    collection: str,
+    now: datetime,
+    max_items: int,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    order: str = DEFAULT_ORDER,
 ) -> dict[str, Any]:
-    """CQL2 discovery query for items whose ``expires`` is before ``now``,
-    oldest-first, capped at ``max_items`` and read ``page_size`` items per request."""
+    """CQL2 discovery query for items whose ``expires`` is before ``now``, sorted by
+    ``order``, capped at ``max_items`` and read ``page_size`` items per request."""
     return {
         "collections": [collection],
         "filter_lang": "cql2-json",
@@ -177,10 +193,7 @@ def build_search_kwargs(
             "op": "<",
             "args": [{"property": "expires"}, format_expires(now)],
         },
-        # Oldest-expiry first. `id` is a unique tiebreaker: a whole backfill batch
-        # can share one `expires` day, and keyset pagination silently under-returns
-        # across pages when the sort has no total order.
-        "sortby": ["+properties.expires", "+id"],
+        "sortby": list(SORT_ORDERS[order]),
         "max_items": max_items,
         # A page larger than the cap is rows the client discards on arrival.
         "limit": min(page_size, max_items),
@@ -410,6 +423,8 @@ def run_cleanup(args: argparse.Namespace) -> int:
     # ceiling even once the page gets a smaller one than the batch.
     if not 1 <= page_size <= stac_auth.MAX_PAGE_SIZE:
         raise ValueError(f"page_size must be 1..{stac_auth.MAX_PAGE_SIZE}, got {page_size}")
+    if args.order not in SORT_ORDERS:
+        raise ValueError(f"order must be one of {sorted(SORT_ORDERS)}, got {args.order!r}")
     budget = args.max_runtime_seconds
     if budget is not None and not 1 <= budget <= MAX_BUDGET_SECONDS:
         raise ValueError(
@@ -490,18 +505,19 @@ def run_cleanup(args: argparse.Namespace) -> int:
         # page_size is logged because discovery_seconds cannot be read without knowing
         # whether it covered 100-row pages or 10-row ones.
         logger.info(
-            "Cleanup start: collection=%s dry_run=%s max_items=%d page_size=%d "
+            "Cleanup start: collection=%s dry_run=%s max_items=%d page_size=%d order=%s "
             "allowed_bucket=%s max_runtime_seconds=%s",
             args.collection,
             dry_run,
             args.max_items,
             page_size,
+            args.order,
             args.allowed_bucket,
             budget,
         )
 
         search = client.search(
-            **build_search_kwargs(args.collection, now, args.max_items, page_size)
+            **build_search_kwargs(args.collection, now, args.max_items, page_size, args.order)
         )
 
         # Materialise the whole result set BEFORE deleting anything. The search paginates
@@ -512,7 +528,8 @@ def run_cleanup(args: argparse.Namespace) -> int:
         # every page boundary, never inside a page. Without it an unbounded discovery gets
         # the pod killed mid-read, which emits no cleanup_summary at all. Nothing read this
         # way is processed (the budget is monotone, so the delete loop stops too) and
-        # nothing starves, because the query is oldest-expiry-first. The resulting
+        # nothing is lost: the query is sorted, so a short read is the front of the queue
+        # and the rest is re-found next run. The resulting
         # `time_budget_reached: true` + `processed: 0` is the README's alert pair, on
         # purpose: a budget spent by discovery IS the stalled-cron condition.
         stale_items: list[dict[str, Any]] = []
@@ -521,8 +538,7 @@ def run_cleanup(args: argparse.Namespace) -> int:
             if budget_spent():
                 logger.warning(
                     "Runtime budget of %ds spent during discovery after %d items — "
-                    "processing none of them; they are re-discovered next run "
-                    "(oldest-expiry first, so nothing starves)",
+                    "processing none of them; they are re-discovered next run",
                     budget,
                     len(stale_items),
                 )
@@ -547,8 +563,7 @@ def run_cleanup(args: argparse.Namespace) -> int:
         for stale in stale_items:
             # Checked at the TOP of the loop only. Stopping here leaves the previous
             # item fully done and audited, and the next one entirely untouched; the
-            # items we skip are simply re-discovered by the next run (oldest-expiry
-            # first, so nothing starves).
+            # items we skip are simply re-discovered by the next run.
             if budget_spent():
                 time_budget_reached = True
                 logger.warning(
@@ -676,6 +691,18 @@ def main(argv: list[str] | None = None) -> int:
             f"Items per /search request during discovery (1..{stac_auth.MAX_PAGE_SIZE}; "
             '"" means the default). A page, not a cap: --max-items still bounds the run, '
             "and the page is clamped to it."
+        ),
+    )
+    parser.add_argument(
+        "--order",
+        # `""` is this fleet's spelling of an unset Argo parameter (see _budget_seconds);
+        # argparse checks `choices` after `type`, so it maps to the default first.
+        type=lambda raw: raw.strip() or DEFAULT_ORDER,
+        choices=tuple(SORT_ORDERS),
+        default=DEFAULT_ORDER,
+        help=(
+            'Discovery order by `expires` ("" means the default, oldest-first). '
+            "newest-first drains the most recently expired items first."
         ),
     )
     parser.add_argument(

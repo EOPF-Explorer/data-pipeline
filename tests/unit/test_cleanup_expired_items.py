@@ -19,6 +19,7 @@ import pytest
 import requests
 from botocore.exceptions import ClientError, EndpointConnectionError
 from cleanup_expired_items import (
+    DEFAULT_ORDER,
     DEFAULT_PAGE_SIZE,
     MAX_BUDGET_SECONDS,
     MAX_ITEMS_CEILING,
@@ -88,6 +89,15 @@ def test_build_search_kwargs_sorts_and_caps() -> None:
     # pagination silently under-returns across pages without a total order.
     assert kwargs["sortby"] == ["+properties.expires", "+id"]
     assert kwargs["max_items"] == 25
+
+
+def test_build_search_kwargs_newest_first_reverses_only_the_sort() -> None:
+    """Both sort keys flip — `id` stays the total-order tiebreaker, in the same direction —
+    and the filter, cap and page are exactly the default query's."""
+    default = build_search_kwargs("c", NOW, 25)
+    newest = build_search_kwargs("c", NOW, 25, order="newest-first")
+    assert newest["sortby"] == ["-properties.expires", "-id"]
+    assert newest | {"sortby": default["sortby"]} == default
 
 
 def test_build_search_kwargs_passes_an_explicit_page_size() -> None:
@@ -436,6 +446,7 @@ def _args(
     max_items: int = 100,
     max_runtime_seconds: int | None = None,
     page_size: int = DEFAULT_PAGE_SIZE,
+    order: str = DEFAULT_ORDER,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         stac_api_url="https://stac.example.com",
@@ -444,6 +455,7 @@ def _args(
         allowed_bucket=BUCKET,
         max_items=max_items,
         page_size=page_size,
+        order=order,
         max_runtime_seconds=max_runtime_seconds,
         exclude_file=None,
         execute=execute,
@@ -785,8 +797,8 @@ def test_budget_stops_discovery_itself_not_only_the_delete_loop(expired_item, ca
     the pod past activeDeadlineSeconds, and THAT kill emits no cleanup_summary at all —
     the silent-failure shape the summary guard exists to prevent.
 
-    Partial discovery is safe because the query is oldest-expiry-first: a short read is
-    the front of the queue, and the remainder is re-found next tick.
+    Partial discovery is safe because the query is sorted: a short read is the front of
+    the queue, and the remainder is re-found next tick.
     """
     items = _items(expired_item, 5)
     code, _session = _run_budgeted(
@@ -1327,6 +1339,50 @@ def test_cli_treats_an_empty_page_size_as_the_default(raw: str) -> None:
     with patch("cleanup_expired_items.run_cleanup", return_value=0) as run:
         main([*_CLI_BASE, "--page-size", raw])
     assert run.call_args.args[0].page_size == DEFAULT_PAGE_SIZE
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        ([], "oldest-first"),
+        (["--order", ""], "oldest-first"),
+        (["--order", " "], "oldest-first"),
+        (["--order", "newest-first"], "newest-first"),
+    ],
+    ids=["omitted", "empty", "blank", "newest-first"],
+)
+def test_cli_order_defaults_to_oldest_first_and_accepts_empty(argv, expected) -> None:
+    """Same `""` contract as `--page-size`: a template that splices the parameter
+    unconditionally must not exit 2 on every tick."""
+    with patch("cleanup_expired_items.run_cleanup", return_value=0) as run:
+        main([*_CLI_BASE, *argv])
+    assert run.call_args.args[0].order == expected
+
+
+def test_cli_rejects_an_unknown_order(capsys) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main([*_CLI_BASE, "--order", "newest"])
+    assert exc.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
+
+
+def test_run_cleanup_sends_the_order_and_rejects_an_unknown_one() -> None:
+    """The order reaches the actual /search call; and run_cleanup guards every caller,
+    not only the CLI, before anything is read."""
+    client = MagicMock()
+    client.self_href = "https://stac.example.com"
+    client.search.return_value.items_as_dicts.return_value = iter([])
+    with (
+        patch("cleanup_expired_items.stac_auth.open_resilient_client", return_value=client),
+        patch("cleanup_expired_items._session"),
+        patch("cleanup_expired_items._s3_client"),
+    ):
+        run_cleanup(_args(order="newest-first"))
+        assert client.search.call_args.kwargs["sortby"] == ["-properties.expires", "-id"]
+        client.search.reset_mock()
+        with pytest.raises(ValueError, match="order must be one of"):
+            run_cleanup(_args(order="newest"))
+    client.search.assert_not_called()
 
 
 def test_summary_carries_discovery_seconds(expired_item, capsys) -> None:
