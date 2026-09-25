@@ -39,11 +39,15 @@ for lib in ["botocore", "s3fs", "aiobotocore", "urllib3", "httpx", "httpcore"]:
 
 EXPLORER_BASE = os.getenv("EXPLORER_BASE_URL", "https://explorer.eopf.copernicus.eu")
 
+# The HTTPS gateway our own stores are served from. Both directions of the S3<->HTTPS
+# conversion default to it; a store served from any other host must pass its own.
+DEFAULT_S3_GATEWAY = "https://s3.explorer.eopf.copernicus.eu"
+
 
 # === Utilities ===
 
 
-def s3_to_https(s3_url: str, gateway_url: str = "https://s3.explorer.eopf.copernicus.eu") -> str:
+def s3_to_https(s3_url: str, gateway_url: str = DEFAULT_S3_GATEWAY) -> str:
     """Convert s3:// URL to https:// using S3 gateway.
 
     Uses gateway format: https://s3.explorer.eopf.copernicus.eu/bucket/path
@@ -66,9 +70,7 @@ def s3_to_https(s3_url: str, gateway_url: str = "https://s3.explorer.eopf.copern
     return f"{gateway_base}/{bucket}{path}"
 
 
-def https_to_s3(
-    https_url: str, gateway_url: str = "https://s3.explorer.eopf.copernicus.eu"
-) -> str | None:
+def https_to_s3(https_url: str, gateway_url: str = DEFAULT_S3_GATEWAY) -> str | None:
     """Convert https:// URL back to s3:// URL.
 
     Handles both formats:
@@ -600,7 +602,9 @@ def remove_xarray_integration(item: Item) -> None:
         logger.debug(f"Removed {removed_count} XArray integration field(s)")
 
 
-def add_alternate_s3_assets(item: Item, s3_endpoint: str) -> None:
+def add_alternate_s3_assets(
+    item: Item, s3_endpoint: str, gateway_url: str = DEFAULT_S3_GATEWAY
+) -> int:
     """Add alternate S3 URLs to assets using the alternate and storage extensions.
 
     For each asset with an HTTPS URL pointing to S3, adds an alternate representation
@@ -609,6 +613,13 @@ def add_alternate_s3_assets(item: Item, s3_endpoint: str) -> None:
     Args:
         item: STAC item to modify
         s3_endpoint: S3 endpoint URL (used to extract region metadata)
+        gateway_url: HTTPS gateway the asset hrefs are served from. The default is the
+            Explorer gateway; an href on any other host converts to no S3 URI at all, so
+            a caller whose store is served elsewhere MUST pass its own gateway or it
+            silently gets zero alternates.
+
+    Returns:
+        The number of assets that gained an S3 alternate.
     """
     # Add alternate and storage extensions to the item if not present
     extensions = [
@@ -637,7 +648,7 @@ def add_alternate_s3_assets(item: Item, s3_endpoint: str) -> None:
             continue
 
         # Convert HTTPS URL to S3 URL
-        s3_url = https_to_s3(asset.href)
+        s3_url = https_to_s3(asset.href, gateway_url)
         if not s3_url:
             continue
 
@@ -686,6 +697,7 @@ def add_alternate_s3_assets(item: Item, s3_endpoint: str) -> None:
 
     if modified_count > 0:
         logger.info(f"   🔗 Added S3 alternates to {modified_count} asset(s)")
+    return modified_count
 
 
 def consolidate_reflectance_assets(item: Item, geozarr_url: str) -> None:

@@ -321,6 +321,9 @@ BASELAYER_COLLECTIONS = [
     "sentinel-1-grd-rtc-acquisitions-staging.json",
     "sentinel-2-l2a.json",
     "sentinel-2-l2a-staging.json",
+    "proxy/sentinel-2-l2a-samples-zarr3.json",
+    "proxy/sentinel-2-l2a-samples-zarr3-ovh.json",
+    "proxy/sentinel-2-l2a-mirror-rstaging.json",
 ]
 
 
@@ -365,7 +368,13 @@ def test_attribution_present_and_nonempty(filename: str) -> None:
 # --- Sentinel-2 L2A eodash collection metadata (issue #206) ------------------
 
 # Collections that must carry the eodash GeoZarr layer metadata.
-EODASH_COLLECTIONS = ["sentinel-2-l2a.json", "sentinel-2-l2a-staging.json"]
+EODASH_COLLECTIONS = [
+    "sentinel-2-l2a.json",
+    "sentinel-2-l2a-staging.json",
+    "proxy/sentinel-2-l2a-samples-zarr3.json",
+    "proxy/sentinel-2-l2a-samples-zarr3-ovh.json",
+    "proxy/sentinel-2-l2a-mirror-rstaging.json",
+]
 
 STYLE_HREF = (
     "https://raw.githubusercontent.com/EOPF-Explorer/eodash-assets/"
@@ -406,8 +415,8 @@ def test_style_targets_existing_asset(filename: str) -> None:
 
 def test_no_leak_into_other_collections() -> None:
     """eodash:layerExclusive / style links must not appear on non-S2-L2A collections."""
-    for path in STAC_DIR.glob("*.json"):
-        if path.name in EODASH_COLLECTIONS:
+    for path in STAC_DIR.rglob("*.json"):
+        if path.relative_to(STAC_DIR).as_posix() in EODASH_COLLECTIONS:
             continue
         data = json.loads(path.read_text())
         assert "eodash:layerExclusive" not in data, f"unexpected field in {path.name}"
@@ -453,6 +462,9 @@ RASTERFORM_BASE = (
 EXPECTED_RASTERFORMS = {
     "sentinel-2-l2a.json": RASTERFORM_BASE + "bandsform.json",
     "sentinel-2-l2a-staging.json": RASTERFORM_BASE + "bandsform.json",
+    "proxy/sentinel-2-l2a-samples-zarr3.json": RASTERFORM_BASE + "bandsform.json",
+    "proxy/sentinel-2-l2a-samples-zarr3-ovh.json": RASTERFORM_BASE + "bandsform.json",
+    "proxy/sentinel-2-l2a-mirror-rstaging.json": RASTERFORM_BASE + "bandsform.json",
     "sentinel-1-grd-rtc-acquisitions-staging.json": RASTERFORM_BASE + "s1-bandsform.json",
 }
 
@@ -470,8 +482,26 @@ def test_rasterform_absent_everywhere_else() -> None:
     collection-level form there would substitute an orbit the displayed slice may not
     have. Only the per-acquisition items are single-orbit by construction.
     """
-    for path in STAC_DIR.glob("*.json"):
-        if path.name in EXPECTED_RASTERFORMS:
+    for path in STAC_DIR.rglob("*.json"):
+        if path.relative_to(STAC_DIR).as_posix() in EXPECTED_RASTERFORMS:
             continue
         data = json.loads(path.read_text())
         assert "eodash:rasterform" not in data, f"unexpected rasterform in {path.name}"
+
+
+def test_proxy_templates_are_not_in_the_batch_create_glob() -> None:
+    """`batch-create stac/` globs *.json non-recursively behind ONE confirmation.
+
+    The two proxies advertise third-party data we neither host nor convert
+    (coordination#287), and the mirror re-publishes prod items under their prod ids
+    (coordination#304): a routine prod re-apply must create none of them. Keeping them
+    in a subdirectory is the whole mechanism — this test is what stops them drifting back.
+    """
+    top_level = {path.name for path in STAC_DIR.glob("*.json")}
+    for name in (
+        "sentinel-2-l2a-samples-zarr3.json",
+        "sentinel-2-l2a-samples-zarr3-ovh.json",
+        "sentinel-2-l2a-mirror-rstaging.json",
+    ):
+        assert name not in top_level, f"{name} would be created by `batch-create stac/`"
+        assert (STAC_DIR / "proxy" / name).exists()
