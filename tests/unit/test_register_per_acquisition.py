@@ -2,7 +2,7 @@
 
 Item *construction* (one item per cube `time` slice, oriented to its orbit, single `datetime`) now lives
 in data-model (``eopf_geozarr.stac.s1_rtc.build_s1_rtc_per_acquisition_items``, tested there). This script
-adds only the deployment decoration — render/`via` links + thumbnail pointing at the shared **cube**
+adds only the deployment decoration — render links + thumbnail pointing at the shared **cube**
 TiTiler endpoint with ``sel=time={datetime}`` (no data duplication) — which is what's tested here.
 """
 
@@ -162,7 +162,7 @@ def test_link_titles_and_order_match_cube_convention() -> None:
     )
     rels = [lk["rel"] for lk in d["links"]]
     # two related links (parent + sibling-collection filter) so STAC Browser groups the section
-    assert rels == ["store", "viewer", "tilejson", "xyz", "via", "related", "related"]
+    assert rels == ["store", "viewer", "tilejson", "xyz", "related", "related"]  # no dead `via`
     by_rel = {lk["rel"]: lk for lk in d["links"]}
     assert by_rel["viewer"]["title"] == "VV, VH, VV/VH composite"
     assert by_rel["xyz"]["title"] == "VV, VH, VV/VH composite"
@@ -184,7 +184,7 @@ def test_two_related_links_for_stac_browser_grouping() -> None:
     assert filt["type"] == "application/json"
 
 
-def test_thumbnail_via_and_store_link_kept() -> None:
+def test_thumbnail_and_store_link_kept() -> None:
     d = rpa.decorate_acquisition_item(
         _acq_item(), tile_id="31TCH", cube_collection=CUBE, raster_api=RASTER, stac_api_url=STAC
     )
@@ -195,7 +195,7 @@ def test_thumbnail_via_and_store_link_kept() -> None:
     assert _SEL in thumb["href"]
 
     links = _links(d)
-    assert links["via"].endswith(f"/collections/{ACQ}/items/s1-rtc-31TCH-20260605t060907")
+    assert "via" not in links  # the Explorer /collections/<c>/items/<id> route 404s (static site)
     assert "store" in links  # the caller's cube store link is preserved
     assert "/WebMercatorQuad/map.html" in links["viewer"]  # map.html deep-link into this slice
     # the parent related link → the parent tile datacube STAC item (cube collection)
