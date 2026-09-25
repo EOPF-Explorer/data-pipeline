@@ -34,14 +34,20 @@ Usage
     uv run python scripts/provision_source_cache_lifecycle.py --apply
 
 Credentials come from the standard ``AWS_*`` environment, as everywhere else in this repo.
+
+The read, merge and read-back verification here are shared with
+``provision_tier_down_lifecycle.py``, which installs a storage-class transition rule on
+the same buckets. Keep them generic: a rule is just a dict, built by its own script.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
+import time
 from typing import Any
 
 import boto3
@@ -54,6 +60,25 @@ RULE_ID = "expire-source-cache"
 DEFAULT_BUCKET = "esa-zarr-sentinel-explorer-fra"
 DEFAULT_PREFIX = "source-cache/"
 DEFAULT_DAYS = 7
+
+# Lifecycle configuration is eventually consistent, so the read-back gets a few tries
+# before it calls a write failed. Tests set _VERIFY_ATTEMPTS = 1.
+_VERIFY_ATTEMPTS = 3
+_VERIFY_DELAY_S = 1.5
+
+
+def expiration_rule(prefix: str, days: int) -> dict:
+    """The ``source-cache/`` expiry rule. Validation lives with the rule it guards."""
+    if not prefix.strip():
+        raise ValueError("prefix must not be empty — that would expire the whole bucket")
+    if days <= 0:
+        raise ValueError(f"days must be positive, got {days}")
+    return {
+        "ID": RULE_ID,
+        "Filter": {"Prefix": prefix},
+        "Status": "Enabled",
+        "Expiration": {"Days": days},
+    }
 
 
 def read_rules(client: Any, bucket: str) -> list[dict]:
@@ -68,77 +93,191 @@ def read_rules(client: Any, bucket: str) -> list[dict]:
         raise
 
 
-def merge_rules(current: list[dict], prefix: str, days: int) -> list[dict]:
+def merge_rules(current: list[dict], rule: dict) -> list[dict]:
     """Every rule that is not ours, plus ours. Replacing by ID keeps this idempotent."""
-    kept = [rule for rule in current if rule.get("ID") != RULE_ID]
-    ours = {
-        "ID": RULE_ID,
-        "Filter": {"Prefix": prefix},
-        "Status": "Enabled",
-        "Expiration": {"Days": days},
-    }
-    return [*kept, ours]
+    return [*remove_rule(current, rule["ID"]), rule]
+
+
+def remove_rule(current: list[dict], rule_id: str) -> list[dict]:
+    """Every rule but ``rule_id``. Removing an absent rule is a no-op, not an error."""
+    return [rule for rule in current if rule.get("ID") != rule_id]
 
 
 def _describe(rule: dict) -> str:
-    prefix = rule.get("Filter", {}).get("Prefix", rule.get("Prefix", "<none>"))
-    days = rule.get("Expiration", {}).get("Days", "-")
-    return f"  {rule.get('ID')}  status={rule.get('Status')}  prefix={prefix}  expiry={days}d"
+    """One line per rule for the dry run. The filter IS the blast radius, so every part
+    of it has to be visible here — a rule whose prefix printed as '<none>' would defeat
+    the point of the dry run."""
+    rule_filter = rule.get("Filter", {})
+    scope = rule_filter.get("And") or rule_filter or {"Prefix": rule.get("Prefix")}
+    # A rule scopes to the WHOLE bucket in three shapes: Filter {} (what the AWS console
+    # emits), no Filter at all, and an explicit empty Prefix. None of them may print like
+    # a narrow rule — this line is the operator's only view of the blast radius.
+    prefix = scope.get("Prefix") or "(whole bucket)"
+    line = f"  {rule.get('ID')}  status={rule.get('Status')}  prefix={prefix}"
+    if "ObjectSizeGreaterThan" in scope:
+        line += f"  size>{scope['ObjectSizeGreaterThan']}B"
+    if "Expiration" in rule:
+        line += f"  expiry={rule['Expiration'].get('Days', '-')}d"
+    for transition in rule.get("Transitions", []):
+        line += f"  -> {transition.get('StorageClass')} after {transition.get('Days')}d"
+    return line
 
 
-def _report(bucket: str, current: list[dict], proposed: list[dict]) -> None:
+def _report(
+    bucket: str,
+    current: list[dict],
+    proposed: list[dict],
+    rule_id: str,
+    endpoint: str | None,
+) -> None:
     """Show what is there now and what would replace it — the whole point of the dry run."""
-    logger.info("=== current rules on s3://%s ===", bucket)
-    for rule in current:
-        logger.info("%s", _describe(rule))
-    if not current:
-        logger.info("  (none)")
-    logger.info("=== proposed ===")
-    for rule in proposed:
-        logger.info("%s", _describe(rule))
-    logger.info("=== preserving %d pre-existing rule(s) ===", len(proposed) - 1)
+    logger.info("=== target: s3://%s via %s ===", bucket, endpoint or "<default AWS endpoint>")
+    for heading, rules in (("current rules", current), ("proposed", proposed)):
+        logger.info("=== %s ===", heading)
+        for line in [_describe(rule) for rule in rules] or ["  (none)"]:
+            logger.info("%s", line)
+    logger.info("=== keeping %d pre-existing rule(s) ===", len(remove_rule(proposed, rule_id)))
 
 
-def _verify_stored(client: Any, bucket: str, prefix: str, days: int, want_count: int) -> list[dict]:
-    """Read back what the put actually stored. A put that reports success but stores
-    something else — or drops another rule — is exactly what this catches."""
-    stored = read_rules(client, bucket)
-    ours = [rule for rule in stored if rule.get("ID") == RULE_ID]
-    if len(ours) != 1:
-        raise RuntimeError(f"verification failed: {len(ours)} '{RULE_ID}' rules stored, want 1")
-    if ours[0].get("Expiration", {}).get("Days") != days:
-        raise RuntimeError(f"verification failed: stored expiry {ours[0]} != {days}d")
-    if ours[0].get("Filter", {}).get("Prefix") != prefix:
-        raise RuntimeError(f"verification failed: stored prefix {ours[0]} != {prefix!r}")
-    if len(stored) != want_count:
-        raise RuntimeError(
-            f"verification failed: {len(stored)} rules stored, want {want_count} — rules dropped"
+def _fingerprint(rules: list[dict]) -> list[str]:
+    """Rules as a comparable multiset: order-independent and ID-agnostic."""
+    return sorted(json.dumps(rule, sort_keys=True, default=str) for rule in rules)
+
+
+def _verify_stored(client: Any, bucket: str, proposed: list[dict]) -> list[dict]:
+    """Read back what the put actually stored, and insist it is exactly what we sent.
+
+    A put that reports success but stores something else — a filter silently stripped of
+    its size predicate, a transition retargeted, another rule dropped — is exactly what
+    this exists to catch.
+
+    Deliberately strict: it compares whole rules, not a few fields. A server that
+    NORMALISES what it stores (echoing a defaulted sub-field, say) therefore reads as a
+    failure even though the write landed. That is the safe direction to be wrong in, but
+    read the sent/stored diff before concluding a rule was lost: extra fields on the
+    stored side are a normalisation, not a loss.
+    """
+    stored: list[dict] = []
+    want = {rule.get("ID"): rule for rule in proposed}
+    # Lifecycle configuration propagates: a GET straight after the PUT can still answer with
+    # the old config. Re-read a few times before calling it a failure, so a rollback that
+    # actually worked does not report a false alarm at the worst possible moment.
+    for attempt in range(max(_VERIFY_ATTEMPTS, 1)):
+        stored = read_rules(client, bucket)
+        # Compared as a multiset of whole rules: order-independent, and not reliant on
+        # IDs, which a server is not obliged to assign. Two ID-less rules would collapse
+        # onto one key in a by-ID comparison and hide an edit to one of them.
+        if _fingerprint(stored) == _fingerprint(proposed):
+            return stored
+        if attempt + 1 < _VERIFY_ATTEMPTS:
+            time.sleep(_VERIFY_DELAY_S)
+
+    got = {rule.get("ID"): rule for rule in stored}
+    dropped = sorted(k for k in want.keys() - got.keys() if k is not None)
+    added = sorted(k for k in got.keys() - want.keys() if k is not None)
+    changed = sorted(
+        rid for rid in want.keys() & got.keys() if rid is not None and want[rid] != got[rid]
+    )
+    detail = ", ".join(
+        part
+        for part in (
+            f"rules dropped: {dropped}" if dropped else "",
+            f"unexpected rules: {added}" if added else "",
+            f"rules stored differently: {changed}" if changed else "",
+            f"{len(stored)} rules stored, want {len(proposed)}"
+            if len(stored) != len(proposed)
+            else "",
         )
-    return stored
+        if part
+    )
+    raise RuntimeError(
+        f"verification failed after {_VERIFY_ATTEMPTS} read(s): {detail}\n"
+        f"sent:   {json.dumps(proposed, indent=2, sort_keys=True, default=str)}\n"
+        f"stored: {json.dumps(stored, indent=2, sort_keys=True, default=str)}"
+    )
 
 
-def provision(client: Any, bucket: str, prefix: str, days: int, *, apply: bool) -> list[dict]:
-    """Ensure exactly one RULE_ID rule expiring `prefix` after `days`. Returns the rules."""
-    if not prefix.strip():
-        raise ValueError("prefix must not be empty — that would expire the whole bucket")
-    if days <= 0:
-        raise ValueError(f"days must be positive, got {days}")
-
-    current = read_rules(client, bucket)
-    proposed = merge_rules(current, prefix, days)
-    _report(bucket, current, proposed)
-
+def _commit(
+    client: Any,
+    bucket: str,
+    current: list[dict],
+    proposed: list[dict],
+    rule_id: str,
+    *,
+    apply: bool,
+    endpoint: str | None = None,
+) -> list[dict]:
+    """Report, then put and verify — or report only. The one place that writes."""
+    _report(bucket, current, proposed, rule_id, endpoint)
     if not apply:
         logger.info("\nDRY RUN — nothing written. Re-run with --apply to commit.")
         return current
 
-    client.put_bucket_lifecycle_configuration(
-        Bucket=bucket, LifecycleConfiguration={"Rules": proposed}
+    if _fingerprint(current) == _fingerprint(proposed):
+        # Re-running a converged provision, or rolling back a rule that is already gone.
+        # Writing anyway would be a no-op write on a shared bucket that nobody asked for.
+        logger.info("already as proposed — nothing to write.")
+        return current
+
+    if proposed:
+        client.put_bucket_lifecycle_configuration(
+            Bucket=bucket, LifecycleConfiguration={"Rules": proposed}
+        )
+    else:
+        # S3 has no "configuration with zero rules": a put of an empty Rules list is
+        # MalformedXML, and botocore does not catch it. Removing the last rule means
+        # deleting the configuration. Without this the documented rollback fails exactly
+        # when ours is the only rule — leaving the transition rule installed and moving.
+        logger.info("no rules left — deleting the bucket's lifecycle configuration")
+        client.delete_bucket_lifecycle(Bucket=bucket)
+
+    try:
+        return _verify_stored(client, bucket, proposed)
+    except ClientError as exc:
+        # The write already landed; only the read-back failed. Saying just "AccessDenied"
+        # here would leave the operator thinking nothing happened — worst on a rollback,
+        # where "did it take?" is the entire question.
+        raise RuntimeError(
+            f"the write was issued and may have succeeded, but reading it back failed: {exc}"
+            " — re-run without --apply to see the bucket's current rules before acting."
+        ) from exc
+
+
+def provision(
+    client: Any, bucket: str, rule: dict, *, apply: bool, endpoint: str | None = None
+) -> list[dict]:
+    """Ensure exactly one rule with ``rule``'s ID, exactly as given. Returns the rules."""
+    current = read_rules(client, bucket)
+    stored = _commit(
+        client,
+        bucket,
+        current,
+        merge_rules(current, rule),
+        rule["ID"],
+        apply=apply,
+        endpoint=endpoint,
     )
-    stored = _verify_stored(client, bucket, prefix, days, len(proposed))
-    logger.info(
-        "VERIFIED: '%s' expires %s after %dd; %d rule(s).", RULE_ID, prefix, days, len(stored)
+    if apply:
+        logger.info("VERIFIED: '%s' stored as sent; %d rule(s).", rule["ID"], len(stored))
+    return stored
+
+
+def deprovision(
+    client: Any, bucket: str, rule_id: str, *, apply: bool, endpoint: str | None = None
+) -> list[dict]:
+    """Remove ``rule_id``, keeping every other rule. The rollback path — idempotent."""
+    current = read_rules(client, bucket)
+    stored = _commit(
+        client,
+        bucket,
+        current,
+        remove_rule(current, rule_id),
+        rule_id,
+        apply=apply,
+        endpoint=endpoint,
     )
+    if apply:
+        logger.info("VERIFIED: '%s' absent; %d rule(s) remain.", rule_id, len(stored))
     return stored
 
 
@@ -150,9 +289,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--apply", action="store_true", help="Actually write; omit for a dry run.")
     args = parser.parse_args(argv)
 
-    client = boto3.client("s3", endpoint_url=os.getenv("AWS_ENDPOINT_URL"))
+    endpoint = os.getenv("AWS_ENDPOINT_URL")
+    client = boto3.client("s3", endpoint_url=endpoint)
     try:
-        provision(client, args.bucket, args.prefix, args.days, apply=args.apply)
+        provision(
+            client,
+            args.bucket,
+            expiration_rule(args.prefix, args.days),
+            apply=args.apply,
+            endpoint=endpoint,
+        )
     except (ClientError, RuntimeError, ValueError) as exc:
         logger.error("%s", exc)
         return 1
