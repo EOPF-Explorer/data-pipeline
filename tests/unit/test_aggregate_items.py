@@ -322,6 +322,45 @@ class TestUpdateCollectionLinks:
             "https://s3.explorer.eopf.copernicus.eu/my-bucket/agg/s2/monthly.json"
         )
 
+    def test_strips_generated_queryables_and_gateway_auth_fields(self):
+        # Shape of the live sentinel-2-l2a GET after months of daily round-trips:
+        # queryables links piled up, gateway auth decoration persisted.
+        auth_ext = "https://stac-extensions.github.io/authentication/v1.1.0/schema.json"
+        sat_ext = "https://stac-extensions.github.io/sat/v1.0.0/schema.json"
+        queryables = {
+            "rel": "http://www.opengis.net/def/rel/ogc/1.0/queryables",
+            "href": "https://api.test/stac/collections/s2/queryables",
+        }
+        kept = [
+            {"rel": "self", "href": "https://api.test/stac/collections/s2"},
+            {"rel": "root", "href": "https://api.test/stac/"},
+            {"rel": "parent", "href": "https://api.test/stac/"},
+            {"rel": "items", "href": "https://api.test/stac/collections/s2/items"},
+            {"rel": "license", "href": "https://license.test"},
+            {"rel": "xyz", "href": "https://tiles.test/{z}/{x}/{y}.png"},
+            {"rel": "style", "href": "https://style.test/geozarr.json"},
+        ]
+        collection_data = {
+            "id": "s2",
+            "stac_extensions": [sat_ext, auth_ext],
+            "auth:schemes": {"oidc": {"type": "openIdConnect"}},
+            "links": [
+                *kept[:4],
+                queryables,
+                *kept[4:],
+                {"rel": "pre-aggregation", "href": "https://old/daily.json"},
+                queryables,
+                queryables,
+            ],
+        }
+
+        body = TestTemplateSurvivesAggregation()._capture_put("s2", collection_data)
+        assert "auth:schemes" not in body
+        assert body["stac_extensions"] == [sat_ext]
+        links = body["links"]
+        assert links[: len(kept)] == kept
+        assert [lk["rel"] for lk in links[len(kept) :]] == ["pre-aggregation"] * 2
+
 
 # --- Integration tests (main with --dry-run) ---
 

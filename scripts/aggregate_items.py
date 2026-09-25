@@ -38,6 +38,13 @@ logger = logging.getLogger(__name__)
 for _lib in ["botocore", "s3fs", "aiobotocore", "urllib3", "httpx", "httpcore"]:
     logging.getLogger(_lib).setLevel(logging.WARNING)
 
+# The API adds a queryables link to every collection response but stores the links it
+# is PUT, so each GET-then-PUT persists one more copy (stored self/root/parent/items
+# are dropped on read; queryables is not).
+QUERYABLES_REL = "http://www.opengis.net/def/rel/ogc/1.0/queryables"
+# stac-auth-proxy decorates every single-collection GET with auth:schemes + this extension.
+AUTH_EXTENSION_PREFIX = "https://stac-extensions.github.io/authentication/"
+
 
 def count_items_by_datetime(stac_api_url: str, collection_id: str) -> collections.Counter[str]:
     """Query all items and count them by date (YYYY-MM-DD).
@@ -154,11 +161,19 @@ def update_collection_links(
         resp.raise_for_status()
         collection_data = resp.json()
 
-        # Remove existing pre-aggregation links
+        collection_data.pop("auth:schemes", None)
+        if "stac_extensions" in collection_data:
+            collection_data["stac_extensions"] = [
+                ext
+                for ext in collection_data["stac_extensions"]
+                if not ext.startswith(AUTH_EXTENSION_PREFIX)
+            ]
+
+        # Remove existing pre-aggregation links and the API-generated queryables links
         links = [
             link
             for link in collection_data.get("links", [])
-            if link.get("rel") != "pre-aggregation"
+            if link.get("rel") not in ("pre-aggregation", QUERYABLES_REL)
         ]
 
         # Add new pre-aggregation links

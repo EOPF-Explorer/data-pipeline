@@ -132,7 +132,7 @@ Output example:
 3. **Build daily JSON** — sorted chronologically, formatted as `AggregationCollection`
 4. **Build monthly JSON** — derived from daily counts by summing per `YYYY-MM`
 5. **Upload to S3** — `s3://{bucket}/{prefix}/{collection}/daily.json` and `monthly.json`
-6. **Update collection links** — fetches collection via `GET`, removes existing `pre-aggregation` links, adds new ones, `PUT`s back
+6. **Update collection links** — fetches collection via `GET`, removes existing `pre-aggregation` and `queryables` links and the gateway's `auth:schemes` + extension, adds new ones, `PUT`s back
 
 The script is **idempotent**: running it twice produces the same result (overwrites S3 files, replaces links).
 
