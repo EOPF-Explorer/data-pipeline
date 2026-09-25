@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.19.0 (2026-09-25)
+
+## What's Changed
+* fix(cleanup): protect the openeo-studio sample scenes by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/432
+* feat(lifecycle): add the HP->STANDARD transition rule via a shared provisioning core by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/430
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.18.0...v1.19.0
+
 ## 1.18.0 (2026-09-23)
 
 ## What's Changed
