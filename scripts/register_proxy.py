@@ -140,8 +140,9 @@ ROOT_HREF_ASSETS = {
 #
 # Track A items carry no S3 alternate (the stores are EODC's), so even a cron pointed at
 # them would skip each one as `no_s3_urls` — data assets, no s3:// URL — and never delete
-# it: remove them with `manage_item.py delete`. For Track B this makes the cleanup
-# *possible*; the cron is `--collection` scoped and does not target these collections today.
+# it: remove them by deleting the collection, never by item id (the ids are also prod
+# `sentinel-2-l2a` ids). For Track B this makes the cleanup *possible*; the cron is
+# `--collection` scoped and does not target these collections today.
 PROXY_EXPIRES = datetime(2026, 11, 1, tzinfo=UTC)
 
 # What a finished proxy item must advertise. Checked before the item is written, because
