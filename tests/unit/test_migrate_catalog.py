@@ -3414,3 +3414,178 @@ class TestHistoryIgnoresRunsThatWroteNothing:
         record_run(history_file, migration_result)
 
         assert was_migration_run(history_file, "fix_zarr_media_type", "sentinel-2-l2a")
+
+
+# === set_storage_refs_standard (HP -> STANDARD lifecycle move, Part 3) ===
+
+from _migrate_catalog.migrations import set_storage_refs_standard as refs_mod  # noqa: E402
+from query_storage_tier_items import is_already_migrated  # noqa: E402
+
+_REFS_S3_ROOT = "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-2-l2a/x.zarr"
+_PAST = "2020-01-01T00:00:00Z"
+_PERFORMANCE = {
+    "storage:refs": ["performance"],
+    "objects_per_storage_class": {"EXPRESS_ONEZONE": 40},
+}
+_MIXED = {
+    "storage:refs": ["mixed"],
+    "objects_per_storage_class": {"STANDARD": 450, "EXPRESS_ONEZONE": 608},
+}
+# register_v1's legacy per-asset block: no storage:refs at all.
+_LEGACY = {"storage:scheme": {"platform": "OVHcloud", "region": "de", "tier": "EXPRESS_ONEZONE"}}
+
+
+def _tiered_item(
+    *s3_blocks: dict | None, item_id: str = "S2_tiered", expires: str = "2099-01-01T00:00:00Z"
+) -> dict:
+    """A prod-shaped S2 item with one asset per block (None = asset without alternate.s3)."""
+    item = _prod_shaped_item(item_id)
+    item["properties"]["expires"] = expires
+    item["assets"] = {}
+    for i, block in enumerate(s3_blocks):
+        asset: dict = {"href": f"https://s3.example.com/x.zarr/b{i}", "roles": ["data"]}
+        if block is not None:
+            asset["alternate"] = {"s3": {"href": f"{_REFS_S3_ROOT}/b{i}", **copy.deepcopy(block)}}
+        item["assets"][f"b{i}"] = asset
+    return item
+
+
+def _refs(item: dict) -> list:
+    return [s3.get("storage:refs") for s3 in refs_mod._s3_alternates(item)]
+
+
+def _is_standard(item: dict) -> bool:
+    """The check the tier-down cron and `submit_storage_tier_workflows --dry-run` use."""
+    return is_already_migrated(pystac.Item.from_dict(item), "standard")
+
+
+class TestSetStorageRefsStandard:
+    @pytest.fixture(autouse=True)
+    def _clear_histogram(self) -> None:
+        refs_mod.HISTOGRAM.clear()
+
+    @pytest.mark.parametrize(
+        "blocks",
+        [
+            pytest.param((_PERFORMANCE, _MIXED), id="a-performance-and-mixed"),
+            pytest.param((_LEGACY, _LEGACY), id="b-legacy-scheme-no-refs"),
+            pytest.param(({"storage:refs": ["standard"]}, _LEGACY), id="c-refs-on-some-assets"),
+        ],
+    )
+    def test_each_population_ends_standard(self, blocks) -> None:
+        item = _tiered_item(*blocks)
+        snapshot = copy.deepcopy(item)
+        assert not _is_standard(item)
+
+        result = refs_mod.set_storage_refs_standard(item)
+
+        assert result is not None
+        assert _refs(result) == [["standard"], ["standard"]]
+        assert all("storage:scheme" not in s3 for s3 in refs_mod._s3_alternates(result))
+        assert _is_standard(result)
+        assert item == snapshot  # input untouched
+        assert refs_mod.HISTOGRAM == {"needs_refs": 1}
+
+    def test_folds_counts_into_standard_preserving_totals(self) -> None:
+        result = refs_mod.set_storage_refs_standard(_tiered_item(_PERFORMANCE, _MIXED))
+
+        assert result is not None
+        counts = [s3["objects_per_storage_class"] for s3 in refs_mod._s3_alternates(result)]
+        assert counts == [{"STANDARD": 40}, {"STANDARD": 1058}]
+
+    def test_adds_item_schemes_and_extensions_when_missing(self) -> None:
+        item = _tiered_item(_LEGACY)
+        assert "storage:schemes" not in item["properties"]
+
+        result = refs_mod.set_storage_refs_standard(item)
+
+        assert result is not None
+        standard = result["properties"]["storage:schemes"]["standard"]
+        assert standard["storage_class"] == "STANDARD"
+        assert standard["bucket"] == "esa-zarr-sentinel-explorer-fra"
+        assert standard["region"] == "de"
+        assert set(refs_mod._EXTENSIONS) <= set(result["stac_extensions"])
+        assert TIMESTAMPS_EXTENSION in result["stac_extensions"]  # existing ones kept
+
+    def test_keeps_existing_item_schemes(self) -> None:
+        item = _tiered_item(_PERFORMANCE)
+        item["properties"]["storage:schemes"] = {"standard": {"marker": True}}
+
+        result = refs_mod.set_storage_refs_standard(item)
+
+        assert result is not None
+        assert result["properties"]["storage:schemes"] == {"standard": {"marker": True}}
+
+    def test_second_pass_is_a_no_op(self) -> None:
+        first = refs_mod.set_storage_refs_standard(_tiered_item(_PERFORMANCE, _LEGACY))
+        assert first is not None
+
+        assert refs_mod.set_storage_refs_standard(first) is None
+        assert refs_mod.HISTOGRAM == {"needs_refs": 1, "already_standard": 1}
+
+    @pytest.mark.parametrize(
+        "alternate", [None, {"s3": {}}, {"xarray": {}}], ids=["none", "empty-s3", "not-s3"]
+    )
+    def test_item_without_s3_assets_is_not_written(self, alternate) -> None:
+        item = _tiered_item(None, None)
+        if alternate is not None:
+            item["assets"]["b0"]["alternate"] = alternate
+        assert refs_mod.set_storage_refs_standard(item) is None
+        assert refs_mod.HISTOGRAM == {"no_s3_assets": 1}
+
+    def test_expired_item_is_skipped(self) -> None:
+        assert refs_mod.set_storage_refs_standard(_tiered_item(_PERFORMANCE, expires=_PAST)) is None
+        # "expired" counts only items that would otherwise be written, so it is exactly
+        # the number of writes the skip saves.
+        done = refs_mod.set_storage_refs_standard(_tiered_item(_PERFORMANCE))
+        assert done is not None
+        done["properties"]["expires"] = _PAST
+        assert refs_mod.set_storage_refs_standard(done) is None
+        assert refs_mod.HISTOGRAM == {"expired": 1, "needs_refs": 1, "already_standard": 1}
+
+    def test_item_without_expires_is_written(self) -> None:
+        item = _tiered_item(_PERFORMANCE)
+        del item["properties"]["expires"]
+        assert refs_mod.set_storage_refs_standard(item) is not None
+
+    def test_denylisted_id_is_written(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Decided: demo scenes move to STANDARD too, and this field cannot affect
+        # deletion, so the denylist is deliberately not consulted.
+        monkeypatch.delenv("EXPIRES_EXCLUDE_FILE", raising=False)
+        demo_id = sorted(resolve_exclude_ids())[0]
+
+        result = refs_mod.set_storage_refs_standard(_tiered_item(_PERFORMANCE, item_id=demo_id))
+
+        assert result is not None
+        assert _refs(result) == [["standard"]]
+
+    def test_run_reconciles_histogram_with_runner_counts(self) -> None:
+        entry = MIGRATIONS["set_storage_refs_standard"]
+        assert entry.reset is not None and entry.reporter is not None
+        done = refs_mod.set_storage_refs_standard(_tiered_item(_LEGACY, item_id="done"))
+        items = [
+            _tiered_item(_PERFORMANCE, item_id="needs"),
+            _tiered_item(None, item_id="no-s3"),
+            _tiered_item(_MIXED, item_id="expired", expires=_PAST),
+            done,
+        ]
+        entry.reset()  # the CLI calls this before every run; clears the call above
+        runner = STACMigrationRunner("https://api.example.com/stac")
+        runner._update_item = MagicMock()
+
+        with patch("_migrate_catalog.runner.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value.search.return_value = _make_mock_search(items, total=4)
+            result = runner.run_migration("c", entry.fn, "set_storage_refs_standard")
+
+        assert (result.items_modified, result.items_skipped, result.items_failed) == (1, 3, 0)
+        runner._update_item.assert_called_once()
+        assert runner._update_item.call_args[0][1] == "needs"
+        text = entry.reporter(result)
+        for reason in ("needs_refs", "no_s3_assets", "expired", "already_standard"):
+            assert f"  {reason:<16} 1" in text
+        assert "WARNING" not in text
+
+    def test_report_warns_when_histogram_does_not_reconcile(self) -> None:
+        refs_mod.HISTOGRAM["needs_refs"] = 5
+        text = refs_mod.report(_result(processed=2, modified=2, skipped=0))
+        assert "WARNING" in text
