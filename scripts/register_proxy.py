@@ -21,10 +21,13 @@ Render host is ``/rstaging`` (titiler-eopf **0.12.0**), not ``/raster`` (0.11.0)
 0.12.0 serves the ``assets=<key>|bands=…`` / ``|variables=…`` notation these items use,
 and only 0.12.0 is being migrated to. See ``rgb_query``/``add_proxy_visualization``.
 
-Asset mapping (see ``evidence-proxy-T1.md``, reader gate run 2026-09-11):
+Asset mapping (see ``evidence-proxy-T1.md``, reader gate run 2026-09-11 on ``/raster``
+0.11). The last column is the reader-gate probe, not the render contract: the items'
+own links use the ``assets=<key>|bands=…`` form (``RGB_QUERY``), because ``/rstaging``
+0.12 answers the repeated ``variables=`` form with a 422.
 
 ==========  ================================  ===========================================
-key         href                              rendered with
+key         href                              reader-gate probe (/raster 0.11)
 ==========  ================================  ===========================================
 reflectance ``<store>/measurements/reflect…``  ``variables=/measurements/reflectance:b04``
 AOT_10m     ``<store>/`` (store root)          ``variables=/quality/atmosphere/r10m:aot``
@@ -72,7 +75,12 @@ from register_v1 import (
     remove_xarray_integration,
     upsert_item,
 )
-from s3_item_cleanup import format_expires
+from s3_item_cleanup import (
+    check_urls_confined,
+    extract_s3_urls_from_item,
+    format_expires,
+    parse_s3_prefix,
+)
 from storage_tier_utils import extract_region_from_endpoint
 from update_stac_storage_tier import _build_storage_schemes, _tier_to_scheme_ref
 
@@ -92,10 +100,6 @@ DEFAULT_SOURCE_COLLECTION = "sentinel-2-l2a-zarr3"
 COLLECTION_ID_MARKER = "samples-zarr3"
 MIRROR_COLLECTION_ID_MARKER = "mirror-rstaging"
 
-# The probe strings used by the T1 reader gate, T3's rehearsal and T4, verbatim, so
-# the evidence files and the registered items cannot drift apart. An unqualified
-# ``/assets/AOT_10m/info`` on a root href answers 200 with all 49 variables and
-# proves nothing — always pass ``variables=``.
 # True-colour query for the visualization links, in the 0.12 notation: one `assets`
 # parameter whose value carries the per-asset band selection. The two deployments are
 # mirror images and neither accepts the other's form (measured 2026-09-11 against a prod
@@ -114,10 +118,6 @@ RGB_QUERY = (
     f"&rescale={urllib.parse.quote('0,1', safe='')}"
     f"&color_formula={urllib.parse.quote(S2_COLOR_FORMULA, safe='')}"
 )
-
-AOT_PROBE = "assets=AOT_10m|variables=/quality/atmosphere/r10m:aot"
-WVP_PROBE = "assets=WVP_10m|variables=/quality/atmosphere/r10m:wvp"
-SCL_PROBE = "assets=SCL_20m|variables=/conditions/mask/l2a_classification/r20m:scl"
 
 # Proxy asset key -> (source asset key, band name, title).
 # AOT and WVP are split out of the source's single ``ATM_10m`` group asset so the
@@ -141,18 +141,23 @@ ROOT_HREF_ASSETS = {
 # Track A items carry no S3 alternate (the stores are EODC's), so even a cron pointed at
 # them would skip each one as `no_s3_urls` — data assets, no s3:// URL — and never delete
 # it: remove them by deleting the collection, never by item id (the ids are also prod
-# `sentinel-2-l2a` ids). For Track B this makes the cleanup *possible*; the cron is
-# `--collection` scoped and does not target these collections today.
+# `sentinel-2-l2a` ids). For Track B this makes the cleanup *possible*, but only with
+# `--allowed-bucket esa-zarr-sentinel-explorer-tests`: the cron's default is prod's bucket,
+# which refuses these alternates as `wrong_bucket`. The cron is `--collection` scoped and
+# does not target these collections today. `main` refuses to stamp this date once it has
+# passed: the item would be born expired.
 PROXY_EXPIRES = datetime(2026, 11, 1, tzinfo=UTC)
 
 # What a finished proxy item must advertise. Checked before the item is written, because
 # every other guard here is a warning and the render links name `reflectance` outright.
 EXPECTED_ASSET_KEYS = frozenset({"reflectance", *ROOT_HREF_ASSETS})
 
-# Links that only make sense in the source catalogue. ``collection`` is re-added
-# pointing at the proxy collection: the STAC item schema refuses a ``collection``
-# field without a matching link, so dropping it outright makes the item invalid.
-DROPPED_LINK_RELS = frozenset({"root", "self", "parent", "collection", "alternate"})
+# What a proxy item keeps of its source's links. A keep-list, like the asset prune and
+# MIRROR_KEPT_LINK_RELS: the rest are the source catalogue's (root/self/parent/alternate),
+# re-added here (``collection``, which the item schema requires, re-pointed at the proxy
+# collection), or a rel EODC adds later, e.g. its own render links, which would then sit
+# ahead of ours. The source schema is not frozen.
+SOURCE_KEPT_LINK_RELS = frozenset({"cite-as", "license"})
 
 # What a mirror item keeps of its prod source's links. A keep-list, not a drop-list: the
 # rest are the source catalogue's, the /raster render links the /rstaging ones replace,
@@ -374,6 +379,13 @@ def storage_to_v2(item: Item, s3_endpoint: str) -> None:
     item.properties["storage:schemes"] = schemes
     for s3 in alternates:
         legacy = s3.pop("storage:scheme", {})
+        if not legacy.get("tier"):
+            # `get_s3_storage_class` returns None for a missing or unreadable store, and
+            # `_tier_to_scheme_ref(None, None)` would then call it 'standard'.
+            raise ValueError(
+                f"{item.id}: no storage tier for {s3['href']} -- the OVH store is missing "
+                "or unreadable"
+            )
         s3["storage:refs"] = [_tier_to_scheme_ref(legacy.get("tier"), None)]
 
 
@@ -417,8 +429,14 @@ def build_proxy_item(
     # from_dict deep-copies, so the caller's dict is never mutated. Stripping the
     # source catalogue's links (self included) is also what keeps to_dict() offline:
     # pystac would otherwise resolve root/parent over the network.
+    # Fail closed on projection drift, like the missing-asset check below: without an
+    # item-level proj:code, consolidate_reflectance_assets silently falls back to
+    # EPSG:32632, a wrong CRS on an item that still validates (the T28RBS precedent).
+    if "proj:code" not in source_item.get("properties", {}):
+        raise ValueError(f"{source_item.get('id')}: source item has no item-level proj:code")
+
     item = Item.from_dict(source_item)
-    item.links = [link for link in item.links if link.rel not in DROPPED_LINK_RELS]
+    item.links = [link for link in item.links if link.rel in SOURCE_KEPT_LINK_RELS]
     item.collection_id = collection
     item.add_link(collection_link(stac_api_url, collection))
 
@@ -440,6 +458,11 @@ def build_proxy_item(
     missing = EXPECTED_ASSET_KEYS - set(item.assets)
     if missing:
         raise ValueError(f"{item.id}: proxy item is missing asset(s) {sorted(missing)}")
+    # `fill_cube_extent` returns silently without a proj:bbox, and the datacube extension
+    # `reconcile_extensions` declares requires the x/y extents.
+    dimensions = item.assets["reflectance"].extra_fields.get("cube:dimensions") or {}
+    if any("extent" not in dimensions.get(axis, {}) for axis in ("x", "y")):
+        raise ValueError(f"{item.id}: reflectance cube:dimensions x/y have no extent")
 
     stamp_proxy_expires(item)
     add_proxy_visualization(item, raster_api_url, collection)
@@ -510,6 +533,24 @@ def build_mirror_item(
     stamp_proxy_expires(item)
     add_proxy_visualization(item, raster_api_url, collection)
     return item
+
+
+def assert_s3_urls_confined(item: Item, allowed: tuple[str, str] | None) -> None:
+    """Refuse an item that advertises S3 locations a deleter could act on wrongly.
+
+    Track B items point at their OVH copies, which must sit under ``--confine-to``.
+    Track A and mirror items must advertise none at all: their stores are EODC's or
+    prod's, and the cleanup cron's default bucket is prod's.
+    """
+    urls = extract_s3_urls_from_item(item.to_dict(transform_hrefs=False))
+    if allowed is None:
+        if urls:
+            raise ValueError(f"{item.id}: advertises S3 location(s) {sorted(urls)[:2]}")
+        return
+    violations = check_urls_confined(urls, [allowed])
+    if violations:
+        url, reason = violations[0]
+        raise ValueError(f"{item.id}: S3 location {url!r} is outside --confine-to ({reason})")
 
 
 def read_item_ids(path: Path) -> list[str]:
@@ -584,6 +625,11 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="Track B: repoint each asset at <URL>/<store>.zarr (the OVH copies)",
     )
     parser.add_argument("--s3-endpoint", help="Track B only: add alternate.s3 to each asset")
+    parser.add_argument(
+        "--confine-to",
+        metavar="S3_PREFIX",
+        help="Track B only: s3://bucket/prefix/ every alternate.s3 must sit under",
+    )
     return parser.parse_args(argv)
 
 
@@ -612,21 +658,57 @@ def main(argv: list[str] | None = None) -> int:
             logger.error("Error: %s must be an HTTPS URL, got: %r", name, url)
             return 1
 
-    # Track B needs both. --store-root-base alone registers OVH stores with no alternate,
-    # which no deleter can ever reclaim; --s3-endpoint alone derives alternates from EODC's
-    # host, and `https_to_s3` then reads its first path segment (`collections`) as a bucket.
-    if bool(args.store_root_base) != bool(args.s3_endpoint):
-        logger.error("--store-root-base and --s3-endpoint go together (Track B) or not at all")
+    # Track B needs all three. --store-root-base alone registers OVH stores with no
+    # alternate, which no deleter can ever reclaim; --s3-endpoint alone derives alternates
+    # from EODC's host, and `https_to_s3` then reads its first path segment (`collections`)
+    # as a bucket; --confine-to bounds where those alternates may point (a base under
+    # prod's prefix would give every alternate the prod store of the same id).
+    track_b = (args.store_root_base, args.s3_endpoint, args.confine_to)
+    if any(track_b) and not all(track_b):
+        logger.error(
+            "--store-root-base, --s3-endpoint and --confine-to go together (Track B) or not at all"
+        )
         return 1
     if args.mirror_explorer and args.store_root_base:
         logger.error("--mirror-explorer keeps the source's asset hrefs: no Track B flags")
+        return 1
+    # Each track has its own collection, with the same item ids: Track A flags aimed at
+    # the -ovh collection (or Track B at the EODC one) would PUT over the other's items.
+    if bool(args.store_root_base) != args.collection.endswith("-ovh"):
+        logger.error(
+            "Track B (--store-root-base) goes with an -ovh collection and Track A with any "
+            "other, got --collection %r",
+            args.collection,
+        )
+        return 1
+    allowed = None
+    if args.confine_to:
+        try:
+            allowed = parse_s3_prefix(args.confine_to)
+        except ValueError as exc:
+            logger.error("--confine-to: %s", exc)
+            return 1
+
+    if datetime.now(UTC) >= PROXY_EXPIRES:
+        logger.error(
+            "Refusing to run: the fixed proxy expiry %s has passed, so every item would be "
+            "registered already expired",
+            format_expires(PROXY_EXPIRES),
+        )
         return 1
 
     item_ids = list(args.item_id)
     if args.item_ids_file:
         item_ids += read_item_ids(args.item_ids_file)
+    # A duplicate would be fetched and written twice, and counted twice against the bound.
+    item_ids = list(dict.fromkeys(item_ids))
     if not item_ids:
         logger.error("No item ids: pass --item-id and/or --item-ids-file")
+        return 1
+    # An id names a file under --dry-run: one carrying a path could write elsewhere.
+    not_plain = [ident for ident in item_ids if "/" in ident or ident.startswith(".")]
+    if not_plain:
+        logger.error("Refusing item ids that are not plain names: %s", not_plain[:3])
         return 1
 
     # Bound before any network call, and refuse rather than truncate: a silently
@@ -663,9 +745,10 @@ def main(argv: list[str] | None = None) -> int:
                     store_root_base=args.store_root_base,
                     s3_endpoint=args.s3_endpoint,
                 )
+            assert_s3_urls_confined(item, allowed)
             if client is None:
-                # `item_id`, never `item.id`: the id names a file under --dry-run, and a
-                # path-bearing id would write outside that directory.
+                # A plain name (refused otherwise above), and fetch_source_item has already
+                # made sure the source did not substitute another id.
                 out = args.dry_run / f"{item_id}.json"
                 out.write_text(json.dumps(item.to_dict(), indent=2))
                 logger.info(f"   📄 {out}")
@@ -679,7 +762,13 @@ def main(argv: list[str] | None = None) -> int:
     # Without this, a mid-run failure leaves a partially populated collection and no
     # record of which ids landed — the operator cannot tell a clean run from a torn one.
     registered = len(item_ids) - len(failed)
-    logger.info("Registered %d/%d item(s) into %s", registered, len(item_ids), args.collection)
+    logger.info(
+        "%s %d/%d item(s) for %s",
+        "Wrote" if args.dry_run else "Registered",
+        registered,
+        len(item_ids),
+        args.collection,
+    )
     if failed:
         logger.error("Failed (%d): %s", len(failed), ", ".join(failed))
         return 1

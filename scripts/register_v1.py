@@ -614,9 +614,10 @@ def add_alternate_s3_assets(
         item: STAC item to modify
         s3_endpoint: S3 endpoint URL (used to extract region metadata)
         gateway_url: HTTPS gateway the asset hrefs are served from. The default is the
-            Explorer gateway; an href on any other host converts to no S3 URI at all, so
+            Explorer gateway; an href on another path-style host converts to no S3 URI, so
             a caller whose store is served elsewhere MUST pass its own gateway or it
-            silently gets zero alternates.
+            silently gets zero alternates. (Virtual-hosted ``<bucket>.s3.<host>`` hrefs are
+            always parsed, whatever the gateway, by ``https_to_s3``'s fallback.)
 
     Returns:
         The number of assets that gained an S3 alternate.

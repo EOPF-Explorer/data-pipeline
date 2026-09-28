@@ -1,27 +1,28 @@
 """Unit tests for the Samples Service proxy item transform (coordination#287).
 
-Everything here runs offline. The ``no_stac_network`` autouse fixture makes
-``pystac``'s concrete ``DefaultStacIO.read_text`` raise, so any accidental link
-resolution (``root``/``parent``/``collection``) fails the test instead of silently
-reaching the source catalogue.
+Everything here runs offline, and the ``no_network`` autouse fixture enforces it: a pystac
+link resolution, a STAC client, or any real HTTP transport raises, so a guard regression
+fails the test instead of reaching a live catalogue. The target hosts are ``.invalid``
+(RFC 2606) for the same reason; only fixture data carries real URLs.
 """
 
 import json
 from copy import deepcopy
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import httpx
 import pystac.stac_io
 import pytest
+import register_proxy
 from register_proxy import (
-    AOT_PROBE,
     DROPPED_EXTENSION_PREFIXES,
-    SCL_PROBE,
-    WVP_PROBE,
+    assert_s3_urls_confined,
     build_mirror_item,
     build_proxy_item,
     fetch_source_item,
+    fill_cube_extent,
     main,
     read_item_ids,
 )
@@ -32,21 +33,47 @@ FIXTURE = (
     / "fixtures/eodc/S2B_MSIL2A_20260907T130029_N0512_R138_T26TLL_20260907T145009.json"
 )
 COLLECTION = "sentinel-2-l2a-samples-zarr3"
-RASTER = "https://api.explorer.eopf.copernicus.eu/rstaging"
-STAC_API = "https://api.explorer.eopf.copernicus.eu/stac"
+RASTER = "https://rstaging.invalid/rstaging"
+STAC_API = "https://stac.invalid/stac"
+# The prod catalogue named inside the fixture items; never a target here.
+PROD_STAC = "https://api.explorer.eopf.copernicus.eu/stac"
 OVH_BASE = (
     "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-tests/samples-zarr3-proxy"
 )
+OVH_ENDPOINT = "https://s3.de.io.cloud.ovh.net"
+OVH_CONFINE = "s3://esa-zarr-sentinel-explorer-tests/samples-zarr3-proxy/"
+TRACK_B = [
+    "--store-root-base",
+    OVH_BASE,
+    "--s3-endpoint",
+    OVH_ENDPOINT,
+    "--confine-to",
+    OVH_CONFINE,
+]
 
 
 @pytest.fixture(autouse=True)
-def no_stac_network(monkeypatch):
-    """Any pystac read over the wire is a bug in the transform."""
+def no_network(monkeypatch):
+    """Any read or write over the wire is a bug in a test, or in a guard it exercises."""
 
     def _explode(*args, **kwargs):
-        raise AssertionError("build_proxy_item must not resolve STAC links over the network")
+        raise AssertionError("tests must not reach the network")
 
     monkeypatch.setattr(pystac.stac_io.DefaultStacIO, "read_text", _explode)
+    monkeypatch.setattr("stac_auth.open_client", _explode)
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", _explode)
+
+
+class _Before1Nov(datetime):
+    @classmethod
+    def now(cls, tz=None):
+        return cls(2026, 9, 28, tzinfo=tz)
+
+
+@pytest.fixture(autouse=True)
+def frozen_clock(monkeypatch):
+    """main refuses once PROXY_EXPIRES has passed; the suite must not start failing then."""
+    monkeypatch.setattr(register_proxy, "datetime", _Before1Nov)
 
 
 @pytest.fixture
@@ -57,6 +84,19 @@ def source():
 @pytest.fixture
 def proxy(source):
     return build_proxy_item(source, COLLECTION, RASTER, STAC_API).to_dict()
+
+
+@pytest.fixture
+def track_b(source):
+    with patch("register_v1.get_s3_storage_class", return_value="STANDARD"):
+        return build_proxy_item(
+            source,
+            f"{COLLECTION}-ovh",
+            RASTER,
+            STAC_API,
+            store_root_base=OVH_BASE,
+            s3_endpoint=OVH_ENDPOINT,
+        ).to_dict()
 
 
 def store_link(item):
@@ -120,12 +160,6 @@ def test_root_href_assets_carry_their_single_band_and_source_metadata(proxy, key
     assert asset["type"] == "application/vnd.zarr; version=3"
     # Numeric fields stay as EODC published them — they describe the EODC store.
     assert "raster:scale" in asset
-
-
-def test_probe_strings_are_exact():
-    assert AOT_PROBE == "assets=AOT_10m|variables=/quality/atmosphere/r10m:aot"
-    assert WVP_PROBE == "assets=WVP_10m|variables=/quality/atmosphere/r10m:wvp"
-    assert SCL_PROBE == "assets=SCL_20m|variables=/conditions/mask/l2a_classification/r20m:scl"
 
 
 # --- properties, links, extensions ---
@@ -225,43 +259,39 @@ def test_store_root_base_keeps_the_sub_paths_below_the_store(source):
     assert reflectance == f"{OVH_BASE}/{proxy.id}.zarr/measurements/reflectance"
 
 
-@patch("register_v1.get_s3_storage_class", return_value="STANDARD")
-def test_s3_endpoint_adds_alternates_and_their_extensions(_tier, source):
-    proxy = build_proxy_item(
-        source,
-        f"{COLLECTION}-ovh",
-        RASTER,
-        STAC_API,
-        store_root_base=OVH_BASE,
-        s3_endpoint="https://s3.de.io.cloud.ovh.net",
-    ).to_dict()
-    alternate = proxy["assets"]["AOT_10m"]["alternate"]["s3"]
+def test_s3_endpoint_adds_alternates_and_their_extensions(track_b):
+    alternate = track_b["assets"]["AOT_10m"]["alternate"]["s3"]
     assert alternate["href"].startswith("s3://esa-zarr-sentinel-explorer-tests/")
-    assert any("alternate-assets" in ext for ext in proxy["stac_extensions"])
+    assert any("alternate-assets" in ext for ext in track_b["stac_extensions"])
 
 
-@patch("register_v1.get_s3_storage_class", return_value="STANDARD")
-def test_s3_alternates_use_the_storage_v2_layout_the_extension_declares(_tier, source):
+def test_s3_alternates_use_the_storage_v2_layout_the_extension_declares(track_b):
     """Storage v2 requires item-level `storage:schemes`; the live -ovh items had none and
     failed STAC validation (2026-09-23). Each ref must name a scheme on OUR bucket."""
-    proxy = build_proxy_item(
-        source,
-        f"{COLLECTION}-ovh",
-        RASTER,
-        STAC_API,
-        store_root_base=OVH_BASE,
-        s3_endpoint="https://s3.de.io.cloud.ovh.net",
-    ).to_dict()
-    schemes = proxy["properties"]["storage:schemes"]
+    schemes = track_b["properties"]["storage:schemes"]
     assert {s["bucket"] for s in schemes.values()} == {"esa-zarr-sentinel-explorer-tests"}
     for key in ("reflectance", "AOT_10m", "WVP_10m", "SCL_20m"):
-        s3 = proxy["assets"][key]["alternate"]["s3"]
+        s3 = track_b["assets"][key]["alternate"]["s3"]
         assert s3["storage:refs"] == ["standard"]
         assert "storage:scheme" not in s3
 
 
-@patch("register_v1.get_s3_storage_class", return_value="STANDARD")
-def test_the_two_consumers_each_get_the_slash_form_they_need(_tier, source):
+@patch("register_v1.get_s3_storage_class", return_value=None)
+def test_a_track_b_store_with_no_readable_tier_is_refused(_tier, source):
+    """A missing or unreadable OVH store has no storage class; it was registered as
+    'standard', pointing at nothing."""
+    with pytest.raises(ValueError, match="no storage tier"):
+        build_proxy_item(
+            source,
+            f"{COLLECTION}-ovh",
+            RASTER,
+            STAC_API,
+            store_root_base=OVH_BASE,
+            s3_endpoint=OVH_ENDPOINT,
+        )
+
+
+def test_the_two_consumers_each_get_the_slash_form_they_need(track_b):
     """titiler wants a bare `.zarr` href; s3_item_cleanup wants a trailing slash.
 
     They read different fields, so both can be satisfied — but only deliberately.
@@ -270,17 +300,9 @@ def test_the_two_consumers_each_get_the_slash_form_they_need(_tier, source):
     """
     from s3_item_cleanup import check_urls_confined
 
-    proxy = build_proxy_item(
-        source,
-        f"{COLLECTION}-ovh",
-        RASTER,
-        STAC_API,
-        store_root_base=OVH_BASE,
-        s3_endpoint="https://s3.de.io.cloud.ovh.net",
-    ).to_dict()
     allowed = [("esa-zarr-sentinel-explorer-tests", "samples-zarr3-proxy/")]
     for key in ("AOT_10m", "WVP_10m", "SCL_20m"):
-        asset = proxy["assets"][key]
+        asset = track_b["assets"][key]
         assert asset["href"].endswith(".zarr"), "titiler 404s on a trailing slash"
         s3_href = asset["alternate"]["s3"]["href"]
         assert s3_href.endswith(".zarr/"), "cleanup refuses a bare .zarr key"
@@ -326,28 +348,66 @@ def test_more_ids_than_max_items_exits_before_any_network_call(client, upsert, f
     upsert.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--collection", "sentinel-2-l2a"],  # prod: not a proxy collection
+        ["--collection", f"{COLLECTION}-ovh"],  # Track A flags into the Track B collection
+        ["--collection", COLLECTION, *TRACK_B],  # Track B flags into the Track A collection
+        ["--confine-to", OVH_CONFINE],  # a Track B flag on its own
+        ["--item-id", "../elsewhere"],  # an id that is a path
+        ["--item-id", ".hidden"],
+    ],
+)
 @patch("register_proxy.fetch_source_item")
 @patch("register_proxy.upsert_item")
-def test_a_non_proxy_collection_is_refused(upsert, fetch):
-    assert (
-        main(
-            [
-                "--collection",
-                "sentinel-2-l2a",
-                "--raster-api-url",
-                RASTER,
-                "--stac-api-url",
-                "https://api.explorer.eopf.copernicus.eu/stac",
-                "--item-id",
-                "a",
-                "--max-items",
-                "1",
-            ]
-        )
-        == 1
-    )
+def test_refused_before_any_network_call(upsert, fetch, extra):
+    """argparse keeps the last --collection, so `extra` overrides cli()'s default."""
+    assert cli("--item-id", "a", "--max-items", "2", *extra) == 1
     fetch.assert_not_called()
     upsert.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [
+        "--source-stac-api",
+        "--raster-api-url",
+        "--stac-api-url",
+        "--store-root-base",
+        "--s3-endpoint",
+    ],
+)
+@patch("register_proxy.fetch_source_item")
+@patch("register_proxy.upsert_item")
+def test_every_url_flag_must_be_https(upsert, fetch, flag, caplog):
+    """A cleartext --stac-api-url would send the OIDC bearer in the clear. Given a
+    complete, valid Track B set so no other guard can mask this one."""
+    args = ["--collection", f"{COLLECTION}-ovh", *TRACK_B, "--item-id", "a", "--max-items", "1"]
+    assert cli(*args, flag, "http://plain.invalid/x") == 1
+    assert "must be an HTTPS URL" in caplog.text
+    fetch.assert_not_called()
+    upsert.assert_not_called()
+
+
+@patch("register_proxy.fetch_source_item")
+def test_a_passed_proxy_expiry_is_refused(fetch, monkeypatch):
+    """PROXY_EXPIRES is a fixed date: after it, every item would be born expired."""
+    monkeypatch.setattr(register_proxy, "PROXY_EXPIRES", datetime(2026, 9, 1, tzinfo=UTC))
+    assert cli("--item-id", "a", "--max-items", "1") == 1
+    fetch.assert_not_called()
+
+
+def test_duplicate_ids_are_fetched_once_and_a_dry_run_says_wrote(source, tmp_path, caplog):
+    caplog.set_level("INFO", logger="register_proxy")
+    with patch("register_proxy.fetch_source_item", return_value=source) as fetch:
+        rc = cli(
+            "--item-id", source["id"], "--item-id", source["id"], "--max-items", "1",
+            "--dry-run", str(tmp_path),
+        )  # fmt: skip
+    assert rc == 0
+    fetch.assert_called_once()
+    assert f"Wrote 1/1 item(s) for {COLLECTION}" in caplog.text
 
 
 @patch("register_proxy.upsert_item")
@@ -375,6 +435,34 @@ def test_collection_link_points_at_the_proxy_collection(proxy):
 
 
 # --- Guards added after the 2026-09-14 review ---------------------------------
+
+
+@pytest.mark.parametrize(
+    ("base", "rc"),
+    [
+        (OVH_BASE, 0),
+        # prod's own prefix: every alternate would name the PROD store of the same id
+        ("https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output", 1),
+    ],
+)
+@patch("register_v1.get_s3_storage_class", return_value="STANDARD")
+def test_track_b_alternates_must_sit_under_confine_to(_tier, source, tmp_path, base, rc):
+    with patch("register_proxy.fetch_source_item", return_value=source):
+        code = cli(
+            "--collection", f"{COLLECTION}-ovh", *TRACK_B, "--store-root-base", base,
+            "--item-id", source["id"], "--max-items", "1", "--dry-run", str(tmp_path),
+        )  # fmt: skip
+    assert code == rc
+    assert (tmp_path / f"{source['id']}.json").exists() == (rc == 0)
+
+
+def test_an_item_that_must_have_no_s3_location_is_refused_if_it_has_one(prod_item):
+    """Track A and mirror items name stores we do not own; an s3:// href on one would let
+    a cleanup delete them."""
+    prod_item["assets"]["reflectance"]["href"] = "s3://esa-zarr-sentinel-explorer-fra/X.zarr/"
+    mirror = build_mirror_item(prod_item, MIRROR, RASTER, STAC_API)
+    with pytest.raises(ValueError, match="advertises S3 location"):
+        assert_s3_urls_confined(mirror, None)
 
 
 @patch("register_v1.get_s3_storage_class", return_value="STANDARD")
@@ -451,6 +539,40 @@ def test_aot_and_wvp_do_not_share_mutable_fields(source):
     assert aot.get("proj:shape") is not wvp.get("proj:shape")
 
 
+def test_a_source_without_item_level_proj_code_is_refused(source):
+    """register_v1 would silently fall back to EPSG:32632: a wrong CRS on a valid item."""
+    del source["properties"]["proj:code"]
+    with pytest.raises(ValueError, match="no item-level proj:code"):
+        build_proxy_item(source, COLLECTION, RASTER, STAC_API)
+
+
+def test_a_source_without_proj_bbox_is_refused(source):
+    """No bbox means no x/y extent, which the declared datacube extension requires."""
+    del source["properties"]["proj:bbox"]
+    with pytest.raises(ValueError, match="x/y have no extent"):
+        build_proxy_item(source, COLLECTION, RASTER, STAC_API)
+
+
+def test_a_six_element_proj_bbox_is_read_without_its_heights(proxy):
+    """[west, south, min-z, east, north, max-z]: slicing four would read a height as east."""
+    item = MagicMock()
+    dims = {"x": {}, "y": {}}
+    item.assets = {"reflectance": MagicMock(extra_fields={"cube:dimensions": dims})}
+    item.properties = {"proj:bbox": [1.0, 2.0, -5.0, 3.0, 4.0, 9.0]}
+    fill_cube_extent(item)
+    assert dims == {"x": {"extent": [1.0, 3.0]}, "y": {"extent": [2.0, 4.0]}}
+
+
+def test_a_source_render_link_is_not_carried_over(source):
+    """The source links are a keep-list: an EODC xyz would sit ahead of ours."""
+    source["links"].append({"rel": "xyz", "href": "https://eodc.invalid/tiles/{z}/{x}/{y}"})
+    source["links"].append({"rel": "preview", "href": "https://eodc.invalid/p.png"})
+    proxy = build_proxy_item(source, COLLECTION, RASTER, STAC_API).to_dict()
+    xyz = [link["href"] for link in proxy["links"] if link["rel"] == "xyz"]
+    assert len(xyz) == 1 and xyz[0].startswith(RASTER)
+    assert link_href(proxy, "preview") is None
+
+
 def test_a_missing_reflectance_asset_is_refused(source):
     """The render links name `assets=reflectance` unconditionally."""
     for key in ("SR_10m", "SR_20m", "SR_60m"):
@@ -468,6 +590,21 @@ def test_the_source_cannot_choose_which_id_gets_registered(source):
         )
         with pytest.raises(ValueError, match="different item id"):
             fetch_source_item("https://stac.example", "c", "REQUESTED")
+
+
+def test_a_redirect_from_the_source_is_refused_not_followed():
+    """A 3xx could downgrade to http or change host; what came back would be registered
+    as if it had been asked for."""
+    real_client = httpx.Client
+
+    def redirect(request):
+        return httpx.Response(302, headers={"Location": "http://elsewhere.invalid/x"})
+
+    def client(**kwargs):
+        return real_client(transport=httpx.MockTransport(redirect), **kwargs)
+
+    with patch("register_proxy.httpx.Client", client), pytest.raises(httpx.HTTPStatusError):
+        fetch_source_item("https://stac.invalid", "c", "ID")
 
 
 def test_dot_segments_in_an_item_id_cannot_retarget_the_collection():
@@ -505,24 +642,9 @@ def test_one_failing_item_does_not_abandon_the_rest(client, upsert, source):
     upsert.assert_called_once()
 
 
-def test_a_non_https_store_root_base_is_refused(source):
-    """--store-root-base rewrites every asset href; it gets the same guard as the APIs."""
-    with patch("register_proxy.fetch_source_item", return_value=source) as fetch:
-        rc = cli(
-            "--item-id",
-            source["id"],
-            "--max-items",
-            "1",
-            "--store-root-base",
-            "http://s3.typo-host.example/bucket/prefix",
-        )
-    assert rc == 1
-    fetch.assert_not_called()
-
-
 @pytest.mark.parametrize(
     ("flag", "value"),
-    [("--store-root-base", OVH_BASE), ("--s3-endpoint", "https://s3.de.io.cloud.ovh.net")],
+    [("--store-root-base", OVH_BASE), ("--s3-endpoint", OVH_ENDPOINT)],
 )
 @patch("register_proxy.fetch_source_item")
 @patch("register_proxy.upsert_item")
@@ -610,7 +732,7 @@ def test_mirror_links_point_at_the_mirror_and_back_at_prod_only_via_canonical(pr
     prod_hrefs = [
         link["rel"]
         for link in mirror["links"]
-        if link["href"].startswith(f"{STAC_API}/collections/sentinel-2-l2a/")
+        if link["href"].startswith(f"{PROD_STAC}/collections/sentinel-2-l2a/")
     ]
     assert prod_hrefs == ["canonical"]
     # The EODC lineage survives: `canonical` is added, it does not replace `derived_from`.
@@ -626,6 +748,12 @@ def test_mirror_render_links_are_the_proxy_form_on_rstaging(mirror):
 
 def test_mirror_expires_on_the_fixed_proxy_date(mirror):
     assert mirror["properties"]["expires"] == "2026-11-01T00:00:00Z"
+
+
+def test_a_mirror_item_missing_a_proxy_asset_is_refused(source):
+    """The EODC source has SR_*/ATM_* groups, not the Explorer's four assets."""
+    with pytest.raises(ValueError, match="mirror item is missing"):
+        build_mirror_item(source, MIRROR, RASTER, STAC_API)
 
 
 def test_mirror_does_not_mutate_the_source(prod_item):
