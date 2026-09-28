@@ -27,7 +27,7 @@ import urllib.parse
 import stac_auth
 from eopf_geozarr.stac.s1_rtc import build_s1_rtc_per_acquisition_items
 from pystac import Item
-from register_v1 import EXPLORER_BASE, _render_to_query, renders_blocks
+from register_v1 import _render_to_query, renders_blocks
 from stac_link_titles import ACQUISITIONS_FILTER_TITLE, PARENT_DATACUBE_TITLE
 
 # Per-acquisition collections are env-split like the cube collections (…-tests/-staging/-prod). The
@@ -37,7 +37,7 @@ DEFAULT_ACQ_COLLECTION = "sentinel-1-grd-rtc-acquisitions-tests"
 # Item *construction* — one item per cube `time` slice, oriented to its orbit, carrying the orbit's γ⁰
 # asset + a `renders.rgb` whose per-band rescale the builder emits — lives in
 # eopf_geozarr.stac.s1_rtc.build_s1_rtc_per_acquisition_items. This script adds only the deployment
-# decoration (render/`via` links + thumbnail at the cube endpoint, `store` link, S3 alternates) and
+# decoration (render links + thumbnail at the cube endpoint, `store` link, S3 alternates) and
 # upserts. The old in-pipeline apply_s1_rtc_rescale override is gone (the builder owns the stretch).
 
 
@@ -107,7 +107,7 @@ def render_thumbnail(
 def decorate_acquisition_item(
     item: Item, *, tile_id: str, cube_collection: str, raster_api: str, stac_api_url: str
 ) -> dict:
-    """Add the render/``via``/``related`` links + thumbnail to a per-acquisition item and return its dict.
+    """Add the render/``related`` links + thumbnail to a per-acquisition item and return its dict.
 
     Construction (single ``datetime``, run-orbit metadata, the orbit's γ⁰ asset, ``renders.rgb``) is
     already done by ``build_s1_rtc_per_acquisition_items``; this adds only the deployment links. They
@@ -159,12 +159,6 @@ def decorate_acquisition_item(
             "type": "image/png",
             "href": render_xyz(raster_api, cube_collection, tile_id, render, sel_time),
             "title": render_title,
-        },
-        {
-            "rel": "via",
-            "type": "text/html",
-            "href": f"{EXPLORER_BASE}/collections/{collection.lower().replace('_', '-')}/items/{item_id}",
-            "title": "EOPF Explorer",
         },
         {
             "rel": "related",
@@ -256,7 +250,7 @@ def main() -> None:
 
     # Construction (one item per slice, oriented to its orbit, with the orbit's γ⁰ asset + renders.rgb)
     # is done by the library; this script adds the deployment decoration per item: s3://→https for the
-    # TiTiler gateway, the cube `store` link + S3 alternate-assets/storage blocks, then the render/`via`
+    # TiTiler gateway, the cube `store` link + S3 alternate-assets/storage blocks, then the render
     # links + thumbnail (cube endpoint, sel=time). Reading from args.store (authoritative s3 in the cron).
     items = build_s1_rtc_per_acquisition_items(
         args.store, orbit=args.orbit_direction, collection_id=args.collection

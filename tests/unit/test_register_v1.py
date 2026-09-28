@@ -409,6 +409,19 @@ class TestVisualizationFromRenders:
         assert xyz.title == "Sentinel-2 L2A True Color"
         assert "color_formula=" in xyz.href
 
+    @pytest.mark.parametrize(
+        ("renders", "collection"),
+        [
+            (_s1_rgb_renders(), "sentinel-1-grd-rtc-staging"),  # producer render config
+            (None, "sentinel-2-l2a"),  # mission fallback
+        ],
+    )
+    def test_no_explorer_via_link(self, renders, collection):
+        """No ``via``: the Explorer ``/collections/<c>/items/<id>`` route 404s (static site)."""
+        item = _real_item(renders)
+        add_visualization_links(item, RASTER_BASE, collection)
+        assert [link.rel for link in item.links if link.rel == "via"] == []
+
 
 _SEL = "2026-06-07T05:52:48"
 _SEL_Q = "sel=time=2026-06-07T05%3A52%3A48"  # colons percent-encoded

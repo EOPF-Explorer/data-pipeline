@@ -161,35 +161,6 @@ def test_register_v1_rejects_http_stac_api_url():
     assert result == 1
 
 
-def test_register_v1_rejects_http_explorer_base_url(monkeypatch):
-    monkeypatch.setenv("EXPLORER_BASE_URL", "http://explorer.example.com")
-    import importlib
-
-    import register_v1
-
-    importlib.reload(register_v1)
-
-    result = register_v1.main(
-        [
-            "--source-url",
-            "https://stac.example.com/item.json",
-            "--collection",
-            "test",
-            "--stac-api-url",
-            "https://api.example.com/stac",
-            "--raster-api-url",
-            "https://raster.example.com",
-            "--s3-endpoint",
-            "https://s3.example.com",
-            "--s3-output-bucket",
-            "mybucket",
-            "--s3-output-prefix",
-            "myprefix",
-        ]
-    )
-    assert result == 1
-
-
 def test_convert_v1_s2_rejects_http_source_url():
     from convert_v1_s2 import main
 
