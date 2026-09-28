@@ -10,18 +10,17 @@ proved, so run it only once that inventory reads 0 non-STANDARD objects.
   its ``objects_per_storage_class`` folds into ``{"STANDARD": total}``, and the
   legacy ``storage:scheme`` is dropped (as ``update_stac_storage_tier`` does).
 - ``no_s3_assets``: nothing to record, so the item is skipped, not written.
-- ``expired``: ``expires`` is already past, so the cleanup cron is deleting the item.
-  Counted only for items that would otherwise be written, so it is the number of
-  writes the skip saves. Always on: the framework has no per-migration options.
+- ``other_bucket``: an ``alternate.s3`` outside ``_BUCKET``, whose inventory proved nothing
+  about it, so the item is skipped, not written (cleanup's ``wrong_bucket`` test).
 - The demo denylist is deliberately NOT consulted: this field cannot affect deletion.
 """
 
 import copy
 import sys
 from collections import Counter
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from _migrate_catalog.migrations._registry import migration
 from _migrate_catalog.types import MigrationResult, apply_item_transform
@@ -30,7 +29,8 @@ _scripts_dir = Path(__file__).resolve().parents[3] / "scripts"
 if str(_scripts_dir) not in sys.path:
     sys.path.insert(0, str(_scripts_dir))
 
-from s3_item_cleanup import parse_stac_timestamp  # noqa: E402
+# The bucket the inventory covered; also the one the storage:schemes written below name.
+_BUCKET = "esa-zarr-sentinel-explorer-fra"
 
 # The pair update_stac_storage_tier.update_item_storage_tiers declares.
 _EXTENSIONS = (
@@ -81,11 +81,6 @@ def _transform(item: dict[str, Any]) -> bool:
     return item != before
 
 
-def _expired(item: dict[str, Any]) -> bool:
-    expires = item.get("properties", {}).get("expires")
-    return bool(expires) and parse_stac_timestamp(expires) < datetime.now(UTC)
-
-
 def report(result: MigrationResult) -> str:
     """The histogram, cross-checked against the runner's counts: only ``needs_refs``
     items are written, so they must end up modified or failed."""
@@ -105,18 +100,19 @@ def report(result: MigrationResult) -> str:
 @migration(
     "set_storage_refs_standard",
     'Set every alternate.s3 storage:refs to ["standard"] after the lifecycle move to '
-    "STANDARD (no S3 listing); skips items with no S3 asset or a past expires",
+    "STANDARD (no S3 listing); skips items with no S3 asset or one outside " + _BUCKET,
     reporter=report,
     reset=HISTOGRAM.clear,
 )
 def set_storage_refs_standard(item: dict[str, Any]) -> dict[str, Any] | None:
     result = None
-    if not _s3_alternates(item):
+    alternates = _s3_alternates(item)
+    if not alternates:
         reason = "no_s3_assets"
+    elif any(urlparse(str(s3.get("href") or "")).netloc != _BUCKET for s3 in alternates):
+        reason = "other_bucket"
     elif (result := apply_item_transform(item, _transform)) is None:
         reason = "already_standard"
-    elif _expired(item):
-        reason, result = "expired", None
     else:
         reason = "needs_refs"
     HISTOGRAM[reason] += 1

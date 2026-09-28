@@ -3533,20 +3533,31 @@ class TestSetStorageRefsStandard:
         assert refs_mod.set_storage_refs_standard(item) is None
         assert refs_mod.HISTOGRAM == {"no_s3_assets": 1}
 
-    def test_expired_item_is_skipped(self) -> None:
-        assert refs_mod.set_storage_refs_standard(_tiered_item(_PERFORMANCE, expires=_PAST)) is None
-        # "expired" counts only items that would otherwise be written, so it is exactly
-        # the number of writes the skip saves.
-        done = refs_mod.set_storage_refs_standard(_tiered_item(_PERFORMANCE))
-        assert done is not None
-        done["properties"]["expires"] = _PAST
-        assert refs_mod.set_storage_refs_standard(done) is None
-        assert refs_mod.HISTOGRAM == {"expired": 1, "needs_refs": 1, "already_standard": 1}
+    def test_expired_item_is_written(self) -> None:
+        # Cleanup never deletes a denylisted or wrong-bucket item, so skipping past
+        # expiries would leave those with stale refs for good.
+        result = refs_mod.set_storage_refs_standard(_tiered_item(_PERFORMANCE, expires=_PAST))
+        assert result is not None
+        assert _refs(result) == [["standard"]]
 
-    def test_item_without_expires_is_written(self) -> None:
-        item = _tiered_item(_PERFORMANCE)
-        del item["properties"]["expires"]
-        assert refs_mod.set_storage_refs_standard(item) is not None
+    @pytest.mark.parametrize(
+        "other_href",
+        [
+            "s3://esa-zarr-sentinel-explorer-s2-l2a-staging/converted/x.zarr/b1",
+            "https://s3.de.io.cloud.ovh.net/esa-zarr-sentinel-explorer-fra/x.zarr/b1",
+            None,
+        ],
+        ids=["other-bucket", "not-s3-url", "no-href"],
+    )
+    def test_item_with_an_asset_outside_fra_is_not_written(self, other_href) -> None:
+        # The inventory only covered fra: one asset elsewhere and the item is left alone.
+        item = _tiered_item(_PERFORMANCE, _PERFORMANCE)
+        item["assets"]["b1"]["alternate"]["s3"]["href"] = other_href
+        assert refs_mod.set_storage_refs_standard(item) is None
+        assert refs_mod.HISTOGRAM == {"other_bucket": 1}
+
+    def test_checked_bucket_is_the_one_the_schemes_name(self) -> None:
+        assert refs_mod._storage_schemes()["standard"]["bucket"] == refs_mod._BUCKET
 
     def test_denylisted_id_is_written(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Decided: demo scenes move to STANDARD too, and this field cannot affect
@@ -3563,10 +3574,12 @@ class TestSetStorageRefsStandard:
         entry = MIGRATIONS["set_storage_refs_standard"]
         assert entry.reset is not None and entry.reporter is not None
         done = refs_mod.set_storage_refs_standard(_tiered_item(_LEGACY, item_id="done"))
+        elsewhere = _tiered_item(_MIXED, item_id="elsewhere")
+        elsewhere["assets"]["b0"]["alternate"]["s3"]["href"] = "s3://another-bucket/x.zarr/b0"
         items = [
             _tiered_item(_PERFORMANCE, item_id="needs"),
             _tiered_item(None, item_id="no-s3"),
-            _tiered_item(_MIXED, item_id="expired", expires=_PAST),
+            elsewhere,
             done,
         ]
         entry.reset()  # the CLI calls this before every run; clears the call above
@@ -3581,7 +3594,7 @@ class TestSetStorageRefsStandard:
         runner._update_item.assert_called_once()
         assert runner._update_item.call_args[0][1] == "needs"
         text = entry.reporter(result)
-        for reason in ("needs_refs", "no_s3_assets", "expired", "already_standard"):
+        for reason in ("needs_refs", "no_s3_assets", "other_bucket", "already_standard"):
             assert f"  {reason:<16} 1" in text
         assert "WARNING" not in text
 
