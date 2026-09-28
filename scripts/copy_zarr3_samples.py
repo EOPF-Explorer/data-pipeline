@@ -43,6 +43,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import boto3
+from botocore.exceptions import ClientError
 from s3_item_cleanup import check_urls_confined, parse_s3_prefix
 
 logger = logging.getLogger("copy_zarr3_samples")
@@ -63,6 +64,9 @@ HTTP_TIMEOUT = 300
 # aws-chunked request for a file body as for bytes (botocore 1.42, checked 2026-09-23).
 SPOOL_BYTES = 64 * 2**20
 READ_BYTES = 2**20
+
+# The store root: its consolidated metadata is what a reader opens first.
+ROOT_KEY = "zarr.json"
 
 
 class CopyError(RuntimeError):
@@ -92,6 +96,11 @@ class StorePlan:
     name: str
     keys: list[str]
     required_keys: set[str] = field(default_factory=set)
+
+    def dest_root(self, prefix: str) -> str:
+        """``<prefix><store>/``: the one place the destination layout is spelled, so the
+        keys confined before the run are the keys the run writes."""
+        return f"{prefix}{self.name}/"
 
 
 def fetch_json(url: str) -> dict[str, Any]:
@@ -128,6 +137,28 @@ def chunk_keys_for_array(path: str, meta: dict[str, Any]) -> list[str]:
     return [f"{path}/c{separator}{ix}" if name == "default" else f"{path}/{ix}" for ix in indices]
 
 
+def check_node_path(path: str) -> None:
+    """Refuse a node path that could step outside the store.
+
+    The paths come verbatim from the source's metadata and end up in both the source URL
+    and the S3 key, and the write confinement is a plain prefix match that a ``..``
+    segment would pass.
+    """
+    if any(seg in ("", ".", "..") for seg in path.split("/")) or "?" in path or "#" in path:
+        raise CopyError(f"unsafe node path in consolidated metadata: {path!r}")
+
+
+def store_exists(s3_client: Any, bucket: str, key: str) -> bool:
+    """True if ``key`` exists. A 404 is False; any other error is raised, not guessed."""
+    try:
+        s3_client.head_object(Bucket=bucket, Key=key)
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") in ("404", "NoSuchKey", "NotFound"):
+            return False
+        raise
+    return True
+
+
 def plan_store(root: str) -> StorePlan:
     """Derive every object key in ``root`` from its consolidated metadata."""
     root = root.rstrip("/")
@@ -140,9 +171,11 @@ def plan_store(root: str) -> StorePlan:
         )
 
     nodes = consolidated["metadata"]
+    for path in nodes:
+        check_node_path(path)
     # Every node's zarr.json is required: it is named in the consolidated metadata, so
     # its absence means the source is incomplete rather than that a default applies.
-    required = {"zarr.json", *(f"{path}/zarr.json" for path in nodes)}
+    required = {ROOT_KEY, *(f"{path}/zarr.json" for path in nodes)}
     keys = sorted(required)
     for path, meta in nodes.items():
         if meta.get("node_type") == "array":
@@ -192,6 +225,14 @@ def copy_object(
                 while block := response.read(READ_BYTES):
                     md5.update(block)
                     body.write(block)
+                # The ETag check below proves only that the PUT holds what was read; this
+                # proves the read got the whole object. EODC sends no ETag, so the declared
+                # length is the one integrity signal the source gives.
+                declared = response.headers.get("Content-Length")
+                if declared is not None and body.tell() != int(declared):
+                    raise CopyError(
+                        f"GET {source_url} ended early: read {body.tell()} of {declared} bytes"
+                    )
         except urllib.error.HTTPError as exc:
             if exc.code == 404 and optional:
                 return None
@@ -214,7 +255,7 @@ def copy_store(
     s3_client: Any, plan: StorePlan, bucket: str, prefix: str, *, workers: int, dry_run: bool
 ) -> tuple[int, int, int]:
     """Copy one store. Returns ``(copied, absent, bytes)``."""
-    dest_root = f"{prefix}{plan.name}/"
+    dest_root = plan.dest_root(prefix)
     if dry_run:
         logger.info(
             "   [dry-run] would copy %d keys to s3://%s/%s", len(plan.keys), bucket, dest_root
@@ -230,38 +271,55 @@ def copy_store(
             optional=key not in plan.required_keys,
         )
 
-    copied = absent = total = 0
+    copied = total = 0
+    absent: list[str] = []
     with ThreadPoolExecutor(workers) as pool:
-        futures = [pool.submit(one, key) for key in plan.keys]
+        # The root is held back: see the commit-marker write below.
+        futures = {pool.submit(one, key): key for key in plan.keys if key != ROOT_KEY}
         try:
             for future in as_completed(futures):
                 size = future.result()
                 if size is None:
-                    absent += 1
+                    absent.append(futures[future])
                 else:
                     copied += 1
                     total += size
-        except Exception as exc:
-            # Cancel what has not started, or leaving the `with` would wait for every
-            # queued copy to run into a store that is already broken.
+        except BaseException as exc:
+            # Cancel what has not started, Ctrl-C included, or leaving the `with` would
+            # wait for every queued copy to run into a store that is already broken.
             pool.shutdown(cancel_futures=True)
-            raise CopyError(f"{plan.name}: {exc}") from exc
+            if isinstance(exc, Exception):
+                raise CopyError(f"{plan.name}: {exc}") from exc
+            raise
     # Every chunk absent is not a fill-value store: it is a key form the source does not
     # use, or a source that lost its data. Either way the copy is metadata over nothing.
     chunks = len(plan.keys) - len(plan.required_keys)
-    if chunks and absent == chunks:
+    if chunks and len(absent) == chunks:
         raise CopyError(
             f"{plan.name}: all {chunks} chunk keys were absent -- the derived key form "
             "is wrong or the source holds no data"
         )
+    # The root holds the consolidated metadata a reader opens, so it goes last, as a
+    # commit marker: a store that failed or was interrupted part-way 404s on open instead
+    # of reading its missing chunks as fill values.
+    if ROOT_KEY in plan.keys:
+        try:
+            total += one(ROOT_KEY) or 0
+        except Exception as exc:
+            raise CopyError(f"{plan.name}: {exc}") from exc
+        copied += 1
     logger.info(
-        "   ✅ %s: %d objects, %s absent-by-fill-value, %.1f MiB",
+        "   ✅ %s: %d objects, %d absent (404), %.1f MiB",
         plan.name,
         copied,
-        absent,
+        len(absent),
         total / 2**20,
     )
-    return copied, absent, total
+    if absent:
+        # Named, not only counted: a band that vanished looks exactly like an all-fill
+        # array, so the list is what gets diffed against the known-absent baseline.
+        logger.info("      absent (404): %s", ", ".join(sorted(absent)))
+    return copied, len(absent), total
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -285,6 +343,11 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Hard cap on stores written, enforced here (1..{MAX_STORES_CEILING})",
     )
     parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Copy over a store that already exists at the destination (refused otherwise)",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Plan and confine, write nothing")
     return parser
 
@@ -342,7 +405,7 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("Planning failed, nothing written: %s", exc)
         return 1
 
-    all_keys = [f"{prefix}{plan.name}/{key}" for plan in plans for key in plan.keys]
+    all_keys = [f"{plan.dest_root(prefix)}{key}" for plan in plans for key in plan.keys]
     try:
         assert_writes_confined(bucket, all_keys, allowed)
     except CopyError as exc:
@@ -353,8 +416,28 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     client = boto3.client("s3", endpoint_url=args.s3_endpoint)
+    # A same-named store already there would be mixed with this copy, and its objects
+    # that this copy does not rewrite would survive to hide fill-value holes.
+    try:
+        existing = [
+            plan.name
+            for plan in plans
+            if store_exists(client, bucket, f"{plan.dest_root(prefix)}{ROOT_KEY}")
+        ]
+    except ClientError as exc:
+        logger.error("Could not check the destination for existing stores: %s", exc)
+        return 1
+    if existing and not args.overwrite:
+        logger.error(
+            "Refusing to run: store(s) already at the destination: %s (--overwrite replaces "
+            "them, leaving any object this copy does not rewrite in place)",
+            existing,
+        )
+        return 2
+
     copied = absent = total = 0
     partial: list[str] = []
+    interrupted = False
     for plan in plans:
         try:
             one_copied, one_absent, one_total = copy_store(
@@ -362,9 +445,14 @@ def main(argv: list[str] | None = None) -> int:
             )
         except CopyError as exc:
             # Not deleted here: a re-run over a good earlier copy would take it with it.
-            partial.append(f"s3://{bucket}/{prefix}{plan.name}/")
+            partial.append(f"s3://{bucket}/{plan.dest_root(prefix)}")
             logger.error("   ❌ %s", exc)
             continue
+        except KeyboardInterrupt:
+            partial.append(f"s3://{bucket}/{plan.dest_root(prefix)}")
+            logger.error("   ⛔ %s: interrupted", plan.name)
+            interrupted = True
+            break
         copied += one_copied
         absent += one_absent
         total += one_total
@@ -382,7 +470,7 @@ def main(argv: list[str] | None = None) -> int:
             "PARTIAL store(s) -- delete before registering anything against them: %s",
             ", ".join(partial),
         )
-        return 1
+        return 130 if interrupted else 1
     return 0
 
 

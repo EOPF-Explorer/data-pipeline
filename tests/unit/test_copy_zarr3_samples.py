@@ -12,6 +12,7 @@ import urllib.request
 from unittest.mock import MagicMock
 
 import pytest
+from botocore.exceptions import ClientError
 
 from scripts.copy_zarr3_samples import (
     MAX_STORES_CEILING,
@@ -114,6 +115,7 @@ class TestPlanStore:
         }
         monkeypatch.setattr("scripts.copy_zarr3_samples.fetch_json", lambda url: root_doc)
         plan = plan_store("https://example.test/S2X.zarr/")
+        assert plan.dest_root("samples/") == "samples/S2X.zarr/"
 
         assert plan.name == "S2X.zarr"
         assert "zarr.json" in plan.keys
@@ -126,6 +128,15 @@ class TestPlanStore:
             "grp/scal/zarr.json",
         }
         assert "grp/scal/c" not in plan.required_keys
+
+    @pytest.mark.parametrize("path", ["grp/../../stray", "/abs", "a//b", "./a", "", "a?x", "a#x"])
+    def test_an_unsafe_node_path_is_refused(self, monkeypatch, path):
+        """Node paths go verbatim into the source URL and the S3 key; confinement is a
+        prefix match that a `..` segment would pass."""
+        root_doc = {"consolidated_metadata": {"metadata": {path: {"node_type": "group"}}}}
+        monkeypatch.setattr("scripts.copy_zarr3_samples.fetch_json", lambda url: root_doc)
+        with pytest.raises(CopyError, match="unsafe node path"):
+            plan_store("https://example.test/S2X.zarr")
 
 
 class TestConfinement:
@@ -152,7 +163,8 @@ class TestCopyObject:
         return client
 
     def test_refuses_when_the_stored_digest_disagrees(self, monkeypatch):
-        """The one check that would catch a truncated or corrupted transfer."""
+        """The ETag check verifies the PUT against the bytes read; the length check below
+        verifies the GET. Neither alone catches both a bad upload and a short read."""
         monkeypatch.setattr(
             "scripts.copy_zarr3_samples._open",
             lambda *a, **k: _resp(b"payload"),
@@ -178,6 +190,17 @@ class TestCopyObject:
         client.put_object.side_effect = put_object
         assert copy_object(client, "https://x/k", "b", "k", optional=False) == len(payload)
         assert seen == {"streamed": True, "body": payload, "length": len(payload)}
+
+    def test_a_get_that_ends_early_is_refused_before_the_put(self, monkeypatch):
+        """Reproduced 2026-09-28: 40,000 of 102,400 declared bytes copied with no error. The
+        ETag check hashes the same short bytes it read, so it cannot catch this."""
+        monkeypatch.setattr(
+            "scripts.copy_zarr3_samples._open", lambda *a, **k: _resp(b"x" * 400, declared=1024)
+        )
+        client = self._client(hashlib.md5(b"x" * 400, usedforsecurity=False).hexdigest())
+        with pytest.raises(CopyError, match="ended early: read 400 of 1024 bytes"):
+            copy_object(client, "https://x/k", "b", "k", optional=False)
+        client.put_object.assert_not_called()
 
     def test_absent_chunk_is_not_an_error(self, monkeypatch):
         """Zarr reads a missing chunk as the fill value; 4 non-scalar chunks and 19
@@ -209,16 +232,47 @@ class TestCopyStore:
         with pytest.raises(CopyError, match="all 2 chunk keys were absent"):
             copy_store(MagicMock(), self.PLAN, "b", "p/", workers=1, dry_run=False)
 
-    def test_some_absent_chunks_are_fill_values(self, monkeypatch):
+    def test_some_absent_chunks_are_fill_values_and_are_named(self, monkeypatch, caplog):
+        """Named, not counted: a vanished band looks exactly like an all-fill array."""
         monkeypatch.setattr(
             "scripts.copy_zarr3_samples.copy_object",
             lambda _c, url, _b, _k, optional: None if url.endswith("c/1") else 10,
         )
-        assert copy_store(MagicMock(), self.PLAN, "b", "p/", workers=1, dry_run=False) == (
-            3,
-            1,
-            30,
-        )
+        with caplog.at_level("INFO", logger="copy_zarr3_samples"):
+            assert copy_store(MagicMock(), self.PLAN, "b", "p/", workers=1, dry_run=False) == (
+                3,
+                1,
+                30,
+            )
+        assert "absent (404): arr/c/1" in caplog.text
+
+    def test_the_root_is_written_last_as_a_commit_marker(self, monkeypatch):
+        """A reader opens the root first; written last, a part-copied store 404s on open
+        instead of reading its missing chunks as fill values."""
+        calls = []
+
+        def record(_c, url, _b, _k, optional):
+            calls.append(url)
+            return 10
+
+        monkeypatch.setattr("scripts.copy_zarr3_samples.copy_object", record)
+        copy_store(MagicMock(), self.PLAN, "b", "p/", workers=2, dry_run=False)
+        assert calls[-1] == "https://x/A.zarr/zarr.json"
+        assert calls.count("https://x/A.zarr/zarr.json") == 1
+
+    def test_a_failed_store_never_gets_its_root(self, monkeypatch):
+        calls = []
+
+        def failing_chunk(_c, url, _b, _k, optional):
+            calls.append(url)
+            if url.endswith("c/0"):
+                raise CopyError("HTTP 500")
+            return 10
+
+        monkeypatch.setattr("scripts.copy_zarr3_samples.copy_object", failing_chunk)
+        with pytest.raises(CopyError, match="A.zarr: HTTP 500"):
+            copy_store(MagicMock(), self.PLAN, "b", "p/", workers=1, dry_run=False)
+        assert "https://x/A.zarr/zarr.json" not in calls
 
 
 class TestStoreCap:
@@ -307,7 +361,7 @@ class TestDryRun:
             "scripts.copy_zarr3_samples.plan_store",
             lambda root: StorePlan(root=root, name="A.zarr", keys=["zarr.json"]),
         )
-        client = MagicMock()
+        client = _bucket()
         monkeypatch.setattr("scripts.copy_zarr3_samples.boto3.client", lambda *a, **k: client)
         code = main(
             [
@@ -384,10 +438,85 @@ class TestFailures:
             return 1, 0, 10
 
         monkeypatch.setattr("scripts.copy_zarr3_samples.copy_store", copy_store_stub)
-        monkeypatch.setattr("scripts.copy_zarr3_samples.boto3.client", lambda *a, **k: MagicMock())
+        monkeypatch.setattr("scripts.copy_zarr3_samples.boto3.client", lambda *a, **k: _bucket())
         roots = ["--store-root", "https://x/A.zarr", "--store-root", "https://x/B.zarr"]
         assert main([*self.ARGS, *roots]) == 1
         assert copied == ["B.zarr"]
+
+    def test_ctrl_c_stops_the_run_and_reports_the_store_partial(self, monkeypatch, caplog):
+        monkeypatch.setattr(
+            "scripts.copy_zarr3_samples.plan_store",
+            lambda root: StorePlan(root=root, name=root.rsplit("/", 1)[-1], keys=["zarr.json"]),
+        )
+        started = []
+
+        def interrupted(_client, plan, *_a, **_k):
+            started.append(plan.name)
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr("scripts.copy_zarr3_samples.copy_store", interrupted)
+        monkeypatch.setattr("scripts.copy_zarr3_samples.boto3.client", lambda *a, **k: _bucket())
+        roots = ["--store-root", "https://x/A.zarr", "--store-root", "https://x/B.zarr"]
+        try:
+            code = main([*self.ARGS, *roots])
+        except KeyboardInterrupt:
+            pytest.fail("Ctrl-C escaped main: no PARTIAL line, no summary")
+        assert code == 130
+        assert started == ["A.zarr"], "no further store may start after Ctrl-C"
+        assert "PARTIAL" in caplog.text and "s3://b/p/A.zarr/" in caplog.text
+
+    def test_ctrl_c_inside_a_store_cancels_its_queued_copies(self, monkeypatch):
+        """Only `Exception` was caught, so Ctrl-C waited for all 41 of 41 queued writes."""
+        calls = []
+
+        def interrupted(_c, url, _b, _k, optional):
+            calls.append(url)
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr("scripts.copy_zarr3_samples.copy_object", interrupted)
+        with pytest.raises(KeyboardInterrupt):
+            copy_store(MagicMock(), self.PLAN, "b", "p/", workers=1, dry_run=False)
+        assert len(calls) <= 2, f"{len(calls)} of 6 chunk copies ran after Ctrl-C"
+
+    def test_an_existing_destination_store_is_refused_unless_overwrite(self, monkeypatch):
+        """Copying over a same-named store mixes two copies; its stale objects would hide
+        fill-value holes."""
+        monkeypatch.setattr(
+            "scripts.copy_zarr3_samples.plan_store",
+            lambda root: StorePlan(root=root, name="A.zarr", keys=["zarr.json"]),
+        )
+        client = _bucket("p/A.zarr/zarr.json")
+        monkeypatch.setattr("scripts.copy_zarr3_samples.boto3.client", lambda *a, **k: client)
+        stores = []
+        monkeypatch.setattr(
+            "scripts.copy_zarr3_samples.copy_store",
+            lambda _c, plan, *_a, **_k: stores.append(plan.name) or (1, 0, 10),
+        )
+        root = ["--store-root", "https://x/A.zarr"]
+        assert main([*self.ARGS, *root]) == 2
+        assert stores == []
+        assert main([*self.ARGS, *root, "--overwrite"]) == 0
+        assert stores == ["A.zarr"]
+
+    def test_every_key_written_is_under_the_confined_prefix(self, monkeypatch):
+        """Confinement checks the keys main computes; this ties them to the keys written."""
+        plan = StorePlan(
+            root="https://x/A.zarr",
+            name="A.zarr",
+            keys=["zarr.json", "arr/zarr.json", "arr/c/0"],
+            required_keys={"zarr.json", "arr/zarr.json"},
+        )
+        monkeypatch.setattr("scripts.copy_zarr3_samples.plan_store", lambda root: plan)
+        monkeypatch.setattr("scripts.copy_zarr3_samples._open", lambda *a, **k: _resp(b"x"))
+        client = _bucket()
+        client.put_object.return_value = {
+            "ETag": f'"{hashlib.md5(b"x", usedforsecurity=False).hexdigest()}"'
+        }
+        monkeypatch.setattr("scripts.copy_zarr3_samples.boto3.client", lambda *a, **k: client)
+        assert main([*self.ARGS, "--store-root", plan.root]) == 0
+        written = [call.kwargs for call in client.put_object.call_args_list]
+        assert len(written) == 3
+        assert all(w["Bucket"] == "b" and w["Key"].startswith("p/A.zarr/") for w in written)
 
     def test_a_planning_failure_writes_nothing_and_exits_1(self, monkeypatch):
         def unreachable(_url):
@@ -408,8 +537,12 @@ class TestFailures:
 
 
 class _resp:
-    def __init__(self, body):
+    """A source response. ``declared`` overrides the Content-Length, to fake a GET that
+    ends before the whole object has arrived."""
+
+    def __init__(self, body, declared=None):
         self._body = io.BytesIO(body)
+        self.headers = {"Content-Length": str(len(body) if declared is None else declared)}
 
     def read(self, size=-1):
         return self._body.read(size)
@@ -423,3 +556,16 @@ class _resp:
 
 def _raise_404(*args, **kwargs):
     raise urllib.error.HTTPError("https://x/k", 404, "Not Found", {}, None)
+
+
+def _bucket(*existing_keys):
+    """An S3 client whose bucket holds only ``existing_keys``: every other HEAD is a 404."""
+    client = MagicMock()
+
+    def head_object(Bucket, Key):  # noqa: N803 - boto3's keyword names
+        if Key not in existing_keys:
+            raise ClientError({"Error": {"Code": "404", "Message": "Not Found"}}, "HeadObject")
+        return {}
+
+    client.head_object.side_effect = head_object
+    return client
