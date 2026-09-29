@@ -110,8 +110,12 @@ def classify_and_stamp(
         return None, "before_floor"
     # Data with no S3 copy (EODC-hosted items, in sentinel-2-l2a from the Oct 2026
     # cutover) is never ours to delete: past an `expires`, the cleanup cron would find
-    # no S3 URL, record `no_s3_urls` and select the item again on every run.
-    if not extract_s3_urls_from_item(item):
+    # no S3 URL, record `no_s3_urls` and select the item again on every run. The
+    # cleanup's own rule (`not s3_urls and _has_managed_assets(item)`), inlined because
+    # importing cleanup_expired_items configures logging: an item with no non-thumbnail
+    # asset still expires, and the cleanup deletes just its STAC record.
+    managed = any("thumbnail" not in a.get("roles", []) for a in item.get("assets", {}).values())
+    if managed and not extract_s3_urls_from_item(item):
         return None, "no_s3_urls"
 
     expires = acquired_dt + timedelta(days=retention_days)

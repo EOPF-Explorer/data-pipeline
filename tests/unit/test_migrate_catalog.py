@@ -1382,14 +1382,7 @@ def _stampable_item(
         "properties": props,
         "stac_extensions": [],
         "links": [],
-        # A converted item: its data has an S3 copy, so the cleanup can delete it.
-        "assets": {
-            "reflectance": {
-                "href": "https://s3.explorer.eopf.copernicus.eu/b/x.zarr/measurements/reflectance",
-                "roles": ["data"],
-                "alternate": {"s3": {"href": "s3://b/x.zarr/measurements/reflectance"}},
-            }
-        },
+        "assets": {},
     }
 
 
