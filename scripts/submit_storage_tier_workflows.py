@@ -23,7 +23,7 @@ import requests
 # The tier-aware selection reuses the proven client-side predicate and tier map
 # from the same scripts/ package (both are on the path in-image and under pytest).
 import stac_auth
-from query_storage_tier_items import is_already_migrated
+from query_storage_tier_items import is_already_migrated, s3_alternates
 from s3_item_cleanup import resolve_exclude_ids
 from update_stac_storage_tier import TIER_TO_SCHEME
 
@@ -157,7 +157,11 @@ def query_stac_items(
     ``target_storage_ref`` (e.g. ``"standard"``) filters out items already at the
     target tier, using the same asset-level ``storage:refs`` check as the optimizer
     (``is_already_migrated``). This keeps a recurring run cheap and makes a re-run a
-    zero-item no-op. When ``None`` no tier filter is applied.
+    zero-item no-op. It also drops items with no ``alternate.s3`` asset: there is nothing
+    to move (the batch job finds no S3 URL and exits 0), yet ``is_already_migrated`` calls
+    them "needs work", so every EODC-hosted item (data on data.eodc.eu, registered into
+    ``sentinel-2-l2a`` from the Oct 2026 cutover) would be posted on each of the three
+    days its ``created`` spends in the age band. When ``None`` no tier filter is applied.
 
     ``exclude_ids`` are never selected regardless of window or tier — the demo
     denylist, so the recurring tier-down cannot move a protected scene off the
@@ -200,15 +204,22 @@ def query_stac_items(
         )
     selected: list[str] = []
     excluded = 0
+    no_s3 = 0
     for item in search.items():
         if item.id in exclude_ids:
             excluded += 1
             continue
-        if target_storage_ref is not None and is_already_migrated(item, target_storage_ref):
-            continue
+        if target_storage_ref is not None:
+            if not s3_alternates(item):
+                no_s3 += 1
+                continue
+            if is_already_migrated(item, target_storage_ref):
+                continue
         selected.append(item.id)
     if excluded:
         logger.info(f"  Excluded {excluded} denylisted item(s) (demo protection)")
+    if no_s3:
+        logger.info(f"  Skipped {no_s3} item(s) with no alternate.s3 asset (nothing to move)")
     return selected
 
 

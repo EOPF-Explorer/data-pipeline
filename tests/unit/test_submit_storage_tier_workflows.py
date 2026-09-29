@@ -322,6 +322,33 @@ class TestQueryStacItemsTierFilter:
 
         assert result == ["needs-move"]
 
+    def test_skips_items_with_no_s3_asset(self) -> None:
+        """An EODC-hosted item has no alternate.s3, so there is nothing to move: never select it.
+
+        is_already_migrated alone calls it "needs work", so each daily run of its age band
+        would post it again to a batch job that finds no S3 URL.
+        """
+        eodc_hosted = _FakeItem("eodc-hosted", None)
+        eodc_hosted.assets = {"data": MagicMock(extra_fields={})}
+        needs = _FakeItem("needs-move", "performance")
+        mock_search = MagicMock()
+        mock_search.items.return_value = [eodc_hosted, needs]
+        mock_catalog = MagicMock()
+        mock_catalog.search.return_value = mock_search
+
+        with patch("submit_storage_tier_workflows.stac_auth.open_resilient_client") as mock_open:
+            mock_open.return_value = mock_catalog
+            result = query_stac_items(
+                "https://stac.example.com",
+                "sentinel-2-l2a",
+                "2026-01-01T00:00:00Z",
+                "2026-04-14T00:00:00Z",
+                date_field="created",
+                target_storage_ref="standard",
+            )
+
+        assert result == ["needs-move"]
+
     def test_all_already_standard_returns_empty(self) -> None:
         """A window where every item is already STANDARD selects nothing (idempotent re-run)."""
         mock_search = MagicMock()
