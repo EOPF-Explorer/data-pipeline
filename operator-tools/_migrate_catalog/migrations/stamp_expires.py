@@ -58,6 +58,7 @@ if str(_scripts_dir) not in sys.path:
 
 from s3_item_cleanup import (  # noqa: E402
     TIMESTAMPS_EXTENSION,
+    extract_s3_urls_from_item,
     format_expires,
     parse_stac_timestamp,
 )
@@ -107,6 +108,11 @@ def classify_and_stamp(
     acquired_dt = parse_stac_timestamp(acquired)
     if min_datetime is not None and acquired_dt < min_datetime:
         return None, "before_floor"
+    # Data with no S3 copy (EODC-hosted items, in sentinel-2-l2a from the Oct 2026
+    # cutover) is never ours to delete: past an `expires`, the cleanup cron would find
+    # no S3 URL, record `no_s3_urls` and select the item again on every run.
+    if not extract_s3_urls_from_item(item):
+        return None, "no_s3_urls"
 
     expires = acquired_dt + timedelta(days=retention_days)
     result = copy.deepcopy(item)
@@ -120,7 +126,8 @@ def classify_and_stamp(
 @migration(
     "stamp_expires",
     "Backfill properties.expires = datetime (acquisition) + retention (timestamps "
-    "ext); skips already-stamped, excluded, and items acquired before the floor",
+    "ext); skips already-stamped, excluded, items acquired before the floor, and "
+    "items with no S3 URL",
     reporter=report,
     reset=reset_histogram,
 )

@@ -1382,7 +1382,14 @@ def _stampable_item(
         "properties": props,
         "stac_extensions": [],
         "links": [],
-        "assets": {},
+        # A converted item: its data has an S3 copy, so the cleanup can delete it.
+        "assets": {
+            "reflectance": {
+                "href": "https://s3.explorer.eopf.copernicus.eu/b/x.zarr/measurements/reflectance",
+                "roles": ["data"],
+                "alternate": {"s3": {"href": "s3://b/x.zarr/measurements/reflectance"}},
+            }
+        },
     }
 
 
@@ -1425,6 +1432,22 @@ class TestClassifyAndStamp:
         )
         assert result is None
         assert reason == "already_stamped"
+
+    def test_item_with_no_s3_url_is_skipped(self) -> None:
+        """An EODC-hosted item must never get `expires`: past it, the cleanup would find
+        no S3 URL to delete and select the item again on every run."""
+        item = _stampable_item()
+        item["assets"] = {
+            "reflectance": {
+                "href": "https://data.eodc.eu/x.zarr/measurements/reflectance",
+                "roles": ["data"],
+            }
+        }
+        result, reason = classify_and_stamp(
+            item, retention_days=183, exclude_ids=set(), min_datetime=None
+        )
+        assert result is None
+        assert reason == "no_s3_urls"
 
     def test_excluded_item_is_skipped(self) -> None:
         item = _stampable_item(item_id="S2_demo")
