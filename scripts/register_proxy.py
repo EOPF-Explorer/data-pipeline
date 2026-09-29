@@ -68,9 +68,11 @@ from collections import Counter
 from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
+from time import monotonic
 from urllib.parse import urlparse
 
 import httpx
+import requests
 import stac_auth
 from pystac import Asset, Item, Link
 from pystac_client import Client
@@ -125,6 +127,10 @@ TARGET_RUNS = {
 # ids it did not attempt are counted as failed, so the run exits 1 and a later window
 # (the daily catch-up) registers them.
 MAX_CONSECUTIVE_FAILURES = 10
+
+# --time-budget ceiling: the register step's 14400 s pod backstop (platform-deploy
+# templates/eopf-eodc-register-job.yaml) minus 30 min for pod start and the id in flight.
+MAX_TIME_BUDGET_SECONDS = 12_600
 
 # True-colour query for the visualization links, in the 0.12 notation: one `assets`
 # parameter whose value carries the per-asset band selection. The two deployments are
@@ -645,23 +651,85 @@ def read_item_ids(path: Path) -> list[str]:
     ]
 
 
-def read_items_json(path: Path, collection: str) -> list[str]:
+def source_item_url(source_stac_api: str, source_collection: str, item_id: str) -> str:
+    """Where one source item is fetched, and so where discover must have found it.
+
+    Both path components are percent-encoded: ``--item-ids-file`` is operator-edited and
+    httpx normalises RFC 3986 dot-segments, so an unquoted id of ``../../<other>/items/X``
+    would silently retarget the GET at another collection — making ``--source-collection``
+    no bound at all. ``quote(safe="")`` also stops ``#`` from truncating the URL.
+    """
+    return (
+        f"{source_stac_api.rstrip('/')}"
+        f"/collections/{urllib.parse.quote(source_collection, safe='')}"
+        f"/items/{urllib.parse.quote(item_id, safe='')}"
+    )
+
+
+def read_items_json(
+    path: Path, collection: str, source_stac_api: str, source_collection: str
+) -> list[str]:
     """Read the ids from ``query_stac.py discover``'s ``items.json``.
 
-    Each row names the collection discover deduplicated against; a row for another one
-    means the list was made for a different target, and its dedup proves nothing here.
+    Each row names the collection discover deduplicated against, and the ``source_url`` it
+    found the item at. A row for another collection means the list was made for a different
+    target, and its dedup proves nothing here. A row found anywhere but ``source_item_url``
+    was discovered on another source than the one each id is fetched from. Exact equality
+    with EODC's self links: if they ever change form, every run is refused, loudly.
     """
     rows = json.loads(path.read_text())
+    if not isinstance(rows, list) or not all(
+        isinstance(row, dict) and isinstance(row.get("item_id"), str) for row in rows
+    ):
+        raise ValueError(f"{path} is not a list of rows with a string item_id")
     wrong = sorted({str(row.get("collection")) for row in rows} - {collection})
     if wrong:
         raise ValueError(f"{path} has rows for {wrong}, not --collection {collection!r}")
-    return [str(row["item_id"]) for row in rows]
+    elsewhere = [
+        (row["item_id"], row.get("source_url"))
+        for row in rows
+        if row.get("source_url")
+        != source_item_url(source_stac_api, source_collection, row["item_id"])
+    ]
+    if elsewhere:
+        raise ValueError(
+            f"{path}: {len(elsewhere)} row(s) not found at "
+            f"{source_item_url(source_stac_api, source_collection, '<id>')}, e.g. {elsewhere[0]}"
+        )
+    return [row["item_id"] for row in rows]
+
+
+class CreatedIdsError(Exception):
+    """The created-ids list cannot be written: ``main`` stops the run, it does not skip the id."""
+
+
+def record_created(path: Path, collection: str, item_id: str, **extra: bool) -> None:
+    """Append one line to the created-ids list, at once: it is what a rollback deletes.
+
+    A failed append ends the run (``CreatedIdsError``): every later create would go
+    unrecorded too, and the error message is then the only record of an item that may
+    exist. It can leave a torn last line, which a rollback reader must expect.
+    """
+    line = {"id": item_id, "collection": collection, "ts": datetime.now(UTC).isoformat(), **extra}
+    try:
+        with path.open("a") as out:
+            out.write(json.dumps(line) + "\n")
+    except OSError as exc:
+        raise CreatedIdsError(
+            f"cannot record {item_id} in {path} ({exc}); it may exist in {collection} "
+            "with no created-ids line"
+        ) from exc
 
 
 def _is_transient(exc: BaseException) -> bool:
-    """A timeout, a dropped connection or a 5xx is worth another GET; a 4xx or 3xx is an answer."""
+    """A timeout, a dropped connection, a 429 or a 5xx is worth another GET; the rest are answers.
+
+    The waits (2 s, 4 s) outlast short bursts only. A sustained 429 fails the ids, 10 in a row
+    stop the run, and the daily catch-up retries them (hourly windows do not overlap).
+    """
     if isinstance(exc, httpx.HTTPStatusError):
-        return exc.response.status_code >= 500
+        status = exc.response.status_code
+        return status >= 500 or status == 429
     return isinstance(exc, httpx.TransportError)
 
 
@@ -674,23 +742,15 @@ def _is_transient(exc: BaseException) -> bool:
 def fetch_source_item(source_stac_api: str, source_collection: str, item_id: str) -> dict:
     """GET one source item. A direct GET avoids depending on the source's conformance.
 
-    Both path components are percent-encoded: ``--item-ids-file`` is operator-edited and
-    httpx normalises RFC 3986 dot-segments, so an unquoted id of ``../../<other>/items/X``
-    would silently retarget the GET at another collection — making ``--source-collection``
-    no bound at all. ``quote(safe="")`` also stops ``#`` from truncating the URL.
-
-    Redirects are NOT followed: the HTTPS check in ``main`` validates the URL the operator
-    typed, and a 3xx could downgrade it to http or move it to another host, after which
-    whatever came back would be registered as if it had been asked for.
+    The URL is ``source_item_url``'s, percent-encoded. Redirects are NOT followed: the HTTPS
+    check in ``main`` validates the URL the operator typed, and a 3xx could downgrade it to
+    http or move it to another host, after which whatever came back would be registered as
+    if it had been asked for.
 
     Up to three attempts on a transient error (``_is_transient``): EODC does return 502s
     (see ``upsert_item``), and one must not turn an hourly run red.
     """
-    url = (
-        f"{source_stac_api.rstrip('/')}"
-        f"/collections/{urllib.parse.quote(source_collection, safe='')}"
-        f"/items/{urllib.parse.quote(item_id, safe='')}"
-    )
+    url = source_item_url(source_stac_api, source_collection, item_id)
     with httpx.Client(timeout=30.0, follow_redirects=False) as http:
         resp = http.get(url)
         resp.raise_for_status()
@@ -701,6 +761,23 @@ def fetch_source_item(source_stac_api: str, source_collection: str, item_id: str
     if returned != item_id:
         raise ValueError(f"{item_id}: source returned a different item id ({returned!r})")
     return source
+
+
+def _seconds(value: str) -> float:
+    """argparse type for --time-budget: a stop that can actually fire, and fire first.
+
+    `nan` would compare False forever, and a budget within 30 min of the register step's
+    14400 s pod backstop (templates/eopf-eodc-register-job.yaml in platform-deploy) would let
+    the kill, which can land between a create and its created-ids line, stop the run instead.
+    The range check refuses both, `nan` and `inf` included (every comparison with `nan` is
+    False). Mirrors cleanup_expired_items._budget_seconds, with this ceiling.
+    """
+    seconds = float(value)
+    if not 0 < seconds <= MAX_TIME_BUDGET_SECONDS:
+        raise argparse.ArgumentTypeError(
+            f"must be seconds in (0, {MAX_TIME_BUDGET_SECONDS}], got {value!r}"
+        )
+    return seconds
 
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -728,6 +805,15 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         type=Path,
         metavar="PATH",
         help="Pipeline mode (required): append one JSON line per created item, the rollback input",
+    )
+    parser.add_argument(
+        "--time-budget",
+        type=_seconds,
+        metavar="SECONDS",
+        help=(
+            "Start no new id after this many seconds; the rest count as failed. It stops "
+            "between ids, where a pod deadline could kill a create before its created-ids line"
+        ),
     )
     parser.add_argument(
         "--max-items",
@@ -806,13 +892,21 @@ def register_one(
     if not args.items_json:
         upsert_item(client, args.collection, item)
         return "registered"
-    outcome = create_item(client, args.collection, item)
+    # The created-ids list, not the item's own `created` (EODC's timestamp, copied from the
+    # source), is what tells a rollback which items this run created.
+    try:
+        outcome = create_item(client, args.collection, item)
+    except requests.RequestException as exc:
+        # A timeout, a reset or a 5xx can arrive after the server committed the item, and the
+        # next run's 409 would then hide it from every list. Record it as uncertain. A line
+        # can be false (an error before anything was sent), and its id may be a converted prod
+        # item, so a rollback must re-check each item's CONTENT before deleting it (EODC data
+        # hrefs, no alternate.s3), never just that it exists.
+        if exc.response is None or exc.response.status_code >= 500:
+            record_created(args.created_ids, args.collection, item.id, uncertain=True)
+        raise
     if outcome == "created":
-        # Written per item, at once: this list is what a rollback deletes. The item's own
-        # `created` is EODC's timestamp, copied from the source, so it cannot tell.
-        line = {"id": item.id, "collection": args.collection, "ts": datetime.now(UTC).isoformat()}
-        with args.created_ids.open("a") as out:
-            out.write(json.dumps(line) + "\n")
+        record_created(args.created_ids, args.collection, item.id)
     return outcome
 
 
@@ -824,6 +918,9 @@ def log_summary(collection: str, counts: Counter[str]) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # The time budget counts from here, not from the first id, so it stays close to the pod's
+    # own clock: opening the target client has no timeout.
+    started = monotonic()
     args = parse_args(argv)
 
     # Every URL that decides where data is read from or written to, not just the three
@@ -900,8 +997,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.items_json:
         try:
-            item_ids = read_items_json(args.items_json, args.collection)
-        except (OSError, ValueError, KeyError) as exc:
+            item_ids = read_items_json(
+                args.items_json, args.collection, args.source_stac_api, args.source_collection
+            )
+        except (OSError, ValueError) as exc:
             logger.error("--items-json: %s", exc)
             return 1
     else:
@@ -933,15 +1032,15 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     logger.info("Registering %d item(s) into %s", len(item_ids), args.collection)
 
-    if args.created_ids:
-        # Fail here, not after the first create: an unwritable list would leave every item
-        # of the run created but unrecorded.
-        args.created_ids.parent.mkdir(parents=True, exist_ok=True)
-        args.created_ids.touch()
     client = None
     if args.dry_run:
         args.dry_run.mkdir(parents=True, exist_ok=True)
     else:
+        if args.created_ids:
+            # Fail here, not after the first create: an unwritable list would leave every
+            # item of the run created but unrecorded.
+            args.created_ids.parent.mkdir(parents=True, exist_ok=True)
+            args.created_ids.touch()
         client = stac_auth.open_client(args.stac_api_url)
         logger.info("Target STAC API: %s", args.stac_api_url)
 
@@ -949,22 +1048,32 @@ def main(argv: list[str] | None = None) -> int:
     failed: list[str] = []
     streak = 0
     for n, item_id in enumerate(item_ids):
-        if streak == MAX_CONSECUTIVE_FAILURES:
+        # Both stops fall between ids, never inside one: a create and its created-ids line
+        # always complete together.
+        out_of_time = args.time_budget is not None and monotonic() - started >= args.time_budget
+        if streak == MAX_CONSECUTIVE_FAILURES or out_of_time:
             logger.error(
-                "Stopping after %d failures in a row: %d id(s) not attempted, counted as failed",
-                streak,
+                "Stopping after %s: %d id(s) not attempted, counted as failed",
+                f"the {args.time_budget:g} s time budget"
+                if out_of_time
+                else f"{streak} failures in a row",
                 len(item_ids) - n,
             )
-            counts["failed"] += len(item_ids) - n
+            failed += item_ids[n:]
             break
         try:
             counts[register_one(args, client, allowed, expires, item_id)] += 1
             streak = 0
+        except CreatedIdsError as exc:
+            # Every later create would go unrecorded too: stop, and say which id may exist.
+            logger.error("Stopping: %s. %d id(s) not attempted", exc, len(item_ids) - n - 1)
+            failed += item_ids[n:]
+            break
         except Exception as exc:  # noqa: BLE001 - one bad item must not hide the rest
             failed.append(item_id)
-            counts["failed"] += 1
             streak += 1
             logger.error("   ❌ %s: %s", item_id, exc)
+    counts["failed"] = len(failed)
 
     # Without this, a mid-run failure leaves a partially populated collection and no
     # record of which ids landed — the operator cannot tell a clean run from a torn one.

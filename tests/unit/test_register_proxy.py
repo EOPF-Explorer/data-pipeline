@@ -841,28 +841,35 @@ class FakeTarget:
     ``session.put`` rather than by patching the writer that would issue it.
     """
 
-    def __init__(self, existing=(), fail=()):
+    def __init__(self, existing=(), fail=None):
         self.ids = set(existing)
-        self.fail = set(fail)
+        self.fail = fail or {}  # id -> the HTTP status to answer, or an exception to raise
         self.client = MagicMock(self_href=STAC_API)
         self.session = self.client._stac_io.session
         self.session.post.side_effect = self.post
 
     def post(self, url, json, **kwargs):
         assert url == f"{STAC_API}/collections/{json['collection']}/items"
+        answer = self.fail.get(json["id"])
+        if isinstance(answer, Exception):
+            raise answer
         resp = requests.Response()
-        if json["id"] in self.fail:
-            resp.status_code = 502
+        if answer:
+            resp.status_code = answer
         else:
             resp.status_code = 409 if json["id"] in self.ids else 201
             self.ids.add(json["id"])
         return resp
 
 
+# Where discover finds each id, and where register_proxy's defaults fetch it from.
+SOURCE_ITEMS = "https://stac.core.eopf.eodc.eu/collections/sentinel-2-l2a-zarr3/items/"
+
+
 def pipeline_cli(tmp_path, ids, *extra, collection=COLLECTION, rows_for=None):
     """main() in pipeline mode, on an items.json shaped like `query_stac.py discover`'s."""
     rows = [
-        {"source_url": f"https://eodc.invalid/{i}", "collection": rows_for or collection,
+        {"source_url": SOURCE_ITEMS + i, "collection": rows_for or collection,
          "item_id": i, "datetime": "2026-09-27T13:39:31.025000+00:00"}
         for i in ids
     ]  # fmt: skip
@@ -890,9 +897,9 @@ def eodc(source):
         yield fetch
 
 
-def run_pipeline(tmp_path, target, ids, **kwargs):
+def run_pipeline(tmp_path, target, ids, extra=(), **kwargs):
     with patch("register_proxy.stac_auth.open_client", return_value=target.client):
-        return pipeline_cli(tmp_path, ids, **kwargs)
+        return pipeline_cli(tmp_path, ids, *extra, **kwargs)
 
 
 def test_pipeline_201_is_created_and_recorded(eodc, tmp_path, caplog):
@@ -930,12 +937,17 @@ def test_pipeline_rerun_of_the_same_list_is_all_exists(eodc, tmp_path, caplog):
     assert [line["id"] for line in created_ids(tmp_path)] == ["A", "B"], "appended once each"
 
 
-def test_pipeline_5xx_is_failed_exits_1_and_the_list_has_exactly_the_201s(eodc, tmp_path, caplog):
+def test_pipeline_list_has_the_201s_and_the_creates_that_may_have_committed(eodc, tmp_path, caplog):
+    """A 5xx, a timeout or a reset can come after the server committed the item; the next
+    run's 409 would then hide it from every rollback list. A 4xx is a refusal: no line."""
     caplog.set_level("INFO", logger="register_proxy")
-    target = FakeTarget(existing={"B"}, fail={"C"})
-    assert run_pipeline(tmp_path, target, ["A", "B", "C"]) == 1
-    assert [line["id"] for line in created_ids(tmp_path)] == ["A"]
-    assert "created=1 exists=1 refused_generation=0 failed=1" in caplog.text
+    fail = {"C": 502, "D": requests.ReadTimeout("slow"), "E": requests.ConnectionError("reset"),
+            "F": 400}  # fmt: skip
+    target = FakeTarget(existing={"B"}, fail=fail)
+    assert run_pipeline(tmp_path, target, ["A", "B", "C", "D", "E", "F"]) == 1
+    lines = [(line["id"], line.get("uncertain", False)) for line in created_ids(tmp_path)]
+    assert lines == [("A", False), ("C", True), ("D", True), ("E", True)]
+    assert "created=1 exists=1 refused_generation=0 failed=4" in caplog.text
     target.session.put.assert_not_called()
 
 
@@ -1050,6 +1062,40 @@ def test_a_row_for_another_collection_is_refused(client, fetch, tmp_path):
     fetch.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "rows",
+    [
+        # discovered on another source than the one each id is fetched from
+        [{"item_id": "A", "collection": COLLECTION,
+          "source_url": "https://stac.core.eopf.eodc.eu/collections/sentinel-2-l2a/items/A"}],
+        # the right source, but another id's URL
+        [{"item_id": "A", "collection": COLLECTION, "source_url": SOURCE_ITEMS + "B"}],
+        [{"item_id": "A", "collection": COLLECTION}],  # no source_url at all
+        {"item_id": "A"},  # not a list
+        ["A"],  # not rows
+        [{"item_id": None, "collection": COLLECTION, "source_url": SOURCE_ITEMS + "None"}],
+    ],
+)  # fmt: skip
+@patch("register_proxy.fetch_source_item")
+@patch("register_proxy.stac_auth.open_client")
+def test_a_list_not_shaped_like_discovers_is_refused(client, fetch, tmp_path, rows, caplog):
+    items = tmp_path / "items.json"
+    items.write_text(json.dumps(rows))
+    created = tmp_path / "created.jsonl"
+    rc = cli("--items-json", str(items), "--created-ids", str(created), "--max-items", "5")
+    assert rc == 1
+    assert "--items-json:" in caplog.text, "a logged refusal, not a traceback"
+    client.assert_not_called()
+    fetch.assert_not_called()
+
+
+def test_a_pipeline_dry_run_leaves_the_created_ids_list_alone(source, tmp_path):
+    """A dry run pointed at the real rollback list must not create or touch it."""
+    with patch("register_proxy.fetch_source_item", return_value=source):
+        assert pipeline_cli(tmp_path, [source["id"]], "--dry-run", str(tmp_path / "out")) == 0
+    assert not (tmp_path / "created.jsonl").exists()
+
+
 @patch("register_proxy.fetch_source_item")
 @patch("register_proxy.stac_auth.open_client")
 def test_items_json_and_created_ids_go_together(client, fetch, tmp_path):
@@ -1068,7 +1114,8 @@ def test_an_unwritable_created_ids_list_fails_before_any_network_call(client, fe
     """Otherwise every item of the run would be created and none recorded."""
     (tmp_path / "file").write_text("")
     items = tmp_path / "items.json"
-    items.write_text(json.dumps([{"item_id": "A", "collection": COLLECTION}]))
+    row = {"item_id": "A", "collection": COLLECTION, "source_url": SOURCE_ITEMS + "A"}
+    items.write_text(json.dumps([row]))
     with pytest.raises(OSError):
         cli("--items-json", str(items), "--created-ids", str(tmp_path / "file/c.jsonl"),
             "--max-items", "1")  # fmt: skip
@@ -1086,6 +1133,44 @@ def test_a_run_stops_after_ten_failures_in_a_row(tmp_path, caplog):
         assert run_pipeline(tmp_path, target, ids) == 1
     assert fetch.call_count == register_proxy.MAX_CONSECUTIVE_FAILURES
     assert "created=0 exists=0 refused_generation=0 failed=12" in caplog.text
+    # The ids it never tried are named too: they are the ones a re-run must cover.
+    assert "Failed (12): ID0, " in caplog.text and "ID10, ID11" in caplog.text
+
+
+def test_a_run_stops_starting_ids_once_its_time_budget_is_spent(eodc, tmp_path, caplog):
+    """The budget stops BETWEEN ids; a pod deadline would kill a create before its line."""
+    caplog.set_level("INFO", logger="register_proxy")
+    target = FakeTarget()
+    clock = iter(range(0, 1000, 5))  # main starts at 0; the ids are checked at 5, 10, 15
+    with patch("register_proxy.monotonic", side_effect=lambda: next(clock)):
+        assert run_pipeline(tmp_path, target, ["A", "B", "C"], extra=["--time-budget", "10"]) == 1
+    # A is started at 5; B, checked exactly at the budget, is not.
+    assert [line["id"] for line in created_ids(tmp_path)] == ["A"]
+    assert "created=1 exists=0 refused_generation=0 failed=2" in caplog.text
+    assert "the 10 s time budget: 2 id(s) not attempted" in caplog.text
+
+
+# 12601: within 30 min of the register step's 14400 s pod backstop, the kill would be the stop.
+@pytest.mark.parametrize("budget", ["nan", "inf", "0", "-5", "12601"])
+def test_a_time_budget_that_could_never_stop_a_run_is_refused(budget, tmp_path):
+    """`nan` compares False forever: the pod deadline, a kill, would become the stop."""
+    with pytest.raises(SystemExit):
+        pipeline_cli(tmp_path, ["A"], "--time-budget", budget)
+
+
+def test_a_create_that_cannot_be_recorded_stops_the_run(eodc, tmp_path, caplog):
+    """Every later create would go unrecorded too; the message names the one that may exist."""
+    target = FakeTarget()
+    created = tmp_path / "created.jsonl"
+    created.write_text("")
+    created.chmod(0o444)  # the run's touch still works; the first append does not
+    caplog.set_level("INFO", logger="register_proxy")
+    assert run_pipeline(tmp_path, target, ["A", "B"]) == 1
+    assert target.session.post.call_count == 1, "B must not be created"
+    assert "Stopping: cannot record A" in caplog.text
+    # The summary and the Failed line still come out, for the alerts and the operator.
+    assert "created=0 exists=0 refused_generation=0 failed=2" in caplog.text
+    assert "Failed (2): A, B" in caplog.text
 
 
 def test_a_success_resets_the_failure_streak(source, tmp_path):
@@ -1128,7 +1213,9 @@ def fake_source(*answers):
     return patch("register_proxy.httpx.Client", client), calls
 
 
-@pytest.mark.parametrize("first", [502, 503, httpx.ReadTimeout("slow"), httpx.ConnectError("x")])
+@pytest.mark.parametrize(
+    "first", [502, 503, 429, httpx.ReadTimeout("slow"), httpx.ConnectError("x")]
+)
 def test_a_transient_source_error_is_retried(no_sleep, first):
     patched, calls = fake_source(first, 200)
     with patched:
