@@ -5,7 +5,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-import requests
 from rollback_created_items import (
     EODC_SOURCE_ITEMS,
     main,
@@ -67,25 +66,31 @@ class _Resp:
     def json(self) -> dict | None:
         return self._body
 
-    def raise_for_status(self) -> None:
-        if self.status_code >= 400:
-            raise requests.HTTPError(str(self.status_code))
-
 
 class _Session:
-    """GET answers from `items` (absent ⇒ 404); DELETE answers `delete_status`."""
+    """GET answers from `items` (absent ⇒ 404). DELETE answers `delete_status` and removes the
+    item unless `delete_keeps` (a DELETE that a redirect turned into a GET). Every call must
+    refuse redirects."""
 
-    def __init__(self, items: dict[str, dict], delete_status: int = 204) -> None:
+    def __init__(
+        self, items: dict[str, dict], delete_status: int = 204, delete_keeps: bool = False
+    ) -> None:
         self.items = items
         self.delete_status = delete_status
+        self.delete_keeps = delete_keeps
         self.deleted: list[str] = []
 
-    def get(self, url: str, timeout: float) -> _Resp:
+    def get(self, url: str, timeout: float, allow_redirects: bool = True) -> _Resp:
+        assert allow_redirects is False
         item_id = url.rsplit("/", 1)[1]
         return _Resp(200, self.items[item_id]) if item_id in self.items else _Resp(404)
 
-    def delete(self, url: str, timeout: float) -> _Resp:
-        self.deleted.append(url.rsplit("/", 1)[1])
+    def delete(self, url: str, timeout: float, allow_redirects: bool = True) -> _Resp:
+        assert allow_redirects is False
+        item_id = url.rsplit("/", 1)[1]
+        self.deleted.append(item_id)
+        if not self.delete_keeps:
+            self.items.pop(item_id, None)
         return _Resp(self.delete_status)
 
 
@@ -106,6 +111,14 @@ class TestReadCreatedIds:
     def test_a_line_for_another_collection_refuses_the_list(self, tmp_path: Path) -> None:
         path = _write(tmp_path, _line("a"), _line("b", collection="sentinel-2-l2a"))
         with pytest.raises(SystemExit, match="sentinel-2-l2a"):
+            read_created_ids(path, C)
+
+    @pytest.mark.parametrize("bad", ["null", "[]", json.dumps({"collection": C})])
+    def test_a_line_that_is_not_a_created_ids_line_refuses_the_list(
+        self, tmp_path: Path, bad: str
+    ) -> None:
+        path = _write(tmp_path, bad + "\n", _line("b"))
+        with pytest.raises(SystemExit, match="not a created-ids line"):
             read_created_ids(path, C)
 
 
@@ -150,9 +163,39 @@ class TestRollBack:
         assert session.deleted == ["a"]
         assert counts == {"deleted": 1, "refused": 1, "absent": 1}
 
+    def test_a_get_answering_neither_200_nor_404_is_a_failure(self) -> None:
+        session = _Session({})
+        session.get = lambda url, timeout, allow_redirects=True: _Resp(302)  # type: ignore[method-assign]
+        assert roll_back(session, API, C, ["a"], apply=True) == {"failed": 1}
+        assert session.deleted == []
+
     def test_a_delete_answering_404_is_a_failure(self) -> None:
         session = _Session({"a": _eodc_item("a")}, delete_status=404)
         assert roll_back(session, API, C, ["a"], apply=True) == {"failed": 1}
+
+    def test_a_delete_answering_a_redirect_is_a_failure(self) -> None:
+        session = _Session({"a": _eodc_item("a")}, delete_status=302)
+        assert roll_back(session, API, C, ["a"], apply=True) == {"failed": 1}
+
+    def test_a_delete_that_leaves_the_item_is_a_failure(self) -> None:
+        """A 200 is not proof: only a 404 afterwards counts as deleted."""
+        session = _Session({"a": _eodc_item("a")}, delete_status=200, delete_keeps=True)
+        assert roll_back(session, API, C, ["a"], apply=True) == {"failed": 1}
+
+    def test_a_token_failure_fails_that_id_and_the_run_goes_on(self) -> None:
+        session = _Session({"a": _eodc_item("a"), "b": _eodc_item("b")})
+        real_get = session.get
+        calls = iter([RuntimeError("OIDC token fetch failed")])
+
+        def flaky_get(url: str, timeout: float, allow_redirects: bool = True) -> _Resp:
+            exc = next(calls, None)
+            if exc:
+                raise exc
+            return real_get(url, timeout, allow_redirects)
+
+        session.get = flaky_get  # type: ignore[method-assign]
+        assert roll_back(session, API, C, ["a", "b"], apply=True) == {"failed": 1, "deleted": 1}
+        assert session.deleted == ["b"]
 
 
 class TestMain:
@@ -188,3 +231,8 @@ class TestMain:
         session = _Session({"a": _eodc_item("a"), "b": _converted_item("b")})
         assert self._run(tmp_path, session, "--max-items", "2", "--apply") == 1
         assert session.deleted == ["a"]
+
+    def test_the_target_host_has_no_default(self, tmp_path: Path) -> None:
+        path = _write(tmp_path, _line("a"))
+        with pytest.raises(SystemExit):
+            main(["--created-ids", str(path), "--collection", C, "--max-items", "1"])
