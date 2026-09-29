@@ -770,7 +770,9 @@ def _seconds(value: str) -> float:
     14400 s pod backstop (templates/eopf-eodc-register-job.yaml in platform-deploy) would let
     the kill, which can land between a create and its created-ids line, stop the run instead.
     The range check refuses both, `nan` and `inf` included (every comparison with `nan` is
-    False). Mirrors cleanup_expired_items._budget_seconds, with this ceiling.
+    False). Unlike cleanup_expired_items._budget_seconds, an empty value is refused, not
+    read as "no budget": the template always passes one, and a run with no stop is exactly
+    what this flag exists to prevent.
     """
     seconds = float(value)
     if not 0 < seconds <= MAX_TIME_BUDGET_SECONDS:
