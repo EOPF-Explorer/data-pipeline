@@ -324,6 +324,7 @@ BASELAYER_COLLECTIONS = [
     "proxy/sentinel-2-l2a-samples-zarr3.json",
     "proxy/sentinel-2-l2a-samples-zarr3-ovh.json",
     "proxy/sentinel-2-l2a-mirror-rstaging.json",
+    "proxy/sentinel-2-l2a-samples-zarr3-rollback.json",
 ]
 
 
@@ -374,6 +375,7 @@ EODASH_COLLECTIONS = [
     "proxy/sentinel-2-l2a-samples-zarr3.json",
     "proxy/sentinel-2-l2a-samples-zarr3-ovh.json",
     "proxy/sentinel-2-l2a-mirror-rstaging.json",
+    "proxy/sentinel-2-l2a-samples-zarr3-rollback.json",
 ]
 
 STYLE_HREF = (
@@ -465,6 +467,7 @@ EXPECTED_RASTERFORMS = {
     "proxy/sentinel-2-l2a-samples-zarr3.json": RASTERFORM_BASE + "bandsform.json",
     "proxy/sentinel-2-l2a-samples-zarr3-ovh.json": RASTERFORM_BASE + "bandsform.json",
     "proxy/sentinel-2-l2a-mirror-rstaging.json": RASTERFORM_BASE + "bandsform.json",
+    "proxy/sentinel-2-l2a-samples-zarr3-rollback.json": RASTERFORM_BASE + "bandsform.json",
     "sentinel-1-grd-rtc-acquisitions-staging.json": RASTERFORM_BASE + "s1-bandsform.json",
 }
 
@@ -502,6 +505,7 @@ def test_proxy_templates_are_not_in_the_batch_create_glob() -> None:
         "sentinel-2-l2a-samples-zarr3.json",
         "sentinel-2-l2a-samples-zarr3-ovh.json",
         "sentinel-2-l2a-mirror-rstaging.json",
+        "sentinel-2-l2a-samples-zarr3-rollback.json",
     ):
         assert name not in top_level, f"{name} would be created by `batch-create stac/`"
         assert (STAC_DIR / "proxy" / name).exists()
