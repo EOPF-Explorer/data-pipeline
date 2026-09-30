@@ -61,6 +61,21 @@ def get_storage_ref(s3_info: dict) -> str | None:
     return None
 
 
+def s3_alternates(item: Item) -> list[dict]:
+    """The non-empty ``alternate.s3`` blocks of an item's assets: what a tier move acts on."""
+    s3_assets = []
+    for asset in item.assets.values():
+        alt = asset.extra_fields.get("alternate", {})
+        if not isinstance(alt, dict):
+            continue
+        s3 = alt.get("s3", {})
+        if not isinstance(s3, dict):
+            continue
+        if s3:
+            s3_assets.append(s3)
+    return s3_assets
+
+
 def is_already_migrated(item: Item, target_storage_ref: str) -> bool:
     """Check if all S3 assets of an item already have the target storage tier.
 
@@ -75,17 +90,7 @@ def is_already_migrated(item: Item, target_storage_ref: str) -> bool:
     Returns:
         True if all S3 assets are already at the target tier, False otherwise.
     """
-    s3_assets = []
-    for asset in item.assets.values():
-        alt = asset.extra_fields.get("alternate", {})
-        if not isinstance(alt, dict):
-            continue
-        s3 = alt.get("s3", {})
-        if not isinstance(s3, dict):
-            continue
-        if s3:
-            s3_assets.append(s3)
-
+    s3_assets = s3_alternates(item)
     if not s3_assets:
         return False
 
