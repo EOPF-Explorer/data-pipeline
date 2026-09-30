@@ -131,7 +131,9 @@ def test_the_thumbnail_is_a_png_preview_on_the_render_host(proxy):
     """What a STAC browser shows for the item; without it the list had footprints only."""
     thumbnail = proxy["assets"]["thumbnail"]
     base = f"{RASTER}/collections/{COLLECTION}/items/{proxy['id']}"
-    assert thumbnail["href"].startswith(f"{base}/preview?format=png&")
+    # The tiles' whole true-colour query: without rescale/color_formula it renders near-black.
+    xyz_query = link_href(proxy, "xyz").split("?", 1)[1]
+    assert thumbnail["href"] == f"{base}/preview?format=png&{xyz_query}"
     assert thumbnail["roles"] == ["thumbnail"]
     assert thumbnail["type"] == "image/png"
 
@@ -774,7 +776,8 @@ def test_mirror_render_links_are_the_proxy_form_on_rstaging(mirror):
     assert link_href(mirror, "viewer").startswith(f"{base}/WebMercatorQuad/map.html?")
     assert link_href(mirror, "xyz").startswith(f"{base}/tiles/WebMercatorQuad/")
     assert "assets=reflectance%7Cbands%3Db04%2Cb03%2Cb02" in link_href(mirror, "tilejson")
-    assert mirror["assets"]["thumbnail"]["href"].startswith(f"{base}/preview?")
+    xyz_query = link_href(mirror, "xyz").split("?", 1)[1]
+    assert mirror["assets"]["thumbnail"]["href"] == f"{base}/preview?format=png&{xyz_query}"
 
 
 def test_mirror_expires_on_the_fixed_proxy_date(mirror):

@@ -558,7 +558,8 @@ def build_mirror_item(
 ) -> Item:
     """Copy an Explorer item into a mirror item whose render links target ``/rstaging``.
 
-    The assets stay as published — our own stores — and none of the EODC-shaped steps of
+    The data assets stay as published — our own stores; the thumbnail is re-rendered on
+    ``raster_api_url`` like the links — and none of the EODC-shaped steps of
     ``build_proxy_item`` run: ``build_root_href_assets`` would repoint SCL at the store
     root, which 500s on our stores (data-model#262). What goes is everything a deleter
     could use to find those stores, which prod still owns: with no ``alternate.s3`` and
