@@ -277,10 +277,10 @@ def build_root_href_assets(item: Item, root: str) -> None:
 
     # Allowlist, not a denylist. Any source asset this transform does not know about
     # would otherwise be proxied verbatim on a per-group href that cannot be opened over
-    # HTTPS — and a source `quicklook` would reintroduce the thumbnail we deliberately do
-    # not publish. EODC republished 220 items on 2026-09-10; the source schema is not
-    # frozen, so this has to be failure-closed. `reflectance` is built upstream by
-    # `consolidate_reflectance_assets`; everything else here is rebuilt above.
+    # HTTPS — and a source `quicklook` would sit next to the thumbnail we render ourselves
+    # (`add_proxy_visualization`). EODC republished 220 items on 2026-09-10; the source
+    # schema is not frozen, so this has to be failure-closed. `reflectance` is built
+    # upstream by `consolidate_reflectance_assets`; everything else here is rebuilt above.
     dropped = sorted(set(item.assets) - {"reflectance"})
     item.assets = {key: item.assets[key] for key in ("reflectance",) if key in item.assets}
     item.assets.update(built)
@@ -321,17 +321,18 @@ def reconcile_extensions(item: Item) -> None:
 
 
 def add_proxy_visualization(item: Item, raster_api_url: str, collection: str) -> None:
-    """Add the viz links in the 0.12 notation.
+    """Add the viz links and the ``thumbnail`` asset in the 0.12 notation.
 
     **No ``via`` link.** ``register_v1`` points it at
     ``{EXPLORER_BASE}/collections/<c>/items/<id>``, which 404s: the Explorer is a static
     site with no collection or item pages (measured 2026-09-23).
 
-    **No ``thumbnail`` asset** (Loïc, 2026-09-11). A STAC browser renders one inline, and
-    this collection is a temporary proxy that must not look like a user-facing product.
-    Note the ordering question this came from has no answer at our end: pgstac normalises
-    asset key order (length, then bytewise), so a ``thumbnail`` key could never be sorted
-    last from the payload — only removed.
+    The ``thumbnail`` is what a STAC browser shows as the item's preview, in the item list
+    and the collection's "Thumbnails" view; without it the proxy items showed footprints
+    only, next to prod's previews. Same true colour as prod's (``/preview``, default size),
+    rendered by ``raster_api_url`` like the links. Each preview is a full ``/rstaging``
+    render (~2 s uncached, measured 2026-09-30), so a browser page of items costs one per
+    item until the render cache holds them.
 
     Deliberately not ``register_v1.add_visualization_links`` /
     ``add_thumbnail_asset``: for a ``sentinel-2*`` collection those emit repeated
@@ -363,6 +364,15 @@ def add_proxy_visualization(item: Item, raster_api_url: str, collection: str) ->
             "application/json",
             f"TileJSON for {item.id}",
         )
+    )
+    item.add_asset(
+        "thumbnail",
+        Asset(
+            href=f"{base}/preview?format=png&{RGB_QUERY}",
+            media_type="image/png",
+            roles=["thumbnail"],
+            title="Sentinel-2 L2A True Color Preview",
+        ),
     )
 
 
@@ -567,7 +577,6 @@ def build_mirror_item(
     # STAC best practices: a copy of another STAC item points back at it with `canonical`.
     item.add_link(Link("canonical", self_href, "application/geo+json"))
 
-    item.assets.pop("thumbnail", None)  # none on the proxy either (Loïc, 2026-09-11)
     for asset in item.assets.values():
         asset.extra_fields.pop("alternate", None)
     item.properties.pop("storage:schemes", None)

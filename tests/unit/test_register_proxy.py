@@ -124,17 +124,16 @@ def link_href(item, rel):
 
 
 def test_asset_keys_are_exactly_the_proxy_set(proxy):
-    assert set(proxy["assets"]) == {"reflectance", "AOT_10m", "WVP_10m", "SCL_20m"}
+    assert set(proxy["assets"]) == {"reflectance", "AOT_10m", "WVP_10m", "SCL_20m", "thumbnail"}
 
 
-def test_no_thumbnail_asset(proxy):
-    """Deliberate: a temporary proxy must not look like a user-facing product.
-
-    Removing it was the only option — pgstac normalises asset key order (length, then
-    bytewise), so `thumbnail` can never be sorted last from the payload.
-    """
-    assert "thumbnail" not in proxy["assets"]
-    assert not any("thumbnail" in (a.get("roles") or []) for a in proxy["assets"].values())
+def test_the_thumbnail_is_a_png_preview_on_the_render_host(proxy):
+    """What a STAC browser shows for the item; without it the list had footprints only."""
+    thumbnail = proxy["assets"]["thumbnail"]
+    base = f"{RASTER}/collections/{COLLECTION}/items/{proxy['id']}"
+    assert thumbnail["href"].startswith(f"{base}/preview?format=png&")
+    assert thumbnail["roles"] == ["thumbnail"]
+    assert thumbnail["type"] == "image/png"
 
 
 def test_reflectance_is_the_consolidated_multiscales_group(proxy):
@@ -229,8 +228,9 @@ def test_visualization_links_use_the_0_12_notation(proxy):
     (422 / 200). Emitting the wrong one produces links that do not render.
     """
     encoded = "assets=reflectance%7Cbands%3Db04%2Cb03%2Cb02"
-    for rel in ("xyz", "tilejson", "viewer"):
-        query = link_href(proxy, rel)
+    hrefs = {rel: link_href(proxy, rel) for rel in ("xyz", "tilejson", "viewer")}
+    hrefs["thumbnail"] = proxy["assets"]["thumbnail"]["href"]
+    for rel, query in hrefs.items():
         assert encoded in query, rel
         assert "variables=" not in query, rel
         assert "bidx=" not in query, rel
@@ -541,7 +541,8 @@ def test_an_unknown_source_asset_is_dropped_not_proxied(source):
         "roles": ["thumbnail", "overview"],
     }
     proxy = build_proxy_item(source, COLLECTION, RASTER, STAC_API, expires=PROXY_EXPIRES).to_dict()
-    assert set(proxy["assets"]) == {"reflectance", "AOT_10m", "WVP_10m", "SCL_20m"}
+    assert set(proxy["assets"]) == {"reflectance", "AOT_10m", "WVP_10m", "SCL_20m", "thumbnail"}
+    assert proxy["assets"]["thumbnail"]["href"].startswith(RASTER)  # ours, not the quicklook
 
 
 def test_a_missing_source_asset_is_refused(source):
@@ -721,10 +722,11 @@ def mirror_cli(*args):
     )
 
 
-def test_mirror_keeps_the_prod_assets_and_hrefs_minus_the_thumbnail(prod_item, mirror):
-    assert set(mirror["assets"]) == set(prod_item["assets"]) - {"thumbnail"}
+def test_mirror_keeps_the_prod_assets_and_hrefs_except_the_thumbnail(prod_item, mirror):
+    assert set(mirror["assets"]) == set(prod_item["assets"])
     for key, asset in mirror["assets"].items():
-        assert asset["href"] == prod_item["assets"][key]["href"]
+        if key != "thumbnail":  # re-rendered on /rstaging, see the render-links test
+            assert asset["href"] == prod_item["assets"][key]["href"]
 
 
 def test_no_deleter_can_reach_the_prod_stores_through_a_mirror_item(prod_item, mirror):
@@ -772,6 +774,7 @@ def test_mirror_render_links_are_the_proxy_form_on_rstaging(mirror):
     assert link_href(mirror, "viewer").startswith(f"{base}/WebMercatorQuad/map.html?")
     assert link_href(mirror, "xyz").startswith(f"{base}/tiles/WebMercatorQuad/")
     assert "assets=reflectance%7Cbands%3Db04%2Cb03%2Cb02" in link_href(mirror, "tilejson")
+    assert mirror["assets"]["thumbnail"]["href"].startswith(f"{base}/preview?")
 
 
 def test_mirror_expires_on_the_fixed_proxy_date(mirror):
