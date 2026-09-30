@@ -332,7 +332,10 @@ def add_proxy_visualization(item: Item, raster_api_url: str, collection: str) ->
     only, next to prod's previews. Same true colour as prod's (``/preview``, default size),
     rendered by ``raster_api_url`` like the links. Each preview is a full ``/rstaging``
     render (~2 s uncached, measured 2026-09-30), so a browser page of items costs one per
-    item until the render cache holds them.
+    item until the render cache holds them. Not pre-rendered like ``register_v1``'s
+    ``warm_thumbnail_cache``: that cache's TTL is 1 h on ``/rstaging`` (platform-deploy
+    ``hr-titiler-eopf-test.yaml``) and EODC publishes in one 00:00-07:30Z burst, so a
+    preview warmed at registration would mostly expire before anyone browses.
 
     Deliberately not ``register_v1.add_visualization_links`` /
     ``add_thumbnail_asset``: for a ``sentinel-2*`` collection those emit repeated
