@@ -333,10 +333,11 @@ def add_proxy_visualization(item: Item, raster_api_url: str, collection: str) ->
 
     The ``thumbnail`` is what a STAC browser shows as the item's preview, in the item list
     and the collection's "Thumbnails" view; without it the proxy items showed footprints
-    only, next to prod's previews. Same true colour as prod's (``/preview``, default size),
-    rendered by ``raster_api_url`` like the links. Each preview is a full ``/rstaging``
-    render (~2 s uncached, measured 2026-09-30), so a browser page of items costs one per
-    item until the render cache holds them. Not pre-rendered like ``register_v1``'s
+    only, next to prod's previews. Same true colour as prod's (``/preview``), rendered by
+    ``raster_api_url`` like the links, but capped at 512 px as WebP: ~80 KB and ~1 s uncached
+    on ``/rstaging``, against ~1.8 MB and ~3 s at the default size as PNG (one item, measured
+    2026-09-30). A browser page of items still costs one render per item until the render
+    cache holds them. Not pre-rendered like ``register_v1``'s
     ``warm_thumbnail_cache``: that cache's TTL is 1 h on ``/rstaging`` (platform-deploy
     ``hr-titiler-eopf-test.yaml``) and EODC publishes in one 00:00-07:30Z burst, so a
     preview warmed at registration would mostly expire before anyone browses.
@@ -375,8 +376,8 @@ def add_proxy_visualization(item: Item, raster_api_url: str, collection: str) ->
     item.add_asset(
         "thumbnail",
         Asset(
-            href=f"{base}/preview?format=png&{RGB_QUERY}",
-            media_type="image/png",
+            href=f"{base}/preview?format=webp&max_size=512&{RGB_QUERY}",
+            media_type="image/webp",
             roles=["thumbnail"],
             title="Sentinel-2 L2A True Color Preview",
         ),
