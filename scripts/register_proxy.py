@@ -12,18 +12,19 @@ without copying it.
 it copies ``sentinel-2-l2a`` items into a ``*mirror-rstaging*`` collection with the same
 ``/rstaging`` links, so our GeoZarr renders next to the proxies. See ``build_mirror_item``.
 
-``--items-json`` is the **pipeline mode** that keeps ``sentinel-2-l2a`` growing once our
-conversion stops (plan rev 2, 2026-09-28): it registers the ids ``query_stac.py discover``
-wrote, **create-only** (a 409 is ``exists``, never a PUT: the ids are prod's), appends each
+``--items-json`` is the **pipeline mode** that publishes new Sentinel-2 scenes into
+``sentinel-2-l2a-new`` once our conversion stops (plan rev 3, 2026-09-30): it registers the ids
+``query_stac.py discover`` wrote, **create-only** (a 409 is ``exists``, never a PUT), appends each
 201 to ``--created-ids`` (the rollback input), and refuses old-generation sources. What a
 run may do is decided by the target collection, never by a flag (see ``TARGET_RUNS``):
-into ``sentinel-2-l2a`` only this mode may write, and without an ``expires``.
+into ``sentinel-2-l2a-new`` only this mode may write, and without an ``expires``; our
+converted archive, ``sentinel-2-l2a``, takes no run at all.
 
 It deliberately does NOT convert or upload anything: ``build_proxy_item`` is a pure
 dict-in/Item-out transform, and the only write is the STAC upsert (a create in pipeline
-mode). Outside prod it stamps a fixed ``expires`` (see ``PROXY_EXPIRES``) — without one
-the items would be structurally undeletable, and a Track B copy in our own bucket could
-never be reclaimed.
+mode). Outside ``sentinel-2-l2a-new`` it stamps a fixed ``expires`` (see ``PROXY_EXPIRES``) —
+without one the items would be structurally undeletable, and a Track B copy in our own bucket
+could never be reclaimed.
 
 Render host is ``/rstaging`` (titiler-eopf **0.12.0**), not ``/raster`` (0.11.0): only
 0.12.0 serves the ``assets=<key>|bands=…`` / ``|variables=…`` notation these items use,
@@ -106,16 +107,19 @@ logger = logging.getLogger(__name__)
 DEFAULT_SOURCE_STAC_API = "https://stac.core.eopf.eodc.eu"
 DEFAULT_SOURCE_COLLECTION = "sentinel-2-l2a-zarr3"
 
-PROD_COLLECTION = "sentinel-2-l2a"
+# The user-facing, temporary collection the pipeline publishes EODC-hosted scenes into
+# (plan rev 3). Its items carry no ``expires`` (see ``PROXY_EXPIRES``).
+TRANSITION_COLLECTION = "sentinel-2-l2a-new"
 
 # Target collection -> the kinds of run allowed to write it (``run_kind``). Exact ids, not
 # a marker substring: every item written here reuses a prod ``sentinel-2-l2a`` id, and a
 # near miss (``sentinel-2-l2a-staging``, ``…-samples-zarr3x``) would pass a substring check.
-# Into prod only the pipeline may write, because it is the one that never PUTs
-# (``upsert_item`` replaces an existing id). ``-rollback`` is the scratch collection the
-# pipeline's rollback is exercised in (plan rev 2, T10).
+# ``sentinel-2-l2a`` itself, our converted archive, is absent: no run may write it (plan
+# rev 3, R1). Into ``TRANSITION_COLLECTION`` only the pipeline may write, because it is the
+# one that never PUTs (``upsert_item`` replaces an existing id). ``-rollback`` is the
+# scratch collection the pipeline's rollback is exercised in (plan rev 2, T10).
 TARGET_RUNS = {
-    PROD_COLLECTION: {"pipeline"},
+    TRANSITION_COLLECTION: {"pipeline"},
     "sentinel-2-l2a-samples-zarr3": {"track-a", "pipeline"},
     "sentinel-2-l2a-samples-zarr3-rollback": {"track-a", "pipeline"},
     "sentinel-2-l2a-samples-zarr3-ovh": {"track-b"},
@@ -179,9 +183,9 @@ ROOT_HREF_ASSETS = {
 # does not target these collections today. `main` refuses to stamp this date once it has
 # passed: the item would be born expired.
 #
-# Items registered into `sentinel-2-l2a` get no `expires` at all (plan rev 2, D2): with no
-# S3 URL, an expired one would be selected by the cleanup cron on every run and skipped as
-# `no_s3_urls`, forever.
+# Items registered into `sentinel-2-l2a-new` get no `expires` at all (plan rev 2 D2, rev 3
+# R3): they are the Explorer's user-facing scenes, which no retention job may select, and
+# this date would stop the pipeline on 1 Nov, when `main` starts refusing it.
 PROXY_EXPIRES = datetime(2026, 11, 1, tzinfo=UTC)
 
 # What a finished proxy item must advertise. Checked before the item is written, because
@@ -382,8 +386,8 @@ def add_proxy_visualization(item: Item, raster_api_url: str, collection: str) ->
 def set_expires(item: Item, expires: datetime | None) -> None:
     """Stamp ``expires`` so the retention cron can select the item, or, for ``None``, remove it.
 
-    Removed rather than left alone: a source ``expires`` is the source's retention, and on a
-    prod item it would start the cleanup starvation ``PROXY_EXPIRES`` describes.
+    Removed rather than left alone: a source ``expires`` is the source's retention, not ours,
+    and an item in ``TRANSITION_COLLECTION`` must carry none (see ``PROXY_EXPIRES``).
     """
     if expires is None:
         item.properties.pop("expires", None)
@@ -480,8 +484,8 @@ def build_proxy_item(
 
     Pure: no network access, no catalogue resolution. ``s3_endpoint`` is the one
     exception — Track B passes it and ``add_alternate_s3_assets`` then queries the
-    object's storage class. ``expires`` has no default: prod passes ``None``, and a
-    forgotten argument must not stamp the proxy's date onto a prod item.
+    object's storage class. ``expires`` has no default: ``TRANSITION_COLLECTION`` gets ``None``,
+    and a forgotten argument must not stamp the proxy's date onto one of its items.
     """
     self_href = source_self_href(source_item)
 
@@ -622,7 +626,7 @@ def is_old_generation(source_item: dict) -> bool:
 
     The marker of the pre-N0513 EODC generation (a 9 Sep item has it; 600/600 N0513 items
     sampled 2026-09-28 have none, their scaling lives in the stores' CF attributes). A mixed
-    archive in prod means double scaling and black nodata, so the pipeline refuses these.
+    user-facing collection means double scaling and black nodata, so the pipeline refuses these.
     """
     return any(
         field in fields
@@ -636,9 +640,9 @@ def is_old_generation(source_item: dict) -> bool:
 def create_item(client: Client, collection_id: str, item: Item) -> str:
     """POST one item: ``created``, or ``exists`` on a 409. Never a PUT, unlike ``upsert_item``.
 
-    The pipeline's ids ARE prod ids (EODC's ids equal our converted items', 7,023/7,023
-    checked 2026-09-28), so a PUT on 409 would replace a converted prod item. An existing
-    item is left exactly as it is. ``transform_hrefs=False`` for the reason ``upsert_item``
+    A PUT on 409 would replace whatever the target already holds under that id: an item an
+    earlier run registered, or the test collection's comparison items. An existing item is
+    left exactly as it is. ``transform_hrefs=False`` for the reason ``upsert_item``
     gives.
     """
     io = client._stac_io
@@ -914,9 +918,9 @@ def register_one(
     except requests.RequestException as exc:
         # A timeout, a reset or a 5xx can arrive after the server committed the item, and the
         # next run's 409 would then hide it from every list. Record it as uncertain. A line
-        # can be false (an error before anything was sent), and its id may be a converted prod
-        # item, so a rollback must re-check each item's CONTENT before deleting it (EODC data
-        # hrefs, no alternate.s3), never just that it exists.
+        # can be false (an error before anything was sent), and its id may name an item this
+        # run did not create, so a rollback must re-check each item's CONTENT before deleting
+        # it (EODC data hrefs, no alternate.s3), never just that it exists.
         if exc.response is None or exc.response.status_code >= 500:
             record_created(args.created_ids, args.collection, item.id, uncertain=True)
         raise
@@ -999,9 +1003,9 @@ def main(argv: list[str] | None = None) -> int:
             logger.error("--confine-to: %s", exc)
             return 1
 
-    # By target, not by flag: prod items carry none (D2, see PROXY_EXPIRES). So the prod
-    # pipeline keeps running after 1 Nov, when this refusal stops every other run.
-    expires = None if args.collection == PROD_COLLECTION else PROXY_EXPIRES
+    # By target, not by flag: TRANSITION_COLLECTION items carry none (see PROXY_EXPIRES). So
+    # the pipeline keeps running there after 1 Nov, when this refusal stops every other run.
+    expires = None if args.collection == TRANSITION_COLLECTION else PROXY_EXPIRES
     if expires is not None and datetime.now(UTC) >= expires:
         logger.error(
             "Refusing to run: the fixed proxy expiry %s has passed, so every item would be "

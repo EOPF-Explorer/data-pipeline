@@ -40,6 +40,7 @@ OLD_GENERATION_FIXTURE = (
     EODC_FIXTURES / "S2B_MSIL2A_20260907T130029_N0512_R138_T26TLL_20260907T145009.json"
 )
 COLLECTION = "sentinel-2-l2a-samples-zarr3"
+NEW = "sentinel-2-l2a-new"  # the pipeline's user-facing target (plan rev 3)
 RASTER = "https://rstaging.invalid/rstaging"
 STAC_API = "https://stac.invalid/stac"
 # The prod catalogue named inside the fixture items; never a target here.
@@ -922,7 +923,7 @@ def test_pipeline_201_is_created_and_recorded(eodc, tmp_path, caplog):
 
 
 def test_pipeline_409_is_exists_and_never_a_put(eodc, tmp_path, caplog):
-    """The ids ARE prod ids: upsert_item's PUT on 409 would replace a converted prod item."""
+    """upsert_item's PUT on 409 would replace an item an earlier run registered."""
     caplog.set_level("INFO", logger="register_proxy")
     target = FakeTarget(existing={"A"})
     assert run_pipeline(tmp_path, target, ["A"]) == 0
@@ -998,38 +999,96 @@ def test_the_proxy_mode_keeps_registering_old_generation_sources(old_source, tmp
     assert (tmp_path / f"{old_source['id']}.json").exists()
 
 
-def test_a_prod_item_has_no_expires_even_if_its_source_had_one(source, tmp_path):
-    """D2: an expired no-S3 item is re-selected by the cleanup cron forever."""
+def test_a_transition_item_has_no_expires_even_if_its_source_had_one(source, tmp_path):
+    """D2/R3: the user-facing scenes must never expire."""
     source["properties"]["expires"] = "2026-10-15T00:00:00Z"
     out = tmp_path / "out"
     with patch("register_proxy.fetch_source_item", return_value=source):
-        rc = pipeline_cli(
-            tmp_path, [source["id"]], "--dry-run", str(out), collection="sentinel-2-l2a"
-        )
+        rc = pipeline_cli(tmp_path, [source["id"]], "--dry-run", str(out), collection=NEW)
     assert rc == 0
     written = json.loads((out / f"{source['id']}.json").read_text())
     assert "expires" not in written["properties"]
-    assert written["collection"] == "sentinel-2-l2a"
+    assert written["collection"] == NEW
     assert extract_s3_urls_from_item(written) == set()
 
 
-def test_the_prod_pipeline_keeps_running_after_the_proxy_expiry(source, tmp_path, monkeypatch):
+def test_the_transition_pipeline_keeps_running_after_the_proxy_expiry(
+    source, tmp_path, monkeypatch
+):
     monkeypatch.setattr(register_proxy, "PROXY_EXPIRES", datetime(2026, 9, 1, tzinfo=UTC))
     out = tmp_path / "out"
     with patch("register_proxy.fetch_source_item", return_value=source):
-        prod = pipeline_cli(
-            tmp_path, [source["id"]], "--dry-run", str(out), collection="sentinel-2-l2a"
-        )
+        new = pipeline_cli(tmp_path, [source["id"]], "--dry-run", str(out), collection=NEW)
         proxy = pipeline_cli(tmp_path, [source["id"]], "--dry-run", str(out))
-    assert (prod, proxy) == (0, 1)
+    assert (new, proxy) == (0, 1)
+
+
+@pytest.mark.parametrize(
+    "run",
+    [
+        lambda tmp_path: pipeline_cli(tmp_path, ["A"], collection="sentinel-2-l2a"),
+        lambda _: cli("--collection", "sentinel-2-l2a", "--item-id", "a", "--max-items", "1"),
+        lambda _: cli(
+            "--collection", "sentinel-2-l2a", *TRACK_B, "--item-id", "a", "--max-items", "1"
+        ),
+        lambda _: mirror_cli(
+            "--collection", "sentinel-2-l2a", "--item-id", "a", "--max-items", "1"
+        ),
+    ],
+    ids=["pipeline", "track-a", "track-b", "mirror"],
+)
+@patch("register_proxy.fetch_source_item")
+@patch("register_proxy.upsert_item")
+@patch("register_proxy.stac_auth.open_client")
+def test_no_run_may_write_the_converted_archive(client, upsert, fetch, tmp_path, run):
+    """Plan rev 3, R1: `sentinel-2-l2a` keeps our converted items and takes no run at all."""
+    assert run(tmp_path) == 1
+    client.assert_not_called()
+    fetch.assert_not_called()
+    upsert.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "run",
+    [
+        lambda: cli("--collection", NEW, *TRACK_B, "--item-id", "a", "--max-items", "1"),
+        lambda: mirror_cli("--collection", NEW, "--item-id", "a", "--max-items", "1"),
+    ],
+    ids=["track-b", "mirror"],
+)
+@patch("register_proxy.fetch_source_item")
+@patch("register_proxy.upsert_item")
+@patch("register_proxy.stac_auth.open_client")
+def test_the_transition_collection_takes_only_the_pipeline(client, upsert, fetch, run):
+    """R3: through TARGET_RUNS, not the --items-json flag check, which these runs never reach."""
+    assert run() == 1
+    client.assert_not_called()
+    fetch.assert_not_called()
+    upsert.assert_not_called()
+
+
+def test_the_transition_template_describes_the_items_it_will_hold(source):
+    """eodash builds its filters from the collection's summaries: they must match the items."""
+    template = json.loads((Path(__file__).parents[2] / "stac" / f"{NEW}.json").read_text())
+    item = build_proxy_item(source, NEW, RASTER, STAC_API, expires=None).to_dict()
+    summaries, reflectance = template["summaries"], template["item_assets"]["reflectance"]
+    for key in ("platform", "processing:level", "constellation", "product:type"):
+        assert item["properties"][key] in summaries[key], key
+    assert "eo:cloud_cover" in summaries
+    built = item["assets"]["reflectance"]
+    bands = {band["name"] for band in built["bands"]}
+    assert {band["name"] for band in summaries["bands"]} == bands
+    assert {band["name"] for band in reflectance["bands"]} == bands
+    assert set(reflectance["cube:variables"]) == set(built["cube:variables"])
+    assert set(template["item_assets"]) == set(item["assets"]) - {"thumbnail"}
 
 
 @pytest.mark.parametrize(
     ("extra", "collection"),
     [
-        (TRACK_B, "sentinel-2-l2a"),  # Track B into prod
-        (["--mirror-explorer"], "sentinel-2-l2a"),
-        (["--item-id", "other"], "sentinel-2-l2a"),  # ids from anywhere but discover's list
+        (TRACK_B, NEW),  # Track B into the user-facing collection
+        (["--mirror-explorer"], NEW),
+        (["--item-id", "other"], NEW),  # ids from anywhere but discover's list
         ([], "sentinel-2-l2a-staging"),  # near misses: a substring check would take them
         ([], "sentinel-2-l2a-samples-zarr3x"),
         ([], "sentinel-2-l2a-samples-zarr3-ovh"),  # EODC hrefs into the OVH-copies collection
@@ -1048,12 +1107,13 @@ def test_pipeline_targets_and_flags_are_refused_before_any_network_call(
 
 
 @pytest.mark.parametrize(
-    "collection", ["sentinel-2-l2a", "sentinel-2-l2a-staging", "sentinel-2-l2a-samples-zarr3x"]
+    "collection",
+    [NEW, "sentinel-2-l2a", "sentinel-2-l2a-staging", "sentinel-2-l2a-samples-zarr3x"],
 )
 @patch("register_proxy.fetch_source_item")
 @patch("register_proxy.upsert_item")
 def test_a_track_a_run_is_refused_outside_its_exact_targets(upsert, fetch, collection):
-    """Prod takes only the pipeline, the one run that never PUTs."""
+    """The user-facing collection takes only the pipeline, the one run that never PUTs."""
     assert cli("--collection", collection, "--item-id", "a", "--max-items", "1") == 1
     fetch.assert_not_called()
     upsert.assert_not_called()

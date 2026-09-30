@@ -320,6 +320,7 @@ BASELAYER_COLLECTIONS = [
     "sentinel-1-grd-rtc-staging.json",
     "sentinel-1-grd-rtc-acquisitions-staging.json",
     "sentinel-2-l2a.json",
+    "sentinel-2-l2a-new.json",
     "sentinel-2-l2a-staging.json",
     "proxy/sentinel-2-l2a-samples-zarr3.json",
     "proxy/sentinel-2-l2a-samples-zarr3-ovh.json",
@@ -370,6 +371,7 @@ def test_attribution_present_and_nonempty(filename: str) -> None:
 # Collections that must carry the eodash GeoZarr layer metadata.
 EODASH_COLLECTIONS = [
     "sentinel-2-l2a.json",
+    "sentinel-2-l2a-new.json",
     "sentinel-2-l2a-staging.json",
     "proxy/sentinel-2-l2a-samples-zarr3.json",
     "proxy/sentinel-2-l2a-samples-zarr3-ovh.json",
@@ -432,6 +434,7 @@ def test_no_leak_into_other_collections() -> None:
 # aggregated and has no links to protect.
 AGGREGATED_COLLECTIONS = [
     "sentinel-2-l2a.json",
+    "sentinel-2-l2a-new.json",
     "sentinel-2-l2a-staging.json",
     "sentinel-1-grd-rtc-acquisitions-staging.json",
 ]
@@ -461,6 +464,7 @@ RASTERFORM_BASE = (
 
 EXPECTED_RASTERFORMS = {
     "sentinel-2-l2a.json": RASTERFORM_BASE + "bandsform.json",
+    "sentinel-2-l2a-new.json": RASTERFORM_BASE + "bandsform.json",
     "sentinel-2-l2a-staging.json": RASTERFORM_BASE + "bandsform.json",
     "proxy/sentinel-2-l2a-samples-zarr3.json": RASTERFORM_BASE + "bandsform.json",
     "proxy/sentinel-2-l2a-samples-zarr3-ovh.json": RASTERFORM_BASE + "bandsform.json",
