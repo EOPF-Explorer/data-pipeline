@@ -1426,6 +1426,22 @@ class TestClassifyAndStamp:
         assert result is None
         assert reason == "already_stamped"
 
+    def test_item_with_no_s3_url_is_skipped(self) -> None:
+        """An EODC-hosted item must never get `expires`: past it, the cleanup would find
+        no S3 URL to delete and select the item again on every run."""
+        item = _stampable_item()
+        item["assets"] = {
+            "reflectance": {
+                "href": "https://data.eodc.eu/x.zarr/measurements/reflectance",
+                "roles": ["data"],
+            }
+        }
+        result, reason = classify_and_stamp(
+            item, retention_days=183, exclude_ids=set(), min_datetime=None
+        )
+        assert result is None
+        assert reason == "no_s3_urls"
+
     def test_excluded_item_is_skipped(self) -> None:
         item = _stampable_item(item_id="S2_demo")
         result, reason = classify_and_stamp(
