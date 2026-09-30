@@ -12,10 +12,19 @@ without copying it.
 it copies ``sentinel-2-l2a`` items into a ``*mirror-rstaging*`` collection with the same
 ``/rstaging`` links, so our GeoZarr renders next to the proxies. See ``build_mirror_item``.
 
+``--items-json`` is the **pipeline mode** that publishes new Sentinel-2 scenes into
+``sentinel-2-l2a-new`` once our conversion stops (plan rev 3, 2026-09-30): it registers the ids
+``query_stac.py discover`` wrote, **create-only** (a 409 is ``exists``, never a PUT), appends each
+201 to ``--created-ids`` (the rollback input), and refuses old-generation sources. What a
+run may do is decided by the target collection, never by a flag (see ``TARGET_RUNS``):
+into ``sentinel-2-l2a-new`` only this mode may write, and without an ``expires``; our
+converted archive, ``sentinel-2-l2a``, takes no run at all.
+
 It deliberately does NOT convert or upload anything: ``build_proxy_item`` is a pure
-dict-in/Item-out transform, and the only write is the STAC upsert. It does stamp a
-fixed ``expires`` (see ``PROXY_EXPIRES``) — without one the items would be structurally
-undeletable, and a Track B copy in our own bucket could never be reclaimed.
+dict-in/Item-out transform, and the only write is the STAC upsert (a create in pipeline
+mode). Outside ``sentinel-2-l2a-new`` it stamps a fixed ``expires`` (see ``PROXY_EXPIRES``) —
+without one the items would be structurally undeletable, and a Track B copy in our own bucket
+could never be reclaimed.
 
 Render host is ``/rstaging`` (titiler-eopf **0.12.0**), not ``/raster`` (0.11.0): only
 0.12.0 serves the ``assets=<key>|bands=…`` / ``|variables=…`` notation these items use,
@@ -56,14 +65,18 @@ import logging
 import os
 import sys
 import urllib.parse
+from collections import Counter
 from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
+from time import monotonic
 from urllib.parse import urlparse
 
 import httpx
+import requests
 import stac_auth
 from pystac import Asset, Item, Link
+from pystac_client import Client
 from register_v1 import (
     DEFAULT_S3_GATEWAY,
     TIMESTAMPS_EXTENSION,
@@ -82,6 +95,7 @@ from s3_item_cleanup import (
     parse_s3_prefix,
 )
 from storage_tier_utils import extract_region_from_endpoint
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 from update_stac_storage_tier import _build_storage_schemes, _tier_to_scheme_ref
 
 logging.basicConfig(
@@ -93,12 +107,34 @@ logger = logging.getLogger(__name__)
 DEFAULT_SOURCE_STAC_API = "https://stac.core.eopf.eodc.eu"
 DEFAULT_SOURCE_COLLECTION = "sentinel-2-l2a-zarr3"
 
-# Only collections whose id carries the mode's marker may be written to. The proxy holds
-# third-party data under an Explorer-looking id, and a mirror item reuses a prod item's
-# id; a typo that aimed either at ``sentinel-2-l2a`` would overwrite real Explorer items
-# (``upsert_item`` PUTs over an existing id).
-COLLECTION_ID_MARKER = "samples-zarr3"
-MIRROR_COLLECTION_ID_MARKER = "mirror-rstaging"
+# The user-facing, temporary collection the pipeline publishes EODC-hosted scenes into
+# (plan rev 3). Its items carry no ``expires`` (see ``PROXY_EXPIRES``).
+TRANSITION_COLLECTION = "sentinel-2-l2a-new"
+
+# Target collection -> the kinds of run allowed to write it (``run_kind``). Exact ids, not
+# a marker substring: every item written here reuses a prod ``sentinel-2-l2a`` id, and a
+# near miss (``sentinel-2-l2a-staging``, ``…-samples-zarr3x``) would pass a substring check.
+# ``sentinel-2-l2a`` itself, our converted archive, is absent: no run may write it (plan
+# rev 3, R1). Into ``TRANSITION_COLLECTION`` only the pipeline may write, because it is the
+# one that never PUTs (``upsert_item`` replaces an existing id). ``-rollback`` is the
+# scratch collection the pipeline's rollback is exercised in (plan rev 2, T10).
+TARGET_RUNS = {
+    TRANSITION_COLLECTION: {"pipeline"},
+    "sentinel-2-l2a-samples-zarr3": {"track-a", "pipeline"},
+    "sentinel-2-l2a-samples-zarr3-rollback": {"track-a", "pipeline"},
+    "sentinel-2-l2a-samples-zarr3-ovh": {"track-b"},
+    "sentinel-2-l2a-mirror-rstaging": {"mirror"},
+}
+
+# A run stops attempting ids after this many failures in a row: a source or target outage
+# would otherwise spend ~1.5 min per id (three timed-out GETs) across a 1,000-id list. The
+# ids it did not attempt are counted as failed, so the run exits 1 and a later window
+# (the daily catch-up) registers them.
+MAX_CONSECUTIVE_FAILURES = 10
+
+# --time-budget ceiling: the register step's 14400 s pod backstop (platform-deploy
+# templates/eopf-eodc-register-job.yaml) minus 30 min for pod start and the id in flight.
+MAX_TIME_BUDGET_SECONDS = 12_600
 
 # True-colour query for the visualization links, in the 0.12 notation: one `assets`
 # parameter whose value carries the per-asset band selection. The two deployments are
@@ -146,6 +182,10 @@ ROOT_HREF_ASSETS = {
 # which refuses these alternates as `wrong_bucket`. The cron is `--collection` scoped and
 # does not target these collections today. `main` refuses to stamp this date once it has
 # passed: the item would be born expired.
+#
+# Items registered into `sentinel-2-l2a-new` get no `expires` at all (plan rev 2 D2, rev 3
+# R3): they are the Explorer's user-facing scenes, which no retention job may select, and
+# this date would stop the pipeline on 1 Nov, when `main` starts refusing it.
 PROXY_EXPIRES = datetime(2026, 11, 1, tzinfo=UTC)
 
 # What a finished proxy item must advertise. Checked before the item is written, because
@@ -241,10 +281,10 @@ def build_root_href_assets(item: Item, root: str) -> None:
 
     # Allowlist, not a denylist. Any source asset this transform does not know about
     # would otherwise be proxied verbatim on a per-group href that cannot be opened over
-    # HTTPS — and a source `quicklook` would reintroduce the thumbnail we deliberately do
-    # not publish. EODC republished 220 items on 2026-09-10; the source schema is not
-    # frozen, so this has to be failure-closed. `reflectance` is built upstream by
-    # `consolidate_reflectance_assets`; everything else here is rebuilt above.
+    # HTTPS — and a source `quicklook` would sit next to the thumbnail we render ourselves
+    # (`add_proxy_visualization`). EODC republished 220 items on 2026-09-10; the source
+    # schema is not frozen, so this has to be failure-closed. `reflectance` is built
+    # upstream by `consolidate_reflectance_assets`; everything else here is rebuilt above.
     dropped = sorted(set(item.assets) - {"reflectance"})
     item.assets = {key: item.assets[key] for key in ("reflectance",) if key in item.assets}
     item.assets.update(built)
@@ -285,17 +325,22 @@ def reconcile_extensions(item: Item) -> None:
 
 
 def add_proxy_visualization(item: Item, raster_api_url: str, collection: str) -> None:
-    """Add the viz links in the 0.12 notation.
+    """Add the viz links and the ``thumbnail`` asset in the 0.12 notation.
 
     **No ``via`` link.** ``register_v1`` points it at
     ``{EXPLORER_BASE}/collections/<c>/items/<id>``, which 404s: the Explorer is a static
     site with no collection or item pages (measured 2026-09-23).
 
-    **No ``thumbnail`` asset** (Loïc, 2026-09-11). A STAC browser renders one inline, and
-    this collection is a temporary proxy that must not look like a user-facing product.
-    Note the ordering question this came from has no answer at our end: pgstac normalises
-    asset key order (length, then bytewise), so a ``thumbnail`` key could never be sorted
-    last from the payload — only removed.
+    The ``thumbnail`` is what a STAC browser shows as the item's preview, in the item list
+    and the collection's "Thumbnails" view; without it the proxy items showed footprints
+    only, next to prod's previews. Same true colour as prod's (``/preview``), rendered by
+    ``raster_api_url`` like the links, but capped at 512 px as WebP: ~80 KB and ~1 s uncached
+    on ``/rstaging``, against ~1.8 MB and ~3 s at the default size as PNG (one item, measured
+    2026-09-30). A browser page of items still costs one render per item until the render
+    cache holds them. Not pre-rendered like ``register_v1``'s
+    ``warm_thumbnail_cache``: that cache's TTL is 1 h on ``/rstaging`` (platform-deploy
+    ``hr-titiler-eopf-test.yaml``) and EODC publishes in one 00:00-07:30Z burst, so a
+    preview warmed at registration would mostly expire before anyone browses.
 
     Deliberately not ``register_v1.add_visualization_links`` /
     ``add_thumbnail_asset``: for a ``sentinel-2*`` collection those emit repeated
@@ -328,11 +373,27 @@ def add_proxy_visualization(item: Item, raster_api_url: str, collection: str) ->
             f"TileJSON for {item.id}",
         )
     )
+    item.add_asset(
+        "thumbnail",
+        Asset(
+            href=f"{base}/preview?format=webp&max_size=512&{RGB_QUERY}",
+            media_type="image/webp",
+            roles=["thumbnail"],
+            title="Sentinel-2 L2A True Color Preview",
+        ),
+    )
 
 
-def stamp_proxy_expires(item: Item) -> None:
-    """Stamp the fixed proxy expiry so the retention cron can select these items."""
-    item.properties["expires"] = format_expires(PROXY_EXPIRES)
+def set_expires(item: Item, expires: datetime | None) -> None:
+    """Stamp ``expires`` so the retention cron can select the item, or, for ``None``, remove it.
+
+    Removed rather than left alone: a source ``expires`` is the source's retention, not ours,
+    and an item in ``TRANSITION_COLLECTION`` must carry none (see ``PROXY_EXPIRES``).
+    """
+    if expires is None:
+        item.properties.pop("expires", None)
+        return
+    item.properties["expires"] = format_expires(expires)
     if TIMESTAMPS_EXTENSION not in item.stac_extensions:
         item.stac_extensions.append(TIMESTAMPS_EXTENSION)
 
@@ -415,6 +476,8 @@ def build_proxy_item(
     collection: str,
     raster_api_url: str,
     stac_api_url: str,
+    *,
+    expires: datetime | None,
     store_root_base: str | None = None,
     s3_endpoint: str | None = None,
 ) -> Item:
@@ -422,7 +485,8 @@ def build_proxy_item(
 
     Pure: no network access, no catalogue resolution. ``s3_endpoint`` is the one
     exception — Track B passes it and ``add_alternate_s3_assets`` then queries the
-    object's storage class.
+    object's storage class. ``expires`` has no default: ``TRANSITION_COLLECTION`` gets ``None``,
+    and a forgotten argument must not stamp the proxy's date onto one of its items.
     """
     self_href = source_self_href(source_item)
 
@@ -464,7 +528,7 @@ def build_proxy_item(
     if any("extent" not in dimensions.get(axis, {}) for axis in ("x", "y")):
         raise ValueError(f"{item.id}: reflectance cube:dimensions x/y have no extent")
 
-    stamp_proxy_expires(item)
+    set_expires(item, expires)
     add_proxy_visualization(item, raster_api_url, collection)
     add_derived_from_link(item, self_href)
 
@@ -493,11 +557,17 @@ def build_proxy_item(
 
 
 def build_mirror_item(
-    source_item: dict, collection: str, raster_api_url: str, stac_api_url: str
+    source_item: dict,
+    collection: str,
+    raster_api_url: str,
+    stac_api_url: str,
+    *,
+    expires: datetime | None,
 ) -> Item:
     """Copy an Explorer item into a mirror item whose render links target ``/rstaging``.
 
-    The assets stay as published — our own stores — and none of the EODC-shaped steps of
+    The data assets stay as published — our own stores; the thumbnail is re-rendered on
+    ``raster_api_url`` like the links — and none of the EODC-shaped steps of
     ``build_proxy_item`` run: ``build_root_href_assets`` would repoint SCL at the store
     root, which 500s on our stores (data-model#262). What goes is everything a deleter
     could use to find those stores, which prod still owns: with no ``alternate.s3`` and
@@ -516,7 +586,6 @@ def build_mirror_item(
     # STAC best practices: a copy of another STAC item points back at it with `canonical`.
     item.add_link(Link("canonical", self_href, "application/geo+json"))
 
-    item.assets.pop("thumbnail", None)  # none on the proxy either (Loïc, 2026-09-11)
     for asset in item.assets.values():
         asset.extra_fields.pop("alternate", None)
     item.properties.pop("storage:schemes", None)
@@ -530,7 +599,7 @@ def build_mirror_item(
     if missing:
         raise ValueError(f"{item.id}: mirror item is missing asset(s) {sorted(missing)}")
 
-    stamp_proxy_expires(item)
+    set_expires(item, expires)
     add_proxy_visualization(item, raster_api_url, collection)
     return item
 
@@ -553,6 +622,46 @@ def assert_s3_urls_confined(item: Item, allowed: tuple[str, str] | None) -> None
         raise ValueError(f"{item.id}: S3 location {url!r} is outside --confine-to ({reason})")
 
 
+def is_old_generation(source_item: dict) -> bool:
+    """True if a source ``SR_*`` asset, or one of its bands, carries ``raster:scale``/``offset``.
+
+    The marker of the pre-N0513 EODC generation (a 9 Sep item has it; 600/600 N0513 items
+    sampled 2026-09-28 have none, their scaling lives in the stores' CF attributes). A mixed
+    user-facing collection means double scaling and black nodata, so the pipeline refuses these.
+    """
+    return any(
+        field in fields
+        for key, asset in source_item.get("assets", {}).items()
+        if key.startswith("SR_")
+        for fields in (asset, *asset.get("bands", []))
+        for field in ("raster:scale", "raster:offset")
+    )
+
+
+def create_item(client: Client, collection_id: str, item: Item) -> str:
+    """POST one item: ``created``, or ``exists`` on a 409. Never a PUT, unlike ``upsert_item``.
+
+    A PUT on 409 would replace whatever the target already holds under that id: an item an
+    earlier run registered, or the test collection's comparison items. An existing item is
+    left exactly as it is. ``transform_hrefs=False`` for the reason ``upsert_item``
+    gives.
+    """
+    io = client._stac_io
+    assert io is not None  # noqa: S101  # nosec B101 -- pystac-client always sets this after open()
+    resp = io.session.post(
+        f"{str(client.self_href).rstrip('/')}/collections/{collection_id}/items",
+        json=item.to_dict(transform_hrefs=False),
+        headers={"Content-Type": "application/json"},
+        timeout=30,
+    )
+    if resp.status_code == 409:
+        logger.info(f"   ⏭️  {item.id} exists (HTTP 409), left unchanged")
+        return "exists"
+    resp.raise_for_status()
+    logger.info(f"✅ Created {item.id} (HTTP {resp.status_code})")
+    return "created"
+
+
 def read_item_ids(path: Path) -> list[str]:
     """Read item ids one per line, ignoring blanks and ``#`` comments."""
     return [
@@ -560,23 +669,106 @@ def read_item_ids(path: Path) -> list[str]:
     ]
 
 
-def fetch_source_item(source_stac_api: str, source_collection: str, item_id: str) -> dict:
-    """GET one source item. A direct GET avoids depending on the source's conformance.
+def source_item_url(source_stac_api: str, source_collection: str, item_id: str) -> str:
+    """Where one source item is fetched, and so where discover must have found it.
 
     Both path components are percent-encoded: ``--item-ids-file`` is operator-edited and
     httpx normalises RFC 3986 dot-segments, so an unquoted id of ``../../<other>/items/X``
     would silently retarget the GET at another collection — making ``--source-collection``
     no bound at all. ``quote(safe="")`` also stops ``#`` from truncating the URL.
-
-    Redirects are NOT followed: the HTTPS check in ``main`` validates the URL the operator
-    typed, and a 3xx could downgrade it to http or move it to another host, after which
-    whatever came back would be registered as if it had been asked for.
     """
-    url = (
+    return (
         f"{source_stac_api.rstrip('/')}"
         f"/collections/{urllib.parse.quote(source_collection, safe='')}"
         f"/items/{urllib.parse.quote(item_id, safe='')}"
     )
+
+
+def read_items_json(
+    path: Path, collection: str, source_stac_api: str, source_collection: str
+) -> list[str]:
+    """Read the ids from ``query_stac.py discover``'s ``items.json``.
+
+    Each row names the collection discover deduplicated against, and the ``source_url`` it
+    found the item at. A row for another collection means the list was made for a different
+    target, and its dedup proves nothing here. A row found anywhere but ``source_item_url``
+    was discovered on another source than the one each id is fetched from. Exact equality
+    with EODC's self links: if they ever change form, every run is refused, loudly.
+    """
+    rows = json.loads(path.read_text())
+    if not isinstance(rows, list) or not all(
+        isinstance(row, dict) and isinstance(row.get("item_id"), str) for row in rows
+    ):
+        raise ValueError(f"{path} is not a list of rows with a string item_id")
+    wrong = sorted({str(row.get("collection")) for row in rows} - {collection})
+    if wrong:
+        raise ValueError(f"{path} has rows for {wrong}, not --collection {collection!r}")
+    elsewhere = [
+        (row["item_id"], row.get("source_url"))
+        for row in rows
+        if row.get("source_url")
+        != source_item_url(source_stac_api, source_collection, row["item_id"])
+    ]
+    if elsewhere:
+        raise ValueError(
+            f"{path}: {len(elsewhere)} row(s) not found at "
+            f"{source_item_url(source_stac_api, source_collection, '<id>')}, e.g. {elsewhere[0]}"
+        )
+    return [row["item_id"] for row in rows]
+
+
+class CreatedIdsError(Exception):
+    """The created-ids list cannot be written: ``main`` stops the run, it does not skip the id."""
+
+
+def record_created(path: Path, collection: str, item_id: str, **extra: bool) -> None:
+    """Append one line to the created-ids list, at once: it is what a rollback deletes.
+
+    A failed append ends the run (``CreatedIdsError``): every later create would go
+    unrecorded too, and the error message is then the only record of an item that may
+    exist. It can leave a torn last line, which a rollback reader must expect.
+    """
+    line = {"id": item_id, "collection": collection, "ts": datetime.now(UTC).isoformat(), **extra}
+    try:
+        with path.open("a") as out:
+            out.write(json.dumps(line) + "\n")
+    except OSError as exc:
+        raise CreatedIdsError(
+            f"cannot record {item_id} in {path} ({exc}); it may exist in {collection} "
+            "with no created-ids line"
+        ) from exc
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """A timeout, a dropped connection, a 429 or a 5xx is worth another GET; the rest are answers.
+
+    The waits (2 s, 4 s) outlast short bursts only. A sustained 429 fails the ids, 10 in a row
+    stop the run, and the daily catch-up retries them (hourly windows do not overlap).
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        return status >= 500 or status == 429
+    return isinstance(exc, httpx.TransportError)
+
+
+@retry(
+    retry=retry_if_exception(_is_transient),
+    stop=stop_after_attempt(3),
+    wait=wait_exponential(multiplier=2, max=30),
+    reraise=True,
+)
+def fetch_source_item(source_stac_api: str, source_collection: str, item_id: str) -> dict:
+    """GET one source item. A direct GET avoids depending on the source's conformance.
+
+    The URL is ``source_item_url``'s, percent-encoded. Redirects are NOT followed: the HTTPS
+    check in ``main`` validates the URL the operator typed, and a 3xx could downgrade it to
+    http or move it to another host, after which whatever came back would be registered as
+    if it had been asked for.
+
+    Up to three attempts on a transient error (``_is_transient``): EODC does return 502s
+    (see ``upsert_item``), and one must not turn an hourly run red.
+    """
+    url = source_item_url(source_stac_api, source_collection, item_id)
     with httpx.Client(timeout=30.0, follow_redirects=False) as http:
         resp = http.get(url)
         resp.raise_for_status()
@@ -587,6 +779,25 @@ def fetch_source_item(source_stac_api: str, source_collection: str, item_id: str
     if returned != item_id:
         raise ValueError(f"{item_id}: source returned a different item id ({returned!r})")
     return source
+
+
+def _seconds(value: str) -> float:
+    """argparse type for --time-budget: a stop that can actually fire, and fire first.
+
+    `nan` would compare False forever, and a budget within 30 min of the register step's
+    14400 s pod backstop (templates/eopf-eodc-register-job.yaml in platform-deploy) would let
+    the kill, which can land between a create and its created-ids line, stop the run instead.
+    The range check refuses both, `nan` and `inf` included (every comparison with `nan` is
+    False). Unlike cleanup_expired_items._budget_seconds, an empty value is refused, not
+    read as "no budget": the template always passes one, and a run with no stop is exactly
+    what this flag exists to prevent.
+    """
+    seconds = float(value)
+    if not 0 < seconds <= MAX_TIME_BUDGET_SECONDS:
+        raise argparse.ArgumentTypeError(
+            f"must be seconds in (0, {MAX_TIME_BUDGET_SECONDS}], got {value!r}"
+        )
+    return seconds
 
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -603,6 +814,27 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--raster-api-url", required=True, help="TiTiler base URL for links")
     parser.add_argument("--item-id", action="append", default=[], help="Repeatable")
     parser.add_argument("--item-ids-file", type=Path, help="One id per line, # comments ignored")
+    parser.add_argument(
+        "--items-json",
+        type=Path,
+        metavar="PATH",
+        help="Pipeline mode: register the ids in query_stac.py discover's items.json, create-only",
+    )
+    parser.add_argument(
+        "--created-ids",
+        type=Path,
+        metavar="PATH",
+        help="Pipeline mode (required): append one JSON line per created item, the rollback input",
+    )
+    parser.add_argument(
+        "--time-budget",
+        type=_seconds,
+        metavar="SECONDS",
+        help=(
+            "Start no new id after this many seconds; the rest count as failed. It stops "
+            "between ids, where a pod deadline could kill a create before its created-ids line"
+        ),
+    )
     parser.add_argument(
         "--max-items",
         type=int,
@@ -633,17 +865,83 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
+def run_kind(args: argparse.Namespace) -> str:
+    """The kind of run the flags ask for, as ``TARGET_RUNS`` names it."""
+    if args.mirror_explorer:
+        return "mirror"
+    if args.items_json:
+        return "pipeline"
+    return "track-b" if args.store_root_base else "track-a"
 
-    marker = MIRROR_COLLECTION_ID_MARKER if args.mirror_explorer else COLLECTION_ID_MARKER
-    if marker not in args.collection or args.collection == args.source_collection:
-        logger.error(
-            "Refusing --collection %r: it must contain %r and differ from --source-collection",
-            args.collection,
-            marker,
+
+def register_one(
+    args: argparse.Namespace,
+    client: Client | None,
+    allowed: tuple[str, str] | None,
+    expires: datetime | None,
+    item_id: str,
+) -> str:
+    """Fetch, build and write one id. Returns its outcome, a key of ``main``'s counts."""
+    source = fetch_source_item(args.source_stac_api, args.source_collection, item_id)
+    if args.items_json and is_old_generation(source):
+        # Content-based, so a retry cannot succeed: counted, not failed (T18 alerts on it).
+        logger.warning("   ⚠️  %s: old-generation source (raster:scale on SR_*), refused", item_id)
+        return "refused_generation"
+    if args.mirror_explorer:
+        item = build_mirror_item(
+            source, args.collection, args.raster_api_url, args.stac_api_url, expires=expires
         )
-        return 1
+    else:
+        item = build_proxy_item(
+            source,
+            args.collection,
+            args.raster_api_url,
+            args.stac_api_url,
+            expires=expires,
+            store_root_base=args.store_root_base,
+            s3_endpoint=args.s3_endpoint,
+        )
+    assert_s3_urls_confined(item, allowed)
+    if client is None:
+        # A plain name (refused otherwise in main), and fetch_source_item has already made
+        # sure the source did not substitute another id.
+        out = args.dry_run / f"{item_id}.json"
+        out.write_text(json.dumps(item.to_dict(), indent=2))
+        logger.info(f"   📄 {out}")
+        return "written"
+    if not args.items_json:
+        upsert_item(client, args.collection, item)
+        return "registered"
+    # The created-ids list, not the item's own `created` (EODC's timestamp, copied from the
+    # source), is what tells a rollback which items this run created.
+    try:
+        outcome = create_item(client, args.collection, item)
+    except requests.RequestException as exc:
+        # A timeout, a reset or a 5xx can arrive after the server committed the item, and the
+        # next run's 409 would then hide it from every list. Record it as uncertain. A line
+        # can be false (an error before anything was sent), and its id may name an item this
+        # run did not create, so a rollback must re-check each item's CONTENT before deleting
+        # it (EODC data hrefs, no alternate.s3), never just that it exists.
+        if exc.response is None or exc.response.status_code >= 500:
+            record_created(args.created_ids, args.collection, item.id, uncertain=True)
+        raise
+    if outcome == "created":
+        record_created(args.created_ids, args.collection, item.id)
+    return outcome
+
+
+def log_summary(collection: str, counts: Counter[str]) -> None:
+    """The pipeline's one-line result: fixed keys, for the logs and the alerts to read."""
+    keys = ("created", "exists", "refused_generation", "failed")
+    summary = " ".join(f"{key}={counts[key]}" for key in keys)
+    logger.info("Summary for %s: %s", collection, summary)
+
+
+def main(argv: list[str] | None = None) -> int:
+    # The time budget counts from here, not from the first id, so it stays close to the pod's
+    # own clock: opening the target client has no timeout.
+    started = monotonic()
+    args = parse_args(argv)
 
     # Every URL that decides where data is read from or written to, not just the three
     # the operator types most often: --store-root-base rewrites every asset href.
@@ -672,13 +970,30 @@ def main(argv: list[str] | None = None) -> int:
     if args.mirror_explorer and args.store_root_base:
         logger.error("--mirror-explorer keeps the source's asset hrefs: no Track B flags")
         return 1
-    # Each track has its own collection, with the same item ids: Track A flags aimed at
-    # the -ovh collection (or Track B at the EODC one) would PUT over the other's items.
-    if bool(args.store_root_base) != args.collection.endswith("-ovh"):
+    if args.items_json and (
+        args.mirror_explorer or args.store_root_base or args.item_id or args.item_ids_file
+    ):
         logger.error(
-            "Track B (--store-root-base) goes with an -ovh collection and Track A with any "
-            "other, got --collection %r",
+            "--items-json builds Track A items from that file's ids alone: no --mirror-explorer, "
+            "Track B flags, --item-id or --item-ids-file"
+        )
+        return 1
+    # Without the list a pipeline run could not be rolled back: the items' `created` is
+    # EODC's timestamp. Outside the pipeline an upsert cannot tell a create from a replace.
+    if bool(args.items_json) != bool(args.created_ids):
+        logger.error("--items-json and --created-ids go together")
+        return 1
+    # Each target takes only the runs TARGET_RUNS lists, all with the same item ids: e.g.
+    # Track A flags aimed at the -ovh collection would PUT over the Track B items.
+    kind = run_kind(args)
+    runs = TARGET_RUNS.get(args.collection, set())
+    if kind not in runs or args.collection == args.source_collection:
+        logger.error(
+            "Refusing a %s run into --collection %r: it takes %s, and must differ from "
+            "--source-collection",
+            kind,
             args.collection,
+            sorted(runs) or "none",
         )
         return 1
     allowed = None
@@ -689,19 +1004,35 @@ def main(argv: list[str] | None = None) -> int:
             logger.error("--confine-to: %s", exc)
             return 1
 
-    if datetime.now(UTC) >= PROXY_EXPIRES:
+    # By target, not by flag: TRANSITION_COLLECTION items carry none (see PROXY_EXPIRES). So
+    # the pipeline keeps running there after 1 Nov, when this refusal stops every other run.
+    expires = None if args.collection == TRANSITION_COLLECTION else PROXY_EXPIRES
+    if expires is not None and datetime.now(UTC) >= expires:
         logger.error(
             "Refusing to run: the fixed proxy expiry %s has passed, so every item would be "
             "registered already expired",
-            format_expires(PROXY_EXPIRES),
+            format_expires(expires),
         )
         return 1
 
-    item_ids = list(args.item_id)
-    if args.item_ids_file:
-        item_ids += read_item_ids(args.item_ids_file)
+    if args.items_json:
+        try:
+            item_ids = read_items_json(
+                args.items_json, args.collection, args.source_stac_api, args.source_collection
+            )
+        except (OSError, ValueError) as exc:
+            logger.error("--items-json: %s", exc)
+            return 1
+    else:
+        item_ids = list(args.item_id)
+        if args.item_ids_file:
+            item_ids += read_item_ids(args.item_ids_file)
     # A duplicate would be fetched and written twice, and counted twice against the bound.
     item_ids = list(dict.fromkeys(item_ids))
+    if not item_ids and args.items_json:
+        # Most hourly windows: EODC publishes in one daily burst, 00:00-07:30Z.
+        log_summary(args.collection, Counter())
+        return 0
     if not item_ids:
         logger.error("No item ids: pass --item-id and/or --item-ids-file")
         return 1
@@ -725,50 +1056,57 @@ def main(argv: list[str] | None = None) -> int:
     if args.dry_run:
         args.dry_run.mkdir(parents=True, exist_ok=True)
     else:
+        if args.created_ids:
+            # Fail here, not after the first create: an unwritable list would leave every
+            # item of the run created but unrecorded.
+            args.created_ids.parent.mkdir(parents=True, exist_ok=True)
+            args.created_ids.touch()
         client = stac_auth.open_client(args.stac_api_url)
         logger.info("Target STAC API: %s", args.stac_api_url)
 
+    counts: Counter[str] = Counter()
     failed: list[str] = []
-    for item_id in item_ids:
+    streak = 0
+    for n, item_id in enumerate(item_ids):
+        # Both stops fall between ids, never inside one: a create and its created-ids line
+        # always complete together.
+        out_of_time = args.time_budget is not None and monotonic() - started >= args.time_budget
+        if streak == MAX_CONSECUTIVE_FAILURES or out_of_time:
+            logger.error(
+                "Stopping after %s: %d id(s) not attempted, counted as failed",
+                f"the {args.time_budget:g} s time budget"
+                if out_of_time
+                else f"{streak} failures in a row",
+                len(item_ids) - n,
+            )
+            failed += item_ids[n:]
+            break
         try:
-            source = fetch_source_item(args.source_stac_api, args.source_collection, item_id)
-            if args.mirror_explorer:
-                item = build_mirror_item(
-                    source, args.collection, args.raster_api_url, args.stac_api_url
-                )
-            else:
-                item = build_proxy_item(
-                    source,
-                    args.collection,
-                    args.raster_api_url,
-                    args.stac_api_url,
-                    store_root_base=args.store_root_base,
-                    s3_endpoint=args.s3_endpoint,
-                )
-            assert_s3_urls_confined(item, allowed)
-            if client is None:
-                # A plain name (refused otherwise above), and fetch_source_item has already
-                # made sure the source did not substitute another id.
-                out = args.dry_run / f"{item_id}.json"
-                out.write_text(json.dumps(item.to_dict(), indent=2))
-                logger.info(f"   📄 {out}")
-            else:
-                upsert_item(client, args.collection, item)
+            counts[register_one(args, client, allowed, expires, item_id)] += 1
+            streak = 0
+        except CreatedIdsError as exc:
+            # Every later create would go unrecorded too: stop, and say which id may exist.
+            logger.error("Stopping: %s. %d id(s) not attempted", exc, len(item_ids) - n - 1)
+            failed += item_ids[n:]
+            break
         except Exception as exc:  # noqa: BLE001 - one bad item must not hide the rest
             failed.append(item_id)
+            streak += 1
             logger.error("   ❌ %s: %s", item_id, exc)
-            continue
+    counts["failed"] = len(failed)
 
     # Without this, a mid-run failure leaves a partially populated collection and no
     # record of which ids landed — the operator cannot tell a clean run from a torn one.
-    registered = len(item_ids) - len(failed)
-    logger.info(
-        "%s %d/%d item(s) for %s",
-        "Wrote" if args.dry_run else "Registered",
-        registered,
-        len(item_ids),
-        args.collection,
-    )
+    if args.items_json and not args.dry_run:
+        log_summary(args.collection, counts)
+    else:
+        logger.info(
+            "%s %d/%d item(s) for %s",
+            "Wrote" if args.dry_run else "Registered",
+            counts["written"] + counts["registered"],
+            len(item_ids),
+            args.collection,
+        )
     if failed:
         logger.error("Failed (%d): %s", len(failed), ", ".join(failed))
         return 1
