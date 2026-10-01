@@ -394,7 +394,7 @@ def _drop_consolidated_metadata(local_store: str) -> None:
     shapes, so ``eopf_geozarr``'s resize-then-write raises ``BoundsCheckError`` ("index out of bounds
     for dimension with length 1"). ``eopf_geozarr`` consolidates at the **orbit-group** level (not the
     root), so we strip ``consolidated_metadata`` from *every* group node, not just the root; zarr then
-    reads per-array metadata and honours ``resize``. ``ingest_all`` re-consolidates at the end.
+    reads per-array metadata and honours ``resize``. ``run_ingest`` re-consolidates before the upload.
     """
     dropped = 0
     for zj in Path(local_store).rglob("zarr.json"):
@@ -593,6 +593,17 @@ def run_ingest(
         )
         if rc != 0:
             return rc
+        # The drop above stripped every group's consolidated block, and ingest_all's no-op returns
+        # (nothing new, or only all-nodata scenes) come back 0 before its consolidate step. Uploading
+        # that would strip the S3 cube too, and an HTTP reader cannot list a store: titiler-eopf
+        # >= 0.12 opens the asset href via the gateway and 500s on PROPFIND. Re-consolidate first,
+        # with plain zarr: consolidate_s1_store also rewrites the root's geo attributes, which a run
+        # that appends nothing must not do to a prod cube (migrate_s1_rtc_datamodel keeps that
+        # opt-in too). use_consolidated=False because every block was just dropped.
+        root = zarr.open_group(local_store, mode="r", zarr_format=3, use_consolidated=False)
+        for orbit, _ in root.groups():
+            zarr.consolidate_metadata(local_store, path=orbit, zarr_format=3)
+        zarr.consolidate_metadata(local_store, zarr_format=3)
         log.info("Uploading store %s -> %s", local_store, store)
         _upload_store_to_s3(local_store, store)
         return 0
