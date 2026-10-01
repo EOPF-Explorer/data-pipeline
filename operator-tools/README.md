@@ -437,6 +437,35 @@ uv run operator-tools/consolidate_zarr_groups.py --restore ~/consolidate-backups
 
 `stores.txt` holds one `s3://bucket/path/x.zarr` per line. A group that already has a block is skipped, so a re-run is a no-op.
 
+### 9. `fill_coordinate_holes.py` - Fill Lost Values in 1-D Zarr Arrays on S3
+
+Writes reviewed values into fill-value holes of 1-D zarr v3 arrays on S3, and changes nothing else. It was written for the S1 RTC per-slice coordinates (`r10m/platform`, `r10m/relative_orbit`), which `ingest_v1_s1_rtc._sync_tree` lost on S3 when a rewritten chunk kept its compressed size. The values come from a plan file (`fill-coordinate-holes/1`) that is built and reviewed separately. The tool only applies it.
+
+It refuses a store unless, for every planned array:
+- the array is 1-D, unsharded, in one chunk, and has the planned length and fill value;
+- every planned index holds the fill value now;
+- no fill value is left afterwards;
+- only the chunk `c/0` changes.
+
+**Safety:** the same as `consolidate_zarr_groups.py`:
+- it is a dry run unless you pass `--apply` (which needs `--backup-dir` and `--s3-endpoint`);
+- `--max-writes` is required and stops between stores;
+- every chunk is backed up (base64, fsync'd) before its store's first PUT;
+- each object's ETag is re-checked before writing, and every PUT is read back;
+- `--restore` undoes a run.
+
+A re-run of a finished plan is a no-op.
+
+```bash
+# Dry run; --only limits the run to one store (a canary)
+uv run operator-tools/fill_coordinate_holes.py --plan fill_plan.json --max-writes 2 \
+    --only s3://BUCKET/PATH/s1-rtc-32UPB.zarr --s3-endpoint https://s3.de.io.cloud.ovh.net
+# Apply: the same command plus --apply --backup-dir ~/fill-backups
+# Undo a run
+uv run operator-tools/fill_coordinate_holes.py --restore ~/fill-backups/fill-coordinate-holes-<stamp>-<n>-<pid>.jsonl \
+    --max-writes 300 --apply --backup-dir ~/fill-backups-undo --s3-endpoint https://s3.de.io.cloud.ovh.net
+```
+
 ## Debugging Workflow: When to Use Which Tool 🔍
 
 The refactored tools follow a "single item → collection" debugging workflow:
