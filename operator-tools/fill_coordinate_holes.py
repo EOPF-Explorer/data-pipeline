@@ -8,10 +8,17 @@ separately; this tool only writes them.
 For each planned array it reads ``zarr.json`` and the single chunk, decodes the chunk with zarr in a
 temp dir, fills the planned indices, and re-encodes. A store is written only if, for every array:
 - it is a 1-D, unsharded zarr v3 array held in one chunk, with exactly the planned length and fill;
-- every planned index holds the fill value now, and no other value changes;
+- every planned index holds the fill value now, every planned value has the array's type and
+  survives its dtype unchanged, and no other slot of the chunk changes (the padding past the array
+  length included: only the planned indices are written);
 - no fill value is left afterwards (the plan covers every hole);
 - ``zarr.json`` is untouched (only the chunk ``c/0`` is written).
-An array whose planned indices already hold the planned values is skipped, so a re-run is a no-op.
+An array whose planned indices already hold the planned values (and has no other hole) is skipped,
+so re-running a finished plan is a no-op while the arrays are unchanged. An array that changed since
+the plan was built (e.g. a slice appended) is refused instead.
+
+Hold every writer of the planned stores (for S1 RTC, every ingest) while it runs: the ETag checks
+narrow, but cannot close, the window between a check and its PUT.
 
 Safety properties (as in ``consolidate_zarr_groups.py``):
 - dry-run by default; ``--apply`` needs ``--backup-dir`` and an explicit ``--s3-endpoint``
@@ -20,8 +27,8 @@ Safety properties (as in ``consolidate_zarr_groups.py``):
 - every chunk is backed up (base64, with the hash of its replacement) and fsync'd before its store's
   first PUT; ``--restore`` puts them back, and refuses a chunk changed since the repair unless
   ``--force``
-- each chunk's ETag is re-checked before writing, every PUT is read back, any failed or uncertain
-  PUT stops the run, and 3 consecutive or 10 total failures abort it
+- the ETags of each chunk and of its ``zarr.json`` are re-checked before writing, every PUT is read
+  back, any failed or uncertain PUT stops the run, and 3 consecutive or 10 total failures abort it
 """
 
 import argparse
@@ -65,6 +72,8 @@ class ChunkWrite:
     etag: str
     old: bytes
     new: bytes
+    meta_key: str
+    meta_etag: str
 
 
 @dataclass
@@ -117,11 +126,14 @@ def plan_array(
 ) -> ChunkWrite | None:
     """The chunk write that fills ``spec``'s holes, or None when they are already filled."""
     path = spec["path"].strip("/")
+    if not path or any(segment in ("", ".", "..") for segment in path.split("/")):
+        raise PlanError(f"s3://{bucket}/{prefix}: {spec['path']!r} is not a plain relative path")
     where = f"s3://{bucket}/{prefix}/{path}"
-    got = _get(s3, bucket, f"{prefix}/{path}/zarr.json")
+    meta_key = f"{prefix}/{path}/zarr.json"
+    got = _get(s3, bucket, meta_key)
     if got is None:
         raise PlanError(f"{where}: no zarr.json")
-    meta_body, _ = got
+    meta_body, meta_etag = got
     meta = json.loads(meta_body)
     key = chunk_key(prefix, path, meta)
     if meta["shape"][0] != spec["length"]:
@@ -151,23 +163,48 @@ def plan_array(
 
     expected = before.copy()
     for i, value in planned.items():
-        expected[i] = value
+        # numpy coerces silently ('sentinel-1c' -> 'sent' in <U4, 110.7 -> 110, True -> 1).
+        if type(value) is not type(fill):
+            raise PlanError(
+                f"{where}: planned value {value!r} at {i} is not a {type(fill).__name__}"
+            )
+        try:
+            expected[i] = value
+        except (OverflowError, ValueError) as exc:  # numpy refuses some out-of-range ints itself
+            raise PlanError(
+                f"{where}: planned value {value!r} at {i} does not fit {array.dtype}"
+            ) from exc
+        if expected[i].tolist() != value:
+            raise PlanError(f"{where}: planned value {value!r} at {i} does not fit {array.dtype}")
     if (expected == fill).any():
         missing = np.flatnonzero(expected == fill).tolist()
         raise PlanError(f"{where}: the plan leaves fill values at {missing}")
-    array[:] = expected
+    for i, value in planned.items():  # only these slots: the rest of the chunk is read back as is
+        array[i] = value
 
-    # `expected` is `before` with only the planned holes filled, so this also proves that nothing
-    # outside the plan changes.
+    new = (local / "c" / "0").read_bytes()
     after = np.asarray(zarr.open_array(str(local), mode="r", zarr_format=3)[:])
     if not np.array_equal(after, expected):
         raise PlanError(f"{where}: the re-encoded chunk does not decode to the planned values")
+    old_full = _decode_whole_chunk(meta, old, workdir / ".whole-chunk" / "old" / path)
+    new_full = _decode_whole_chunk(meta, new, workdir / ".whole-chunk" / "new" / path)
+    if np.flatnonzero(old_full != new_full).tolist() != sorted(planned):
+        raise PlanError(f"{where}: slots outside the plan would change (padding included)")
     if (local / "zarr.json").read_bytes() != meta_body:
         raise PlanError(f"{where}: zarr rewrote zarr.json")
     files = sorted(p.relative_to(local).as_posix() for p in local.rglob("*") if p.is_file())
     if files != ["c/0", "zarr.json"]:
         raise PlanError(f"{where}: unexpected files after filling: {files}")
-    return ChunkWrite(key, etag, old, (local / "c" / "0").read_bytes())
+    return ChunkWrite(key, etag, old, new, meta_key, meta_etag)
+
+
+def _decode_whole_chunk(meta: dict[str, Any], chunk: bytes, where: Path) -> np.ndarray:
+    """Every slot of the single chunk, the padding past the array length included."""
+    (where / "c").mkdir(parents=True)
+    whole = {**meta, "shape": list(meta["chunk_grid"]["configuration"]["chunk_shape"])}
+    (where / "zarr.json").write_text(json.dumps(whole))
+    (where / "c" / "0").write_bytes(chunk)
+    return np.asarray(zarr.open_array(str(where), mode="r", zarr_format=3)[:])
 
 
 def plan_store(s3: Any, entry: dict[str, Any], workdir: Path) -> StorePlan:
@@ -186,14 +223,38 @@ def plan_store(s3: Any, entry: dict[str, Any], workdir: Path) -> StorePlan:
     return plan
 
 
+def _no_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    keys = [k for k, _ in pairs]
+    if len(set(keys)) != len(keys):
+        raise ValueError(
+            f"duplicate keys in the plan: {sorted({k for k in keys if keys.count(k) > 1})}"
+        )
+    return dict(pairs)
+
+
 def load_plan(path: Path) -> list[dict[str, Any]]:
-    plan = json.loads(path.read_text())
+    """Read and check a plan: a format tag, at least one store, each store once (as parsed), each
+    with at least one array, and index keys written as canonical non-negative integers."""
+    plan = json.loads(path.read_text(), object_pairs_hook=_no_duplicate_keys)
     if plan.get("format") != PLAN_FORMAT:
         raise ValueError(f"plan format {plan.get('format')!r}, this tool reads {PLAN_FORMAT}")
-    stores = [entry["store"].rstrip("/") for entry in plan["stores"]]
-    if len(set(stores)) != len(stores):
-        raise ValueError("a store appears twice in the plan")
-    return list(plan["stores"])
+    stores = plan.get("stores")
+    if not isinstance(stores, list) or not stores:
+        raise ValueError("the plan has no stores")
+    seen: set[tuple[str, str]] = set()
+    for entry in stores:
+        target = parse_s3_uri(entry["store"])
+        if target in seen:
+            raise ValueError(f"{entry['store']!r} appears twice in the plan")
+        seen.add(target)
+        if not entry.get("arrays"):
+            raise ValueError(f"{entry['store']}: no arrays")
+        for spec in entry["arrays"]:
+            keys = list(spec.get("values") or {})
+            bad = [k for k in keys if not k.isdigit() or str(int(k)) != k]
+            if not keys or bad:
+                raise ValueError(f"{entry['store']} {spec.get('path')}: bad or no index keys {bad}")
+    return stores
 
 
 class FillRun:
@@ -298,14 +359,13 @@ class FillRun:
     def _write_store(self, store_uri: str, plan: StorePlan) -> bool:
         """Write one store's plan. Returns True when the run must abort."""
         for write in plan.writes:  # staleness guard, before anything is written
-            try:
-                current = self.s3.head_object(Bucket=plan.bucket, Key=write.key)["ETag"]
-            except S3_ERRORS as exc:
-                return self._fail(store_uri, f"{write.key}: {exc}")
-            if current != write.etag:
-                return self._fail(
-                    store_uri, f"{write.key} changed since it was read; store skipped"
-                )
+            for key, etag in ((write.meta_key, write.meta_etag), (write.key, write.etag)):
+                try:
+                    current = self.s3.head_object(Bucket=plan.bucket, Key=key)["ETag"]
+                except S3_ERRORS as exc:
+                    return self._fail(store_uri, f"{key}: {exc}")
+                if current != etag:
+                    return self._fail(store_uri, f"{key} changed since it was read; store skipped")
         for write in plan.writes:
             self._backup(plan.bucket, plan.prefix, write.key, write.etag, write.old, write.new)
         for write in plan.writes:
@@ -326,8 +386,8 @@ class FillRun:
                 store_uri = entry["store"]
                 try:
                     plan = plan_store(self.s3, entry, Path(tmp) / str(i))
-                except (*S3_ERRORS, PlanError, ValueError, KeyError) as exc:
-                    if self._fail(store_uri, str(exc)):
+                except Exception as exc:  # noqa: BLE001 — refuses this store, names it, goes on
+                    if self._fail(store_uri, f"{type(exc).__name__}: {exc}"):
                         return
                     continue
                 if not (self.apply and plan.writes):
@@ -401,7 +461,10 @@ class FillRun:
         """Whether the run must abort, and the current (body, etag) if ``entry`` needs a write."""
         self.scanned += 1
         bucket, key = entry["bucket"], entry["key"]
-        body = base64.b64decode(entry["body_b64"])
+        try:
+            body = base64.b64decode(entry["body_b64"], validate=True)
+        except (KeyError, TypeError, ValueError):
+            return self._fail(key, "the backup line's body_b64 is unreadable; not restored"), None
         if hashlib.sha256(body).hexdigest() != entry["sha256"]:
             return self._fail(key, "the backup line does not match its sha256; not restored"), None
         try:
@@ -435,9 +498,12 @@ class FillRun:
 def _full_fsync(fd: int) -> None:
     """fsync, and on macOS also flush the drive's write cache, which plain fsync does not."""
     if hasattr(fcntl, "F_FULLFSYNC"):
-        fcntl.fcntl(fd, fcntl.F_FULLFSYNC)
-    else:
-        os.fsync(fd)
+        try:
+            fcntl.fcntl(fd, fcntl.F_FULLFSYNC)
+            return
+        except OSError:  # e.g. ENOTSUP on a network filesystem: plain fsync is what is left
+            pass
+    os.fsync(fd)
 
 
 def _path(value: str) -> Path:
@@ -488,11 +554,14 @@ def main(argv: list[str] | None = None) -> int:
         except (ValueError, KeyError) as exc:
             parser.error(f"--plan: {exc}")
         if args.only:
-            wanted = {s.rstrip("/") for s in args.only}
-            unknown = wanted - {e["store"].rstrip("/") for e in entries}
+            try:
+                wanted = {parse_s3_uri(s) for s in args.only}
+            except ValueError as exc:
+                parser.error(f"--only: {exc}")
+            unknown = wanted - {parse_s3_uri(e["store"]) for e in entries}
             if unknown:
                 parser.error(f"--only names stores that are not in the plan: {sorted(unknown)}")
-            entries = [e for e in entries if e["store"].rstrip("/") in wanted]
+            entries = [e for e in entries if parse_s3_uri(e["store"]) in wanted]
 
     s3 = make_s3_client(args.s3_endpoint)
     logger.info("Endpoint: %s", s3.meta.endpoint_url)

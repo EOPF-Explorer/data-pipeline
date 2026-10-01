@@ -441,20 +441,27 @@ uv run operator-tools/consolidate_zarr_groups.py --restore ~/consolidate-backups
 
 Writes reviewed values into fill-value holes of 1-D zarr v3 arrays on S3, and changes nothing else. It was written for the S1 RTC per-slice coordinates (`r10m/platform`, `r10m/relative_orbit`), which `ingest_v1_s1_rtc._sync_tree` lost on S3 when a rewritten chunk kept its compressed size. The values come from a plan file (`fill-coordinate-holes/1`) that is built and reviewed separately. The tool only applies it.
 
+The plan is JSON: `{"format": "fill-coordinate-holes/1", "stores": [{"store": "s3://bucket/path/x.zarr", "arrays": [{"path": "descending/r10m/relative_orbit", "length": 4, "fill": 0, "values": {"3": 110}}]}]}`. Each `values` key is a slot index written as a plain integer, and each value must have the array's type (`str` or `int`).
+
 It refuses a store unless, for every planned array:
 - the array is 1-D, unsharded, in one chunk, and has the planned length and fill value;
-- every planned index holds the fill value now;
+- every planned index holds the fill value now, and every planned value survives the array's dtype unchanged;
 - no fill value is left afterwards;
-- only the chunk `c/0` changes.
+- only the planned slots of the chunk `c/0` change (only those slots are written, so the padding past the array length is kept).
 
 **Safety:** the same as `consolidate_zarr_groups.py`:
 - it is a dry run unless you pass `--apply` (which needs `--backup-dir` and `--s3-endpoint`);
 - `--max-writes` is required and stops between stores;
 - every chunk is backed up (base64, fsync'd) before its store's first PUT;
-- each object's ETag is re-checked before writing, and every PUT is read back;
-- `--restore` undoes a run.
+- the ETags of each chunk and of its `zarr.json` are re-checked before writing, and every PUT is read back;
+- `--restore <backup>.jsonl` replays the whole file: it puts the pre-fill chunks back store by store within `--max-writes`, and refuses a chunk changed since the fill unless you pass `--force`. A restore is only safe until the cube's next append: the backup holds the whole pre-fill chunk, so `--force` after an append would empty the new slice too.
 
-A re-run of a finished plan is a no-op.
+A re-run of a finished plan is a no-op while the arrays are unchanged; an array that changed since the plan was built (for example, a slice appended) is refused.
+
+**Before a run on S1 RTC cubes:**
+- hold every S1 ingest for the planned tiles while it runs (the cron, manual submits and webhook-triggered runs). An ingest that fetched before the fill and uploads after it puts the old chunk back, and an upload between the ETag check and the PUT is overwritten;
+- deploy an ingest image with the `_sync_tree` coordinate fix (`fix(s1-ingest): always re-upload coordinate chunks after an append`) before S1 ingest resumes: on an older image, appends lose values again;
+- the per-acquisition STAC items built while the holes existed keep their missing `platform`. Registration skips existing items, so they need a separate re-registration after the fill.
 
 ```bash
 # Dry run; --only limits the run to one store (a canary)

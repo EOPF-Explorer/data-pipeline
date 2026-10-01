@@ -201,9 +201,8 @@ def test_post_encode_checks_catch_a_misbehaving_writer(sabotage, match, tmp_path
             return self.array[key]
 
         def __setitem__(self, key, value) -> None:
-            value = value.copy()
             if sabotage == "wrong-value":
-                value[0] = value[1]
+                value = "s1a"  # not the planned 's1c'
             self.array[key] = value
             if sabotage == "touch-metadata":
                 (self.path / "zarr.json").write_text((self.path / "zarr.json").read_text() + " ")
@@ -252,6 +251,10 @@ def test_a_store_planned_twice_with_one_array_is_refused(tmp_path) -> None:
     fake = FakeS3(_fleet())
     run = _run(fake, tmp_path, [{"store": f"s3://{BUCKET}/{UPB}", "arrays": [PLAT, PLAT]}])
     assert fake.puts == [] and run.failures == 1
+    with pytest.raises(fch.PlanError, match="planned twice"):  # refused for that reason
+        fch.plan_store(
+            fake, {"store": f"s3://{BUCKET}/{UPB}", "arrays": [PLAT, PLAT]}, tmp_path / "w"
+        )
 
 
 # --- the write bound -------------------------------------------------------------------------
@@ -485,3 +488,328 @@ def test_cli_needs_a_plan(monkeypatch) -> None:
     monkeypatch.setattr(fch, "make_s3_client", lambda endpoint: _Client({}))
     with pytest.raises(SystemExit):
         fch.main(["--max-writes", "5"])
+
+
+# --- gaps found by the max review of #453 (1 Oct) --------------------------------------------
+
+
+def _encode(values: list, dtype: str, fill, tmp_path: Path, name: str) -> bytes:
+    """c/0 of `values` in one 512-chunk with the cubes' codecs (bytes + zstd level 0)."""
+    arr = zarr.create_array(
+        str(tmp_path / name),
+        shape=(len(values),),
+        chunks=(512,),
+        dtype=dtype,
+        fill_value=fill,
+        compressors=ZstdCodec(level=0),
+        zarr_format=3,
+    )
+    arr[:] = np.array(values, dtype=dtype)
+    return (tmp_path / name / "c" / "0").read_bytes()
+
+
+@pytest.mark.parametrize(
+    ("store", "spec", "match"),
+    [
+        (UPB, {**PLAT, "values": {"2": "sentinel-1c"}}, "does not fit"),  # 'sent' in <U4
+        (UPB, {**PLAT, "values": {"2": None}}, "is not a str"),
+        (TEL, {**REL, "values": {"3": 110.7}}, "is not a int"),
+        (TEL, {**REL, "values": {"3": True}}, "is not a int"),
+        (TEL, {**REL, "values": {"3": "110"}}, "is not a int"),
+        (TEL, {**REL, "values": {"3": 2**40}}, "does not fit"),
+    ],
+    ids=["truncated-str", "null", "float", "bool", "str-for-int", "overflow"],
+)
+def test_planned_values_must_keep_their_type_and_value(store, spec, match, tmp_path) -> None:
+    with pytest.raises(fch.PlanError, match=match):
+        fch.plan_array(FakeS3(_fleet()), BUCKET, store, spec, tmp_path)
+
+
+def test_the_padding_past_the_length_is_kept(tmp_path) -> None:
+    """An append mid-upload: c/0 already holds a 4th slice while zarr.json still says 3."""
+    objects = _fleet()
+    key = (BUCKET, _key(UPB, PLAT["path"]))
+    objects[key] = _encode(["s1a", "s1c", "", "s1a"], "<U4", "", tmp_path, "inflight")
+    fake = FakeS3(objects)
+    run = _run(fake, tmp_path, [{"store": f"s3://{BUCKET}/{UPB}", "arrays": [PLAT]}])
+
+    assert run.failures == 0 and run.verified == 1
+    meta = json.loads(objects[(BUCKET, f"{UPB}/{PLAT['path']}/zarr.json")])
+    whole = fch._decode_whole_chunk(meta, fake.objects[key], tmp_path / "whole")
+    assert whole[:4].tolist() == ["s1a", "s1c", "s1c", "s1a"]  # the 4th slice survives
+
+
+def test_a_zarr_json_changed_since_it_was_read_skips_the_store(tmp_path, monkeypatch) -> None:
+    fake = FakeS3(_fleet())
+    real_head = fake.head_object
+
+    def head(Bucket, Key):  # noqa: N803
+        return (
+            {"ETag": '"changed"'}
+            if Key.endswith("zarr.json")
+            else real_head(Bucket=Bucket, Key=Key)
+        )
+
+    monkeypatch.setattr(fake, "head_object", head)
+    run = _run(fake, tmp_path)
+    assert fake.puts == [] and run.failures == 2 and run.backup_path is None
+
+
+def test_a_planning_crash_refuses_only_that_store(tmp_path) -> None:
+    objects = _fleet()
+    objects[(BUCKET, _key(UPB, PLAT["path"]))] = b"not zstd at all"
+    fake = FakeS3(objects)
+    run = _run(fake, tmp_path)
+
+    assert run.failures == 1 and fake.puts == [_key(TEL, REL["path"])]
+
+
+def test_staleness_is_checked_for_every_chunk_of_a_store(tmp_path, monkeypatch) -> None:
+    fake, entries = _two_array_store()
+    second = f"{BASE}/s1-rtc-BOTH.zarr/{REL['path']}/c/0"
+    real_head = fake.head_object
+
+    def head(Bucket, Key):  # noqa: N803
+        return {"ETag": '"changed"'} if Key == second else real_head(Bucket=Bucket, Key=Key)
+
+    monkeypatch.setattr(fake, "head_object", head)
+    run = _run(fake, tmp_path, entries[:1])
+    assert fake.puts == [] and run.failures == 1
+
+
+def test_each_backup_line_holds_its_own_chunk(tmp_path) -> None:
+    fake, entries = _two_array_store()
+    before = dict(fake.objects)
+    fake.fail_put_on = f"{BASE}/s1-rtc-BOTH.zarr/{PLAT['path']}/c/0"
+    run = _run(fake, tmp_path, entries[:1])
+
+    lines = [json.loads(line) for line in run.backup_path.read_text().splitlines()]
+    assert len(lines) == 2
+    for line in lines:
+        assert base64.b64decode(line["body_b64"]) == before[(BUCKET, line["key"])]
+
+
+def test_restore_of_a_two_array_store_puts_each_chunk_back(tmp_path) -> None:
+    fake, entries = _two_array_store()
+    before = dict(fake.objects)
+    repair = _run(fake, tmp_path, entries[:1])
+    filled = dict(fake.objects)
+    run = _restore(fake, tmp_path, repair.backup_path)
+
+    assert run.failures == 0 and run.verified == 2 and fake.objects == before
+    for line in map(json.loads, run.backup_path.read_text().splitlines()):
+        assert base64.b64decode(line["body_b64"]) == filled[(BUCKET, line["key"])]
+
+
+def test_restore_fails_a_line_with_unreadable_base64_and_restores_the_rest(tmp_path) -> None:
+    fake, _, repair = _repaired(tmp_path)
+    lines = repair.backup_path.read_text().splitlines()
+    damaged = json.loads(lines[0])
+    damaged["body_b64"] = damaged["body_b64"][1:]
+    repair.backup_path.write_text("\n".join([json.dumps(damaged), *lines[1:]]) + "\n")
+    run = _restore(fake, tmp_path, repair.backup_path)
+
+    assert run.failures == 1 and run.verified == 1
+
+
+def test_restore_skips_a_torn_or_foreign_line_and_restores_the_rest(tmp_path) -> None:
+    fake, before, repair = _repaired(tmp_path)
+    text = repair.backup_path.read_text()
+    repair.backup_path.write_text(
+        text + json.dumps({"format": "other/1"}) + '\n{"format": "fill-co'
+    )
+    run = _restore(fake, tmp_path, repair.backup_path)
+
+    assert run.failures == 2 and run.verified == 2 and fake.objects == before
+
+
+def test_rerunning_a_finished_restore_writes_nothing(tmp_path) -> None:
+    fake, _, repair = _repaired(tmp_path)
+    _restore(fake, tmp_path, repair.backup_path)
+    again = _restore(fake, tmp_path, repair.backup_path)
+    assert again.writes == 0 and again.skipped_clean == 2 and again.failures == 0
+
+
+def test_a_tls_error_raised_as_ssl_error_stops_the_run_cleanly(tmp_path, monkeypatch) -> None:
+    """botocore wraps urllib3's ProtocolError, but an SSLError during a body read escapes as is."""
+    from urllib3.exceptions import SSLError
+
+    fake = FakeS3(_fleet())
+    real_get = fake.get_object
+
+    class BrokenBody:
+        def read(self) -> bytes:
+            raise SSLError("TLS record truncated")
+
+    def get_object(Bucket, Key):  # noqa: N803
+        resp = real_get(Bucket=Bucket, Key=Key)
+        return {**resp, "Body": BrokenBody()} if Key in fake.puts else resp
+
+    monkeypatch.setattr(fake, "get_object", get_object)
+    run = _run(fake, tmp_path)
+    assert run.failures == 1 and run.scanned == 1
+
+
+def test_a_filled_index_with_another_hole_elsewhere_is_refused(tmp_path) -> None:
+    objects = _fleet()
+    objects[(BUCKET, _key(UPB, PLAT["path"]))] = _encode(
+        ["", "s1c", "s1c"], "<U4", "", tmp_path, "h"
+    )
+    with pytest.raises(fch.PlanError, match="index 2 holds 's1c'"):
+        fch.plan_array(FakeS3(objects), BUCKET, UPB, PLAT, tmp_path / "w")
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["../x/r10m/platform", "ascending/./r10m/platform", "ascending//r10m/platform"],
+)
+def test_plan_array_refuses_a_path_that_is_not_plain(path, tmp_path) -> None:
+    with pytest.raises(fch.PlanError, match="not a plain relative path"):
+        fch.plan_array(FakeS3(_fleet()), BUCKET, UPB, {**PLAT, "path": path}, tmp_path)
+
+
+def test_plan_array_refuses_a_negative_index(tmp_path) -> None:
+    with pytest.raises(fch.PlanError, match="out of range"):
+        fch.plan_array(FakeS3(_fleet()), BUCKET, UPB, {**PLAT, "values": {"-1": "s1c"}}, tmp_path)
+
+
+def test_chunk_key_refuses_a_dot_separator() -> None:
+    meta = json.loads((FIXTURES / "s1-rtc-32UPB" / PLAT["path"] / "zarr.json").read_text())
+    dotted = {
+        **meta,
+        "chunk_key_encoding": {"name": "default", "configuration": {"separator": "."}},
+    }
+    with pytest.raises(fch.PlanError, match="not handled"):
+        fch.chunk_key(UPB, PLAT["path"], dotted)
+
+
+def test_an_apply_where_every_store_is_stale_aborts_at_three(tmp_path, monkeypatch) -> None:
+    objects, entries = {}, []
+    for i in range(4):
+        prefix = f"{BASE}/s1-rtc-C{i}.zarr"
+        objects |= _fixture("s1-rtc-32UPB", prefix)
+        entries.append({"store": f"s3://{BUCKET}/{prefix}", "arrays": [PLAT]})
+    fake = FakeS3(objects)
+    monkeypatch.setattr(fake, "head_object", lambda Bucket, Key: {"ETag": '"changed"'})  # noqa: N803
+    run = _run(fake, tmp_path, entries)
+    assert run.failures == 3 and run.scanned == 3 and fake.puts == []
+
+
+def test_path_expands_the_home_directory() -> None:
+    assert fch._path("~/x") == Path.home() / "x"
+
+
+@pytest.mark.parametrize(
+    ("plan", "match"),
+    [
+        ({"format": fch.PLAN_FORMAT, "stores": []}, "no stores"),
+        (
+            {
+                "format": fch.PLAN_FORMAT,
+                "stores": [{"store": f"s3://{BUCKET}/{UPB}", "arrays": []}],
+            },
+            "no arrays",
+        ),
+        (
+            {
+                "format": fch.PLAN_FORMAT,
+                "stores": [
+                    {"store": f"s3://{BUCKET}/{UPB}", "arrays": [{**PLAT, "values": {"02": "s1c"}}]}
+                ],
+            },
+            "bad or no index keys",
+        ),
+        (
+            {
+                "format": fch.PLAN_FORMAT,
+                "stores": [
+                    {"store": f"s3://{BUCKET}/{UPB}", "arrays": [PLAT]},
+                    {"store": f"s3://{BUCKET}//{UPB}", "arrays": [PLAT]},
+                ],
+            },
+            "twice",
+        ),
+        (
+            {"format": fch.PLAN_FORMAT, "stores": [{"store": f"s3://{BUCKET}", "arrays": [PLAT]}]},
+            "expected s3://",
+        ),
+    ],
+    ids=["no-stores", "no-arrays", "non-canonical-index", "same-store-twice", "bad-uri"],
+)
+def test_load_plan_refuses(plan, match, tmp_path) -> None:
+    path = tmp_path / "plan.json"
+    path.write_text(json.dumps(plan))
+    with pytest.raises(ValueError, match=match):
+        fch.load_plan(path)
+
+
+def test_load_plan_refuses_duplicate_json_keys(tmp_path) -> None:
+    path = tmp_path / "plan.json"
+    store = json.dumps({"store": f"s3://{BUCKET}/{UPB}", "arrays": [PLAT]})
+    path.write_text(f'{{"format": "{fch.PLAN_FORMAT}", "stores": [{store}], "stores": []}}')
+    with pytest.raises(ValueError, match="duplicate keys"):
+        fch.load_plan(path)
+
+
+def test_cli_max_writes_bounds_an_apply(tmp_path, monkeypatch, capsys) -> None:
+    fake = _Client(_fleet())
+    monkeypatch.setattr(fch, "make_s3_client", lambda endpoint: fake)
+    argv = ["--plan", str(_plan_file(tmp_path)), "--max-writes", "1", "--apply"]
+    rc = fch.main(
+        argv + ["--backup-dir", str(tmp_path / "b"), "--s3-endpoint", "https://s3.example"]
+    )
+
+    assert rc == 0 and len(fake.puts) == 1 and "truncated=True" in capsys.readouterr().out
+
+
+def test_cli_only_writes_just_the_named_store(tmp_path, monkeypatch) -> None:
+    fake, entries = _two_array_store()
+    client = _Client(fake.objects)
+    monkeypatch.setattr(fch, "make_s3_client", lambda endpoint: client)
+    argv = ["--plan", str(_plan_file(tmp_path, entries)), "--max-writes", "5", "--apply"]
+    argv += ["--only", f"s3://{BUCKET}/{UPB}", "--backup-dir", str(tmp_path / "b")]
+    rc = fch.main(argv + ["--s3-endpoint", "https://s3.example"])
+
+    assert rc == 0 and client.puts == [_key(UPB, PLAT["path"])]
+
+
+def test_the_whole_chunk_check_catches_a_writer_that_clears_the_padding(
+    tmp_path, monkeypatch
+) -> None:
+    objects = _fleet()
+    objects[(BUCKET, _key(UPB, PLAT["path"]))] = _encode(
+        ["s1a", "s1c", "", "s1a"], "<U4", "", tmp_path, "inflight"
+    )
+    real_open = zarr.open_array
+
+    class WholeChunkWriter:
+        def __init__(self, array) -> None:
+            self.array, self.fill_value = array, array.fill_value
+
+        def __getitem__(self, key):
+            return self.array[key]
+
+        def __setitem__(self, key, value) -> None:
+            self.array[key] = value
+            self.array[:] = self.array[:]  # a complete-chunk write resets the padding
+
+    def open_array(path, mode="r", **kwargs):
+        array = real_open(path, mode=mode, **kwargs)
+        return WholeChunkWriter(array) if mode == "r+" else array
+
+    monkeypatch.setattr(fch.zarr, "open_array", open_array)
+    with pytest.raises(fch.PlanError, match="outside the plan"):
+        fch.plan_array(FakeS3(objects), BUCKET, UPB, PLAT, tmp_path / "w")
+
+
+def test_full_fsync_falls_back_when_the_filesystem_refuses_it(monkeypatch) -> None:
+    calls = []
+
+    def refuse(fd, op):
+        raise OSError(45, "Operation not supported")
+
+    monkeypatch.setattr(fch.fcntl, "F_FULLFSYNC", 51, raising=False)
+    monkeypatch.setattr(fch.fcntl, "fcntl", refuse)
+    monkeypatch.setattr(fch.os, "fsync", lambda fd: calls.append(fd))
+    fch._full_fsync(7)
+    assert calls == [7]
