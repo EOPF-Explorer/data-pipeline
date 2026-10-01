@@ -322,8 +322,12 @@ def test_run_ingest_local_passthrough(tmp_path) -> None:
 def test_run_ingest_s3_uploads_on_success() -> None:
     """An s3:// store ingests into a local temp store, then uploads it to S3."""
     s3_store = "s3://out-bucket/sentinel-1-grd-rtc-staging/s1-grd-rtc-31TCH.zarr"
+
+    def fetch(_s3_uri: str, local: str) -> None:  # rc 0 always leaves a local cube behind
+        zarr.open_group(local, mode="w", zarr_format=3).create_group("descending")
+
     with (
-        patch(f"{_MOD}._fetch_store_from_s3") as mock_fetch,
+        patch(f"{_MOD}._fetch_store_from_s3", side_effect=fetch) as mock_fetch,
         patch(f"{_MOD}.ingest_all", return_value=0) as mock_ingest,
         patch(f"{_MOD}._upload_store_to_s3") as mock_upload,
     ):
@@ -351,6 +355,59 @@ def test_run_ingest_s3_skips_upload_on_failure() -> None:
             rc = run_ingest("s3://bucket/in/", s3_store, "descending")
         assert rc == code
         mock_upload.assert_not_called()
+
+
+def test_run_ingest_s3_noop_keeps_the_cube_consolidated(tmp_path) -> None:
+    """A no-op re-run (ingest_all returns 0 with nothing appended) must not upload a cube whose
+    consolidated blocks the pre-append drop removed: over HTTP the store could no longer be opened."""
+    import json
+    import shutil
+
+    cube = tmp_path / "remote" / "s1-rtc-31TCH.zarr"
+    root = zarr.open_group(str(cube), mode="w", zarr_format=3)
+    for orbit in ("ascending", "descending"):
+        r10m = root.create_group(
+            orbit,
+            attributes={
+                "proj:code": "EPSG:32631",
+                "spatial:bbox": [500000.0, 4989200.0, 510800.0, 5000000.0],
+            },
+        ).create_group("r10m")
+        r10m.create_array(
+            "vv", shape=(1, 4, 4), dtype="float32", dimension_names=("time", "y", "x")
+        )
+        r10m.create_array("time", shape=(1,), dtype="int64", dimension_names=("time",))[:] = 1
+    for orbit in ("ascending", "descending"):
+        zarr.consolidate_metadata(str(cube), path=orbit, zarr_format=3)
+    zarr.consolidate_metadata(str(cube), zarr_format=3)
+
+    uploaded: dict[str, dict] = {}
+
+    def snapshot_upload(local_store: str, _s3_uri: str) -> None:
+        for zj in Path(local_store).rglob("zarr.json"):
+            uploaded[str(zj.relative_to(local_store))] = json.loads(zj.read_text())
+
+    with (
+        patch(
+            f"{_MOD}._fetch_store_from_s3",
+            side_effect=lambda _s3, local: shutil.copytree(cube, local),
+        ),
+        patch(f"{_MOD}.ingest_all", return_value=0),  # the no-op path: nothing new to append
+        patch(f"{_MOD}._upload_store_to_s3", side_effect=snapshot_upload),
+    ):
+        rc = run_ingest(
+            "s3://bucket/in/", "s3://out/tests-output/c/s1-rtc-31TCH.zarr", "descending"
+        )
+
+    assert rc == 0
+    for orbit in ("ascending", "descending"):
+        assert "r10m/vv" in uploaded[f"{orbit}/zarr.json"]["consolidated_metadata"]["metadata"]
+    root = uploaded["zarr.json"]
+    assert {"ascending/r10m/vv", "descending/r10m/vv"} <= root["consolidated_metadata"][
+        "metadata"
+    ].keys()
+    # Plain consolidation: a run that appends nothing must not rewrite the root's geo attributes.
+    assert root.get("attributes", {}) == {}
 
 
 def test_sync_tree_lands_at_dest_without_nesting(tmp_path) -> None:
