@@ -501,9 +501,12 @@ def _sync_tree(fs: Any, local_store: str, dest: str) -> None:
       append fetches the stale chunk back (123 of 134 demo cubes, 1 Oct 2026). They are tiny
       and already fetched on every append.
     - bulk chunk/shard objects: upload only if **absent** from the S3 listing (new) or its local
-      **size differs**. Bulk arrays shard with time-extent 1 and are never fetched, so a bulk
-      chunk present locally is a new key. NOT ETag/MD5 — s3fs uploads shards multipart, whose
-      ETag is ``<md5>-<nparts>``, not the object MD5.
+      **size differs**. The data arrays (``vv``/``vh``/``border_mask``) shard with time-extent 1
+      and are never fetched, so an append only adds new keys to them. The 2-D condition arrays
+      (``gamma_area_*``/``lia_*``) are rewritten whole on re-ingest and keep this size check;
+      their inputs are static, so a same-size rewrite is almost certainly identical. NOT
+      ETag/MD5 — s3fs uploads shards multipart, whose ETag is ``<md5>-<nparts>``, not the
+      object MD5.
     - deletions: drop only vanished **coordinate/metadata** keys. The append fetch
       (``_fetch_for_append``) deliberately skips the bulk >=2-D data chunks, so they are absent
       locally but MUST NOT be deleted from S3 -- a whole-cube ``set(remote) - local`` would wipe
