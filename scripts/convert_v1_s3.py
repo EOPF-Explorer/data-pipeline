@@ -57,6 +57,13 @@ DEFAULT_OUTPUT_GRID = "EPSG:4326"
 # pod for one string. tests/unit/test_eopf_geozarr_contract.py asserts the two agree.
 BASE_LEVEL = "r0"
 
+# Groups that get a consolidated metadata block after conversion. The converter writes with
+# consolidated=False. titiler-eopf >= 0.12 opens the group a STAC asset href points to
+# (radianceData -> measurements/r0) over HTTPS, and a group without a block has to be listed,
+# which the gateway refuses (PROPFIND 405): the item returns 500 (#446). The order doesn't matter:
+# the root's block lists r0's nodes itself rather than embedding r0's block.
+CONSOLIDATED_GROUPS = (f"measurements/{BASE_LEVEL}", "")
+
 # Cap simultaneous aiohttp connections to the HTTPS source per pod (override via env).
 DEFAULT_SOURCE_HTTP_MAX_CONNECTIONS = 10
 
@@ -90,6 +97,17 @@ def assert_gridded_output(dt_output: object, output_url: str, output_grid: str) 
             "delete it manually before re-running (the bucket has no versioning)."
         ) from exc
     logger.info(f"   ✅ Output grid verified: {base} declares a CRS ({crs_wkt[:40]}…)")
+
+
+def consolidate_output(output_url: str) -> None:
+    """Write a consolidated metadata block into each of ``CONSOLIDATED_GROUPS``.
+
+    It uses ``output_url`` exactly as the converter wrote to it (and as cleanup and register read
+    it): a normalized URL could name a different prefix.
+    """
+    for group in CONSOLIDATED_GROUPS:
+        zarr.consolidate_metadata(output_url, path=group or None, zarr_format=3)
+    logger.info(f"   ✅ Consolidated metadata: {[g or '/' for g in CONSOLIDATED_GROUPS]}")
 
 
 def run_conversion(
@@ -230,6 +248,7 @@ def run_conversion(
         if client is not None:
             client.close()
 
+    consolidate_output(output_url)
     logger.info(f"✅ Conversion complete → {output_url}")
     return output_url
 

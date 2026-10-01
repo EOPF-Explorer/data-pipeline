@@ -34,7 +34,7 @@ _BASE_ARGS = {
 }
 
 
-def _run_with_mocks(mock_client, convert_side_effect=None, **arg_overrides):
+def _run_with_mocks(mock_client, convert_side_effect=None, consolidate=None, **arg_overrides):
     """Call run_conversion with all I/O mocked out. Returns the output URL.
 
     The converter is autospec'd against the REAL pinned function, so a call that no longer
@@ -64,6 +64,7 @@ def _run_with_mocks(mock_client, convert_side_effect=None, **arg_overrides):
         patch.object(convert_v1_s3, "convert_olci_optimized", mock_convert),
         patch("fsspec.filesystem", return_value=mock_fs),
         patch.object(convert_v1_s3, "open_source_datatree", return_value=MagicMock()),
+        patch.object(convert_v1_s3, "consolidate_output", consolidate or MagicMock()),
         maybe_suppress,
     ):
         output_url = run_conversion(**{**_BASE_ARGS, **arg_overrides})
@@ -154,6 +155,55 @@ def test_client_closed_when_conversion_raises():
     mock_client.close.assert_called_once()
 
 
+# ---------------------------------------------------------------------------
+# Consolidated metadata (#446)
+# ---------------------------------------------------------------------------
+
+
+def test_output_is_consolidated_after_converting():
+    consolidate = MagicMock()
+    output_url, mock_convert = _run_with_mocks(MagicMock(), consolidate=consolidate)
+
+    mock_convert.assert_called_once()
+    consolidate.assert_called_once_with(output_url)
+
+
+def test_no_consolidation_when_conversion_raises():
+    consolidate = MagicMock()
+    _run_with_mocks(
+        MagicMock(), convert_side_effect=RuntimeError("conversion failed"), consolidate=consolidate
+    )
+
+    consolidate.assert_not_called()
+
+
+def test_consolidate_output_blocks_the_href_group_and_root_only(tmp_path):
+    """On the layout the converter writes, r0 (the radianceData href) and the root get a block;
+    `measurements` and the overview levels don't need one and are left alone."""
+    import json
+
+    import zarr
+
+    store = tmp_path / "S3B_X.zarr"
+    root = zarr.open_group(str(store), mode="w", zarr_format=3)
+    measurements = root.create_group("measurements")
+    for level in ("r0", "r2"):
+        group = measurements.create_group(level)
+        group.create_array(
+            "oa08_radiance", shape=(4, 4), dtype="float32", dimension_names=("y", "x")
+        )
+
+    convert_v1_s3.consolidate_output(str(store))
+
+    def block(rel):
+        meta = json.loads((store / rel / "zarr.json").read_text())
+        return meta.get("consolidated_metadata")
+
+    assert "oa08_radiance" in block("measurements/r0")["metadata"]
+    assert "measurements/r0/oa08_radiance" in block("")["metadata"]
+    assert block("measurements") is None and block("measurements/r2") is None
+
+
 def test_no_client_created_when_dask_disabled():
     """When use_dask_cluster=False, setup_dask_cluster returns None."""
     args = {**_BASE_ARGS, "use_dask_cluster": False}
@@ -165,6 +215,7 @@ def test_no_client_created_when_dask_disabled():
         patch.object(convert_v1_s3, "setup_dask_cluster", return_value=None) as mock_setup,
         patch.object(convert_v1_s3, "get_storage_options", return_value={}),
         patch.object(convert_v1_s3, "convert_olci_optimized"),
+        patch.object(convert_v1_s3, "consolidate_output"),
         patch("fsspec.filesystem", return_value=mock_fs),
         patch.object(convert_v1_s3, "open_source_datatree", return_value=MagicMock()),
     ):
@@ -397,6 +448,7 @@ def _open_source_datatree_call_for(zarr_url: str, get_storage_options_return: di
         patch.object(convert_v1_s3, "setup_dask_cluster", return_value=None),
         patch.object(convert_v1_s3, "get_storage_options", return_value=get_storage_options_return),
         patch.object(convert_v1_s3, "convert_olci_optimized"),
+        patch.object(convert_v1_s3, "consolidate_output"),
         patch("fsspec.filesystem", return_value=mock_fs),
         patch.object(convert_v1_s3, "open_source_datatree", mock_open_source_datatree),
     ):
