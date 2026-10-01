@@ -397,6 +397,46 @@ uv run jupyter notebook submit_stac_items_notebook.ipynb
 - Submit all or selected items to the pipeline via HTTP webhook
 - Track submission success/failure
 
+### 8. `consolidate_zarr_groups.py` - Add Consolidated Metadata to Zarr Groups on S3
+
+Adds a `consolidated_metadata` block to the `zarr.json` of the groups you name and changes nothing else (#446). titiler-eopf 0.12 opens the group a STAC asset `href` points to over HTTPS; without a block, zarr lists the group, the gateway refuses the listing (PROPFIND 405), and the item returns 500.
+
+It copies only the stores' `zarr.json` files (never chunks) to a temp dir, consolidates there, and refuses a store unless the only change is the added block and the block lists exactly the group's nodes found on S3. A key with an empty path segment (`//`) also refuses the store.
+
+**Safety:**
+- it is a dry run unless you pass `--apply`;
+- `--max-writes` is required; a store is started only if all its writes fit, so a bounded run stops between stores;
+- every original `zarr.json` is backed up (JSONL, fsync'd) to `--backup-dir` before its store's first PUT, in a new file per run;
+- each object's ETag is re-checked before writing, every PUT is read back, and a failed or uncertain PUT stops the run;
+- `--apply` needs an explicit `--s3-endpoint`;
+- `--restore <backup>.jsonl` replays the whole file (it takes no `--store` or `--group`): it puts the originals back store by store within `--max-writes`, recognises the repair's own writes by hash, and refuses any other change unless you pass `--force`. Restore with the same commit that wrote the backup: a line in another format is refused.
+
+**Before a run on S1 RTC cubes:**
+- every `--group` must exist in every listed store, or that store is refused: list single-orbit cubes in their own file, with their one orbit group;
+- hold every S1 ingest for those tiles while it runs (the cron, manual submits and webhook-triggered runs): the ETag check is a HEAD before an unconditional PUT, so an ingest landing in between would be overwritten;
+- deploy an ingest image with the no-op re-consolidation fix (`fix(s1-ingest): re-consolidate the cube before a no-op upload`) before S1 ingest resumes: on an older image, a re-run with nothing new strips the blocks again.
+
+**Before a run on S3 OLCI stores:** hold every OLCI conversion until a converter image with `fix(s3olci): consolidate measurements/r0 and the root after converting` is deployed. A re-conversion on an older image rewrites the store unconsolidated.
+
+```bash
+# S1 RTC cubes: both orbit groups, then the root (dry run)
+uv run operator-tools/consolidate_zarr_groups.py --stores-file stores.txt \
+    --group ascending --group descending --group . --max-writes 90 \
+    --s3-endpoint https://s3.de.io.cloud.ovh.net
+
+# S3 OLCI stores: the radiance group, then the root
+uv run operator-tools/consolidate_zarr_groups.py --store s3://BUCKET/PATH/PRODUCT.zarr \
+    --group measurements/r0 --group . --max-writes 2 --s3-endpoint https://s3.de.io.cloud.ovh.net
+
+# Apply: the same command plus --apply and --backup-dir
+#   ... --apply --backup-dir ~/consolidate-backups
+# Undo a run
+uv run operator-tools/consolidate_zarr_groups.py --restore ~/consolidate-backups/consolidate-zarr-groups-<stamp>-<n>-<pid>.jsonl \
+    --max-writes 90 --apply --backup-dir ~/consolidate-backups --s3-endpoint https://s3.de.io.cloud.ovh.net
+```
+
+`stores.txt` holds one `s3://bucket/path/x.zarr` per line. A group that already has a block is skipped, so a re-run is a no-op.
+
 ## Debugging Workflow: When to Use Which Tool 🔍
 
 The refactored tools follow a "single item → collection" debugging workflow:
