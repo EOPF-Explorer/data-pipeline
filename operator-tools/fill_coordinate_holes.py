@@ -42,6 +42,7 @@ from typing import Any, TextIO
 import numpy as np
 import zarr
 from botocore.exceptions import BotoCoreError, ClientError
+from urllib3.exceptions import HTTPError as Urllib3Error
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +50,9 @@ PLAN_FORMAT = "fill-coordinate-holes/1"
 BACKUP_FORMAT = "fill-coordinate-holes-backup/1"
 MAX_CONSECUTIVE_FAILURES = 3
 MAX_TOTAL_FAILURES = 10
-S3_ERRORS = (ClientError, BotoCoreError)
+# What an S3 call can raise: service errors, transport errors, and a TLS failure while a body
+# streams (urllib3 raises that one unwrapped). As in consolidate_zarr_groups.py.
+S3_ERRORS = (ClientError, BotoCoreError, Urllib3Error)
 
 
 class PlanError(Exception):

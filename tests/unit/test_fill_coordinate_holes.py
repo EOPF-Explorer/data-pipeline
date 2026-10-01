@@ -331,6 +331,27 @@ def test_a_read_back_mismatch_stops_the_run(tmp_path) -> None:
     assert run.failures == 1 and run.verified == 0 and len(fake.puts) == 1
 
 
+def test_a_tls_error_while_reading_back_stops_the_run_cleanly(tmp_path, monkeypatch) -> None:
+    """urllib3 raises a TLS failure during a body read unwrapped (not a BotoCoreError)."""
+    from urllib3.exceptions import ProtocolError
+
+    fake = FakeS3(_fleet())
+    real_get = fake.get_object
+
+    class BrokenBody:
+        def read(self) -> bytes:
+            raise ProtocolError("TLS connection broken")
+
+    def get_object(Bucket, Key):  # noqa: N803
+        resp = real_get(Bucket=Bucket, Key=Key)
+        return {**resp, "Body": BrokenBody()} if Key in fake.puts else resp
+
+    monkeypatch.setattr(fake, "get_object", get_object)
+    run = _run(fake, tmp_path)
+
+    assert run.failures == 1 and run.verified == 0 and run.scanned == 1
+
+
 def test_refuses_to_write_a_key_that_is_not_a_chunk(tmp_path) -> None:
     run = fch.FillRun(FakeS3({}), max_writes=3, apply=True, backup_dir=tmp_path)
     with pytest.raises(fch.PlanError, match="not a chunk"):
