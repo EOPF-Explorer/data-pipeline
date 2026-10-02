@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.19.0 (2026-10-02)
+
+## What's Changed
+* fix(cleanup): protect the openeo-studio sample scenes by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/432
+* feat(lifecycle): add the HP->STANDARD transition rule via a shared provisioning core by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/430
+* fix(aggregate): stop persisting the API queryables link and gateway auth fields by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/439
+* feat(stac): Samples Service S2 proxy collections and /rstaging mirror for the GeoZarr comparison by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/415
+* feat(migrate): add set_storage_refs_standard to catch STAC up after the HP->STANDARD move by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/440
+* fix(storage-tier): skip items with no alternate.s3 in the tier-down selection by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/443
+* fix(expires): never stamp expires on an item with no S3 URL by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/444
+* feat(stac): create-only pipeline mode for EODC-hosted S2 L2A items by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/442
+* fix(s1-ingest): keep S1 RTC cubes consolidated, and add a consolidate-only repair tool by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/449
+* fix(s1-ingest): always re-upload coordinate chunks after an append by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/452
+* feat(operator-tools): add a bounded tool that fills lost values in 1-D zarr arrays by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/453
+* build(deps): bump the minor-and-patch group across 1 directory with 9 updates by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/448
+* build(deps): bump python from `c6ead21` to `9e9fde4` in /docker by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/447
+* build(deps): bump the all group with 4 updates by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/441
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.18.0...v1.19.0
+
 ## 1.18.0 (2026-09-23)
 
 ## What's Changed
