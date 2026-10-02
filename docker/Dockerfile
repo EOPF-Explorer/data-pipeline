@@ -1,7 +1,7 @@
 # Build for linux/amd64: docker buildx build --platform linux/amd64 -t <tag> . --push
 
 # --- Builder stage: installs build tools and Python dependencies ---
-FROM python:3.14.7-alpine@sha256:c6ead215bfd31f1e433d968853b7a769989117115b728874824e6c0a27cb96fc AS builder
+FROM python:3.14.7-alpine@sha256:9e9fde4d32eedce0b661d9ab91e826b62dddf28e928c230ec55f1866cac66b01 AS builder
 
 RUN apk add --no-cache \
     git \
@@ -22,7 +22,7 @@ COPY pyproject.toml uv.lock README.md /app/
 RUN uv sync --frozen --no-dev --no-editable
 
 # --- Runtime stage: minimal production image without build tools ---
-FROM python:3.14.7-alpine@sha256:c6ead215bfd31f1e433d968853b7a769989117115b728874824e6c0a27cb96fc
+FROM python:3.14.7-alpine@sha256:9e9fde4d32eedce0b661d9ab91e826b62dddf28e928c230ec55f1866cac66b01
 
 RUN apk add --no-cache \
     bash \
