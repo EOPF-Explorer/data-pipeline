@@ -25,6 +25,7 @@ import logging
 import os
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -75,6 +76,11 @@ def is_corrupted(item: dict[str, Any]) -> bool:
     )
 
 
+def still_corrupted(after: dict[str, Any], doc: dict[str, Any]) -> str | None:
+    """Default post-PUT check: why the re-read item is not repaired, or None."""
+    return "still corrupted after PUT" if is_corrupted(after) else None
+
+
 def discover_corrupted_ids(
     session: requests.Session, api_url: str, collection: str, updated_since: str
 ) -> list[str]:
@@ -110,7 +116,12 @@ def discover_corrupted_ids(
 
 
 class RepairRun:
-    """One bounded repair (or restore) run against a single collection."""
+    """One bounded repair (or restore) run against a single collection.
+
+    ``fix`` returns (repaired copy, number of changes) and may raise ValueError to refuse an item;
+    ``check`` says why a re-read item is not what was PUT, or None. They default to the link repair,
+    so other item repairs (e.g. fill_stac_item_platform.py) reuse the same bounded run.
+    """
 
     def __init__(
         self,
@@ -120,6 +131,9 @@ class RepairRun:
         max_items: int,
         apply: bool,
         backup_dir: Path,
+        fix: Callable[[dict[str, Any]], tuple[dict[str, Any], int]] = repair_links,
+        check: Callable[[dict[str, Any], dict[str, Any]], str | None] = still_corrupted,
+        label: str = "raster-link-repair",
     ) -> None:
         self.session = session
         self.api_url = api_url
@@ -127,6 +141,9 @@ class RepairRun:
         self.max_items = max_items
         self.apply = apply
         self.backup_dir = Path(backup_dir)
+        self.fix = fix
+        self.check = check
+        self.label = label
         self.scanned = 0
         self.skipped_clean = 0
         self.written = 0
@@ -146,7 +163,7 @@ class RepairRun:
             return self._backup_fh
         self.backup_dir.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-        self._backup_path = self.backup_dir / f"raster-link-repair-{self.collection}-{stamp}.jsonl"
+        self._backup_path = self.backup_dir / f"{self.label}-{self.collection}-{stamp}.jsonl"
         self._results_path = self._backup_path.with_suffix(".results.jsonl")
         self._backup_fh = open(  # noqa: SIM115 — held across items, fsync'd per line
             self._backup_path, "a", encoding="utf-8"
@@ -197,8 +214,9 @@ class RepairRun:
         check = self.session.get(self.item_url(item_id), timeout=30)
         check.raise_for_status()
         after = check.json()
-        if is_corrupted(after):
-            return self._fail(item_id, "still corrupted after PUT")
+        why = self.check(after, doc)
+        if why:
+            return self._fail(item_id, why)
         self.verified += 1
         self.consecutive_failures = 0
         self._record_result(item_id, after.get("properties", {}).get("updated"))
@@ -213,14 +231,19 @@ class RepairRun:
             resp.raise_for_status()
             original = resp.json()
 
-            repaired, changed = repair_links(original)
+            try:
+                repaired, changed = self.fix(original)
+            except ValueError as exc:  # the fix refuses this item: name it and go on
+                if self._fail(item_id, str(exc)):
+                    return
+                continue
             if changed == 0:
                 self.skipped_clean += 1
                 logger.info("clean, skipping %s", item_id)
                 continue
 
             if not self.apply:
-                logger.info("DRY-RUN would repair %s (%d links)", item_id, changed)
+                logger.info("DRY-RUN would repair %s (%d change(s))", item_id, changed)
                 continue
 
             # Hard write bound, checked BEFORE each PUT.
@@ -238,20 +261,20 @@ class RepairRun:
     def restore(self, backup_file: Path, force: bool) -> None:
         """PUT each backed-up doc verbatim (returns items to their pre-repair state).
 
-        Loud by design: the backup contains the CORRUPTED links. A staleness guard
+        Loud by design: the backup holds the pre-repair (broken) docs. A staleness guard
         refuses to clobber an item whose current `updated` differs from the value
         recorded after our repair PUT (i.e. something else wrote it since) unless
         --force is given.
         """
         entries = [json.loads(line) for line in backup_file.read_text().splitlines() if line]
-        n_corrupt = sum(1 for e in entries if is_corrupted(e["item"]))
         logger.warning(
-            "RESTORE MODE: %d items from %s — %d contain corrupted /stac/raster links "
-            "which will be re-installed verbatim",
+            "RESTORE MODE: %d items from %s will be re-installed verbatim (pre-repair state)",
             len(entries),
             backup_file,
-            n_corrupt,
         )
+        n_corrupt = sum(1 for e in entries if is_corrupted(e["item"]))
+        if n_corrupt:
+            logger.warning("%d of them contain corrupted /stac/raster links", n_corrupt)
         results_path = backup_file.with_suffix(".results.jsonl")
         expected: dict[str, str | None] = {}
         if results_path.exists():
