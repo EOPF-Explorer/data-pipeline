@@ -491,12 +491,22 @@ def _sync_tree(fs: Any, local_store: str, dest: str) -> None:
     and rewrites only the tiny metadata in place. Exploit that instead of an ``rm`` + full
     re-upload of the whole accumulated cube every append (which re-PUT ~3600 static objects):
 
-    - ``zarr.json`` metadata: always re-upload — it is the one thing rewritten *in place*
-      (shape/attr edits) and is tiny.
-    - chunk/shard objects: upload only if **absent** from the S3 listing (new) or its local
-      **size differs** (changed). A content-changed blosc-compressed shard almost always
-      changes compressed size. NOT ETag/MD5 — s3fs uploads shards multipart, whose ETag is
-      ``<md5>-<nparts>``, not the object MD5, so an MD5 compare is both wrong and pointless.
+    - ``zarr.json`` metadata: always re-upload — it is rewritten *in place* (shape/attr edits)
+      and is tiny.
+    - coordinate/aux chunks (``ndim <= 1`` arrays, ``_coordinate_array_dirs``): always re-upload
+      too. They are the other thing rewritten in place: ``time``/``relative_orbit``/
+      ``absolute_orbit``/``platform`` are one 512-element chunk, so every append rewrites ``c/0``,
+      and the new compressed chunk often has the *same size* as the old one (repeated values).
+      A size check skipped those uploads and lost the new value on S3 for good, since the next
+      append fetches the stale chunk back (123 of 134 demo cubes, 1 Oct 2026). They are tiny
+      and already fetched on every append.
+    - bulk chunk/shard objects: upload only if **absent** from the S3 listing (new) or its local
+      **size differs**. The data arrays (``vv``/``vh``/``border_mask``) shard with time-extent 1
+      and are never fetched, so an append only adds new keys to them. The 2-D condition arrays
+      (``gamma_area_*``/``lia_*``) are rewritten whole on re-ingest and keep this size check;
+      their inputs are static, so a same-size rewrite is almost certainly identical. NOT
+      ETag/MD5 — s3fs uploads shards multipart, whose ETag is ``<md5>-<nparts>``, not the
+      object MD5.
     - deletions: drop only vanished **coordinate/metadata** keys. The append fetch
       (``_fetch_for_append``) deliberately skips the bulk >=2-D data chunks, so they are absent
       locally but MUST NOT be deleted from S3 -- a whole-cube ``set(remote) - local`` would wipe
@@ -509,6 +519,7 @@ def _sync_tree(fs: Any, local_store: str, dest: str) -> None:
     remote_size = (
         {k: v.get("size") for k, v in fs.find(dest, detail=True).items()} if fs.exists(dest) else {}
     )
+    coord_dirs = _coordinate_array_dirs(local_store)
     pairs: list[tuple[str, str]] = []
     local_keys: set[str] = set()
     for root, _dirs, files in os.walk(local_store):
@@ -519,6 +530,7 @@ def _sync_tree(fs: Any, local_store: str, dest: str) -> None:
             local_keys.add(rpath)
             if (
                 name == "zarr.json"
+                or _is_coordinate_key(rel, coord_dirs)
                 or rpath not in remote_size
                 or os.path.getsize(lpath) != remote_size[rpath]
             ):
@@ -526,7 +538,6 @@ def _sync_tree(fs: Any, local_store: str, dest: str) -> None:
     _put_files(fs, pairs)
     # Scope deletion to coordinate/metadata keys (C1): the append fetch skips the bulk >=2-D chunks,
     # so they are absent locally but must not be removed from S3.
-    coord_dirs = _coordinate_array_dirs(local_store)
     stale = sorted(
         k
         for k in set(remote_size) - local_keys

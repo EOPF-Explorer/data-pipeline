@@ -891,18 +891,22 @@ def test_fetch_for_append_then_sync_preserves_remote_bulk_chunks(tmp_path) -> No
 
 
 def test_sync_tree_uploads_only_new_changed_and_metadata(tmp_path) -> None:
-    """Append uploads only new + size-changed chunks, every zarr.json, and deletes a vanished
-    coordinate key — no rm(recursive) of the live cube. `g` is a 1-D coordinate array (its chunks
-    are deletable under the scoped deletion); a separate test covers bulk-chunk preservation."""
+    """Append uploads every zarr.json, every coordinate chunk, and only new + size-changed bulk
+    chunks, and deletes a vanished coordinate key — no rm(recursive) of the live cube. `g` is a
+    1-D coordinate array (always re-sent, deletable under the scoped deletion); `b` is a 2-D bulk
+    array; a separate test covers bulk-chunk preservation."""
     from unittest.mock import MagicMock
 
     store = tmp_path / "cube.zarr"
     (store / "g").mkdir(parents=True)
+    (store / "b").mkdir(parents=True)
     (store / "zarr.json").write_text('{"node_type":"group"}')  # metadata -> always re-upload
     (store / "g" / "zarr.json").write_text('{"node_type":"array","shape":[2]}')  # 1-D coord array
-    (store / "g" / "new.0").write_text("brand new shard")  # absent remotely -> upload
-    (store / "g" / "same.0").write_text("unchanged")  # same size remote -> skip
-    (store / "g" / "changed.0").write_text("now much bigger")  # size differs -> upload
+    (store / "g" / "same.0").write_text("unchanged")  # coord chunk, same size -> STILL upload
+    (store / "b" / "zarr.json").write_text('{"node_type":"array","shape":[2,2]}')  # 2-D bulk array
+    (store / "b" / "new.0").write_text("brand new shard")  # absent remotely -> upload
+    (store / "b" / "same.0").write_text("unchanged")  # bulk, same size remote -> skip
+    (store / "b" / "changed.0").write_text("now much bigger")  # size differs -> upload
 
     fs = MagicMock()
     fs.exists.return_value = True
@@ -910,8 +914,10 @@ def test_sync_tree_uploads_only_new_changed_and_metadata(tmp_path) -> None:
         "bucket/c/zarr.json": {"size": 99},
         "bucket/c/g/zarr.json": {"size": 99},
         "bucket/c/g/same.0": {"size": len("unchanged")},
-        "bucket/c/g/changed.0": {"size": 3},  # local is larger -> changed
         "bucket/c/g/gone.0": {"size": 5},  # not local, a coord chunk -> delete
+        "bucket/c/b/zarr.json": {"size": 99},
+        "bucket/c/b/same.0": {"size": len("unchanged")},
+        "bucket/c/b/changed.0": {"size": 3},  # local is larger -> changed
     }
 
     _sync_tree(fs, str(store), "bucket/c")
@@ -923,15 +929,60 @@ def test_sync_tree_uploads_only_new_changed_and_metadata(tmp_path) -> None:
     sent = set(fs.put.call_args[0][1])
     assert sent == {
         "bucket/c/zarr.json",
-        "bucket/c/g/zarr.json",  # metadata always
-        "bucket/c/g/new.0",
-        "bucket/c/g/changed.0",  # new + size-changed
+        "bucket/c/g/zarr.json",
+        "bucket/c/b/zarr.json",  # metadata always
+        "bucket/c/g/same.0",  # coordinate chunk always, whatever its size
+        "bucket/c/b/new.0",
+        "bucket/c/b/changed.0",  # new + size-changed bulk
     }
-    assert "bucket/c/g/same.0" not in sent  # unchanged chunk skipped
+    assert "bucket/c/b/same.0" not in sent  # unchanged bulk chunk skipped
     fs.rm.assert_called_once_with(["bucket/c/g/gone.0"])  # vanished coordinate key deleted
     # never an rm(recursive) of the whole cube
     for c in fs.rm.call_args_list:
         assert c.kwargs.get("recursive") is not True
+
+
+def test_append_cycle_keeps_every_coordinate_value_on_s3(tmp_path) -> None:
+    """Fetch -> append -> _sync_tree, repeated, with the cubes' real coordinate layout (one
+    512-element chunk, bytes + zstd level 0). A repeated value (one relative orbit, one platform)
+    compresses to the same size, so a size-only check skipped the rewritten chunk and S3 kept the
+    fill value, for good: 123 of 134 demo cubes lost `platform`/`relative_orbit` values (1 Oct)."""
+    import fsspec
+    from zarr.codecs import ZstdCodec
+
+    fs = fsspec.filesystem("file")
+    remote = str(tmp_path / "remote" / "s1-rtc-T.zarr")
+    r10m = zarr.open_group(remote, mode="w", zarr_format=3).create_group("descending")
+    r10m = r10m.create_group("r10m")
+    coords = {
+        "time": ("int64", 0, lambda k: 1_767_417_004_000_000_000 + k * 12 * 86_400 * 10**9),
+        "relative_orbit": ("int32", 0, lambda k: 66),
+        "absolute_orbit": ("int32", 0, lambda k: 60_000 + k * 175),
+        "platform": ("<U4", "", lambda k: "S1A"),
+    }
+    for name, (dtype, fill, _) in coords.items():
+        r10m.create_array(
+            name,
+            shape=(0,),
+            chunks=(512,),
+            dtype=dtype,
+            fill_value=fill,
+            compressors=ZstdCodec(level=0),
+            dimension_names=("time",),
+        )
+
+    for k in range(6):
+        local = str(tmp_path / f"local{k}" / "s1-rtc-T.zarr")
+        _fetch_for_append(fs, remote, local)
+        group = zarr.open_group(local, mode="r+", zarr_format=3)["descending/r10m"]
+        for name, (_, _, value) in coords.items():
+            group[name].resize((k + 1,))
+            group[name][k] = value(k)
+        _sync_tree(fs, local, remote)
+
+        on_s3 = zarr.open_group(remote, mode="r", zarr_format=3)["descending/r10m"]
+        for name, (_, _, value) in coords.items():
+            assert on_s3[name][:].tolist() == [value(i) for i in range(k + 1)], (name, k + 1)
 
 
 def test_sync_tree_fresh_cube_uploads_everything(tmp_path) -> None:
