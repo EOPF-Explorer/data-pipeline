@@ -99,7 +99,6 @@ TRANSITION_COLLECTION = "sentinel-2-l2a-new"
 # scratch collection the pipeline's rollback is exercised in (plan rev 2, T10).
 TARGET_RUNS = {
     TRANSITION_COLLECTION: {"pipeline"},
-    "sentinel-2-l2a-samples-zarr3": {"track-a", "pipeline"},
     "sentinel-2-l2a-samples-zarr3-rollback": {"track-a", "pipeline"},
 }
 

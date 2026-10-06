@@ -314,18 +314,8 @@ uv run operator-tools/manage_collections.py batch-create stac/ --pattern "*-stag
 - `--pattern`: File pattern to match (default: `*.json`)
 
 > ⚠️ `batch-create` globs `*.json` **non-recursively** and applies every match behind a
-> single confirmation. Templates that must NOT be created by a routine re-apply live in a
-> subdirectory and are therefore skipped: `stac/proxy/` holds the third-party proxy
-> collection (`sentinel-2-l2a-samples-zarr3`, coordination#287), which advertises data we
-> do not convert and must only be created deliberately:
->
-> ```bash
-> uv run operator-tools/manage_collections.py create stac/proxy/sentinel-2-l2a-samples-zarr3.json
-> ```
->
-> Every `stac/proxy/` item shares its id with a prod `sentinel-2-l2a` item, so remove these
-> collections by deleting the collection, which takes its items with it, and **never delete
-> their items by id**.
+> single confirmation. A template that must NOT be created by a routine re-apply belongs in
+> a subdirectory, which the glob skips.
 
 **Features:**
 - Processes all matching JSON files in directory

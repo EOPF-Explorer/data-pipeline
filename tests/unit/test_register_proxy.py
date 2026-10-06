@@ -37,7 +37,7 @@ FIXTURE = EODC_FIXTURES / "S2C_MSIL2A_20260927T133931_N0513_R067_T28WDE_20260927
 OLD_GENERATION_FIXTURE = (
     EODC_FIXTURES / "S2B_MSIL2A_20260907T130029_N0512_R138_T26TLL_20260907T145009.json"
 )
-COLLECTION = "sentinel-2-l2a-samples-zarr3"
+COLLECTION = "sentinel-2-l2a-samples-zarr3-rollback"
 NEW = "sentinel-2-l2a-new"  # the pipeline's user-facing target (plan rev 3)
 RASTER = "https://rstaging.invalid/rstaging"
 STAC_API = "https://stac.invalid/stac"
@@ -717,6 +717,7 @@ def test_the_transition_template_describes_the_items_it_will_hold(source):
         (["--item-id", "other"], NEW),  # ids from anywhere but discover's list
         ([], "sentinel-2-l2a-staging"),  # near misses: a substring check would take them
         ([], "sentinel-2-l2a-samples-zarr3x"),
+        ([], "sentinel-2-l2a-samples-zarr3"),  # deleted 2026-10-05
         ([], "sentinel-2-l2a-samples-zarr3-ovh"),  # deleted 2026-10-05
         ([], "sentinel-2-l2a-mirror-rstaging"),  # deleted 2026-10-05
         ([], "sentinel-2-l2a-zarr3"),  # the source collection itself
@@ -734,7 +735,13 @@ def test_pipeline_targets_and_flags_are_refused_before_any_network_call(
 
 @pytest.mark.parametrize(
     "collection",
-    [NEW, "sentinel-2-l2a", "sentinel-2-l2a-staging", "sentinel-2-l2a-samples-zarr3x"],
+    [
+        NEW,
+        "sentinel-2-l2a",
+        "sentinel-2-l2a-staging",
+        "sentinel-2-l2a-samples-zarr3x",
+        "sentinel-2-l2a-samples-zarr3",  # deleted 2026-10-05
+    ],
 )
 @patch("register_proxy.fetch_source_item")
 @patch("register_proxy.upsert_item")

@@ -322,7 +322,6 @@ BASELAYER_COLLECTIONS = [
     "sentinel-2-l2a.json",
     "sentinel-2-l2a-new.json",
     "sentinel-2-l2a-staging.json",
-    "proxy/sentinel-2-l2a-samples-zarr3.json",
 ]
 
 
@@ -371,7 +370,6 @@ EODASH_COLLECTIONS = [
     "sentinel-2-l2a.json",
     "sentinel-2-l2a-new.json",
     "sentinel-2-l2a-staging.json",
-    "proxy/sentinel-2-l2a-samples-zarr3.json",
 ]
 
 STYLE_HREF = (
@@ -462,7 +460,6 @@ EXPECTED_RASTERFORMS = {
     "sentinel-2-l2a.json": RASTERFORM_BASE + "bandsform.json",
     "sentinel-2-l2a-new.json": RASTERFORM_BASE + "bandsform.json",
     "sentinel-2-l2a-staging.json": RASTERFORM_BASE + "bandsform.json",
-    "proxy/sentinel-2-l2a-samples-zarr3.json": RASTERFORM_BASE + "bandsform.json",
     "sentinel-1-grd-rtc-acquisitions-staging.json": RASTERFORM_BASE + "s1-bandsform.json",
 }
 
@@ -487,32 +484,7 @@ def test_rasterform_absent_everywhere_else() -> None:
         assert "eodash:rasterform" not in data, f"unexpected rasterform in {path.name}"
 
 
-def test_proxy_templates_are_not_in_the_batch_create_glob() -> None:
-    """`batch-create stac/` globs *.json non-recursively behind ONE confirmation.
-
-    The proxy advertises third-party data we do not convert (coordination#287): a routine prod
-    re-apply must not create it. Keeping it in a subdirectory is the whole mechanism — this
-    test is what stops it drifting back.
-    """
-    top_level = {path.name for path in STAC_DIR.glob("*.json")}
-    name = "sentinel-2-l2a-samples-zarr3.json"
-    assert name not in top_level, f"{name} would be created by `batch-create stac/`"
-    assert (STAC_DIR / "proxy" / name).exists()
-
-
-@pytest.mark.parametrize("path", sorted(STAC_DIR.glob("proxy/*.json")), ids=lambda p: p.name)
-def test_a_proxy_template_cannot_act_on_a_prod_collection(path: Path) -> None:
-    """`manage_collections create/--update` takes its target from the body's `id`, so the
-    id is the only thing between a proxy template and a prod collection."""
-    data = json.loads(path.read_text())
-    prod_ids = {json.loads(p.read_text())["id"] for p in STAC_DIR.glob("*.json")}
-    assert "samples-zarr3" in data["id"]
-    assert data["id"] not in prod_ids
-    assert "not for users" in data["title"]
-    assert not any(link.get("rel") == "pre-aggregation" for link in data.get("links", []))
-
-
 def test_no_top_level_template_carries_the_proxy_marker() -> None:
-    """The marker is what keeps a template out of routine re-applies; it belongs only there."""
+    """The marker flags a template routine re-applies must skip: never a top-level one."""
     for path in STAC_DIR.glob("*.json"):
         assert "not for users" not in json.loads(path.read_text()).get("title", ""), path.name
