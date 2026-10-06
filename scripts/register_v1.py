@@ -213,14 +213,16 @@ def _is_olci_level(segment: str) -> bool:
 
 
 def remap_olci_measurement_paths(item: Item) -> None:
-    """Repoint OLCI measurement assets at the base level of the gridded store (in place).
+    """Repoint OLCI band assets at the base level of the gridded store (in place).
 
     Source EODC items describe the flat swath layout (``measurements/<band>``). The
     converter (data-model #212) writes a multiscale pyramid instead, so the same band now
     lives at ``measurements/r0/<band>``. The pyramid is written in both grid modes, so this
     remap is grid-agnostic.
     rewrite_asset_hrefs only swaps the store base, leaving the in-store path untouched —
-    without this remap every band asset would 404. Idempotent, and leaves sibling groups
+    without this remap every band asset would 404. The group asset on ``measurements``
+    itself (radianceData) stays there: it is the multiscales group, which titiler-eopf
+    reads to pick an overview level per zoom (#457). Idempotent, and leaves sibling groups
     (orphans/) and already-remapped hrefs alone.
     """
     marker = ".zarr/measurements"
@@ -230,7 +232,7 @@ def remap_olci_measurement_paths(item: Item) -> None:
         base, _, suffix = asset.href.partition(marker)
         suffix = suffix.strip("/")
         head = suffix.split("/", 1)[0]
-        if head and (head in _S3_OLCI_MEASUREMENT_SIBLINGS or _is_olci_level(head)):
+        if not head or head in _S3_OLCI_MEASUREMENT_SIBLINGS or _is_olci_level(head):
             continue
         new_href = "/".join(filter(None, (f"{base}{marker}", _S3_OLCI_BASE_LEVEL, suffix)))
         logger.debug(f"  {key}: {asset.href} -> {new_href}")

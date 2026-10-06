@@ -608,10 +608,11 @@ class TestRemapOlciMeasurementPaths:
         assert item.assets["Oa01_radianceData"].href.endswith("/measurements/r0/oa01_radiance")
         assert item.assets["Oa21_radianceData"].href.endswith("/measurements/r0/oa21_radiance")
 
-    def test_measurements_group_asset_moves_to_r0(self):
+    def test_measurements_group_asset_stays_on_multiscales_group(self):
+        """radianceData keeps pointing at `measurements`, so titiler-eopf reads overviews (#457)."""
         item = self._item()
         remap_olci_measurement_paths(item)
-        assert item.assets["radianceData"].href.endswith("/measurements/r0")
+        assert item.assets["radianceData"].href.endswith(".zarr/measurements")
 
     def test_non_measurement_assets_untouched(self):
         item = self._item()
