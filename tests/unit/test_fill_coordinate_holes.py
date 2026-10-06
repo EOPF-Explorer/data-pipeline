@@ -788,6 +788,15 @@ def test_path_expands_the_home_directory() -> None:
             },
             "`where` x: bad or no index keys",
         ),
+        (
+            {
+                "format": fch.PLAN_FORMAT,
+                "stores": [
+                    {"store": f"s3://{BUCKET}/{UPB}", "arrays": [{**PLAT, "current": {"2": "x"}}]}
+                ],
+            },
+            "`current` needs a `where`",
+        ),
     ],
     ids=[
         "no-stores",
@@ -801,6 +810,7 @@ def test_path_expands_the_home_directory() -> None:
         "current-null",
         "where-a-list",
         "where-values-a-list",
+        "current-without-where",
     ],
 )
 def test_load_plan_refuses(plan, match, tmp_path) -> None:
@@ -963,6 +973,13 @@ def test_a_swap_rerun_is_a_noop(tmp_path) -> None:
 def test_a_swap_refuses(spec, match, tmp_path) -> None:
     with pytest.raises(fch.PlanError, match=match):
         fch.plan_array(_filled(tmp_path), BUCKET, TEL, spec, tmp_path / "plan")
+
+
+def test_a_mistyped_value_is_refused_even_once_the_swap_is_done(tmp_path) -> None:
+    fake = _filled(tmp_path)
+    _swap(fake, tmp_path)
+    with pytest.raises(fch.PlanError, match="holds 110, not the plan's current 37"):
+        fch.plan_array(fake, BUCKET, TEL, {**SWAP, "values": {"1": 110.0}}, tmp_path / "plan")
 
 
 def test_a_where_array_of_another_length_is_refused(tmp_path) -> None:

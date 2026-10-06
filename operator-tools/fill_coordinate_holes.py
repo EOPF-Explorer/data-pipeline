@@ -201,7 +201,7 @@ def plan_array(
         for i, v in checks.items():
             if int(i) >= len(values) or not _same(values[int(i)].tolist(), v):
                 raise PlanError(f"{where}: {other_path}[{i}] is not {v!r}")
-    if all(before[i].tolist() == v for i, v in planned.items()) and not (before == fill).any():
+    if all(_same(before[i].tolist(), v) for i, v in planned.items()) and not (before == fill).any():
         return None  # already filled by an earlier run
     current = {int(i): v for i, v in spec.get("current", {}).items()}
     for i in planned:
@@ -283,7 +283,8 @@ def _no_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 def load_plan(path: Path) -> list[dict[str, Any]]:
     """Read and check a plan: a format tag, at least one store, each store once (as parsed), each
     with at least one array, index keys written as canonical non-negative integers, ``current``
-    only at planned indices, and every ``where`` array with at least one index."""
+    only at planned indices and always with a ``where``, and every ``where`` array with at least
+    one index."""
     plan = json.loads(path.read_text(), object_pairs_hook=_no_duplicate_keys)
     if plan.get("format") != PLAN_FORMAT:
         raise ValueError(f"plan format {plan.get('format')!r}, this tool reads {PLAN_FORMAT}")
@@ -307,6 +308,10 @@ def load_plan(path: Path) -> list[dict[str, Any]]:
                 raise ValueError(f"{what}: `current` and `where` must be JSON objects")
             if not set(current) <= set(spec["values"]):
                 raise ValueError(f"{what}: `current` names an index that has no planned value")
+            # Without a pin, a swap aimed at the wrong slot that already holds the new value would
+            # pass as already done.
+            if current and not where:
+                raise ValueError(f"{what}: `current` needs a `where` that pins the slot")
             for other, checks in where.items():
                 if not _index_keys_ok(checks):
                     raise ValueError(f"{what}: `where` {other}: bad or no index keys")

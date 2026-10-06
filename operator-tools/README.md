@@ -444,7 +444,7 @@ Writes reviewed values into fill-value holes of 1-D zarr v3 arrays on S3, and ch
 The plan is JSON: `{"format": "fill-coordinate-holes/1", "stores": [{"store": "s3://bucket/path/x.zarr", "arrays": [{"path": "descending/r10m/relative_orbit", "length": 4, "fill": 0, "values": {"3": 110}}]}]}`. Each `values` key is a slot index written as a plain integer, and each value must have the array's type (`str` or `int`).
 
 To correct a value that is wrong rather than lost, an array can also carry two optional keys:
-- `current`: the value an index must hold now, instead of the fill value. This makes the write a compare-and-swap.
+- `current`: the value an index must hold now, instead of the fill value. This makes the write a compare-and-swap. It requires a `where`, so a swap aimed at the wrong slot can't pass as already done.
 - `where`: other arrays of the same store, and the values they must hold at the given indices. These arrays are only read, never written, and pin the slot to its slice.
 
 For example, `"values": {"1": 110}, "current": {"1": 37}, "where": {"descending/r10m/absolute_orbit": {"1": 8258}}` replaces a 37 with 110 only at index 1, and only while that slice's absolute orbit is 8258.
