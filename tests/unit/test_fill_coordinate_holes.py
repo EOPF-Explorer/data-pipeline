@@ -733,8 +733,75 @@ def test_path_expands_the_home_directory() -> None:
             {"format": fch.PLAN_FORMAT, "stores": [{"store": f"s3://{BUCKET}", "arrays": [PLAT]}]},
             "expected s3://",
         ),
+        (
+            {
+                "format": fch.PLAN_FORMAT,
+                "stores": [
+                    {"store": f"s3://{BUCKET}/{UPB}", "arrays": [{**PLAT, "current": {"1": "s1c"}}]}
+                ],
+            },
+            "`current` names an index",
+        ),
+        (
+            {
+                "format": fch.PLAN_FORMAT,
+                "stores": [
+                    {"store": f"s3://{BUCKET}/{UPB}", "arrays": [{**PLAT, "where": {"x": {}}}]}
+                ],
+            },
+            "`where` x: bad or no index keys",
+        ),
+        (
+            {
+                "format": fch.PLAN_FORMAT,
+                "stores": [
+                    {
+                        "store": f"s3://{BUCKET}/{UPB}",
+                        "arrays": [{**PLAT, "where": {"x": {"01": 1}}}],
+                    }
+                ],
+            },
+            "`where` x: bad or no index keys",
+        ),
+        (
+            {
+                "format": fch.PLAN_FORMAT,
+                "stores": [
+                    {"store": f"s3://{BUCKET}/{UPB}", "arrays": [{**PLAT, "current": None}]}
+                ],
+            },
+            "must be JSON objects",
+        ),
+        (
+            {
+                "format": fch.PLAN_FORMAT,
+                "stores": [{"store": f"s3://{BUCKET}/{UPB}", "arrays": [{**PLAT, "where": ["x"]}]}],
+            },
+            "must be JSON objects",
+        ),
+        (
+            {
+                "format": fch.PLAN_FORMAT,
+                "stores": [
+                    {"store": f"s3://{BUCKET}/{UPB}", "arrays": [{**PLAT, "where": {"x": [1]}}]}
+                ],
+            },
+            "`where` x: bad or no index keys",
+        ),
     ],
-    ids=["no-stores", "no-arrays", "non-canonical-index", "same-store-twice", "bad-uri"],
+    ids=[
+        "no-stores",
+        "no-arrays",
+        "non-canonical-index",
+        "same-store-twice",
+        "bad-uri",
+        "current-unplanned",
+        "where-empty",
+        "where-non-canonical",
+        "current-null",
+        "where-a-list",
+        "where-values-a-list",
+    ],
 )
 def test_load_plan_refuses(plan, match, tmp_path) -> None:
     path = tmp_path / "plan.json"
@@ -813,3 +880,116 @@ def test_full_fsync_falls_back_when_the_filesystem_refuses_it(monkeypatch) -> No
     monkeypatch.setattr(fch.os, "fsync", lambda fd: calls.append(fd))
     fch._full_fsync(7)
     assert calls == [7]
+
+
+# --- compare-and-swap: `current` and `where` --------------------------------------------------
+
+ABS = "descending/r10m/absolute_orbit"  # 31TEL: [65107, 8258, 8258, 8360]
+# The 2 Oct fill put CDSE's 37 (orbit 8360) in the hole; the 37 at index 1 (orbit 8258) is wrong.
+FILLED = {**REL, "values": {"3": 37}}
+SWAP = {**REL, "values": {"1": 110}, "current": {"1": 37}, "where": {ABS: {"1": 8258}}}
+
+
+def _filled(tmp_path) -> FakeS3:
+    """31TEL as it is on S3 since the 2 Oct fill: relative_orbit [110, 37, 110, 37]."""
+    fake = FakeS3(_fleet())
+    _run(fake, tmp_path / "fill", [{"store": f"s3://{BUCKET}/{TEL}", "arrays": [FILLED]}])
+    fake.puts.clear()
+    return fake
+
+
+def _swap(fake, tmp_path, spec=None, **kwargs):
+    entries = [{"store": f"s3://{BUCKET}/{TEL}", "arrays": [spec or SWAP]}]
+    return _run(fake, tmp_path / "swap", entries, **kwargs)
+
+
+def test_the_fixture_holds_the_real_absolute_orbits(tmp_path) -> None:
+    assert _decode(FakeS3(_fleet()), TEL, ABS, tmp_path) == [65107, 8258, 8258, 8360]
+
+
+def test_swaps_the_wrong_37_and_keeps_the_legitimate_one(tmp_path) -> None:
+    fake = _filled(tmp_path)
+    before = dict(fake.objects)
+    run = _swap(fake, tmp_path)
+
+    assert run.failures == 0 and run.writes == 1 and run.verified == 1
+    assert _decode(fake, TEL, REL["path"], tmp_path) == [110, 110, 110, 37]
+    assert fake.puts == [_key(TEL, REL["path"])]
+    assert all(fake.objects[k] == v for k, v in before.items() if k[1] not in fake.puts)
+
+
+def test_a_swap_rerun_is_a_noop(tmp_path) -> None:
+    fake = _filled(tmp_path)
+    _swap(fake, tmp_path)
+    again = _swap(fake, tmp_path)
+
+    assert again.writes == 0 and again.skipped_clean == 1 and len(fake.puts) == 1
+
+
+@pytest.mark.parametrize(
+    ("spec", "match"),
+    [
+        ({**SWAP, "current": {"1": 36}}, "holds 37, not the plan's current 36"),
+        ({**SWAP, "current": {}}, "holds 37, not the fill value"),
+        ({**SWAP, "where": {ABS: {"1": 8360}}}, r"absolute_orbit\[1\] is not 8360"),
+        ({**SWAP, "where": {ABS: {"9": 8258}}}, r"absolute_orbit\[9\] is not 8258"),
+        ({**SWAP, "where": {"descending/r10m/nope": {"1": 1}}}, "missing"),
+        ({**SWAP, "where": {"../x": {"1": 1}}}, "not a plain relative path"),
+        (
+            {**SWAP, "values": {"3": 110}, "current": {"3": 37}, "where": {ABS: {"3": 8258}}},
+            r"absolute_orbit\[3\] is not 8258",
+        ),
+        # index 0 already holds 110: without the pin this would pass as "already done"
+        (
+            {**SWAP, "values": {"0": 110}, "current": {"0": 37}, "where": {ABS: {"0": 8258}}},
+            r"absolute_orbit\[0\] is not 8258",
+        ),
+        ({**SWAP, "current": {"1": 37.0}}, "holds 37, not the plan's current 37.0"),
+        ({**SWAP, "where": {ABS: {"1": 8258.0}}}, r"absolute_orbit\[1\] is not 8258.0"),
+    ],
+    ids=[
+        "wrong-current",
+        "no-current",
+        "wrong-where",
+        "where-out-of-range",
+        "where-missing",
+        "where-not-plain",
+        "the-legitimate-37",
+        "wrong-slice-already-110",
+        "float-current",
+        "float-where",
+    ],
+)
+def test_a_swap_refuses(spec, match, tmp_path) -> None:
+    with pytest.raises(fch.PlanError, match=match):
+        fch.plan_array(_filled(tmp_path), BUCKET, TEL, spec, tmp_path / "plan")
+
+
+def test_a_where_array_of_another_length_is_refused(tmp_path) -> None:
+    fake = _filled(tmp_path)
+    meta_key = (BUCKET, f"{TEL}/{ABS}/zarr.json")
+    fake.objects[meta_key] = json.dumps(
+        {**json.loads(fake.objects[meta_key]), "shape": [5]}
+    ).encode()
+    with pytest.raises(fch.PlanError, match="absolute_orbit has length 5, not 4"):
+        fch.plan_array(fake, BUCKET, TEL, SWAP, tmp_path / "plan")
+
+
+def test_a_where_array_changed_since_it_was_read_skips_the_store(tmp_path, monkeypatch) -> None:
+    fake = _filled(tmp_path)
+    real_head = fake.head_object
+
+    def head(Bucket, Key):  # noqa: N803
+        return {"ETag": '"changed"'} if f"/{ABS}/" in Key else real_head(Bucket=Bucket, Key=Key)
+
+    monkeypatch.setattr(fake, "head_object", head)
+    run = _swap(fake, tmp_path)
+    assert fake.puts == [] and run.failures == 1 and run.backup_path is None
+
+
+def test_restore_undoes_a_swap(tmp_path) -> None:
+    fake = _filled(tmp_path)
+    before = dict(fake.objects)
+    run = _restore(fake, tmp_path, _swap(fake, tmp_path).backup_path)
+
+    assert run.failures == 0 and run.verified == 1 and fake.objects == before

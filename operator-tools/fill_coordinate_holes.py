@@ -1,16 +1,19 @@
-"""Fill fill-value holes in 1-D zarr v3 arrays on S3 from a reviewed plan, and change nothing else.
+"""Fill fill-value holes, or replace planned wrong values, in 1-D zarr v3 arrays on S3 from a plan.
 
 Written for the S1 RTC per-slice coordinates (``r10m/platform``, ``r10m/relative_orbit``) that
 ``ingest_v1_s1_rtc._sync_tree`` lost on S3: a rewritten chunk whose compressed size had not changed
 was not uploaded, so S3 kept the fill value. The values come from a plan file built and reviewed
-separately; this tool only writes them.
+separately; this tool only writes them. An array's ``current`` maps an index to the wrong value it
+must hold now instead of the fill (a compare-and-swap), and its ``where`` maps another array of the
+same store to the values it must hold, e.g. the absolute orbit that identifies the slice.
 
 For each planned array it reads ``zarr.json`` and the single chunk, decodes the chunk with zarr in a
 temp dir, fills the planned indices, and re-encodes. A store is written only if, for every array:
 - it is a 1-D, unsharded zarr v3 array held in one chunk, with exactly the planned length and fill;
-- every planned index holds the fill value now, every planned value has the array's type and
-  survives its dtype unchanged, and no other slot of the chunk changes (the padding past the array
-  length included: only the planned indices are written);
+- every planned index holds the fill value now (or its ``current`` value), every ``where`` array
+  holds its values (read only), every planned value has the array's type and survives its dtype
+  unchanged, and no other slot of the chunk changes (the padding past the array length included:
+  only the planned indices are written);
 - no fill value is left afterwards (the plan covers every hole);
 - ``zarr.json`` is untouched (only the chunk ``c/0`` is written).
 An array whose planned indices already hold the planned values (and has no other hole) is skipped,
@@ -27,8 +30,9 @@ Safety properties (as in ``consolidate_zarr_groups.py``):
 - every chunk is backed up (base64, with the hash of its replacement) and fsync'd before its store's
   first PUT; ``--restore`` puts them back, and refuses a chunk changed since the repair unless
   ``--force``
-- the ETags of each chunk and of its ``zarr.json`` are re-checked before writing, every PUT is read
-  back, any failed or uncertain PUT stops the run, and 3 consecutive or 10 total failures abort it
+- the ETags of each chunk, of its ``zarr.json`` and of every ``where`` array are re-checked before
+  writing, every PUT is read back, any failed or uncertain PUT stops the run, and 3 consecutive or
+  10 total failures abort it
 """
 
 import argparse
@@ -74,6 +78,7 @@ class ChunkWrite:
     new: bytes
     meta_key: str
     meta_etag: str
+    guards: list[tuple[str, str]] = field(default_factory=list)  # (key, ETag) of `where` arrays
 
 
 @dataclass
@@ -121,13 +126,41 @@ def chunk_key(prefix: str, path: str, meta: dict[str, Any]) -> str:
     return f"{prefix}/{path}/c/0"
 
 
+def _same(stored: Any, planned: Any) -> bool:
+    """Equal and of the same type: ``37.0`` or ``True`` in a plan does not match a stored 37 or 1."""
+    return type(stored) is type(planned) and stored == planned
+
+
+def _plain_path(bucket: str, prefix: str, raw: str) -> str:
+    path = raw.strip("/")
+    if not path or any(segment in ("", ".", "..") for segment in path.split("/")):
+        raise PlanError(f"s3://{bucket}/{prefix}: {raw!r} is not a plain relative path")
+    return path
+
+
+def _read_array(
+    s3: Any, bucket: str, prefix: str, path: str, workdir: Path
+) -> tuple[np.ndarray, list[tuple[str, str]]]:
+    """Another array's values, for a ``where`` check, and the (key, ETag) of each object read."""
+    meta_key = f"{prefix}/{path}/zarr.json"
+    got = _get(s3, bucket, meta_key)
+    if got is None:
+        raise PlanError(f"s3://{bucket}/{meta_key}: missing")
+    meta_body, meta_etag = got
+    meta = json.loads(meta_body)
+    key = chunk_key(prefix, path, meta)
+    got = _get(s3, bucket, key)
+    if got is None:
+        raise PlanError(f"s3://{bucket}/{key}: missing")
+    values = _decode_whole_chunk(meta, got[0], workdir)[: meta["shape"][0]]
+    return values, [(meta_key, meta_etag), (key, got[1])]
+
+
 def plan_array(
     s3: Any, bucket: str, prefix: str, spec: dict[str, Any], workdir: Path
 ) -> ChunkWrite | None:
     """The chunk write that fills ``spec``'s holes, or None when they are already filled."""
-    path = spec["path"].strip("/")
-    if not path or any(segment in ("", ".", "..") for segment in path.split("/")):
-        raise PlanError(f"s3://{bucket}/{prefix}: {spec['path']!r} is not a plain relative path")
+    path = _plain_path(bucket, prefix, spec["path"])
     where = f"s3://{bucket}/{prefix}/{path}"
     meta_key = f"{prefix}/{path}/zarr.json"
     got = _get(s3, bucket, meta_key)
@@ -155,11 +188,26 @@ def plan_array(
     planned = {int(i): v for i, v in spec["values"].items()}
     if not planned or not all(0 <= i < len(before) for i in planned):
         raise PlanError(f"{where}: planned indices {sorted(planned)} are empty or out of range")
+    # Before the already-done shortcut, so a clean skip also means the plan's slices are the right ones.
+    guards: list[tuple[str, str]] = []
+    for other, checks in spec.get("where", {}).items():
+        other_path = _plain_path(bucket, prefix, other)
+        values, read = _read_array(
+            s3, bucket, prefix, other_path, workdir / ".where" / path / other_path
+        )
+        if len(values) != spec["length"]:
+            raise PlanError(f"{where}: {other_path} has length {len(values)}, not {spec['length']}")
+        guards += read
+        for i, v in checks.items():
+            if int(i) >= len(values) or not _same(values[int(i)].tolist(), v):
+                raise PlanError(f"{where}: {other_path}[{i}] is not {v!r}")
     if all(before[i].tolist() == v for i, v in planned.items()) and not (before == fill).any():
         return None  # already filled by an earlier run
+    current = {int(i): v for i, v in spec.get("current", {}).items()}
     for i in planned:
-        if before[i].tolist() != fill:
-            raise PlanError(f"{where}: index {i} holds {before[i].tolist()!r}, not the fill value")
+        if not _same(before[i].tolist(), current.get(i, fill)):
+            now = "the fill value" if i not in current else f"the plan's current {current[i]!r}"
+            raise PlanError(f"{where}: index {i} holds {before[i].tolist()!r}, not {now}")
 
     expected = before.copy()
     for i, value in planned.items():
@@ -195,7 +243,7 @@ def plan_array(
     files = sorted(p.relative_to(local).as_posix() for p in local.rglob("*") if p.is_file())
     if files != ["c/0", "zarr.json"]:
         raise PlanError(f"{where}: unexpected files after filling: {files}")
-    return ChunkWrite(key, etag, old, new, meta_key, meta_etag)
+    return ChunkWrite(key, etag, old, new, meta_key, meta_etag, guards)
 
 
 def _decode_whole_chunk(meta: dict[str, Any], chunk: bytes, where: Path) -> np.ndarray:
@@ -234,7 +282,8 @@ def _no_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 def load_plan(path: Path) -> list[dict[str, Any]]:
     """Read and check a plan: a format tag, at least one store, each store once (as parsed), each
-    with at least one array, and index keys written as canonical non-negative integers."""
+    with at least one array, index keys written as canonical non-negative integers, ``current``
+    only at planned indices, and every ``where`` array with at least one index."""
     plan = json.loads(path.read_text(), object_pairs_hook=_no_duplicate_keys)
     if plan.get("format") != PLAN_FORMAT:
         raise ValueError(f"plan format {plan.get('format')!r}, this tool reads {PLAN_FORMAT}")
@@ -250,11 +299,27 @@ def load_plan(path: Path) -> list[dict[str, Any]]:
         if not entry.get("arrays"):
             raise ValueError(f"{entry['store']}: no arrays")
         for spec in entry["arrays"]:
-            keys = list(spec.get("values") or {})
-            bad = [k for k in keys if not k.isdigit() or str(int(k)) != k]
-            if not keys or bad:
-                raise ValueError(f"{entry['store']} {spec.get('path')}: bad or no index keys {bad}")
+            what = f"{entry['store']} {spec.get('path')}"
+            if not _index_keys_ok(spec.get("values")):
+                raise ValueError(f"{what}: bad or no index keys")
+            current, where = spec.get("current", {}), spec.get("where", {})
+            if not isinstance(current, dict) or not isinstance(where, dict):
+                raise ValueError(f"{what}: `current` and `where` must be JSON objects")
+            if not set(current) <= set(spec["values"]):
+                raise ValueError(f"{what}: `current` names an index that has no planned value")
+            for other, checks in where.items():
+                if not _index_keys_ok(checks):
+                    raise ValueError(f"{what}: `where` {other}: bad or no index keys")
     return stores
+
+
+def _index_keys_ok(mapping: Any) -> bool:
+    """A non-empty JSON object keyed by canonical non-negative integers ("3", not "03" or "-1")."""
+    return (
+        isinstance(mapping, dict)
+        and bool(mapping)
+        and all(k.isdigit() and str(int(k)) == k for k in mapping)
+    )
 
 
 class FillRun:
@@ -359,7 +424,8 @@ class FillRun:
     def _write_store(self, store_uri: str, plan: StorePlan) -> bool:
         """Write one store's plan. Returns True when the run must abort."""
         for write in plan.writes:  # staleness guard, before anything is written
-            for key, etag in ((write.meta_key, write.meta_etag), (write.key, write.etag)):
+            checked = [(write.meta_key, write.meta_etag), (write.key, write.etag), *write.guards]
+            for key, etag in checked:
                 try:
                     current = self.s3.head_object(Bucket=plan.bucket, Key=key)["ETag"]
                 except S3_ERRORS as exc:
@@ -408,7 +474,8 @@ class FillRun:
                     return
 
     def restore(self, backup_file: Path, force: bool) -> None:
-        """Put each backed-up chunk back, which empties the filled holes again."""
+        """Put each backed-up chunk back: the filled holes are empty again, and the values a
+        ``current`` plan replaced come back too."""
         entries = []
         for n, line in enumerate(backup_file.read_text().splitlines(), 1):
             if not line:
