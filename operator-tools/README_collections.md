@@ -316,30 +316,16 @@ uv run operator-tools/manage_collections.py batch-create stac/ --pattern "*-stag
 > ⚠️ `batch-create` globs `*.json` **non-recursively** and applies every match behind a
 > single confirmation. Templates that must NOT be created by a routine re-apply live in a
 > subdirectory and are therefore skipped: `stac/proxy/` holds the third-party proxy
-> collections (`sentinel-2-l2a-samples-zarr3*`, coordination#287), which advertise data we
-> do not convert (the `-ovh` copy is hosted in our test bucket) and must only be created
-> deliberately:
+> collection (`sentinel-2-l2a-samples-zarr3`, coordination#287), which advertises data we
+> do not convert and must only be created deliberately:
 >
 > ```bash
 > uv run operator-tools/manage_collections.py create stac/proxy/sentinel-2-l2a-samples-zarr3.json
 > ```
 >
-> `stac/proxy/sentinel-2-l2a-mirror-rstaging.json` (coordination#304) lives there too: it
-> re-publishes four prod `sentinel-2-l2a` items, under their prod ids, with `/rstaging`
-> links (`scripts/register_proxy.py --mirror-explorer`). Its assets are the prod stores,
-> so **never run any `--add-missing` storage-tier sync on it** (`update_stac_storage_tier.py`,
-> `manage_collections.py sync-storage-tiers`, `manage_item.py sync-storage-tiers`): each
-> would rebuild the S3 alternates the mirror strips.
->
 > Every `stac/proxy/` item shares its id with a prod `sentinel-2-l2a` item, so remove these
 > collections by deleting the collection, which takes its items with it, and **never delete
-> their items by id**. For `-ovh`, first delete its OVH copies through the items, or deleting
-> the collection drops the only record of where they are:
->
-> ```bash
-> uv run operator-tools/manage_collections.py clean sentinel-2-l2a-samples-zarr3-ovh --clean-s3 \
->     --confine-to s3://esa-zarr-sentinel-explorer-tests/samples-zarr3-proxy/ --dry-run   # then without --dry-run
-> ```
+> their items by id**.
 
 **Features:**
 - Processes all matching JSON files in directory

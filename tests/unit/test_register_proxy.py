@@ -18,10 +18,8 @@ import pytest
 import register_proxy
 import requests
 from register_proxy import (
-    DROPPED_EXTENSION_PREFIXES,
     PROXY_EXPIRES,
-    assert_s3_urls_confined,
-    build_mirror_item,
+    assert_no_s3_urls,
     build_proxy_item,
     fetch_source_item,
     fill_cube_extent,
@@ -43,21 +41,6 @@ COLLECTION = "sentinel-2-l2a-samples-zarr3"
 NEW = "sentinel-2-l2a-new"  # the pipeline's user-facing target (plan rev 3)
 RASTER = "https://rstaging.invalid/rstaging"
 STAC_API = "https://stac.invalid/stac"
-# The prod catalogue named inside the fixture items; never a target here.
-PROD_STAC = "https://api.explorer.eopf.copernicus.eu/stac"
-OVH_BASE = (
-    "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-tests/samples-zarr3-proxy"
-)
-OVH_ENDPOINT = "https://s3.de.io.cloud.ovh.net"
-OVH_CONFINE = "s3://esa-zarr-sentinel-explorer-tests/samples-zarr3-proxy/"
-TRACK_B = [
-    "--store-root-base",
-    OVH_BASE,
-    "--s3-endpoint",
-    OVH_ENDPOINT,
-    "--confine-to",
-    OVH_CONFINE,
-]
 
 
 @pytest.fixture(autouse=True)
@@ -97,20 +80,6 @@ def old_source():
 @pytest.fixture
 def proxy(source):
     return build_proxy_item(source, COLLECTION, RASTER, STAC_API, expires=PROXY_EXPIRES).to_dict()
-
-
-@pytest.fixture
-def track_b(source):
-    with patch("register_v1.get_s3_storage_class", return_value="STANDARD"):
-        return build_proxy_item(
-            source,
-            f"{COLLECTION}-ovh",
-            RASTER,
-            STAC_API,
-            expires=PROXY_EXPIRES,
-            store_root_base=OVH_BASE,
-            s3_endpoint=OVH_ENDPOINT,
-        ).to_dict()
 
 
 def store_link(item):
@@ -190,8 +159,7 @@ def test_expires_is_the_fixed_proxy_date(proxy):
 
     A fixed date, not `now + N days`: re-registering an item must not push it out. An
     item with no `expires` at all is what `cleanup_expired_items.evaluate_guards` refuses
-    first (`no_expires`), which would leave the Track B copies in our own bucket
-    unreclaimable by anything automated.
+    first (`no_expires`).
     """
     assert proxy["properties"]["expires"] == "2026-11-01T00:00:00Z"
     assert any("timestamps" in ext for ext in proxy["stac_extensions"])
@@ -261,83 +229,6 @@ def test_source_dict_is_not_mutated(source):
     assert json.dumps(source, sort_keys=True) == before
 
 
-# --- Track B: store root rebase + S3 alternates ---
-
-
-def test_store_root_base_rewrites_every_asset_href_flat(source):
-    proxy = build_proxy_item(
-        source,
-        f"{COLLECTION}-ovh",
-        RASTER,
-        STAC_API,
-        expires=PROXY_EXPIRES,
-        store_root_base=OVH_BASE,
-    ).to_dict()
-    for key in ("reflectance", "AOT_10m", "WVP_10m", "SCL_20m"):
-        assert proxy["assets"][key]["href"].startswith(OVH_BASE)
-    # Flat: the source's YYYY/MM/DD directories are dropped (T0.9).
-    assert store_link(proxy) == f"{OVH_BASE}/{proxy['id']}.zarr"
-
-
-def test_store_root_base_keeps_the_sub_paths_below_the_store(source):
-    proxy = build_proxy_item(
-        source, COLLECTION, RASTER, STAC_API, expires=PROXY_EXPIRES, store_root_base=OVH_BASE
-    )
-    reflectance = proxy.assets["reflectance"].href
-    assert reflectance == f"{OVH_BASE}/{proxy.id}.zarr/measurements/reflectance"
-
-
-def test_s3_endpoint_adds_alternates_and_their_extensions(track_b):
-    alternate = track_b["assets"]["AOT_10m"]["alternate"]["s3"]
-    assert alternate["href"].startswith("s3://esa-zarr-sentinel-explorer-tests/")
-    assert any("alternate-assets" in ext for ext in track_b["stac_extensions"])
-
-
-def test_s3_alternates_use_the_storage_v2_layout_the_extension_declares(track_b):
-    """Storage v2 requires item-level `storage:schemes`; the live -ovh items had none and
-    failed STAC validation (2026-09-23). Each ref must name a scheme on OUR bucket."""
-    schemes = track_b["properties"]["storage:schemes"]
-    assert {s["bucket"] for s in schemes.values()} == {"esa-zarr-sentinel-explorer-tests"}
-    for key in ("reflectance", "AOT_10m", "WVP_10m", "SCL_20m"):
-        s3 = track_b["assets"][key]["alternate"]["s3"]
-        assert s3["storage:refs"] == ["standard"]
-        assert "storage:scheme" not in s3
-
-
-@patch("register_v1.get_s3_storage_class", return_value=None)
-def test_a_track_b_store_with_no_readable_tier_is_refused(_tier, source):
-    """A missing or unreadable OVH store has no storage class; it was registered as
-    'standard', pointing at nothing."""
-    with pytest.raises(ValueError, match="no storage tier"):
-        build_proxy_item(
-            source,
-            f"{COLLECTION}-ovh",
-            RASTER,
-            STAC_API,
-            expires=PROXY_EXPIRES,
-            store_root_base=OVH_BASE,
-            s3_endpoint=OVH_ENDPOINT,
-        )
-
-
-def test_the_two_consumers_each_get_the_slash_form_they_need(track_b):
-    """titiler wants a bare `.zarr` href; s3_item_cleanup wants a trailing slash.
-
-    They read different fields, so both can be satisfied — but only deliberately.
-    A bare `s3://…/X.zarr` is `bare_zarr_store`: the delete removes nothing, counts 0
-    remaining, and drops the STAC item while the whole store lives on.
-    """
-    from s3_item_cleanup import check_urls_confined
-
-    allowed = [("esa-zarr-sentinel-explorer-tests", "samples-zarr3-proxy/")]
-    for key in ("AOT_10m", "WVP_10m", "SCL_20m"):
-        asset = track_b["assets"][key]
-        assert asset["href"].endswith(".zarr"), "titiler 404s on a trailing slash"
-        s3_href = asset["alternate"]["s3"]["href"]
-        assert s3_href.endswith(".zarr/"), "cleanup refuses a bare .zarr key"
-        assert check_urls_confined({s3_href}, allowed) == []
-
-
 def test_missing_self_link_is_refused(source):
     source["links"] = [link for link in source["links"] if link["rel"] != "self"]
     with pytest.raises(ValueError, match="no self link"):
@@ -381,9 +272,6 @@ def test_more_ids_than_max_items_exits_before_any_network_call(client, upsert, f
     "extra",
     [
         ["--collection", "sentinel-2-l2a"],  # prod: not a proxy collection
-        ["--collection", f"{COLLECTION}-ovh"],  # Track A flags into the Track B collection
-        ["--collection", COLLECTION, *TRACK_B],  # Track B flags into the Track A collection
-        ["--confine-to", OVH_CONFINE],  # a Track B flag on its own
         ["--item-id", "../elsewhere"],  # an id that is a path
         ["--item-id", ".hidden"],
     ],
@@ -397,23 +285,12 @@ def test_refused_before_any_network_call(upsert, fetch, extra):
     upsert.assert_not_called()
 
 
-@pytest.mark.parametrize(
-    "flag",
-    [
-        "--source-stac-api",
-        "--raster-api-url",
-        "--stac-api-url",
-        "--store-root-base",
-        "--s3-endpoint",
-    ],
-)
+@pytest.mark.parametrize("flag", ["--source-stac-api", "--raster-api-url", "--stac-api-url"])
 @patch("register_proxy.fetch_source_item")
 @patch("register_proxy.upsert_item")
 def test_every_url_flag_must_be_https(upsert, fetch, flag, caplog):
-    """A cleartext --stac-api-url would send the OIDC bearer in the clear. Given a
-    complete, valid Track B set so no other guard can mask this one."""
-    args = ["--collection", f"{COLLECTION}-ovh", *TRACK_B, "--item-id", "a", "--max-items", "1"]
-    assert cli(*args, flag, "http://plain.invalid/x") == 1
+    """A cleartext --stac-api-url would send the OIDC bearer in the clear."""
+    assert cli("--item-id", "a", "--max-items", "1", flag, "http://plain.invalid/x") == 1
     assert "must be an HTTPS URL" in caplog.text
     fetch.assert_not_called()
     upsert.assert_not_called()
@@ -466,74 +343,14 @@ def test_collection_link_points_at_the_proxy_collection(proxy):
 # --- Guards added after the 2026-09-14 review ---------------------------------
 
 
-@pytest.mark.parametrize(
-    ("base", "rc"),
-    [
-        (OVH_BASE, 0),
-        # prod's own prefix: every alternate would name the PROD store of the same id
-        ("https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output", 1),
-    ],
-)
-@patch("register_v1.get_s3_storage_class", return_value="STANDARD")
-def test_track_b_alternates_must_sit_under_confine_to(_tier, source, tmp_path, base, rc):
-    with patch("register_proxy.fetch_source_item", return_value=source):
-        code = cli(
-            "--collection", f"{COLLECTION}-ovh", *TRACK_B, "--store-root-base", base,
-            "--item-id", source["id"], "--max-items", "1", "--dry-run", str(tmp_path),
-        )  # fmt: skip
-    assert code == rc
-    assert (tmp_path / f"{source['id']}.json").exists() == (rc == 0)
-
-
-def test_an_item_that_must_have_no_s3_location_is_refused_if_it_has_one(prod_item):
-    """Track A and mirror items name stores we do not own; an s3:// href on one would let
-    a cleanup delete them."""
-    prod_item["assets"]["reflectance"]["href"] = "s3://esa-zarr-sentinel-explorer-fra/X.zarr/"
-    mirror = build_mirror_item(prod_item, MIRROR, RASTER, STAC_API, expires=PROXY_EXPIRES)
+def test_an_item_that_must_have_no_s3_location_is_refused_if_it_has_one(source):
+    """Proxy items name stores we do not own; an s3:// href on one would let a cleanup
+    delete them."""
+    proxy = build_proxy_item(source, COLLECTION, RASTER, STAC_API, expires=PROXY_EXPIRES)
+    assert_no_s3_urls(proxy)  # control: the item as built passes
+    proxy.assets["reflectance"].href = "s3://esa-zarr-sentinel-explorer-fra/X.zarr/"
     with pytest.raises(ValueError, match="advertises S3 location"):
-        assert_s3_urls_confined(mirror, None)
-
-
-@patch("register_v1.get_s3_storage_class", return_value="STANDARD")
-def test_s3_endpoint_works_off_the_explorer_gateway(_tier, source):
-    """Track B may be served from OVH directly, not only through the Explorer gateway.
-
-    `https_to_s3` recognises the gateway it is given and returns None for every other
-    host, so the gateway must come from the store root we actually wrote. Getting this
-    wrong is silent: zero alternates, no log line, exit 0 — and `s3_item_cleanup` then
-    records `no_s3_urls`, which is not a FAILURE_STATUS, so the store is skipped by the
-    retention cron on every run, forever.
-    """
-    ovh_direct = (
-        "https://s3.de.io.cloud.ovh.net/esa-zarr-sentinel-explorer-tests/samples-zarr3-proxy"
-    )
-    proxy = build_proxy_item(
-        source,
-        f"{COLLECTION}-ovh",
-        RASTER,
-        STAC_API,
-        expires=PROXY_EXPIRES,
-        store_root_base=ovh_direct,
-        s3_endpoint="https://s3.de.io.cloud.ovh.net",
-    ).to_dict()
-    for key in ("reflectance", "AOT_10m", "WVP_10m", "SCL_20m"):
-        href = proxy["assets"][key]["alternate"]["s3"]["href"]
-        assert href.startswith("s3://esa-zarr-sentinel-explorer-tests/samples-zarr3-proxy/")
-
-
-@patch("register_v1.get_s3_storage_class", return_value="STANDARD")
-def test_an_unconvertible_store_root_is_refused_not_registered(_tier, source):
-    """No alternate means no deleter can ever select the item — refuse to write it."""
-    with pytest.raises(ValueError, match="no alternate.s3 href"):
-        build_proxy_item(
-            source,
-            f"{COLLECTION}-ovh",
-            RASTER,
-            STAC_API,
-            expires=PROXY_EXPIRES,
-            store_root_base="ftp://example.invalid/bucket/prefix",
-            s3_endpoint="https://s3.de.io.cloud.ovh.net",
-        )
+        assert_no_s3_urls(proxy)
 
 
 def test_an_unknown_source_asset_is_dropped_not_proxied(source):
@@ -672,173 +489,6 @@ def test_one_failing_item_does_not_abandon_the_rest(client, upsert, source):
     assert rc == 1, "a torn run must not report success"
     assert calls == ["BAD", source["id"]], "the second id must still be attempted"
     upsert.assert_called_once()
-
-
-@pytest.mark.parametrize(
-    ("flag", "value"),
-    [("--store-root-base", OVH_BASE), ("--s3-endpoint", OVH_ENDPOINT)],
-)
-@patch("register_proxy.fetch_source_item")
-@patch("register_proxy.upsert_item")
-@patch("register_proxy.stac_auth.open_client")
-def test_a_track_b_flag_on_its_own_is_refused(client, upsert, fetch, flag, value):
-    """Alone, one registers unreclaimable OVH stores, the other bogus `s3://collections/…`."""
-    assert cli("--item-id", "a", "--max-items", "1", flag, value) == 1
-    client.assert_not_called()
-    fetch.assert_not_called()
-    upsert.assert_not_called()
-
-
-# --- --mirror-explorer: Explorer items re-rendered on /rstaging (coordination#304) ---
-
-MIRROR = "sentinel-2-l2a-mirror-rstaging"
-PROD_FIXTURE = (
-    Path(__file__).parent.parent
-    / "fixtures/explorer/S2B_MSIL2A_20260920T112109_N0512_R037_T29SPB_20260920T151606.json"
-)
-
-
-@pytest.fixture
-def prod_item():
-    return json.loads(PROD_FIXTURE.read_text())
-
-
-@pytest.fixture
-def mirror(prod_item):
-    return build_mirror_item(prod_item, MIRROR, RASTER, STAC_API, expires=PROXY_EXPIRES).to_dict()
-
-
-def mirror_cli(*args):
-    return main(
-        [
-            "--mirror-explorer",
-            "--source-stac-api",
-            STAC_API,
-            "--source-collection",
-            "sentinel-2-l2a",
-            "--raster-api-url",
-            RASTER,
-            "--stac-api-url",
-            STAC_API,
-            *args,
-        ]
-    )
-
-
-def test_mirror_keeps_the_prod_assets_and_hrefs_except_the_thumbnail(prod_item, mirror):
-    assert set(mirror["assets"]) == set(prod_item["assets"])
-    for key, asset in mirror["assets"].items():
-        if key != "thumbnail":  # re-rendered on /rstaging, see the render-links test
-            assert asset["href"] == prod_item["assets"][key]["href"]
-
-
-def test_no_deleter_can_reach_the_prod_stores_through_a_mirror_item(prod_item, mirror):
-    """The stores are prod's: an S3 URL on a mirror item would let its cleanup delete them."""
-    assert extract_s3_urls_from_item(prod_item), "control: the prod item does resolve"
-    assert extract_s3_urls_from_item(mirror) == set()
-    assert "storage:schemes" not in mirror["properties"]
-    assert not any(ext.startswith(DROPPED_EXTENSION_PREFIXES) for ext in mirror["stac_extensions"])
-
-
-def test_mirror_declares_the_prod_extensions_minus_storage_and_nothing_new(prod_item, mirror):
-    """Declaring datacube, as the proxy does, makes our reflectance asset fail its schema.
-
-    Validated 2026-09-23: the prod item is valid as published, and a mirror that also
-    declares datacube v2.3.0 is not. Schema validation needs the network, so pin the set.
-    """
-    expected = [
-        ext
-        for ext in prod_item["stac_extensions"]
-        if not ext.startswith(DROPPED_EXTENSION_PREFIXES)
-    ]
-    assert mirror["stac_extensions"] == expected
-
-
-def test_mirror_links_point_at_the_mirror_and_back_at_prod_only_via_canonical(prod_item, mirror):
-    rels = sorted(link["rel"] for link in mirror["links"])
-    assert rels == sorted(
-        ["collection", "canonical", "store", "cite-as", "license", "derived_from"]
-        + ["viewer", "xyz", "tilejson"]
-    ), "one of each: no /raster render link, no dead `via`"
-    assert link_href(mirror, "collection") == f"{STAC_API}/collections/{MIRROR}"
-    assert link_href(mirror, "canonical") == link_href(prod_item, "self")
-    prod_hrefs = [
-        link["rel"]
-        for link in mirror["links"]
-        if link["href"].startswith(f"{PROD_STAC}/collections/sentinel-2-l2a/")
-    ]
-    assert prod_hrefs == ["canonical"]
-    # The EODC lineage survives: `canonical` is added, it does not replace `derived_from`.
-    assert link_href(mirror, "derived_from") == link_href(prod_item, "derived_from")
-
-
-def test_mirror_render_links_are_the_proxy_form_on_rstaging(mirror):
-    base = f"{RASTER}/collections/{MIRROR}/items/{mirror['id']}"
-    assert link_href(mirror, "viewer").startswith(f"{base}/WebMercatorQuad/map.html?")
-    assert link_href(mirror, "xyz").startswith(f"{base}/tiles/WebMercatorQuad/")
-    assert "assets=reflectance%7Cbands%3Db04%2Cb03%2Cb02" in link_href(mirror, "tilejson")
-    xyz_query = link_href(mirror, "xyz").split("?", 1)[1]
-    assert (
-        mirror["assets"]["thumbnail"]["href"]
-        == f"{base}/preview?format=webp&max_size=512&{xyz_query}"
-    )
-
-
-def test_mirror_expires_on_the_fixed_proxy_date(mirror):
-    assert mirror["properties"]["expires"] == "2026-11-01T00:00:00Z"
-
-
-def test_a_mirror_item_missing_a_proxy_asset_is_refused(source):
-    """The EODC source has SR_*/ATM_* groups, not the Explorer's four assets."""
-    with pytest.raises(ValueError, match="mirror item is missing"):
-        build_mirror_item(source, MIRROR, RASTER, STAC_API, expires=PROXY_EXPIRES)
-
-
-def test_mirror_does_not_mutate_the_source(prod_item):
-    before = deepcopy(prod_item)
-    build_mirror_item(prod_item, MIRROR, RASTER, STAC_API, expires=PROXY_EXPIRES)
-    assert prod_item == before
-
-
-@pytest.mark.parametrize("collection", ["sentinel-2-l2a", COLLECTION, "sentinel-2-l2a-staging"])
-@patch("register_proxy.fetch_source_item")
-@patch("register_proxy.upsert_item")
-@patch("register_proxy.stac_auth.open_client")
-def test_a_mirror_run_refuses_a_non_mirror_collection(client, upsert, fetch, collection):
-    """Mirror ids ARE prod ids: aimed at prod, the upsert's PUT would replace live items."""
-    assert mirror_cli("--collection", collection, "--item-id", "a", "--max-items", "1") == 1
-    client.assert_not_called()
-    fetch.assert_not_called()
-    upsert.assert_not_called()
-
-
-@patch("register_proxy.fetch_source_item")
-@patch("register_proxy.upsert_item")
-@patch("register_proxy.stac_auth.open_client")
-def test_a_mirror_run_refuses_its_source_collection_and_track_b_flags(client, upsert, fetch):
-    base = ["--item-id", "a", "--max-items", "1"]
-    same = ["--source-collection", MIRROR, "--collection", MIRROR]
-    assert mirror_cli(*same, *base) == 1
-    track_b = ["--store-root-base", OVH_BASE, "--s3-endpoint", "https://s3.de.io.cloud.ovh.net"]
-    assert mirror_cli("--collection", MIRROR, *track_b, *base) == 1
-    client.assert_not_called()
-    fetch.assert_not_called()
-    upsert.assert_not_called()
-
-
-@patch("register_proxy.upsert_item")
-def test_a_mirror_dry_run_writes_the_mirror_item(upsert, prod_item, tmp_path):
-    with patch("register_proxy.fetch_source_item", return_value=prod_item) as fetch:
-        rc = mirror_cli(
-            "--collection", MIRROR, "--item-id", prod_item["id"], "--max-items", "1",
-            "--dry-run", str(tmp_path),
-        )  # fmt: skip
-    assert rc == 0
-    fetch.assert_called_once_with(STAC_API, "sentinel-2-l2a", prod_item["id"])
-    upsert.assert_not_called()
-    written = json.loads((tmp_path / f"{prod_item['id']}.json").read_text())
-    assert written["collection"] == MIRROR
-    assert link_href(written, "canonical") == link_href(prod_item, "self")
 
 
 # --- pipeline mode: --items-json, create-only (plan rev 2, T1/T2) ---
@@ -1031,14 +681,8 @@ def test_the_transition_pipeline_keeps_running_after_the_proxy_expiry(
     [
         lambda tmp_path: pipeline_cli(tmp_path, ["A"], collection="sentinel-2-l2a"),
         lambda _: cli("--collection", "sentinel-2-l2a", "--item-id", "a", "--max-items", "1"),
-        lambda _: cli(
-            "--collection", "sentinel-2-l2a", *TRACK_B, "--item-id", "a", "--max-items", "1"
-        ),
-        lambda _: mirror_cli(
-            "--collection", "sentinel-2-l2a", "--item-id", "a", "--max-items", "1"
-        ),
     ],
-    ids=["pipeline", "track-a", "track-b", "mirror"],
+    ids=["pipeline", "track-a"],
 )
 @patch("register_proxy.fetch_source_item")
 @patch("register_proxy.upsert_item")
@@ -1046,25 +690,6 @@ def test_the_transition_pipeline_keeps_running_after_the_proxy_expiry(
 def test_no_run_may_write_the_converted_archive(client, upsert, fetch, tmp_path, run):
     """Plan rev 3, R1: `sentinel-2-l2a` keeps our converted items and takes no run at all."""
     assert run(tmp_path) == 1
-    client.assert_not_called()
-    fetch.assert_not_called()
-    upsert.assert_not_called()
-
-
-@pytest.mark.parametrize(
-    "run",
-    [
-        lambda: cli("--collection", NEW, *TRACK_B, "--item-id", "a", "--max-items", "1"),
-        lambda: mirror_cli("--collection", NEW, "--item-id", "a", "--max-items", "1"),
-    ],
-    ids=["track-b", "mirror"],
-)
-@patch("register_proxy.fetch_source_item")
-@patch("register_proxy.upsert_item")
-@patch("register_proxy.stac_auth.open_client")
-def test_the_transition_collection_takes_only_the_pipeline(client, upsert, fetch, run):
-    """R3: through TARGET_RUNS, not the --items-json flag check, which these runs never reach."""
-    assert run() == 1
     client.assert_not_called()
     fetch.assert_not_called()
     upsert.assert_not_called()
@@ -1089,13 +714,11 @@ def test_the_transition_template_describes_the_items_it_will_hold(source):
 @pytest.mark.parametrize(
     ("extra", "collection"),
     [
-        (TRACK_B, NEW),  # Track B into the user-facing collection
-        (["--mirror-explorer"], NEW),
         (["--item-id", "other"], NEW),  # ids from anywhere but discover's list
         ([], "sentinel-2-l2a-staging"),  # near misses: a substring check would take them
         ([], "sentinel-2-l2a-samples-zarr3x"),
-        ([], "sentinel-2-l2a-samples-zarr3-ovh"),  # EODC hrefs into the OVH-copies collection
-        ([], "sentinel-2-l2a-mirror-rstaging"),
+        ([], "sentinel-2-l2a-samples-zarr3-ovh"),  # deleted 2026-10-05
+        ([], "sentinel-2-l2a-mirror-rstaging"),  # deleted 2026-10-05
         ([], "sentinel-2-l2a-zarr3"),  # the source collection itself
     ],
 )

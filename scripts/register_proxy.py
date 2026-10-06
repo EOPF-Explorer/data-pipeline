@@ -8,10 +8,6 @@ those source items into a *proxy* collection on the Explorer STAC API so the
 Explorer's TiTiler, STAC browser and eodash can be pointed at Samples Service data
 without copying it.
 
-``--mirror-explorer`` (coordination#304) runs the same loop on the Explorer's own items:
-it copies ``sentinel-2-l2a`` items into a ``*mirror-rstaging*`` collection with the same
-``/rstaging`` links, so our GeoZarr renders next to the proxies. See ``build_mirror_item``.
-
 ``--items-json`` is the **pipeline mode** that publishes new Sentinel-2 scenes into
 ``sentinel-2-l2a-new`` once our conversion stops (plan rev 3, 2026-09-30): it registers the ids
 ``query_stac.py discover`` wrote, **create-only** (a 409 is ``exists``, never a PUT), appends each
@@ -23,8 +19,7 @@ converted archive, ``sentinel-2-l2a``, takes no run at all.
 It deliberately does NOT convert or upload anything: ``build_proxy_item`` is a pure
 dict-in/Item-out transform, and the only write is the STAC upsert (a create in pipeline
 mode). Outside ``sentinel-2-l2a-new`` it stamps a fixed ``expires`` (see ``PROXY_EXPIRES``) —
-without one the items would be structurally undeletable, and a Track B copy in our own bucket
-could never be reclaimed.
+without one the items would be structurally undeletable.
 
 Render host is ``/rstaging`` (titiler-eopf **0.12.0**), not ``/raster`` (0.11.0): only
 0.12.0 serves the ``assets=<key>|bands=…`` / ``|variables=…`` notation these items use,
@@ -47,16 +42,9 @@ SCL_20m     ``<store>/`` (store root)          ``…/l2a_classification/r20m:scl
 The three non-reflectance assets point at the **store root** because EODC only
 consolidates metadata at the root and on ``measurements/reflectance`` — the
 ``quality/atmosphere`` and ``conditions/mask`` group hrefs cannot be opened over
-HTTPS (same defect data-pipeline#412 fixes for our own stores).
-
-Trailing slashes on that root are where two consumers disagree, so each field gets
-the form its reader needs (measured 2026-09-11, see ``slash_bare_zarr_alternates``):
-
-* the HTTPS ``href`` is **bare** (``…/X.zarr``) — titiler's ``GeoZarrReader``
-  concatenates and 404s on ``…/X.zarr//zarr.json`` if it ends in a slash;
-* a Track B ``alternate.s3.href`` **keeps the slash** — ``check_urls_confined``
-  refuses a bare ``.zarr`` key as ``bare_zarr_store``, a delete that removes nothing
-  and silently orphans the store.
+HTTPS (same defect data-pipeline#412 fixes for our own stores). That root ``href`` is
+**bare** (``…/X.zarr``): titiler's ``GeoZarrReader`` concatenates and 404s on
+``…/X.zarr//zarr.json`` if it ends in a slash (measured 2026-09-11).
 """
 
 import argparse
@@ -78,9 +66,7 @@ import stac_auth
 from pystac import Asset, Item, Link
 from pystac_client import Client
 from register_v1 import (
-    DEFAULT_S3_GATEWAY,
     TIMESTAMPS_EXTENSION,
-    add_alternate_s3_assets,
     add_derived_from_link,
     add_store_link,
     consolidate_reflectance_assets,
@@ -88,15 +74,8 @@ from register_v1 import (
     remove_xarray_integration,
     upsert_item,
 )
-from s3_item_cleanup import (
-    check_urls_confined,
-    extract_s3_urls_from_item,
-    format_expires,
-    parse_s3_prefix,
-)
-from storage_tier_utils import extract_region_from_endpoint
+from s3_item_cleanup import extract_s3_urls_from_item, format_expires
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
-from update_stac_storage_tier import _build_storage_schemes, _tier_to_scheme_ref
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -122,8 +101,6 @@ TARGET_RUNS = {
     TRANSITION_COLLECTION: {"pipeline"},
     "sentinel-2-l2a-samples-zarr3": {"track-a", "pipeline"},
     "sentinel-2-l2a-samples-zarr3-rollback": {"track-a", "pipeline"},
-    "sentinel-2-l2a-samples-zarr3-ovh": {"track-b"},
-    "sentinel-2-l2a-mirror-rstaging": {"mirror"},
 }
 
 # A run stops attempting ids after this many failures in a row: a source or target outage
@@ -169,19 +146,15 @@ ROOT_HREF_ASSETS = {
 # Retention. Loïc, 2026-09-14: the proxy expires on **1 November 2026**.
 #
 # Without an `expires` these items are structurally undeletable — `cleanup_expired_items.
-# evaluate_guards` returns `no_expires` first, before every other check — so a Track B copy
-# in our own bucket could never be reclaimed by anything automated. A fixed date, not
+# evaluate_guards` returns `no_expires` first, before every other check. A fixed date, not
 # `now + N days`: the proxy answers coordination#287 once and the whole collection goes
 # away with it, so re-registering an item must not push the date out.
 #
-# Track A items carry no S3 alternate (the stores are EODC's), so even a cron pointed at
+# Proxy items carry no S3 alternate (the stores are EODC's), so even a cron pointed at
 # them would skip each one as `no_s3_urls` — data assets, no s3:// URL — and never delete
 # it: remove them by deleting the collection, never by item id (the ids are also prod
-# `sentinel-2-l2a` ids). For Track B this makes the cleanup *possible*, but only with
-# `--allowed-bucket esa-zarr-sentinel-explorer-tests`: the cron's default is prod's bucket,
-# which refuses these alternates as `wrong_bucket`. The cron is `--collection` scoped and
-# does not target these collections today. `main` refuses to stamp this date once it has
-# passed: the item would be born expired.
+# `sentinel-2-l2a` ids). `main` refuses to stamp this date once it has passed: the item
+# would be born expired.
 #
 # Items registered into `sentinel-2-l2a-new` get no `expires` at all (plan rev 2 D2, rev 3
 # R3): they are the Explorer's user-facing scenes, which no retention job may select, and
@@ -192,26 +165,19 @@ PROXY_EXPIRES = datetime(2026, 11, 1, tzinfo=UTC)
 # every other guard here is a warning and the render links name `reflectance` outright.
 EXPECTED_ASSET_KEYS = frozenset({"reflectance", *ROOT_HREF_ASSETS})
 
-# What a proxy item keeps of its source's links. A keep-list, like the asset prune and
-# MIRROR_KEPT_LINK_RELS: the rest are the source catalogue's (root/self/parent/alternate),
-# re-added here (``collection``, which the item schema requires, re-pointed at the proxy
-# collection), or a rel EODC adds later, e.g. its own render links, which would then sit
-# ahead of ours. The source schema is not frozen.
+# What a proxy item keeps of its source's links. A keep-list, like the asset prune: the
+# rest are the source catalogue's (root/self/parent/alternate), re-added here
+# (``collection``, which the item schema requires, re-pointed at the proxy collection), or a
+# rel EODC adds later, e.g. its own render links, which would then sit ahead of ours. The
+# source schema is not frozen.
 SOURCE_KEPT_LINK_RELS = frozenset({"cite-as", "license"})
-
-# What a mirror item keeps of its prod source's links. A keep-list, not a drop-list: the
-# rest are the source catalogue's, the /raster render links the /rstaging ones replace,
-# or the Explorer `via` that 404s (see add_proxy_visualization) — and a rel prod gains
-# later is dropped rather than copied blind. `derived_from` is the EODC lineage.
-MIRROR_KEPT_LINK_RELS = frozenset({"store", "cite-as", "license", "derived_from"})
 
 EO_EXTENSION = "https://stac-extensions.github.io/eo/v2.0.0/schema.json"
 RASTER_EXTENSION = "https://stac-extensions.github.io/raster/v2.0.0/schema.json"
 DATACUBE_EXTENSION = "https://stac-extensions.github.io/datacube/v2.3.0/schema.json"
 REQUIRED_EXTENSIONS = (EO_EXTENSION, RASTER_EXTENSION, DATACUBE_EXTENSION)
 
-# Dropped unless a later step re-adds them: only Track B items (``--s3-endpoint``)
-# carry an S3 alternate, and ``add_alternate_s3_assets`` re-declares both.
+# Dropped: a proxy item carries no S3 alternate (see ``assert_no_s3_urls``).
 DROPPED_EXTENSION_PREFIXES = (
     "https://stac-extensions.github.io/alternate-assets/",
     "https://stac-extensions.github.io/storage/",
@@ -224,25 +190,6 @@ def store_root(item: Item) -> str:
         if ".zarr" in (asset.href or ""):
             return asset.href.split(".zarr")[0] + ".zarr"
     raise ValueError(f"{item.id}: no .zarr asset href to derive the store root from")
-
-
-def rebase_store_root(item: Item, new_base: str) -> str:
-    """Repoint every asset href at ``<new_base>/<store>.zarr`` and return that root.
-
-    Track B copies the stores flat under one prefix (T0.9:
-    ``samples-zarr3-proxy/<id>.zarr/``), dropping the source's ``YYYY/MM/DD``
-    directories — so the rewrite is "same store name, new base", not a prefix
-    substitution, which could only ever match one item's source directory.
-    """
-    old_root = store_root(item)
-    new_root = f"{new_base.rstrip('/')}/{old_root.rsplit('/', 1)[-1]}"
-    rewritten = 0
-    for asset in item.assets.values():
-        if asset.href and asset.href.startswith(old_root):
-            asset.href = new_root + asset.href[len(old_root) :]
-            rewritten += 1
-    logger.info(f"   🔗 Rewrote {rewritten} asset href(s) to {new_root}")
-    return new_root
 
 
 def build_root_href_assets(item: Item, root: str) -> None:
@@ -398,58 +345,6 @@ def set_expires(item: Item, expires: datetime | None) -> None:
         item.stac_extensions.append(TIMESTAMPS_EXTENSION)
 
 
-def slash_bare_zarr_alternates(item: Item) -> None:
-    """Give every ``alternate.s3`` store-root href a trailing slash.
-
-    ``add_alternate_s3_assets`` derives the S3 URI from the HTTPS href, which for the
-    three root-href assets is a bare ``…/X.zarr``. ``s3_item_cleanup`` reads
-    ``alternate.s3.href`` and its ``check_urls_confined`` refuses a bare ``.zarr`` key
-    as ``bare_zarr_store``: ``_partition_by_bucket`` would treat it as a single object,
-    delete ~nothing, count 0 remaining and drop the STAC item while the store lives on.
-    The slash cannot go on the HTTPS href instead — titiler's reader 404s on it.
-    """
-    for asset in item.assets.values():
-        alternate = asset.extra_fields.get("alternate")
-        if not isinstance(alternate, dict):
-            continue
-        s3 = alternate.get("s3")
-        if isinstance(s3, dict) and str(s3.get("href", "")).endswith(".zarr"):
-            s3["href"] += "/"
-
-
-def storage_to_v2(item: Item, s3_endpoint: str) -> None:
-    """Move the S3 alternates' storage metadata to the storage extension v2 layout.
-
-    ``add_alternate_s3_assets`` writes a legacy inline ``storage:scheme`` per alternate
-    but declares storage v2, whose schema requires item-level ``storage:schemes`` and
-    per-alternate ``storage:refs``. Prod items get converted later by
-    ``update_stac_storage_tier.py``; proxy items never pass through it, so without this
-    they fail STAC validation (measured on the live -ovh items, 2026-09-23).
-    """
-    alternates = [
-        asset.extra_fields["alternate"]["s3"]
-        for asset in item.assets.values()
-        if isinstance(asset.extra_fields.get("alternate", {}).get("s3"), dict)
-    ]
-    # One store root, so one bucket; the unpack refuses anything else.
-    (bucket,) = {urlparse(s3["href"]).netloc for s3 in alternates}
-    # The builder names prod's bucket; the Track B copies live elsewhere.
-    schemes = _build_storage_schemes(extract_region_from_endpoint(s3_endpoint))
-    for scheme in schemes.values():
-        scheme["bucket"] = bucket
-    item.properties["storage:schemes"] = schemes
-    for s3 in alternates:
-        legacy = s3.pop("storage:scheme", {})
-        if not legacy.get("tier"):
-            # `get_s3_storage_class` returns None for a missing or unreadable store, and
-            # `_tier_to_scheme_ref(None, None)` would then call it 'standard'.
-            raise ValueError(
-                f"{item.id}: no storage tier for {s3['href']} -- the OVH store is missing "
-                "or unreadable"
-            )
-        s3["storage:refs"] = [_tier_to_scheme_ref(legacy.get("tier"), None)]
-
-
 def source_self_href(source_item: dict) -> str:
     """The source item's ``self`` href — the provenance link, read before it is dropped."""
     self_href = next(
@@ -478,15 +373,12 @@ def build_proxy_item(
     stac_api_url: str,
     *,
     expires: datetime | None,
-    store_root_base: str | None = None,
-    s3_endpoint: str | None = None,
 ) -> Item:
     """Transform a source Samples Service STAC item dict into a proxy item.
 
-    Pure: no network access, no catalogue resolution. ``s3_endpoint`` is the one
-    exception — Track B passes it and ``add_alternate_s3_assets`` then queries the
-    object's storage class. ``expires`` has no default: ``TRANSITION_COLLECTION`` gets ``None``,
-    and a forgotten argument must not stamp the proxy's date onto one of its items.
+    Pure: no network access, no catalogue resolution. ``expires`` has no default:
+    ``TRANSITION_COLLECTION`` gets ``None``, and a forgotten argument must not stamp the
+    proxy's date onto one of its items.
     """
     self_href = source_self_href(source_item)
 
@@ -504,7 +396,7 @@ def build_proxy_item(
     item.collection_id = collection
     item.add_link(collection_link(stac_api_url, collection))
 
-    root = rebase_store_root(item, store_root_base) if store_root_base else store_root(item)
+    root = store_root(item)
 
     fix_zarr_asset_media_types(item)
     add_store_link(item, root)
@@ -531,95 +423,17 @@ def build_proxy_item(
     set_expires(item, expires)
     add_proxy_visualization(item, raster_api_url, collection)
     add_derived_from_link(item, self_href)
-
-    if s3_endpoint:
-        # `https_to_s3` returns None for every host it is not told about, silently, so
-        # pass the gateway the Track B hrefs actually use: zero alternates would make
-        # `s3_item_cleanup` record `no_s3_urls` (not a FAILURE_STATUS) and skip the store
-        # forever. Path-style (`<host>/<bucket>/<key>`) is what both our gateways serve; a
-        # virtual-hosted root is the one shape `https_to_s3` parses unaided, and naming its
-        # host as the gateway would make it read the bucket out of the path instead.
-        parsed = urlparse(root)
-        gateway = (
-            DEFAULT_S3_GATEWAY if ".s3." in parsed.netloc else f"{parsed.scheme}://{parsed.netloc}"
-        )
-        added = add_alternate_s3_assets(item, s3_endpoint, gateway)
-        if not added:
-            raise ValueError(
-                f"{item.id}: --s3-endpoint produced no alternate.s3 href for any asset "
-                f"(store root {root!r}). Registering it would create items no deleter "
-                f"can ever select."
-            )
-        slash_bare_zarr_alternates(item)
-        storage_to_v2(item, s3_endpoint)
-
     return item
 
 
-def build_mirror_item(
-    source_item: dict,
-    collection: str,
-    raster_api_url: str,
-    stac_api_url: str,
-    *,
-    expires: datetime | None,
-) -> Item:
-    """Copy an Explorer item into a mirror item whose render links target ``/rstaging``.
+def assert_no_s3_urls(item: Item) -> None:
+    """Refuse an item that advertises an S3 location a deleter could act on wrongly.
 
-    The data assets stay as published — our own stores; the thumbnail is re-rendered on
-    ``raster_api_url`` like the links — and none of the EODC-shaped steps of
-    ``build_proxy_item`` run: ``build_root_href_assets`` would repoint SCL at the store
-    root, which 500s on our stores (data-model#262). What goes is everything a deleter
-    could use to find those stores, which prod still owns: with no ``alternate.s3`` and
-    HTTPS hrefs, ``extract_s3_urls_from_item`` finds nothing, so deleting a mirror item
-    removes the STAC record only. ``update_stac_storage_tier.py --add-missing`` would
-    re-derive the alternates from the hrefs — never run it on a mirror collection.
-
-    Pure, like ``build_proxy_item``: no network access.
-    """
-    self_href = source_self_href(source_item)
-
-    item = Item.from_dict(source_item)
-    item.links = [link for link in item.links if link.rel in MIRROR_KEPT_LINK_RELS]
-    item.collection_id = collection
-    item.add_link(collection_link(stac_api_url, collection))
-    # STAC best practices: a copy of another STAC item points back at it with `canonical`.
-    item.add_link(Link("canonical", self_href, "application/geo+json"))
-
-    for asset in item.assets.values():
-        asset.extra_fields.pop("alternate", None)
-    item.properties.pop("storage:schemes", None)
-    # Not `reconcile_extensions`: it also declares datacube, which prod does not, and our
-    # reflectance asset then fails the datacube v2.3.0 schema (validated 2026-09-23).
-    item.stac_extensions = [
-        ext for ext in item.stac_extensions if not ext.startswith(DROPPED_EXTENSION_PREFIXES)
-    ]
-
-    missing = EXPECTED_ASSET_KEYS - set(item.assets)
-    if missing:
-        raise ValueError(f"{item.id}: mirror item is missing asset(s) {sorted(missing)}")
-
-    set_expires(item, expires)
-    add_proxy_visualization(item, raster_api_url, collection)
-    return item
-
-
-def assert_s3_urls_confined(item: Item, allowed: tuple[str, str] | None) -> None:
-    """Refuse an item that advertises S3 locations a deleter could act on wrongly.
-
-    Track B items point at their OVH copies, which must sit under ``--confine-to``.
-    Track A and mirror items must advertise none at all: their stores are EODC's or
-    prod's, and the cleanup cron's default bucket is prod's.
+    Its stores are EODC's, and the cleanup cron's default bucket is prod's.
     """
     urls = extract_s3_urls_from_item(item.to_dict(transform_hrefs=False))
-    if allowed is None:
-        if urls:
-            raise ValueError(f"{item.id}: advertises S3 location(s) {sorted(urls)[:2]}")
-        return
-    violations = check_urls_confined(urls, [allowed])
-    if violations:
-        url, reason = violations[0]
-        raise ValueError(f"{item.id}: S3 location {url!r} is outside --confine-to ({reason})")
+    if urls:
+        raise ValueError(f"{item.id}: advertises S3 location(s) {sorted(urls)[:2]}")
 
 
 def is_old_generation(source_item: dict) -> bool:
@@ -805,11 +619,6 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--source-stac-api", default=DEFAULT_SOURCE_STAC_API)
     parser.add_argument("--source-collection", default=DEFAULT_SOURCE_COLLECTION)
     parser.add_argument("--collection", required=True, help="Target collection id")
-    parser.add_argument(
-        "--mirror-explorer",
-        action="store_true",
-        help="Mirror Explorer items into a *mirror-rstaging* collection (build_mirror_item)",
-    )
     parser.add_argument("--stac-api-url", required=True, help="Target STAC API")
     parser.add_argument("--raster-api-url", required=True, help="TiTiler base URL for links")
     parser.add_argument("--item-id", action="append", default=[], help="Repeatable")
@@ -845,39 +654,19 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--dry-run",
         type=Path,
         metavar="DIR",
-        help=(
-            "Write <id>.json here instead of registering. Not fully offline: with "
-            "--s3-endpoint it still issues read-only S3 head_object calls, because the "
-            "storage tier is part of the item being previewed."
-        ),
-    )
-    parser.add_argument(
-        "--store-root-base",
-        metavar="URL",
-        help="Track B: repoint each asset at <URL>/<store>.zarr (the OVH copies)",
-    )
-    parser.add_argument("--s3-endpoint", help="Track B only: add alternate.s3 to each asset")
-    parser.add_argument(
-        "--confine-to",
-        metavar="S3_PREFIX",
-        help="Track B only: s3://bucket/prefix/ every alternate.s3 must sit under",
+        help="Write <id>.json here instead of registering",
     )
     return parser.parse_args(argv)
 
 
 def run_kind(args: argparse.Namespace) -> str:
     """The kind of run the flags ask for, as ``TARGET_RUNS`` names it."""
-    if args.mirror_explorer:
-        return "mirror"
-    if args.items_json:
-        return "pipeline"
-    return "track-b" if args.store_root_base else "track-a"
+    return "pipeline" if args.items_json else "track-a"
 
 
 def register_one(
     args: argparse.Namespace,
     client: Client | None,
-    allowed: tuple[str, str] | None,
     expires: datetime | None,
     item_id: str,
 ) -> str:
@@ -887,21 +676,10 @@ def register_one(
         # Content-based, so a retry cannot succeed: counted, not failed (T18 alerts on it).
         logger.warning("   ⚠️  %s: old-generation source (raster:scale on SR_*), refused", item_id)
         return "refused_generation"
-    if args.mirror_explorer:
-        item = build_mirror_item(
-            source, args.collection, args.raster_api_url, args.stac_api_url, expires=expires
-        )
-    else:
-        item = build_proxy_item(
-            source,
-            args.collection,
-            args.raster_api_url,
-            args.stac_api_url,
-            expires=expires,
-            store_root_base=args.store_root_base,
-            s3_endpoint=args.s3_endpoint,
-        )
-    assert_s3_urls_confined(item, allowed)
+    item = build_proxy_item(
+        source, args.collection, args.raster_api_url, args.stac_api_url, expires=expires
+    )
+    assert_no_s3_urls(item)
     if client is None:
         # A plain name (refused otherwise in main), and fetch_source_item has already made
         # sure the source did not substitute another id.
@@ -943,39 +721,20 @@ def main(argv: list[str] | None = None) -> int:
     started = monotonic()
     args = parse_args(argv)
 
-    # Every URL that decides where data is read from or written to, not just the three
-    # the operator types most often: --store-root-base rewrites every asset href.
+    # Every URL that decides where data is read from or written to.
     for url, name in [
         (args.source_stac_api, "--source-stac-api"),
         (args.raster_api_url, "--raster-api-url"),
         (args.stac_api_url, "--stac-api-url"),
-        (args.store_root_base, "--store-root-base"),
-        (args.s3_endpoint, "--s3-endpoint"),
     ]:
-        if url is not None and urlparse(url).scheme != "https":
+        if urlparse(url).scheme != "https":
             logger.error("Error: %s must be an HTTPS URL, got: %r", name, url)
             return 1
 
-    # Track B needs all three. --store-root-base alone registers OVH stores with no
-    # alternate, which no deleter can ever reclaim; --s3-endpoint alone derives alternates
-    # from EODC's host, and `https_to_s3` then reads its first path segment (`collections`)
-    # as a bucket; --confine-to bounds where those alternates may point (a base under
-    # prod's prefix would give every alternate the prod store of the same id).
-    track_b = (args.store_root_base, args.s3_endpoint, args.confine_to)
-    if any(track_b) and not all(track_b):
+    if args.items_json and (args.item_id or args.item_ids_file):
         logger.error(
-            "--store-root-base, --s3-endpoint and --confine-to go together (Track B) or not at all"
-        )
-        return 1
-    if args.mirror_explorer and args.store_root_base:
-        logger.error("--mirror-explorer keeps the source's asset hrefs: no Track B flags")
-        return 1
-    if args.items_json and (
-        args.mirror_explorer or args.store_root_base or args.item_id or args.item_ids_file
-    ):
-        logger.error(
-            "--items-json builds Track A items from that file's ids alone: no --mirror-explorer, "
-            "Track B flags, --item-id or --item-ids-file"
+            "--items-json builds Track A items from that file's ids alone: no --item-id or "
+            "--item-ids-file"
         )
         return 1
     # Without the list a pipeline run could not be rolled back: the items' `created` is
@@ -984,7 +743,7 @@ def main(argv: list[str] | None = None) -> int:
         logger.error("--items-json and --created-ids go together")
         return 1
     # Each target takes only the runs TARGET_RUNS lists, all with the same item ids: e.g.
-    # Track A flags aimed at the -ovh collection would PUT over the Track B items.
+    # a Track A run aimed at TRANSITION_COLLECTION would PUT over the pipeline's items.
     kind = run_kind(args)
     runs = TARGET_RUNS.get(args.collection, set())
     if kind not in runs or args.collection == args.source_collection:
@@ -996,13 +755,6 @@ def main(argv: list[str] | None = None) -> int:
             sorted(runs) or "none",
         )
         return 1
-    allowed = None
-    if args.confine_to:
-        try:
-            allowed = parse_s3_prefix(args.confine_to)
-        except ValueError as exc:
-            logger.error("--confine-to: %s", exc)
-            return 1
 
     # By target, not by flag: TRANSITION_COLLECTION items carry none (see PROXY_EXPIRES). So
     # the pipeline keeps running there after 1 Nov, when this refusal stops every other run.
@@ -1082,7 +834,7 @@ def main(argv: list[str] | None = None) -> int:
             failed += item_ids[n:]
             break
         try:
-            counts[register_one(args, client, allowed, expires, item_id)] += 1
+            counts[register_one(args, client, expires, item_id)] += 1
             streak = 0
         except CreatedIdsError as exc:
             # Every later create would go unrecorded too: stop, and say which id may exist.
