@@ -90,7 +90,7 @@ DEFAULT_SOURCE_COLLECTION = "sentinel-2-l2a-zarr3"
 # (plan rev 3). Its items carry no ``expires`` (see ``PROXY_EXPIRES``).
 TRANSITION_COLLECTION = "sentinel-2-l2a-new"
 
-# Target collection -> the kinds of run allowed to write it (``run_kind``). Exact ids, not
+# Target collection -> the kinds of run allowed to write it (``kind`` in ``main``). Exact ids, not
 # a marker substring: every item written here reuses a prod ``sentinel-2-l2a`` id, and a
 # near miss (``sentinel-2-l2a-staging``, ``…-samples-zarr3x``) would pass a substring check.
 # ``sentinel-2-l2a`` itself, our converted archive, is absent: no run may write it (plan
@@ -658,11 +658,6 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def run_kind(args: argparse.Namespace) -> str:
-    """The kind of run the flags ask for, as ``TARGET_RUNS`` names it."""
-    return "pipeline" if args.items_json else "track-a"
-
-
 def register_one(
     args: argparse.Namespace,
     client: Client | None,
@@ -743,7 +738,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     # Each target takes only the runs TARGET_RUNS lists, all with the same item ids: e.g.
     # a Track A run aimed at TRANSITION_COLLECTION would PUT over the pipeline's items.
-    kind = run_kind(args)
+    kind = "pipeline" if args.items_json else "track-a"
     runs = TARGET_RUNS.get(args.collection, set())
     if kind not in runs or args.collection == args.source_collection:
         logger.error(
