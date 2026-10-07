@@ -37,8 +37,6 @@ logger = logging.getLogger(__name__)
 for lib in ["botocore", "s3fs", "aiobotocore", "urllib3", "httpx", "httpcore"]:
     logging.getLogger(lib).setLevel(logging.WARNING)
 
-EXPLORER_BASE = os.getenv("EXPLORER_BASE_URL", "https://explorer.eopf.copernicus.eu")
-
 # The HTTPS gateway our own stores are served from. Both directions of the S3<->HTTPS
 # conversion default to it; a store served from any other host must pass its own.
 DEFAULT_S3_GATEWAY = "https://s3.explorer.eopf.copernicus.eu"
@@ -315,7 +313,6 @@ def add_visualization_links(
                 title,
             )
         )
-        _add_explorer_link(item, collection_id)
         return
 
     # Mission-specific tile configurations (no producer render config): bare viewer + legacy xyz.
@@ -365,19 +362,6 @@ def add_visualization_links(
                 f"TileJSON for {item.id}",
             )
         )
-
-    _add_explorer_link(item, collection_id)
-
-
-def _add_explorer_link(item: Item, collection_id: str) -> None:
-    """Add the EOPF Explorer ``via`` link for the item."""
-    item.add_link(
-        Link(
-            "via",
-            f"{EXPLORER_BASE}/collections/{collection_id.lower().replace('_', '-')}/items/{item.id}",
-            title="EOPF Explorer",
-        )
-    )
 
 
 def add_thumbnail_asset(
@@ -1061,7 +1045,6 @@ def main(argv: list[str] | None = None) -> int:
         (args.source_url, "--source-url"),
         (args.stac_api_url, "--stac-api-url"),
         (args.raster_api_url, "--raster-api-url"),
-        (EXPLORER_BASE, "EXPLORER_BASE_URL"),
     ]:
         if urlparse(url).scheme != "https":
             logger.error("Error: %s must be an HTTPS URL, got: %r", name, url)
