@@ -443,9 +443,15 @@ Writes reviewed values into fill-value holes of 1-D zarr v3 arrays on S3, and ch
 
 The plan is JSON: `{"format": "fill-coordinate-holes/1", "stores": [{"store": "s3://bucket/path/x.zarr", "arrays": [{"path": "descending/r10m/relative_orbit", "length": 4, "fill": 0, "values": {"3": 110}}]}]}`. Each `values` key is a slot index written as a plain integer, and each value must have the array's type (`str` or `int`).
 
+To correct a value that is wrong rather than lost, an array can also carry two optional keys:
+- `current`: the value an index must hold now, instead of the fill value. This makes the write a compare-and-swap. It requires a `where`, so a swap aimed at the wrong slot can't pass as already done.
+- `where`: other arrays of the same store, and the values they must hold at the given indices. These arrays are only read, never written, and pin the slot to its slice.
+
+For example, `"values": {"1": 110}, "current": {"1": 37}, "where": {"descending/r10m/absolute_orbit": {"1": 8258}}` replaces a 37 with 110 only at index 1, and only while that slice's absolute orbit is 8258.
+
 It refuses a store unless, for every planned array:
 - the array is 1-D, unsharded, in one chunk, and has the planned length and fill value;
-- every planned index holds the fill value now, and every planned value survives the array's dtype unchanged;
+- every planned index holds the fill value now (or its `current` value), every `where` array holds its values, and every planned value survives the array's dtype unchanged;
 - no fill value is left afterwards;
 - only the planned slots of the chunk `c/0` change (only those slots are written, so the padding past the array length is kept).
 
@@ -453,8 +459,8 @@ It refuses a store unless, for every planned array:
 - it is a dry run unless you pass `--apply` (which needs `--backup-dir` and `--s3-endpoint`);
 - `--max-writes` is required and stops between stores;
 - every chunk is backed up (base64, fsync'd) before its store's first PUT;
-- the ETags of each chunk and of its `zarr.json` are re-checked before writing, and every PUT is read back;
-- `--restore <backup>.jsonl` replays the whole file: it puts the pre-fill chunks back store by store within `--max-writes`, and refuses a chunk changed since the fill unless you pass `--force`. A restore is only safe until the cube's next append: the backup holds the whole pre-fill chunk, so `--force` after an append would empty the new slice too.
+- the ETags of each chunk, of its `zarr.json` and of every `where` array are re-checked before writing, and every PUT is read back;
+- `--restore <backup>.jsonl` replays the whole file: it puts the pre-fill chunks back store by store within `--max-writes` (after a `current` swap, that brings the replaced values back too), and refuses a chunk changed since the fill unless you pass `--force`. A restore is only safe until the cube's next append: the backup holds the whole pre-fill chunk, so `--force` after an append would empty the new slice too.
 
 A re-run of a finished plan is a no-op while the arrays are unchanged; an array that changed since the plan was built (for example, a slice appended) is refused.
 
