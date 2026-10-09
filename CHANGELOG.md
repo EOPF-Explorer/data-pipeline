@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.20.0 (2026-10-09)
+
+## What's Changed
+* chore: drop the deleted temporary S2 collections and the runs that wrote them by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/458
+* build(deps): bump github/codeql-action/upload-sarif from 4.38.1 to 4.38.2 in the all group by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/456
+* build(deps): bump the security group across 1 directory with 2 updates by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/454
+* build(deps-dev): bump types-requests from 2.33.0.20260518 to 2.33.0.20260906 by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/435
+* build(deps): bump multidict from 6.7.1 to 6.9.1 in the security group across 1 directory by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/461
+* feat(operator-tools): let fill_coordinate_holes replace a pinned wrong value by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/462
+* fix(stac): stop writing the dead Explorer via link by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/438
+* build(deps): bump uv from 0.12.18 to 0.12.19 in /docker in the all group across 1 directory by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/409
+* fix(cleanup): protect the FOSS4G:UK talk scene (T30VWJ) by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/465
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.19.0...v1.20.0
+
 ## 1.19.0 (2026-10-02)
 
 ## What's Changed
