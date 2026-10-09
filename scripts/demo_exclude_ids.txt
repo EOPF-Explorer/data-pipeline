@@ -128,3 +128,9 @@ S2C_MSIL2A_20260221T110101_N0512_R094_T30UYB_20260221T145512
 S2C_MSIL2A_20260221T110101_N0512_R094_T30UYC_20260221T145512
 S2C_MSIL2A_20260221T110101_N0512_R094_T31UCS_20260221T145512
 S2C_MSIL2A_20260221T110101_N0512_R094_T31UCT_20260221T145512
+
+# --- FOSS4G:UK 2026 lightning talk (recorded 13 Oct 2026), tile T30VWJ, prod ---
+# The slides show its Explorer permalink and quote byte counts measured on this exact
+# store (the item's /preview and the r10m b02/b03/b04 shards), so do not reconvert it.
+# Already stamped expires = 2026-10-17T11:21:31Z (acq + 90d) when listed here.
+S2A_MSIL2A_20260719T112131_N0512_R037_T30VWJ_20260719T194158
