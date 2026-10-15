@@ -178,8 +178,8 @@ def test_no_consolidation_when_conversion_raises():
 
 
 def test_consolidate_output_blocks_the_href_group_and_root_only(tmp_path):
-    """On the layout the converter writes, r0 (the radianceData href) and the root get a block;
-    `measurements` and the overview levels don't need one and are left alone."""
+    """On the layout the converter writes, `measurements` (the radianceData href) and the root
+    get a block; the levels (r0, r2) don't need one and are left alone (#457)."""
     import json
 
     import zarr
@@ -199,9 +199,9 @@ def test_consolidate_output_blocks_the_href_group_and_root_only(tmp_path):
         meta = json.loads((store / rel / "zarr.json").read_text())
         return meta.get("consolidated_metadata")
 
-    assert "oa08_radiance" in block("measurements/r0")["metadata"]
+    assert "r0/oa08_radiance" in block("measurements")["metadata"]
     assert "measurements/r0/oa08_radiance" in block("")["metadata"]
-    assert block("measurements") is None and block("measurements/r2") is None
+    assert block("measurements/r0") is None and block("measurements/r2") is None
 
 
 def test_no_client_created_when_dask_disabled():
