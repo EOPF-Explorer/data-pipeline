@@ -131,6 +131,12 @@ RGB_QUERY = (
     f"&color_formula={urllib.parse.quote(S2_COLOR_FORMULA, safe='')}"
 )
 
+# STAC Browser ignores the stores' CF scale/offset and stretches raw counts by band statistics:
+# 1000-4000 counts = reflectance 0-0.3. RGB bands only: on every band, TiTiler would apply them to
+# decoded reflectance. Not in consolidate_reflectance_assets, which also builds the float32 archive.
+BROWSER_RGB_BANDS = ("b04", "b03", "b02")
+BROWSER_RGB_STATISTICS = {"minimum": 1000, "maximum": 4000}
+
 # Proxy asset key -> (source asset key, band name, title).
 # AOT and WVP are split out of the source's single ``ATM_10m`` group asset so the
 # proxy uses the Explorer's asset keys and titles; the numeric fields (raster:scale,
@@ -418,6 +424,10 @@ def build_proxy_item(
     dimensions = item.assets["reflectance"].extra_fields.get("cube:dimensions") or {}
     if any("extent" not in dimensions.get(axis, {}) for axis in ("x", "y")):
         raise ValueError(f"{item.id}: reflectance cube:dimensions x/y have no extent")
+
+    for band in item.assets["reflectance"].extra_fields.get("bands", []):
+        if band.get("name") in BROWSER_RGB_BANDS:
+            band["statistics"] = dict(BROWSER_RGB_STATISTICS)
 
     set_expires(item, expires)
     add_proxy_visualization(item, raster_api_url, collection)

@@ -115,6 +115,18 @@ def test_reflectance_is_the_consolidated_multiscales_group(proxy):
     assert "raster:scale" not in reflectance
 
 
+def test_rgb_bands_carry_the_browser_stretch_in_count_units(source):
+    item = build_proxy_item(source, NEW, RASTER, STAC_API, expires=None).to_dict()
+    stats = {
+        band["name"]: band.get("statistics") for band in item["assets"]["reflectance"]["bands"]
+    }
+    rgb = {"b04", "b03", "b02"}
+    assert {name: stats[name] for name in rgb} == dict.fromkeys(
+        rgb, {"minimum": 1000, "maximum": 4000}
+    )
+    assert [name for name in stats if name not in rgb and stats[name] is not None] == []
+
+
 def test_root_href_assets_all_point_at_the_store_root(proxy):
     hrefs = {key: proxy["assets"][key]["href"] for key in ("AOT_10m", "WVP_10m", "SCL_20m")}
     assert len(set(hrefs.values())) == 1

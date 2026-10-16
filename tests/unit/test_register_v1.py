@@ -22,6 +22,7 @@ from register_v1 import (  # noqa: E402
     add_expires,
     add_thumbnail_asset,
     add_visualization_links,
+    consolidate_reflectance_assets,
     https_to_s3,
     repoint_root_assets,
     resolve_exclude_ids,
@@ -144,6 +145,15 @@ class TestUpsertItemPutFailure:
 
 
 SOURCE_ITEM_FIXTURE = "S2A_MSIL2A_20251113T102311_N0511_R065_T32TNQ_20251113T142515.json"
+
+
+def test_consolidated_reflectance_carries_no_band_statistics():
+    fixture = Path(__file__).parents[1] / "fixtures/stac_to_register" / SOURCE_ITEM_FIXTURE
+    item = Item.from_dict(json.loads(fixture.read_text()))
+    consolidate_reflectance_assets(item, "https://example.invalid/x.zarr")
+    bands = item.assets["reflectance"].extra_fields["bands"]
+    assert len(bands) == 12
+    assert [band["name"] for band in bands if "statistics" in band] == []
 
 
 class TestUpsertItemBuildsBodyOffline:
