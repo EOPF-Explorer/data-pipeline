@@ -57,12 +57,14 @@ DEFAULT_OUTPUT_GRID = "EPSG:4326"
 # pod for one string. tests/unit/test_eopf_geozarr_contract.py asserts the two agree.
 BASE_LEVEL = "r0"
 
-# Groups that get a consolidated metadata block after conversion. The converter writes with
-# consolidated=False. titiler-eopf >= 0.12 opens the group a STAC asset href points to
-# (radianceData -> measurements/r0) over HTTPS, and a group without a block has to be listed,
-# which the gateway refuses (PROPFIND 405): the item returns 500 (#446). The order doesn't matter:
-# the root's block lists r0's nodes itself rather than embedding r0's block.
-CONSOLIDATED_GROUPS = (f"measurements/{BASE_LEVEL}", "")
+# Groups that get a consolidated metadata block after conversion. titiler-eopf >= 0.12 opens
+# the group a STAC asset href points to (radianceData -> measurements, #457) over HTTPS, and a
+# group without a block has to be listed, which the gateway refuses (PROPFIND 405): the item
+# returns 500 (#446). The pinned converter already writes both blocks; re-consolidating rewrites
+# the same bytes and keeps them if a later pin stops writing them. r0 needs no block: band
+# assets point at its arrays, which are opened directly. The order doesn't matter: the root's
+# block lists every node itself rather than embedding the child's block.
+CONSOLIDATED_GROUPS = ("measurements", "")
 
 # Cap simultaneous aiohttp connections to the HTTPS source per pod (override via env).
 DEFAULT_SOURCE_HTTP_MAX_CONNECTIONS = 10
