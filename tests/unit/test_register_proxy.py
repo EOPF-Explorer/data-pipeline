@@ -116,10 +116,6 @@ def test_reflectance_is_the_consolidated_multiscales_group(proxy):
 
 
 def test_rgb_bands_carry_the_browser_stretch_in_count_units(source):
-    """STAC Browser stretches the stores' raw uint16 counts by band statistics; without them
-    every valid pixel is white. Count units: 1000-4000 is reflectance 0-0.3 (count * 1e-4 - 0.1).
-    Only the rendered bands, so TiTiler and titiler-openeo, which read CF-decoded reflectance and
-    use statistics only when every band has them, never pick these up."""
     item = build_proxy_item(source, NEW, RASTER, STAC_API, expires=None).to_dict()
     stats = {
         band["name"]: band.get("statistics") for band in item["assets"]["reflectance"]["bands"]

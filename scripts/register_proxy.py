@@ -131,14 +131,9 @@ RGB_QUERY = (
     f"&color_formula={urllib.parse.quote(S2_COLOR_FORMULA, safe='')}"
 )
 
-# STAC Browser 5.1 (ol-stac 1.7) draws `reflectance` client-side from the stored values: it never
-# applies the stores' CF scale_factor/add_offset, and without a value range it outputs the raw
-# counts as RGB, so every valid pixel is white. It takes that range from band `statistics`, which
-# must therefore be in the stores' COUNT units: reflectance = count * 1e-4 - 0.1, so 1000-4000 is
-# reflectance 0-0.3, a true-colour stretch. On b04/b03/b02 only: TiTiler (rio-tiler) and
-# titiler-openeo use band statistics only when every band of the asset carries them, and they
-# read CF-decoded reflectance, so count-unit statistics on all 12 bands would mis-scale them.
-# Never in `consolidate_reflectance_assets`, which also builds our float32 reflectance archive.
+# STAC Browser ignores the stores' CF scale/offset and stretches raw counts by band statistics:
+# 1000-4000 counts = reflectance 0-0.3. RGB bands only: on every band, TiTiler would apply them to
+# decoded reflectance. Not in consolidate_reflectance_assets, which also builds the float32 archive.
 BROWSER_RGB_BANDS = ("b04", "b03", "b02")
 BROWSER_RGB_STATISTICS = {"minimum": 1000, "maximum": 4000}
 

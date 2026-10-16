@@ -148,8 +148,6 @@ SOURCE_ITEM_FIXTURE = "S2A_MSIL2A_20251113T102311_N0511_R065_T32TNQ_20251113T142
 
 
 def test_consolidated_reflectance_carries_no_band_statistics():
-    """The shared builder also builds our float32 reflectance archive, where the proxy's
-    count-unit browser stretch (register_proxy.BROWSER_RGB_STATISTICS) would render black."""
     fixture = Path(__file__).parents[1] / "fixtures/stac_to_register" / SOURCE_ITEM_FIXTURE
     item = Item.from_dict(json.loads(fixture.read_text()))
     consolidate_reflectance_assets(item, "https://example.invalid/x.zarr")
