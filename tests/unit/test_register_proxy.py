@@ -115,6 +115,22 @@ def test_reflectance_is_the_consolidated_multiscales_group(proxy):
     assert "raster:scale" not in reflectance
 
 
+def test_rgb_bands_carry_the_browser_stretch_in_count_units(source):
+    """STAC Browser stretches the stores' raw uint16 counts by band statistics; without them
+    every valid pixel is white. Count units: 1000-4000 is reflectance 0-0.3 (count * 1e-4 - 0.1).
+    Only the rendered bands, so TiTiler and titiler-openeo, which read CF-decoded reflectance and
+    use statistics only when every band has them, never pick these up."""
+    item = build_proxy_item(source, NEW, RASTER, STAC_API, expires=None).to_dict()
+    stats = {
+        band["name"]: band.get("statistics") for band in item["assets"]["reflectance"]["bands"]
+    }
+    rgb = {"b04", "b03", "b02"}
+    assert {name: stats[name] for name in rgb} == dict.fromkeys(
+        rgb, {"minimum": 1000, "maximum": 4000}
+    )
+    assert [name for name in stats if name not in rgb and stats[name] is not None] == []
+
+
 def test_root_href_assets_all_point_at_the_store_root(proxy):
     hrefs = {key: proxy["assets"][key]["href"] for key in ("AOT_10m", "WVP_10m", "SCL_20m")}
     assert len(set(hrefs.values())) == 1

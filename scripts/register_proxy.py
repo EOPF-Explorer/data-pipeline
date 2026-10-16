@@ -131,6 +131,17 @@ RGB_QUERY = (
     f"&color_formula={urllib.parse.quote(S2_COLOR_FORMULA, safe='')}"
 )
 
+# STAC Browser 5.1 (ol-stac 1.7) draws `reflectance` client-side from the stored values: it never
+# applies the stores' CF scale_factor/add_offset, and without a value range it outputs the raw
+# counts as RGB, so every valid pixel is white. It takes that range from band `statistics`, which
+# must therefore be in the stores' COUNT units: reflectance = count * 1e-4 - 0.1, so 1000-4000 is
+# reflectance 0-0.3, a true-colour stretch. On b04/b03/b02 only: TiTiler (rio-tiler) and
+# titiler-openeo use band statistics only when every band of the asset carries them, and they
+# read CF-decoded reflectance, so count-unit statistics on all 12 bands would mis-scale them.
+# Never in `consolidate_reflectance_assets`, which also builds our float32 reflectance archive.
+BROWSER_RGB_BANDS = ("b04", "b03", "b02")
+BROWSER_RGB_STATISTICS = {"minimum": 1000, "maximum": 4000}
+
 # Proxy asset key -> (source asset key, band name, title).
 # AOT and WVP are split out of the source's single ``ATM_10m`` group asset so the
 # proxy uses the Explorer's asset keys and titles; the numeric fields (raster:scale,
@@ -418,6 +429,10 @@ def build_proxy_item(
     dimensions = item.assets["reflectance"].extra_fields.get("cube:dimensions") or {}
     if any("extent" not in dimensions.get(axis, {}) for axis in ("x", "y")):
         raise ValueError(f"{item.id}: reflectance cube:dimensions x/y have no extent")
+
+    for band in item.assets["reflectance"].extra_fields.get("bands", []):
+        if band.get("name") in BROWSER_RGB_BANDS:
+            band["statistics"] = dict(BROWSER_RGB_STATISTICS)
 
     set_expires(item, expires)
     add_proxy_visualization(item, raster_api_url, collection)
