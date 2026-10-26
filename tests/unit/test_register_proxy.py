@@ -155,18 +155,31 @@ def test_root_href_assets_carry_their_single_band_and_source_metadata(
     assert asset["gsd"] == gsd
     assert asset["roles"] == ["data"]
     assert asset["type"] == "application/vnd.zarr; version=3"
-    # Numeric fields stay as EODC published them — they describe the EODC store. N0513
-    # publishes no raster:scale (it is in the stores' CF attributes), so none is invented.
+    # In the current layout the numeric fields, raster:scale included, stay as EODC published
+    # them — they describe the EODC store. N0513 publishes no raster:scale (it is in the
+    # stores' CF attributes), so none is invented. Only the new layout's copies are dropped.
     source_asset = source["assets"][register_proxy.ROOT_HREF_ASSETS[key][0][0]]
     for field in ("nodata", "data_type", "proj:shape", "raster:scale", "raster:offset"):
         assert asset.get(field) == source_asset.get(field), field
+
+
+@pytest.mark.parametrize(("key", "group"), [("AOT_10m", "ATM_10m"), ("WVP_10m", "ATM_10m"),
+                                            ("SCL_20m", "SCL_20m")])  # fmt: skip
+def test_an_old_generation_proxy_item_keeps_its_published_raster_scale(old_source, key, group):
+    """Track A registers old-generation sources as published; only the new layout is stripped."""
+    item = build_proxy_item(old_source, COLLECTION, RASTER, STAC_API, expires=PROXY_EXPIRES)
+    asset = item.to_dict()["assets"][key]
+    for field in ("raster:scale", "raster:offset"):
+        assert field in old_source["assets"][group], field  # control: the source has it
+        assert asset[field] == old_source["assets"][group][field], field
 
 
 # --- EODC's new asset layout ---
 
 
 def item_shape(item):
-    """Per asset: href below the store root, type, roles, band names and cube variables."""
+    """Per asset: href below the store root, type, roles, band names, cube variables, and
+    every asset-level field name."""
     root = store_link(item)
     return {
         key: (
@@ -175,6 +188,7 @@ def item_shape(item):
             asset["roles"],
             sorted(band["name"] for band in asset.get("bands", [])),
             sorted(asset.get("cube:variables", {})),
+            sorted(asset),
         )
         for key, asset in item["assets"].items()
         if key != "thumbnail"
@@ -200,6 +214,25 @@ def test_the_new_layout_carries_no_raster_scale(new_source):
         asset = item["assets"][key]
         for fields in (asset, *asset.get("bands", [])):
             assert not {"raster:scale", "raster:offset"} & set(fields), key
+
+
+def test_a_new_layout_reflectance_without_a_true_colour_band_is_refused(new_source):
+    """The render links name b04,b03,b02: without one, every preview and tile fails."""
+    bands = new_source["assets"]["reflectance"]["bands"]
+    for band in bands:
+        band["name"] = band["name"].upper()  # control: matched case-insensitively, as SR_* are
+    build_proxy_item(deepcopy(new_source), NEW, RASTER, STAC_API, expires=None)
+    bands[:] = [band for band in bands if band["name"] != "B03"]
+    with pytest.raises(ValueError, match=r"no \['b03'\] band"):
+        build_proxy_item(new_source, NEW, RASTER, STAC_API, expires=None)
+
+
+def test_a_new_layout_reflectance_in_another_store_is_refused(new_source):
+    """AOT/WVP/SCL and the store link name one store: a reflectance elsewhere would mix two."""
+    reflectance = new_source["assets"]["reflectance"]
+    reflectance["href"] = reflectance["href"].replace(".zarr/", "_OTHER.zarr/")
+    with pytest.raises(ValueError, match="not in the store"):
+        build_proxy_item(new_source, NEW, RASTER, STAC_API, expires=None)
 
 
 # --- properties, links, extensions ---
