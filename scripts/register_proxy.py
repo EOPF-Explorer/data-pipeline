@@ -131,15 +131,17 @@ RGB_QUERY = (
     f"&color_formula={urllib.parse.quote(S2_COLOR_FORMULA, safe='')}"
 )
 
-# Proxy asset key -> (source asset key, band name, title).
-# AOT and WVP are split out of the source's single ``ATM_10m`` group asset so the
-# proxy uses the Explorer's asset keys and titles; the numeric fields (raster:scale,
-# nodata, data_type, proj:shape) stay as EODC published them, because they describe
-# the EODC store.
+# Proxy asset key -> (source asset keys, band name, title). The first key the source has
+# is used: ``ATM_10m``/``SCL_20m`` in EODC's current layout, ``atmosphere``/``scl`` in the
+# one its NRT items switch to around 30 Oct 2026 (same groups, same arrays).
+# AOT and WVP are split out of the source's single atmosphere group asset so the
+# proxy uses the Explorer's asset keys and titles; the numeric fields (nodata,
+# data_type, proj:shape) stay as EODC published them, because they describe
+# the EODC store. raster:scale/offset do not stay (see ``drop_raster_scaling``).
 ROOT_HREF_ASSETS = {
-    "AOT_10m": ("ATM_10m", "aot", "Aerosol optical thickness (AOT)"),
-    "WVP_10m": ("ATM_10m", "wvp", "Water vapour (WVP)"),
-    "SCL_20m": ("SCL_20m", "scl", "Scene classification map (SCL)"),
+    "AOT_10m": (("ATM_10m", "atmosphere"), "aot", "Aerosol optical thickness (AOT)"),
+    "WVP_10m": (("ATM_10m", "atmosphere"), "wvp", "Water vapour (WVP)"),
+    "SCL_20m": (("SCL_20m", "scl"), "scl", "Scene classification map (SCL)"),
 }
 
 # Retention. Loïc, 2026-09-14: the proxy expires on **1 November 2026**.
@@ -200,10 +202,11 @@ def build_root_href_assets(item: Item, root: str) -> None:
     """
     root_href = root.rstrip("/")
     built = {}
-    for key, (source_key, band_name, title) in ROOT_HREF_ASSETS.items():
-        source = item.assets.get(source_key)
-        if source is None:
-            raise ValueError(f"{item.id}: no {source_key} asset to build {key} from")
+    for key, (source_keys, band_name, title) in ROOT_HREF_ASSETS.items():
+        source_key = next((k for k in source_keys if k in item.assets), None)
+        if source_key is None:
+            raise ValueError(f"{item.id}: no {' or '.join(source_keys)} asset to build {key} from")
+        source = item.assets[source_key]
         fields = deepcopy(source.extra_fields)
         source_bands = fields.get("bands", [])
         bands = [b for b in source_bands if b.get("name") == band_name]
@@ -219,7 +222,8 @@ def build_root_href_assets(item: Item, root: str) -> None:
             fields["description"] = bands[0].get("description", fields.get("description", ""))
         built[key] = Asset(
             href=root_href,
-            media_type=source.media_type,
+            # Not the source's: the href is the store root, and EODC types `scl` as multiscales.
+            media_type="application/vnd.zarr; version=3",
             title=title,
             roles=["data"],
             extra_fields=fields,
@@ -230,7 +234,8 @@ def build_root_href_assets(item: Item, root: str) -> None:
     # HTTPS — and a source `quicklook` would sit next to the thumbnail we render ourselves
     # (`add_proxy_visualization`). EODC republished 220 items on 2026-09-10; the source
     # schema is not frozen, so this has to be failure-closed. `reflectance` is built
-    # upstream by `consolidate_reflectance_assets`; everything else here is rebuilt above.
+    # upstream by `consolidate_reflectance_assets`, or is the source's own in EODC's new
+    # layout; everything else here is rebuilt above.
     dropped = sorted(set(item.assets) - {"reflectance"})
     item.assets = {key: item.assets[key] for key in ("reflectance",) if key in item.assets}
     item.assets.update(built)
@@ -259,6 +264,21 @@ def fill_cube_extent(item: Item) -> None:
     )
     dimensions["x"]["extent"] = [x_min, x_max]
     dimensions["y"]["extent"] = [y_min, y_max]
+
+
+def drop_raster_scaling(item: Item) -> None:
+    """Remove ``raster:scale``/``raster:offset`` from every asset and band.
+
+    EODC's new layout puts them on ``reflectance`` and ``atmosphere``, while its stores
+    carry the same scaling as CF ``scale_factor``/``add_offset``, which titiler and xarray
+    decode: a client that also applied these would scale twice. The current layout has
+    none, so ``TRANSITION_COLLECTION`` keeps one shape. In pipeline mode a source whose
+    ``SR_*`` assets carry them is refused before this runs (``is_old_generation``).
+    """
+    for asset in item.assets.values():
+        for fields in (asset.extra_fields, *asset.extra_fields.get("bands", [])):
+            fields.pop("raster:scale", None)
+            fields.pop("raster:offset", None)
 
 
 def reconcile_extensions(item: Item) -> None:
@@ -403,6 +423,7 @@ def build_proxy_item(
     fill_cube_extent(item)
     build_root_href_assets(item, root)
     remove_xarray_integration(item)
+    drop_raster_scaling(item)
     reconcile_extensions(item)
 
     # Nothing above fails loudly if the source drifts, and the render links below name
@@ -441,6 +462,8 @@ def is_old_generation(source_item: dict) -> bool:
     The marker of the pre-N0513 EODC generation (a 9 Sep item has it; 600/600 N0513 items
     sampled 2026-09-28 have none, their scaling lives in the stores' CF attributes). A mixed
     user-facing collection means double scaling and black nodata, so the pipeline refuses these.
+    EODC's new layout has no ``SR_*`` asset and passes: its stores carry the CF scaling and
+    ``_FillValue``, and ``drop_raster_scaling`` removes the copy on ``reflectance``.
     """
     return any(
         field in fields

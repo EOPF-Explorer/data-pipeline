@@ -37,6 +37,12 @@ FIXTURE = EODC_FIXTURES / "S2C_MSIL2A_20260927T133931_N0513_R067_T28WDE_20260927
 OLD_GENERATION_FIXTURE = (
     EODC_FIXTURES / "S2B_MSIL2A_20260907T130029_N0512_R138_T26TLL_20260907T145009.json"
 )
+# EODC's new layout, which NRT switches to around 30 Oct 2026: `reflectance`, `atmosphere`,
+# `scl`, `mask` instead of SR_*/ATM_*/SCL_*, and raster:scale/offset on `reflectance` and
+# `atmosphere` as well as in the stores' CF attributes.
+NEW_LAYOUT_FIXTURE = (
+    EODC_FIXTURES / "S2B_MSIL2A_20260721T100559_N0512_R022_T33UWQ_20260721T143508.json"
+)
 COLLECTION = "sentinel-2-l2a-samples-zarr3-rollback"
 NEW = "sentinel-2-l2a-new"  # the pipeline's user-facing target (plan rev 3)
 RASTER = "https://rstaging.invalid/rstaging"
@@ -75,6 +81,11 @@ def source():
 @pytest.fixture
 def old_source():
     return json.loads(OLD_GENERATION_FIXTURE.read_text())
+
+
+@pytest.fixture
+def new_source():
+    return json.loads(NEW_LAYOUT_FIXTURE.read_text())
 
 
 @pytest.fixture
@@ -146,9 +157,49 @@ def test_root_href_assets_carry_their_single_band_and_source_metadata(
     assert asset["type"] == "application/vnd.zarr; version=3"
     # Numeric fields stay as EODC published them — they describe the EODC store. N0513
     # publishes no raster:scale (it is in the stores' CF attributes), so none is invented.
-    source_asset = source["assets"][register_proxy.ROOT_HREF_ASSETS[key][0]]
+    source_asset = source["assets"][register_proxy.ROOT_HREF_ASSETS[key][0][0]]
     for field in ("nodata", "data_type", "proj:shape", "raster:scale", "raster:offset"):
         assert asset.get(field) == source_asset.get(field), field
+
+
+# --- EODC's new asset layout ---
+
+
+def item_shape(item):
+    """Per asset: href below the store root, type, roles, band names and cube variables."""
+    root = store_link(item)
+    return {
+        key: (
+            asset["href"].replace(root, "<store>"),
+            asset["type"],
+            asset["roles"],
+            sorted(band["name"] for band in asset.get("bands", [])),
+            sorted(asset.get("cube:variables", {})),
+        )
+        for key, asset in item["assets"].items()
+        if key != "thumbnail"
+    }
+
+
+def test_the_new_layout_builds_the_same_item_as_the_current_one(source, new_source):
+    """EODC renames the groups, not the arrays: `-new` must hold one item shape, not two."""
+    current = build_proxy_item(source, NEW, RASTER, STAC_API, expires=None).to_dict()
+    new = build_proxy_item(new_source, NEW, RASTER, STAC_API, expires=None).to_dict()
+    assert set(new["assets"]) == set(current["assets"])
+    assert item_shape(new) == item_shape(current)
+    assert store_link(new).endswith(f"/{new['id']}.zarr")
+
+
+def test_the_new_layout_carries_no_raster_scale(new_source):
+    """The stores carry the same scaling as CF attributes, which titiler decodes: a client
+    that also applied raster:scale would scale twice. `-new`'s items have none."""
+    assert new_source["assets"]["reflectance"]["raster:scale"] == 0.0001  # control
+    assert new_source["assets"]["atmosphere"]["raster:scale"] == 0.001
+    item = build_proxy_item(new_source, NEW, RASTER, STAC_API, expires=None).to_dict()
+    for key in ("reflectance", "AOT_10m", "WVP_10m", "SCL_20m"):
+        asset = item["assets"][key]
+        for fields in (asset, *asset.get("bands", [])):
+            assert not {"raster:scale", "raster:offset"} & set(fields), key
 
 
 # --- properties, links, extensions ---
@@ -365,10 +416,12 @@ def test_an_unknown_source_asset_is_dropped_not_proxied(source):
     assert proxy["assets"]["thumbnail"]["href"].startswith(RASTER)  # ours, not the quicklook
 
 
-def test_a_missing_source_asset_is_refused(source):
+@pytest.mark.parametrize(("layout", "group"), [("source", "ATM_10m"), ("new_source", "atmosphere")])
+def test_a_missing_source_asset_is_refused(request, layout, group):
     """The four-asset set IS criterion 1 of #287 — a partial item must not look like a pass."""
-    del source["assets"]["ATM_10m"]
-    with pytest.raises(ValueError, match="no ATM_10m asset"):
+    source = request.getfixturevalue(layout)
+    del source["assets"][group]
+    with pytest.raises(ValueError, match="no ATM_10m or atmosphere asset"):
         build_proxy_item(source, COLLECTION, RASTER, STAC_API, expires=PROXY_EXPIRES)
 
 
@@ -650,6 +703,22 @@ def test_the_proxy_mode_keeps_registering_old_generation_sources(old_source, tmp
         rc = cli("--item-id", old_source["id"], "--max-items", "1", "--dry-run", str(tmp_path))
     assert rc == 0
     assert (tmp_path / f"{old_source['id']}.json").exists()
+
+
+def test_the_pipeline_takes_the_new_layout_and_still_refuses_the_old_generation(
+    new_source, old_source, tmp_path, caplog
+):
+    """The refusal reads the SOURCE's SR_* assets, so dropping raster:scale from what the
+    proxy writes cannot let an old-generation item through."""
+    caplog.set_level("INFO", logger="register_proxy")
+    target = FakeTarget()
+    sources = {item["id"]: item for item in (new_source, old_source)}
+    with patch("register_proxy.fetch_source_item", side_effect=lambda _a, _c, i: sources[i]):
+        assert run_pipeline(tmp_path, target, list(sources), collection=NEW) == 0
+    assert "created=1 exists=0 refused_generation=1 failed=0" in caplog.text
+    posted = json.dumps(target.session.post.call_args.kwargs["json"])
+    assert new_source["id"] in posted
+    assert "raster:scale" not in posted and "raster:offset" not in posted
 
 
 def test_a_transition_item_has_no_expires_even_if_its_source_had_one(source, tmp_path):
