@@ -24,13 +24,16 @@ RUN uv sync --frozen --no-dev --no-editable
 # --- Runtime stage: minimal production image without build tools ---
 FROM python:3.14.8-alpine@sha256:f6a589d43c42b9e7f7dc67a12d37132491f362859a5d750607710cc56da3bc72
 
+# pip goes too: the app runs from /app/.venv, and the Trivy scan flags the
+# certifi and urllib3 vendored in the base image's pip.
 RUN apk add --no-cache \
     bash \
     ca-certificates \
     gdal \
     gdal-dev \
     gdal-tools \
-    crc32c
+    crc32c \
+    && pip uninstall -y pip
 
 # Copy the virtualenv created by uv sync; activate it via PATH
 COPY --from=builder /app/.venv /app/.venv
