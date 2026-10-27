@@ -215,13 +215,13 @@ def test_s1_acq_collection_render_matches_the_items() -> None:
 # carried nothing at all) while live had EGM2008 + the cross-links. Pin the rel multiset
 # so a regeneration or a hand edit cannot silently re-arm that.
 S1_TEMPLATE_RELS = {
-    "sentinel-1-grd-rtc-staging.json": ["license", "related", "related"] + ["xyz"] * 4,
+    "sentinel-1-grd-rtc-staging.json": ["license", "related", "related", "style"] + ["xyz"] * 4,
     # The acquisitions collection additionally ships its own pre-aggregation links, so a
     # template apply cannot wipe what aggregate_items wrote (issue #348). They must stay LAST:
     # aggregate_items strips-then-appends, and any other position makes the two writers
     # permanently reorder each other. Pinned by
     # test_aggregate_items.py::TestTemplateSurvivesAggregation.
-    "sentinel-1-grd-rtc-acquisitions-staging.json": ["derived_from", "license", "related"]
+    "sentinel-1-grd-rtc-acquisitions-staging.json": ["derived_from", "license", "related", "style"]
     + ["xyz"] * 4
     + ["pre-aggregation"] * 2,
 }
@@ -319,6 +319,7 @@ EXPECTED_BASELAYERS = [
 BASELAYER_COLLECTIONS = [
     "sentinel-1-grd-rtc-staging.json",
     "sentinel-1-grd-rtc-acquisitions-staging.json",
+    "sentinel-2-l1c.json",
     "sentinel-2-l2a.json",
     "sentinel-2-l2a-new.json",
     "sentinel-2-l2a-staging.json",
@@ -363,23 +364,24 @@ def test_attribution_present_and_nonempty(filename: str) -> None:
         assert attribution.strip(), f"{filename}: {link.get('id')} lacks attribution"
 
 
-# --- Sentinel-2 L2A eodash collection metadata (issue #206) ------------------
+# --- eodash GeoZarr layer metadata (issues #206 / #348) -----------------------
 
-# Collections that must carry the eodash GeoZarr layer metadata.
-EODASH_COLLECTIONS = [
-    "sentinel-2-l2a.json",
-    "sentinel-2-l2a-new.json",
-    "sentinel-2-l2a-staging.json",
-]
+STYLE_BASE = "https://raw.githubusercontent.com/EOPF-Explorer/eodash-assets/refs/heads/main/styles/"
+S1_STYLE_KEYS = ["gamma0-rtc-backscatter-asc", "gamma0-rtc-backscatter-desc"]
 
-STYLES = "https://raw.githubusercontent.com/EOPF-Explorer/eodash-assets/refs/heads/main/styles/"
+# Collections that must carry the eodash GeoZarr layer metadata: (style file, asset:keys).
 # -new reads Samples Service stores of uint16 counts with CF scale_factor/add_offset,
 # which OL's GeoZarr source does not apply, so its style decodes them itself.
-STYLE_HREF = {
-    "sentinel-2-l2a.json": STYLES + "geozarr.json",
-    "sentinel-2-l2a-new.json": STYLES + "s2-geozarr-cf.json",
-    "sentinel-2-l2a-staging.json": STYLES + "geozarr.json",
+# L1C stores digital counts with CF scaling too, so it needs the same decoding style.
+EXPECTED_STYLES = {
+    "sentinel-2-l2a.json": ("geozarr.json", ["reflectance"]),
+    "sentinel-2-l2a-new.json": ("s2-geozarr-cf.json", ["reflectance"]),
+    "sentinel-2-l2a-staging.json": ("geozarr.json", ["reflectance"]),
+    "sentinel-2-l1c.json": ("s2-geozarr-cf.json", ["reflectance"]),
+    "sentinel-1-grd-rtc-staging.json": ("s1-geozarr.json", S1_STYLE_KEYS),
+    "sentinel-1-grd-rtc-acquisitions-staging.json": ("s1-geozarr.json", S1_STYLE_KEYS),
 }
+EODASH_COLLECTIONS = sorted(EXPECTED_STYLES)
 
 
 @pytest.mark.parametrize("filename", EODASH_COLLECTIONS)
@@ -394,14 +396,17 @@ def test_layer_exclusive_set(filename: str) -> None:
 
 
 @pytest.mark.parametrize("filename", EODASH_COLLECTIONS)
-def test_single_style_link_bound_to_reflectance(filename: str) -> None:
-    """Exactly one rel=style link, pointing at the collection's style for the reflectance asset."""
+def test_single_style_link_bound_to_expected_assets(filename: str) -> None:
+    """Exactly one rel=style link, pointing at the collection's style for its display assets."""
     styles = [link for link in _load(filename)["links"] if link.get("rel") == "style"]
     assert len(styles) == 1, "expected exactly one style link (idempotent)"
-    style = styles[0]
-    assert style["href"] == STYLE_HREF[filename]
-    assert style["type"] == "application/json"
-    assert style["asset:keys"] == ["reflectance"]
+    style_file, asset_keys = EXPECTED_STYLES[filename]
+    assert styles[0] == {
+        "rel": "style",
+        "type": "application/json",
+        "href": STYLE_BASE + style_file,
+        "asset:keys": asset_keys,
+    }
 
 
 @pytest.mark.parametrize("filename", EODASH_COLLECTIONS)
@@ -414,7 +419,7 @@ def test_style_targets_existing_asset(filename: str) -> None:
 
 
 def test_no_leak_into_other_collections() -> None:
-    """eodash:layerExclusive / style links must not appear on non-S2-L2A collections."""
+    """eodash:layerExclusive / style links must not appear on any other collection."""
     for path in STAC_DIR.rglob("*.json"):
         if path.relative_to(STAC_DIR).as_posix() in EODASH_COLLECTIONS:
             continue
@@ -461,6 +466,7 @@ RASTERFORM_BASE = (
 )
 
 EXPECTED_RASTERFORMS = {
+    "sentinel-2-l1c.json": RASTERFORM_BASE + "bandsform.json",
     "sentinel-2-l2a.json": RASTERFORM_BASE + "bandsform.json",
     "sentinel-2-l2a-new.json": RASTERFORM_BASE + "bandsform.json",
     "sentinel-2-l2a-staging.json": RASTERFORM_BASE + "bandsform.json",
