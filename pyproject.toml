@@ -21,9 +21,9 @@ classifiers = [
 
 dependencies = [
     "pystac==1.15.2",
-    "pystac-client==0.9.0",
+    "pystac-client==0.9.1",
     "httpx==0.28.1",
-    "boto3==1.43.114",
+    "boto3==1.43.116",
     "xarray==2026.9.0",
     "zarr[cast-value-rs]>=3.2.1",
     "s3fs==2026.9.0",
@@ -52,8 +52,8 @@ dev = [
     "ruff==0.17.1",
     "mypy==2.4.0",
     "pre-commit==4.7.0",
-    "types-boto3==1.43.114",
-    "types-requests==2.33.0.20261006",
+    "types-boto3==1.43.116",
+    "types-requests==2.33.0.20260906",
     "pip-audit==2.10.1",
 ]
 test = [
