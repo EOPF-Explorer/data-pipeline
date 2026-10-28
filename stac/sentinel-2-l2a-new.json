@@ -47,7 +47,7 @@
     },
     {
       "rel": "style",
-      "href": "https://raw.githubusercontent.com/EOPF-Explorer/eodash-assets/refs/heads/main/styles/geozarr.json",
+      "href": "https://raw.githubusercontent.com/EOPF-Explorer/eodash-assets/refs/heads/main/styles/s2-geozarr-cf.json",
       "type": "application/json",
       "asset:keys": ["reflectance"]
     },

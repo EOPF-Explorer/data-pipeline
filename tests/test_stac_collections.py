@@ -372,10 +372,14 @@ EODASH_COLLECTIONS = [
     "sentinel-2-l2a-staging.json",
 ]
 
-STYLE_HREF = (
-    "https://raw.githubusercontent.com/EOPF-Explorer/eodash-assets/"
-    "refs/heads/main/styles/geozarr.json"
-)
+STYLES = "https://raw.githubusercontent.com/EOPF-Explorer/eodash-assets/refs/heads/main/styles/"
+# -new reads Samples Service stores of uint16 counts with CF scale_factor/add_offset,
+# which OL's GeoZarr source does not apply, so its style decodes them itself.
+STYLE_HREF = {
+    "sentinel-2-l2a.json": STYLES + "geozarr.json",
+    "sentinel-2-l2a-new.json": STYLES + "s2-geozarr-cf.json",
+    "sentinel-2-l2a-staging.json": STYLES + "geozarr.json",
+}
 
 
 @pytest.mark.parametrize("filename", EODASH_COLLECTIONS)
@@ -391,11 +395,11 @@ def test_layer_exclusive_set(filename: str) -> None:
 
 @pytest.mark.parametrize("filename", EODASH_COLLECTIONS)
 def test_single_style_link_bound_to_reflectance(filename: str) -> None:
-    """Exactly one rel=style link, pointing at geozarr.json for the reflectance asset."""
+    """Exactly one rel=style link, pointing at the collection's style for the reflectance asset."""
     styles = [link for link in _load(filename)["links"] if link.get("rel") == "style"]
     assert len(styles) == 1, "expected exactly one style link (idempotent)"
     style = styles[0]
-    assert style["href"] == STYLE_HREF
+    assert style["href"] == STYLE_HREF[filename]
     assert style["type"] == "application/json"
     assert style["asset:keys"] == ["reflectance"]
 
