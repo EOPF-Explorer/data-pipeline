@@ -5,9 +5,10 @@ on:
   push:
     branches: [main]
   # Weekly, for advisories published since the last push to main, including
-  # ones Dependabot never raises an alert for.
+  # ones Dependabot never raises an alert for. Off the hour, where GitHub
+  # delays or drops scheduled runs under load.
   schedule:
-    - cron: "0 6 * * 1"
+    - cron: "23 6 * * 1"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
