@@ -33,6 +33,11 @@ updates:
         applies-to: version-updates
         patterns:
           - "*"
+        # eopf-geozarr gets its own PR: its upgrades change conversion output
+        # and need PINNED_EOPF_GEOZARR_VERSION in scripts/s1_store_meta.py
+        # bumped with them, which would block the rest of the group.
+        exclude-patterns:
+          - "eopf-geozarr"
         update-types:
           - "minor"
           - "patch"
