@@ -69,6 +69,15 @@
       "attribution": "{ EOxCloudless 2024: <a xmlns:dct=\"http://purl.org/dc/terms/\" href=\"https://s2maps.eu\" target=\"_blank\" property=\"dct:title\">Sentinel-2 cloudless - s2maps.eu</a> by <a xmlns:cc=\"http://creativecommons.org/ns#\" href=\"https://eox.at\" target=\"_blank\" property=\"cc:attributionName\" rel=\"cc:attributionURL\">EOX IT Services GmbH</a> (Contains modified Copernicus Sentinel data 2024) }"
     },
     {
+      "rel": "style",
+      "type": "application/json",
+      "href": "https://raw.githubusercontent.com/EOPF-Explorer/eodash-assets/refs/heads/main/styles/s1-geozarr.json",
+      "asset:keys": [
+        "gamma0-rtc-backscatter-asc",
+        "gamma0-rtc-backscatter-desc"
+      ]
+    },
+    {
       "rel": "pre-aggregation",
       "href": "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/aggregations/sentinel-1-grd-rtc-acquisitions-staging/daily.json",
       "type": "application/json",
@@ -357,5 +366,6 @@
       "title": "Sentinel-1 GRD RTC per-acquisition thumbnail"
     }
   },
+  "eodash:layerExclusive": true,
   "eodash:rasterform": "https://raw.githubusercontent.com/EOPF-Explorer/eodash-assets/refs/heads/main/forms/s1-bandsform.json"
 }
