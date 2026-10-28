@@ -53,6 +53,9 @@ def test_s1_rtc_collection_valid(collection_id: str, required_data_assets: set[s
 
 # Collections that must carry the eodash GeoZarr layer metadata.
 EODASH_COLLECTIONS = ["sentinel-2-l2a.json", "sentinel-2-l2a-staging.json"]
+# S3 OLCI carries the same metadata with its own style and asset (issue #348); pinned in
+# its own section below.
+S3_OLCI = "sentinel-3-olci-l1-efr-staging.json"
 
 STYLE_HREF = (
     "https://raw.githubusercontent.com/EOPF-Explorer/eodash-assets/"
@@ -96,9 +99,9 @@ def test_style_targets_existing_asset(filename: str) -> None:
 
 
 def test_no_leak_into_other_collections() -> None:
-    """eodash:layerExclusive / style links must not appear on non-S2-L2A collections."""
+    """eodash:layerExclusive / style links must not appear on any other collection."""
     for path in STAC_DIR.glob("*.json"):
-        if path.name in EODASH_COLLECTIONS:
+        if path.name in [*EODASH_COLLECTIONS, S3_OLCI]:
             continue
         data = json.loads(path.read_text())
         assert "eodash:layerExclusive" not in data, f"unexpected field in {path.name}"
@@ -172,10 +175,11 @@ def test_s3_olci_collection_valid() -> None:
     assert col.id == "sentinel-3-olci-l1-efr-staging"
     assert col.extent.temporal.intervals[0][0] is not None
 
-    # Single multiscale radiance asset carrying all 21 Oa bands.
+    # Single multiscale radiance asset carrying all 21 Oa bands, keyed like the item asset
+    # register_v1 writes (radianceData), which the eodash style link targets.
     item_assets = col.extra_fields.get("item_assets", {})
-    assert set(item_assets.keys()) == {"measurements"}
-    assert len(item_assets["measurements"]["bands"]) == 21
+    assert set(item_assets.keys()) == {"radianceData"}
+    assert len(item_assets["radianceData"]["bands"]) == 21
 
     # Deliberately NOT a datacube. The instrument acquires swath data; the pipeline
     # reprojects it to EPSG:4326, but the collection template has never declared cube
@@ -183,3 +187,25 @@ def test_s3_olci_collection_valid() -> None:
     # so the datacube extension / cube:dimensions must stay absent.
     assert not any("datacube" in ext for ext in col.stac_extensions)
     assert "cube:dimensions" not in json.dumps(col.to_dict())
+
+
+EODASH_ASSETS = "https://raw.githubusercontent.com/EOPF-Explorer/eodash-assets/refs/heads/main/"
+
+
+def test_s3_olci_eodash_metadata() -> None:
+    """Browser-rendered radianceData layer (issue #348): style, exclusivity, form, basemaps."""
+    data = _load(S3_OLCI)
+    styles = [link for link in data["links"] if link.get("rel") == "style"]
+    assert styles == [
+        {
+            "rel": "style",
+            "type": "application/json",
+            "href": EODASH_ASSETS + "styles/s3-geozarr.json",
+            "asset:keys": ["radianceData"],
+        }
+    ]
+    assert data.get("eodash:layerExclusive") is True
+    assert data.get("eodash:rasterform") == EODASH_ASSETS + "forms/s3-bandsform.json"
+    xyz = _xyz_links(S3_OLCI)
+    assert [(lk.get("id"), lk.get("type"), lk.get("roles")) for lk in xyz] == EXPECTED_BASELAYERS
+    assert all(lk.get("attribution", "").strip() for lk in xyz)
