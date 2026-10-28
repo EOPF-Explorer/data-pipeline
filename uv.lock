@@ -965,7 +965,7 @@ requires-dist = [
     { name = "boto3", specifier = "==1.43.116" },
     { name = "cf-xarray", specifier = "==0.11.3" },
     { name = "click", specifier = "==8.5.0" },
-    { name = "eopf-geozarr", specifier = "==0.11.0" },
+    { name = "eopf-geozarr", specifier = "==0.12.0" },
     { name = "httpx", specifier = "==0.28.1" },
     { name = "mgrs", specifier = "==1.5.4" },
     { name = "morecantile", specifier = "==7.1.0" },
@@ -1086,7 +1086,7 @@ wheels = [
 
 [[package]]
 name = "eopf-geozarr"
-version = "0.11.0"
+version = "0.12.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -1106,9 +1106,9 @@ dependencies = [
     { name = "zarr", extra = ["cast-value-rs"] },
     { name = "zarr-cm" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/66/f1/3eb702a8696349221f868104e257731e5250a67a292b816dc6d7981e93eb/eopf_geozarr-0.11.0.tar.gz", hash = "sha256:b8adc8660b02ccbdc158558efbdbeb813afe704798cb307933674b1340a484fe", size = 279682, upload-time = "2026-09-29T10:31:05.628Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/54/3f/f90705d811d2ac0f0100260a523b14717c68c781a0faf98c5e55a36affed/eopf_geozarr-0.12.0.tar.gz", hash = "sha256:b069bebdb497ad74387ad070f1984a8a6e68e2a4efc1f68c7a376ab281171ac6", size = 296060, upload-time = "2026-09-29T10:31:07.156Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e2/5e/f1c5fcd574dd14e06e8455c69dea7263d3f85bd72f7f58ff6a81b49718cb/eopf_geozarr-0.11.0-py3-none-any.whl", hash = "sha256:c98e483c90f29e24d93284849fed32cdfa6a001559a69369447b3f57d722d020", size = 190013, upload-time = "2026-09-29T10:31:03.999Z" },
+    { url = "https://files.pythonhosted.org/packages/88/b6/09f1c95889e21b9d94fba23ddf97685fb45670fa2f1489d2c81217f1381e/eopf_geozarr-0.12.0-py3-none-any.whl", hash = "sha256:3096fb85a0a32c972ad2f53bb4137fee37cf78ea0d034a2f9f13452623ae90fb", size = 202505, upload-time = "2026-09-29T10:31:04.922Z" },
 ]
 
 [[package]]
@@ -4369,14 +4369,14 @@ cast-value-rs = [
 
 [[package]]
 name = "zarr-cm"
-version = "0.4.1"
+version = "0.5.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f9/c6/51d38cafa07bdf725c77a67719647eea43255f925fda062b40799bbb361d/zarr_cm-0.4.1.tar.gz", hash = "sha256:693d24ca2b8e3a7230e1ed448c2c57f98833b81e5899607b6cb4a7ac31f94002", size = 50839, upload-time = "2026-06-21T19:20:36.277Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/45/81/29d60d04fad69ae1d7ee2675990a4c7421ded4d9a15280ead2d4c5f470c6/zarr_cm-0.5.0.tar.gz", hash = "sha256:f39234ef5abc9acab2a4fadcde9132f8695fa47692a1f4e000d2d7b6fac039bd", size = 202161, upload-time = "2026-09-26T07:57:43.488Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e8/14/3de8976647909b2f6764b8d0c9add0a961667ef4ab46f3f99e12d7a522fa/zarr_cm-0.4.1-py3-none-any.whl", hash = "sha256:2c7f36383af2e6f75eb274a797a13154fd5c5827390de7c79294dfeb9f0543ee", size = 33005, upload-time = "2026-06-21T19:20:35.05Z" },
+    { url = "https://files.pythonhosted.org/packages/85/fb/8c17b2956a248be9398f6727490976ab3e69cd419af9d983164a46d830da/zarr_cm-0.5.0-py3-none-any.whl", hash = "sha256:99fef56dae5eb5ee2a7126d8a18e669944494e0778832577ae8ae922b0207b12", size = 55585, upload-time = "2026-09-26T07:57:41.935Z" },
 ]
 
 [[package]]
