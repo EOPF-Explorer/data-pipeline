@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.21.0 (2026-10-28)
+
+## What's Changed
+* build(deps): bump uv from 0.12.19 to 0.13.4 in /docker in the uv group across 1 directory by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/474
+* build(deps): bump the all group across 1 directory with 4 updates by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/478
+* build(deps): bump aiohttp from 3.14.3 to 3.14.4 in the security group across 1 directory by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/473
+* build(deps): bump python from 3.14.7-alpine to 3.14.8-alpine in /docker in the minor-and-patch group by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/468
+* build(deps): bump the minor-and-patch group across 1 directory with 11 updates by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/476
+* build(deps): bump vulnerable transitive dependencies in uv.lock by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/482
+* build(docker): remove pip from the runtime image by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/483
+* build(deps): bump the minor-and-patch group across 1 directory with 11 updates by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/480
+* fix(stac): point sentinel-2-l2a-new at the CF-decoding eodash style by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/481
+* build(deps): install eopf-geozarr from PyPI by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/484
+* build(deps): bump pip from 26.2.1 to 26.2.2 in /docker in the all group by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/488
+* build(deps): bump the all group with 3 updates by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/489
+* build(deps): bump the minor-and-patch group with 4 updates by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/490
+* ci(build): refresh the runtime image's Alpine packages on every build by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/493
+* ci(security-audit): run the audit weekly by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/486
+* feat(stac): eodash style links and layer exclusivity for S1 RTC and S2 L1C by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/494
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.20.0...v1.21.0
+
 ## 1.20.0 (2026-10-09)
 
 ## What's Changed
