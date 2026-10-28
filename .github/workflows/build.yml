@@ -106,6 +106,10 @@ jobs:
         labels: ${{ steps.meta.outputs.labels }}
         cache-from: type=gha
         cache-to: type=gha,mode=max
+        # Rebuild the shipped stage every time, so its apk packages pick up Alpine
+        # security fixes instead of reusing a cached layer until the Dockerfile
+        # changes. The push step below reuses these freshly built, scanned layers.
+        no-cache-filters: runtime
 
     - name: Scan image with Trivy (SARIF CRITICAL/HIGH, incl. unfixed)
       id: trivy-sarif-critical-high
