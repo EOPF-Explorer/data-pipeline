@@ -175,11 +175,10 @@ def test_s3_olci_collection_valid() -> None:
     assert col.id == "sentinel-3-olci-l1-efr-staging"
     assert col.extent.temporal.intervals[0][0] is not None
 
-    # Single multiscale radiance asset carrying all 21 Oa bands, keyed like the item asset
-    # register_v1 writes (radianceData), which the eodash style link targets.
+    # Single multiscale radiance asset carrying all 21 Oa bands.
     item_assets = col.extra_fields.get("item_assets", {})
-    assert set(item_assets.keys()) == {"radianceData"}
-    assert len(item_assets["radianceData"]["bands"]) == 21
+    assert set(item_assets.keys()) == {"measurements"}
+    assert len(item_assets["measurements"]["bands"]) == 21
 
     # Deliberately NOT a datacube. The instrument acquires swath data; the pipeline
     # reprojects it to EPSG:4326, but the collection template has never declared cube
@@ -206,6 +205,5 @@ def test_s3_olci_eodash_metadata() -> None:
     ]
     assert data.get("eodash:layerExclusive") is True
     assert data.get("eodash:rasterform") == EODASH_ASSETS + "forms/s3-bandsform.json"
-    xyz = _xyz_links(S3_OLCI)
-    assert [(lk.get("id"), lk.get("type"), lk.get("roles")) for lk in xyz] == EXPECTED_BASELAYERS
-    assert all(lk.get("attribution", "").strip() for lk in xyz)
+    # The same four base layers the S2 collections carry, byte for byte.
+    assert _xyz_links(S3_OLCI) == _xyz_links("sentinel-2-l2a.json")

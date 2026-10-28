@@ -280,7 +280,7 @@
     ]
   },
   "item_assets": {
-    "radianceData": {
+    "measurements": {
       "gsd": 300,
       "type": "application/vnd.zarr; version=3; profile=multiscales",
       "roles": [
