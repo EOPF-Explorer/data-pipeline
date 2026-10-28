@@ -38,7 +38,7 @@ pre-commit:  ## Run all pre-commit hooks
 
 build:  ## Build Docker image
 	@echo "Building $(IMAGE_NAME):$(TAG) ..."
-	docker build --platform linux/amd64 \
+	docker build --platform linux/amd64 --no-cache-filter runtime \
 		-f docker/Dockerfile \
 		-t $(IMAGE_NAME):$(TAG) \
 		-t $(IMAGE_NAME):latest \

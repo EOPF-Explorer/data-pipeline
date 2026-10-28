@@ -81,14 +81,16 @@ echo $HARBOR_PASSWORD | docker login w9mllyot.c1.de1.container-registry.ovh.net 
 
 On macOS, the linux architecture needs to be specified when building the image with the flag `--platform linux/amd64` :
 ```bash
-docker build -f docker/Dockerfile --network host -t w9mllyot.c1.de1.container-registry.ovh.net/eopf-sentinel-zarr-explorer/data-pipeline:v1-staging --platform linux/amd64 .
+docker build -f docker/Dockerfile --network host --no-cache-filter runtime -t w9mllyot.c1.de1.container-registry.ovh.net/eopf-sentinel-zarr-explorer/data-pipeline:v1-staging --platform linux/amd64 .
 ```
 
 on linux:
 
 ```bash
-docker build -f docker/Dockerfile --network host -t w9mllyot.c1.de1.container-registry.ovh.net/eopf-sentinel-zarr-explorer/data-pipeline:v1-staging  .
+docker build -f docker/Dockerfile --network host --no-cache-filter runtime -t w9mllyot.c1.de1.container-registry.ovh.net/eopf-sentinel-zarr-explorer/data-pipeline:v1-staging  .
 ```
+
+`--no-cache-filter runtime` reinstalls the runtime stage's Alpine packages instead of reusing a cached layer, as CI does.
 
 
 
