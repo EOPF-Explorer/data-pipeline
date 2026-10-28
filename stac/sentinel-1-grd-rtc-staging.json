@@ -319,5 +319,6 @@
     "https://stac-extensions.github.io/sar/v1.0.0/schema.json",
     "https://stac-extensions.github.io/sat/v1.0.0/schema.json"
   ],
-  "eodash:layerExclusive": true
+  "eodash:layerExclusive": true,
+  "eodash:rasterform": "https://raw.githubusercontent.com/EOPF-Explorer/eodash-assets/refs/heads/main/forms/s1-bandsform.json"
 }

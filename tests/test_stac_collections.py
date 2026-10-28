@@ -172,8 +172,7 @@ def test_s1_cube_declares_no_collection_render() -> None:
     a single `rescale` pair for a three-band expression — wrong orbit for a third of the items and
     the wrong number of stretches for all of them (items use [[0.0,0.4],[0.0,0.1],[1.0,15.0]]).
     Every item carries its own correct per-orbit `renders`, and every consumer reads *that*, so the
-    collection declares none — and therefore must not declare the render extension either. Same
-    reasoning as test_rasterform_absent_everywhere_else below.
+    collection declares none — and therefore must not declare the render extension either.
     """
     data = _load(S1_CUBE)
     assert "renders" not in data
@@ -460,7 +459,8 @@ def test_pre_aggregation_links_are_last(filename: str) -> None:
 # The bands form eodash builds its TiTiler parameter picker from. S1 uses a single
 # orbit-agnostic form: its `${properties.sat:orbit_state}` placeholders are resolved
 # against each item at render time (eodash/eodash#424), so one collection-level
-# declaration serves both orbits and no per-item field is needed.
+# declaration serves both orbits and no per-item field is needed. On a dual-orbit cube
+# item that is the orbit of the pinned preview slice, which is the slice its xyz link shows.
 RASTERFORM_BASE = (
     "https://raw.githubusercontent.com/EOPF-Explorer/eodash-assets/refs/heads/main/forms/"
 )
@@ -471,6 +471,7 @@ EXPECTED_RASTERFORMS = {
     "sentinel-2-l2a-new.json": RASTERFORM_BASE + "bandsform.json",
     "sentinel-2-l2a-staging.json": RASTERFORM_BASE + "bandsform.json",
     "sentinel-1-grd-rtc-acquisitions-staging.json": RASTERFORM_BASE + "s1-bandsform.json",
+    "sentinel-1-grd-rtc-staging.json": RASTERFORM_BASE + "s1-bandsform.json",
 }
 
 
@@ -480,13 +481,7 @@ def test_rasterform_points_at_expected_form(filename: str) -> None:
 
 
 def test_rasterform_absent_everywhere_else() -> None:
-    """No other template declares a form — the S1 cube collection least of all.
-
-    Cube items are dual-orbit; their `sat:orbit_state` is only the orbit of the slice
-    `_pin_preview_to_best_recent` pinned, and it does not follow the time slider. A
-    collection-level form there would substitute an orbit the displayed slice may not
-    have. Only the per-acquisition items are single-orbit by construction.
-    """
+    """No other template declares a form."""
     for path in STAC_DIR.rglob("*.json"):
         if path.relative_to(STAC_DIR).as_posix() in EXPECTED_RASTERFORMS:
             continue

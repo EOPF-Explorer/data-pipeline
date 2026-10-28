@@ -147,8 +147,7 @@ def align_collection(
     # `expression` has to name one group, so any value here is false for the other half of the
     # collection. Every item already carries its own correct per-orbit `renders`, and nothing reads
     # the collection-level block (all consumers read `item.properties.renders`), so the cube simply
-    # does not declare one. Same reasoning as the deliberately absent `eodash:rasterform`, pinned by
-    # tests/test_stac_collections.py::test_rasterform_absent_everywhere_else.
+    # does not declare one.
     if is_cube:
         c.pop("renders", None)
     else:
