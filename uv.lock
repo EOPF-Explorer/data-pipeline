@@ -965,7 +965,7 @@ requires-dist = [
     { name = "boto3", specifier = "==1.43.114" },
     { name = "cf-xarray", specifier = "==0.11.3" },
     { name = "click", specifier = "==8.5.0" },
-    { name = "eopf-geozarr", git = "https://github.com/EOPF-Explorer/data-model.git?rev=v0.11.0" },
+    { name = "eopf-geozarr", specifier = "==0.11.0" },
     { name = "httpx", specifier = "==0.28.1" },
     { name = "mgrs", specifier = "==1.5.4" },
     { name = "morecantile", specifier = "==7.1.0" },
@@ -1087,7 +1087,7 @@ wheels = [
 [[package]]
 name = "eopf-geozarr"
 version = "0.11.0"
-source = { git = "https://github.com/EOPF-Explorer/data-model.git?rev=v0.11.0#7d662edf8534c760b82d6ea23031e73242f4a653" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
     { name = "boto3" },
@@ -1105,6 +1105,10 @@ dependencies = [
     { name = "xarray" },
     { name = "zarr", extra = ["cast-value-rs"] },
     { name = "zarr-cm" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/66/f1/3eb702a8696349221f868104e257731e5250a67a292b816dc6d7981e93eb/eopf_geozarr-0.11.0.tar.gz", hash = "sha256:b8adc8660b02ccbdc158558efbdbeb813afe704798cb307933674b1340a484fe", size = 279682, upload-time = "2026-09-29T10:31:05.628Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e2/5e/f1c5fcd574dd14e06e8455c69dea7263d3f85bd72f7f58ff6a81b49718cb/eopf_geozarr-0.11.0-py3-none-any.whl", hash = "sha256:c98e483c90f29e24d93284849fed32cdfa6a001559a69369447b3f57d722d020", size = 190013, upload-time = "2026-09-29T10:31:03.999Z" },
 ]
 
 [[package]]

@@ -2,9 +2,6 @@
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.hatch.metadata]
-allow-direct-references = true
-
 [project]
 name = "data-pipeline"
 version = "1.20.0"
@@ -34,13 +31,7 @@ dependencies = [
     "tenacity==9.2.1",
     "morecantile==7.1.0",
     "cf-xarray==0.11.3",
-    # data-model branch s1-tiling-v0.10.2 = data-model#216 (S1 RTC support, head
-    # b0d31be) merged with v0.10.2, which ships data-model#220 (concurrent-safe
-    # source caching, fixes the fsspec simplecache race behind data-pipeline#339).
-    # This branch needs BOTH: S1 registration/ingest and open_source_datatree.
-    # Chunk-alignment was split out to data-model#221, so quality/atmosphere
-    # aot/wvp ship unsharded until that lands.
-    "eopf-geozarr @ git+https://github.com/EOPF-Explorer/data-model.git@v0.11.0",
+    "eopf-geozarr==0.11.0",
     "mgrs==1.5.4",
     "requests==2.34.2",
     # scripts/stac_auth.py imports urllib3.util.retry directly: Retry(backoff_max=...)
