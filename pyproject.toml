@@ -23,7 +23,7 @@ dependencies = [
     "pystac==1.15.2",
     "pystac-client==0.9.1",
     "httpx==0.28.1",
-    "boto3==1.43.116",
+    "boto3==1.43.117",
     "xarray==2026.9.0",
     "zarr[cast-value-rs]>=3.2.1",
     "s3fs==2026.9.0",
@@ -52,7 +52,7 @@ dev = [
     "ruff==0.17.1",
     "mypy==2.4.0",
     "pre-commit==4.7.0",
-    "types-boto3==1.43.116",
+    "types-boto3==1.43.117",
     "types-requests==2.33.0.20260906",
     "pip-audit==2.10.1",
 ]
@@ -64,7 +64,7 @@ test = [
 notebooks = [
     "notebook==7.6.3",
     "ipykernel==7.4.0",
-    "pandas==3.0.6",
+    "pandas==3.1.0",
     "matplotlib==3.11.2",
     "shapely==2.2.0",
     "python-dotenv==1.2.4",
