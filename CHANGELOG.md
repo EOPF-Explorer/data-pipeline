@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.21.1 (2026-11-03)
+
+## What's Changed
+* build(deps): require tornado>=6.6 for three CVEs by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/500
+* fix(register): keep raster:scale on new-layout assets with statistics by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/502
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.21.0...v1.21.1
+
 ## 1.21.0 (2026-11-03)
 
 ## What's Changed
