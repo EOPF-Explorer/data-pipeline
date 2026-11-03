@@ -1,0 +1,626 @@
+{
+  "id": "S2B_MSIL2A_20260930T094029_N0513_R036_T37WEU_20260930T133458",
+  "bbox": [
+    38.99946329375825,
+    70.20737375621478,
+    40.35379251174531,
+    70.48483047414322
+  ],
+  "type": "Feature",
+  "links": [
+    {
+      "rel": "collection",
+      "type": "application/json",
+      "href": "https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a"
+    },
+    {
+      "rel": "parent",
+      "type": "application/json",
+      "href": "https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a"
+    },
+    {
+      "rel": "root",
+      "type": "application/json",
+      "href": "https://api.explorer.eopf.copernicus.eu/stac/"
+    },
+    {
+      "rel": "self",
+      "type": "application/geo+json",
+      "href": "https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-2-l2a/items/S2B_MSIL2A_20260930T094029_N0513_R036_T37WEU_20260930T133458"
+    },
+    {
+      "rel": "cite-as",
+      "href": "https://doi.org/10.5270/S2_-znk9xsj"
+    },
+    {
+      "rel": "license",
+      "href": "https://sentinel.esa.int/documents/247904/690755/Sentinel_Data_Legal_Notice",
+      "type": "application/pdf",
+      "title": "Legal notice on the use of Copernicus Sentinel Data and Service Information"
+    },
+    {
+      "rel": "store",
+      "href": "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-2-l2a/S2B_MSIL2A_20260930T094029_N0513_R036_T37WEU_20260930T133458.zarr",
+      "type": "application/octet-stream",
+      "title": "Zarr Store"
+    },
+    {
+      "rel": "viewer",
+      "href": "https://api.explorer.eopf.copernicus.eu/raster/collections/sentinel-2-l2a/items/S2B_MSIL2A_20260930T094029_N0513_R036_T37WEU_20260930T133458/viewer",
+      "type": "text/html",
+      "title": "Viewer for S2B_MSIL2A_20260930T094029_N0513_R036_T37WEU_20260930T133458"
+    },
+    {
+      "rel": "xyz",
+      "href": "https://api.explorer.eopf.copernicus.eu/raster/collections/sentinel-2-l2a/items/S2B_MSIL2A_20260930T094029_N0513_R036_T37WEU_20260930T133458/tiles/WebMercatorQuad/{z}/{x}/{y}.png?rescale=0%2C1&color_formula=gamma%20rgb%201.3%2C%20sigmoidal%20rgb%206%200.1%2C%20saturation%201.2&variables=%2Fmeasurements%2Freflectance%3Ab04&variables=%2Fmeasurements%2Freflectance%3Ab03&variables=%2Fmeasurements%2Freflectance%3Ab02&bidx=1",
+      "type": "image/png",
+      "title": "Sentinel-2 L2A True Color"
+    },
+    {
+      "rel": "tilejson",
+      "href": "https://api.explorer.eopf.copernicus.eu/raster/collections/sentinel-2-l2a/items/S2B_MSIL2A_20260930T094029_N0513_R036_T37WEU_20260930T133458/WebMercatorQuad/tilejson.json?rescale=0%2C1&color_formula=gamma%20rgb%201.3%2C%20sigmoidal%20rgb%206%200.1%2C%20saturation%201.2&variables=%2Fmeasurements%2Freflectance%3Ab04&variables=%2Fmeasurements%2Freflectance%3Ab03&variables=%2Fmeasurements%2Freflectance%3Ab02&bidx=1",
+      "type": "application/json",
+      "title": "TileJSON for S2B_MSIL2A_20260930T094029_N0513_R036_T37WEU_20260930T133458"
+    },
+    {
+      "rel": "via",
+      "href": "https://explorer.eopf.copernicus.eu/collections/sentinel-2-l2a/items/S2B_MSIL2A_20260930T094029_N0513_R036_T37WEU_20260930T133458",
+      "title": "EOPF Explorer"
+    },
+    {
+      "rel": "derived_from",
+      "href": "https://stac.core.eopf.eodc.eu/collections/sentinel-2-l2a/items/S2B_MSIL2A_20260930T094029_N0513_R036_T37WEU_20260930T133458",
+      "type": "application/json",
+      "title": "Derived from original Zarr STAC item"
+    }
+  ],
+  "assets": {
+    "AOT_10m": {
+      "gsd": 10,
+      "href": "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-2-l2a/S2B_MSIL2A_20260930T094029_N0513_R036_T37WEU_20260930T133458.zarr/",
+      "type": "application/vnd.zarr; version=3",
+      "roles": [
+        "data"
+      ],
+      "title": "Aerosol optical thickness (AOT)",
+      "nodata": 0,
+      "alternate": {
+        "s3": {
+          "href": "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-2-l2a/S2B_MSIL2A_20260930T094029_N0513_R036_T37WEU_20260930T133458.zarr/quality/atmosphere/r10m/aot",
+          "storage:refs": [
+            "standard"
+          ],
+          "objects_per_storage_class": {
+            "STANDARD": 2
+          }
+        }
+      },
+      "data_type": "uint16",
+      "description": "Aerosol Optical Thickness map at 10m (for 550nm) resampled from 20m AOT map",
+      "raster:scale": 0.001,
+      "raster:offset": 0
+    },
+    "SCL_20m": {
+      "gsd": 20,
+      "href": "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-2-l2a/S2B_MSIL2A_20260930T094029_N0513_R036_T37WEU_20260930T133458.zarr/conditions/mask/l2a_classification/r20m/scl",
+      "type": "application/vnd.zarr; version=3",
+      "roles": [
+        "data"
+      ],
+      "title": "Scene classification map (SCL)",
+      "nodata": 0,
+      "alternate": {
+        "s3": {
+          "href": "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-2-l2a/S2B_MSIL2A_20260930T094029_N0513_R036_T37WEU_20260930T133458.zarr/conditions/mask/l2a_classification/r20m/scl",
+          "storage:refs": [
+            "standard"
+          ],
+          "objects_per_storage_class": {
+            "STANDARD": 2
+          }
+        }
+      },
+      "data_type": "uint8",
+      "description": "scene classification map at 20m",
+      "raster:scale": 1,
+      "raster:offset": 0
+    },
+    "WVP_10m": {
+      "gsd": 10,
+      "href": "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-2-l2a/S2B_MSIL2A_20260930T094029_N0513_R036_T37WEU_20260930T133458.zarr/",
+      "type": "application/vnd.zarr; version=3",
+      "roles": [
+        "data"
+      ],
+      "title": "Water vapour (WVP)",
+      "nodata": 0,
+      "alternate": {
+        "s3": {
+          "href": "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-2-l2a/S2B_MSIL2A_20260930T094029_N0513_R036_T37WEU_20260930T133458.zarr/quality/atmosphere/r10m/wvp",
+          "storage:refs": [
+            "standard"
+          ],
+          "objects_per_storage_class": {
+            "STANDARD": 1
+          }
+        }
+      },
+      "data_type": "uint16",
+      "description": "Water Vapour Content map at 10m",
+      "raster:scale": 0.001,
+      "raster:offset": 0
+    },
+    "thumbnail": {
+      "href": "https://api.explorer.eopf.copernicus.eu/raster/collections/sentinel-2-l2a/items/S2B_MSIL2A_20260930T094029_N0513_R036_T37WEU_20260930T133458/preview?format=png&rescale=0%2C1&color_formula=gamma%20rgb%201.3%2C%20sigmoidal%20rgb%206%200.1%2C%20saturation%201.2&variables=%2Fmeasurements%2Freflectance%3Ab04&variables=%2Fmeasurements%2Freflectance%3Ab03&variables=%2Fmeasurements%2Freflectance%3Ab02&bidx=1",
+      "type": "image/png",
+      "roles": [
+        "thumbnail"
+      ],
+      "title": "Sentinel-2 L2A True Color Preview"
+    },
+    "reflectance": {
+      "gsd": 10,
+      "href": "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-2-l2a/S2B_MSIL2A_20260930T094029_N0513_R036_T37WEU_20260930T133458.zarr/measurements/reflectance",
+      "type": "application/vnd.zarr; version=3; profile=multiscales",
+      "bands": [
+        {
+          "gsd": 20,
+          "name": "b01",
+          "description": "Coastal aerosol (band 1)",
+          "eo:common_name": "coastal",
+          "eo:center_wavelength": 0.443,
+          "eo:full_width_half_max": 0.027
+        },
+        {
+          "gsd": 10,
+          "name": "b02",
+          "description": "Blue (band 2)",
+          "eo:common_name": "blue",
+          "eo:center_wavelength": 0.49,
+          "eo:full_width_half_max": 0.098
+        },
+        {
+          "gsd": 10,
+          "name": "b03",
+          "description": "Green (band 3)",
+          "eo:common_name": "green",
+          "eo:center_wavelength": 0.56,
+          "eo:full_width_half_max": 0.045
+        },
+        {
+          "gsd": 10,
+          "name": "b04",
+          "description": "Red (band 4)",
+          "eo:common_name": "red",
+          "eo:center_wavelength": 0.665,
+          "eo:full_width_half_max": 0.038
+        },
+        {
+          "gsd": 20,
+          "name": "b05",
+          "description": "Red edge 1 (band 5)",
+          "eo:common_name": "rededge071",
+          "eo:center_wavelength": 0.704,
+          "eo:full_width_half_max": 0.019
+        },
+        {
+          "gsd": 20,
+          "name": "b06",
+          "description": "Red edge 2 (band 6)",
+          "eo:common_name": "rededge075",
+          "eo:center_wavelength": 0.74,
+          "eo:full_width_half_max": 0.018
+        },
+        {
+          "gsd": 20,
+          "name": "b07",
+          "description": "Red edge 3 (band 7)",
+          "eo:common_name": "rededge078",
+          "eo:center_wavelength": 0.783,
+          "eo:full_width_half_max": 0.028
+        },
+        {
+          "gsd": 10,
+          "name": "b08",
+          "description": "NIR 1 (band 8)",
+          "eo:common_name": "nir",
+          "eo:center_wavelength": 0.842,
+          "eo:full_width_half_max": 0.145
+        },
+        {
+          "gsd": 60,
+          "name": "b09",
+          "description": "NIR 3 (band 9)",
+          "eo:common_name": "nir09",
+          "eo:center_wavelength": 0.945,
+          "eo:full_width_half_max": 0.026
+        },
+        {
+          "gsd": 20,
+          "name": "b11",
+          "description": "SWIR 1 (band 11)",
+          "eo:common_name": "swir16",
+          "eo:center_wavelength": 1.61,
+          "eo:full_width_half_max": 0.143
+        },
+        {
+          "gsd": 20,
+          "name": "b12",
+          "description": "SWIR 2 (band 12)",
+          "eo:common_name": "swir22",
+          "eo:center_wavelength": 2.19,
+          "eo:full_width_half_max": 0.242
+        },
+        {
+          "gsd": 20,
+          "name": "b8a",
+          "description": "NIR 2 (band 8A)",
+          "eo:common_name": "nir08",
+          "eo:center_wavelength": 0.865,
+          "eo:full_width_half_max": 0.033
+        }
+      ],
+      "roles": [
+        "data",
+        "reflectance"
+      ],
+      "title": "Surface Reflectance",
+      "alternate": {
+        "s3": {
+          "href": "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-2-l2a/S2B_MSIL2A_20260930T094029_N0513_R036_T37WEU_20260930T133458.zarr/measurements/reflectance",
+          "storage:refs": [
+            "standard"
+          ],
+          "objects_per_storage_class": {
+            "STANDARD": 175
+          }
+        }
+      },
+      "proj:code": "EPSG:32637",
+      "proj:shape": [
+        10980,
+        10980
+      ],
+      "cube:variables": {
+        "b01": {
+          "type": "data",
+          "dimensions": [
+            "y",
+            "x"
+          ],
+          "description": "Coastal aerosol (band 1)"
+        },
+        "b02": {
+          "type": "data",
+          "dimensions": [
+            "y",
+            "x"
+          ],
+          "description": "Blue (band 2)"
+        },
+        "b03": {
+          "type": "data",
+          "dimensions": [
+            "y",
+            "x"
+          ],
+          "description": "Green (band 3)"
+        },
+        "b04": {
+          "type": "data",
+          "dimensions": [
+            "y",
+            "x"
+          ],
+          "description": "Red (band 4)"
+        },
+        "b05": {
+          "type": "data",
+          "dimensions": [
+            "y",
+            "x"
+          ],
+          "description": "Red edge 1 (band 5)"
+        },
+        "b06": {
+          "type": "data",
+          "dimensions": [
+            "y",
+            "x"
+          ],
+          "description": "Red edge 2 (band 6)"
+        },
+        "b07": {
+          "type": "data",
+          "dimensions": [
+            "y",
+            "x"
+          ],
+          "description": "Red edge 3 (band 7)"
+        },
+        "b08": {
+          "type": "data",
+          "dimensions": [
+            "y",
+            "x"
+          ],
+          "description": "NIR 1 (band 8)"
+        },
+        "b09": {
+          "type": "data",
+          "dimensions": [
+            "y",
+            "x"
+          ],
+          "description": "NIR 3 (band 9)"
+        },
+        "b11": {
+          "type": "data",
+          "dimensions": [
+            "y",
+            "x"
+          ],
+          "description": "SWIR 1 (band 11)"
+        },
+        "b12": {
+          "type": "data",
+          "dimensions": [
+            "y",
+            "x"
+          ],
+          "description": "SWIR 2 (band 12)"
+        },
+        "b8a": {
+          "type": "data",
+          "dimensions": [
+            "y",
+            "x"
+          ],
+          "description": "NIR 2 (band 8A)"
+        }
+      },
+      "cube:dimensions": {
+        "x": {
+          "axis": "x",
+          "type": "spatial",
+          "reference_system": "EPSG:32637"
+        },
+        "y": {
+          "axis": "y",
+          "type": "spatial",
+          "reference_system": "EPSG:32637"
+        }
+      }
+    }
+  },
+  "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+      [
+        [
+          38.99946329375825,
+          70.48483047414322
+        ],
+        [
+          39.18556021048534,
+          70.44858017249312
+        ],
+        [
+          39.342533828072085,
+          70.41794358868172
+        ],
+        [
+          39.441320351721856,
+          70.39863609040297
+        ],
+        [
+          39.439069318090176,
+          70.39728966041613
+        ],
+        [
+          39.43924062122375,
+          70.39725417439355
+        ],
+        [
+          39.43907477985061,
+          70.39715508324058
+        ],
+        [
+          39.963958362850136,
+          70.288330943187
+        ],
+        [
+          39.964354427312095,
+          70.28856402167173
+        ],
+        [
+          39.9645032310658,
+          70.28853321882673
+        ],
+        [
+          39.96468151589953,
+          70.28863805853928
+        ],
+        [
+          39.965076595662296,
+          70.2885563400036
+        ],
+        [
+          39.966081275356345,
+          70.28914616498376
+        ],
+        [
+          39.96625321754463,
+          70.28911068234449
+        ],
+        [
+          39.96650764078456,
+          70.28926021805887
+        ],
+        [
+          39.966887766894246,
+          70.28918188853454
+        ],
+        [
+          39.96702761967032,
+          70.28926400318245
+        ],
+        [
+          39.967245038479625,
+          70.28921919809449
+        ],
+        [
+          39.96737547183531,
+          70.28929587955732
+        ],
+        [
+          40.35379251174531,
+          70.20737375621478
+        ],
+        [
+          38.999470502829524,
+          70.21832076563753
+        ],
+        [
+          38.99946329375825,
+          70.48483047414322
+        ]
+      ]
+    ]
+  },
+  "collection": "sentinel-2-l2a",
+  "properties": {
+    "gsd": 10.0,
+    "created": "2026-09-30T18:46:41.441809Z",
+    "expires": "2026-12-29T19:05:04Z",
+    "mission": "Sentinel-2",
+    "sci:doi": "10.5270/S2_-znk9xsj",
+    "updated": "2026-09-30T18:46:41.441809Z",
+    "datetime": "2026-09-30T09:40:29.024000Z",
+    "platform": "sentinel-2b",
+    "grid:code": "MGRS-37WEU",
+    "proj:bbox": [
+      499980.0,
+      7790220.0,
+      609780.0,
+      7900020.0
+    ],
+    "proj:code": "EPSG:32637",
+    "providers": [
+      {
+        "url": "https://commission.europa.eu/",
+        "name": "European Commission",
+        "roles": [
+          "licensor"
+        ]
+      },
+      {
+        "url": "https://sentinel.esa.int/web/sentinel/missions/sentinel-2",
+        "name": "ESA",
+        "roles": [
+          "producer",
+          "processor"
+        ]
+      },
+      {
+        "url": "https://zarr.eopf.copernicus.eu/",
+        "name": "EOPF Sentinel Zarr Samples Service",
+        "roles": [
+          "host",
+          "processor"
+        ]
+      }
+    ],
+    "published": "2026-09-30T18:46:41.441809Z",
+    "deprecated": false,
+    "instruments": [
+      "msi"
+    ],
+    "auth:schemes": {
+      "oidc": {
+        "type": "openIdConnect",
+        "openIdConnectUrl": "https://hub-eopf-explorer.eox.at/auth/realms/eoxhub/.well-known/openid-configuration"
+      }
+    },
+    "end_datetime": "2026-09-30T09:40:29.024000Z",
+    "product:type": "S02MSIL2A",
+    "constellation": "sentinel-2",
+    "eo:snow_cover": 0.0,
+    "mgrs:utm_zone": 37,
+    "eo:cloud_cover": 61.518013,
+    "start_datetime": "2026-09-30T09:40:29.024000Z",
+    "sat:orbit_state": "descending",
+    "storage:schemes": {
+      "mixed": {
+        "type": "custom-s3",
+        "bucket": "esa-zarr-sentinel-explorer-fra",
+        "region": "de",
+        "platform": "https://s3.de.io.cloud.ovh.net/",
+        "storage_class": "MIXED",
+        "requester_pays": false
+      },
+      "glacier": {
+        "type": "custom-s3",
+        "bucket": "esa-zarr-sentinel-explorer-fra",
+        "region": "de",
+        "platform": "https://s3.de.io.cloud.ovh.net/",
+        "storage_class": "STANDARD_IA",
+        "requester_pays": false
+      },
+      "standard": {
+        "type": "custom-s3",
+        "bucket": "esa-zarr-sentinel-explorer-fra",
+        "region": "de",
+        "platform": "https://s3.de.io.cloud.ovh.net/",
+        "storage_class": "STANDARD",
+        "requester_pays": false
+      },
+      "performance": {
+        "type": "custom-s3",
+        "bucket": "esa-zarr-sentinel-explorer-fra",
+        "region": "de",
+        "platform": "https://s3.de.io.cloud.ovh.net/",
+        "storage_class": "EXPRESS_ONEZONE",
+        "requester_pays": false
+      }
+    },
+    "eopf:datatake_id": "GS2B_20260930T094029_049969_N05.13",
+    "mgrs:grid_square": "EU",
+    "processing:level": "L2A",
+    "view:sun_azimuth": 188.434224152387,
+    "eopf:datastrip_id": "S2B_OPER_MSI_L2A_DS_2BPS_20260930T133458_S20260930T094030_N05.13",
+    "mgrs:latitude_band": "W",
+    "processing:lineage": "systematic",
+    "processing:version": "05.13",
+    "product:timeliness": "PT3H",
+    "sat:absolute_orbit": 49969,
+    "sat:relative_orbit": 36,
+    "view:sun_elevation": 73.7833026300553,
+    "processing:facility": "ESA",
+    "processing:software": {
+      "EOPF-CPM": "2.7.0"
+    },
+    "eopf:instrument_mode": "INS-NOBS",
+    "product:timeliness_category": "NRT",
+    "sat:platform_international_designator": "2015-028A"
+  },
+  "stac_version": "1.1.0",
+  "stac_extensions": [
+    "https://stac-extensions.github.io/timestamps/v1.1.0/schema.json",
+    "https://stac-extensions.github.io/eo/v2.0.0/schema.json",
+    "https://stac-extensions.github.io/sat/v1.0.0/schema.json",
+    "https://stac-extensions.github.io/projection/v2.0.0/schema.json",
+    "https://stac-extensions.github.io/mgrs/v1.0.0/schema.json",
+    "https://stac-extensions.github.io/grid/v1.1.0/schema.json",
+    "https://stac-extensions.github.io/view/v1.0.0/schema.json",
+    "https://stac-extensions.github.io/processing/v1.2.0/schema.json",
+    "https://stac-extensions.github.io/product/v0.1.0/schema.json",
+    "https://stac-extensions.github.io/scientific/v1.0.0/schema.json",
+    "https://cs-si.github.io/eopf-stac-extension/v1.2.0/schema.json",
+    "https://stac-extensions.github.io/version/v1.2.0/schema.json",
+    "https://stac-extensions.github.io/raster/v2.0.0/schema.json",
+    "https://stac-extensions.github.io/alternate-assets/v1.2.0/schema.json",
+    "https://stac-extensions.github.io/storage/v2.0.0/schema.json",
+    "https://stac-extensions.github.io/authentication/v1.1.0/schema.json"
+  ]
+}
