@@ -31,7 +31,7 @@ dependencies = [
     "tenacity==9.2.1",
     "morecantile==7.1.0",
     "cf-xarray==0.11.3",
-    "eopf-geozarr==0.11.0",
+    "eopf-geozarr==0.12.0",
     "mgrs==1.5.4",
     "requests==2.34.2",
     # scripts/stac_auth.py imports urllib3.util.retry directly: Retry(backoff_max=...)
