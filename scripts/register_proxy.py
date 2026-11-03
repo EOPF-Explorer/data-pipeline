@@ -138,7 +138,8 @@ RGB_QUERY = (
 # AOT and WVP are split out of the source's single atmosphere group asset so the
 # proxy uses the Explorer's asset keys and titles; the numeric fields (raster:scale,
 # nodata, data_type, proj:shape) stay as EODC published them, because they describe
-# the EODC store. Only the new layout's raster:scale/offset go (``drop_raster_scaling``).
+# the EODC store. The new layout's raster:scale/offset go unless the asset has statistics
+# (``drop_raster_scaling``).
 ROOT_HREF_ASSETS = {
     "AOT_10m": (("ATM_10m", "atmosphere"), "aot", "Aerosol optical thickness (AOT)"),
     "WVP_10m": (("ATM_10m", "atmosphere"), "wvp", "Water vapour (WVP)"),
@@ -268,16 +269,21 @@ def fill_cube_extent(item: Item) -> None:
 
 
 def drop_raster_scaling(item: Item) -> None:
-    """Remove ``raster:scale``/``raster:offset`` from every asset and band. New layout only.
+    """Remove ``raster:scale``/``raster:offset`` from assets without statistics. New layout only.
 
     EODC's new layout puts them on ``reflectance`` and ``atmosphere``, while its stores
     carry the same scaling as CF ``scale_factor``/``add_offset``, which titiler and xarray
-    decode: a client that also applied these would scale twice. The current layout has
-    none, so ``TRANSITION_COLLECTION`` keeps one shape. An old-generation source keeps what
-    it published: the pipeline refuses it (``is_old_generation``), Track A takes it as is.
+    decode: a client that also applied these would scale twice. An asset with statistics
+    keeps them: the statistics are in stored counts (EOPF-Explorer/data-model#333) and the
+    scaling is what converts them (radiantearth/stac-spec#1402). The current layout has
+    neither. An old-generation source keeps what it published: the pipeline refuses it
+    (``is_old_generation``), Track A takes it as is.
     """
     for asset in item.assets.values():
-        for fields in (asset.extra_fields, *asset.extra_fields.get("bands", [])):
+        bands = asset.extra_fields.get("bands", [])
+        if "statistics" in asset.extra_fields or any("statistics" in b for b in bands):
+            continue
+        for fields in (asset.extra_fields, *bands):
             fields.pop("raster:scale", None)
             fields.pop("raster:offset", None)
 
@@ -492,7 +498,8 @@ def is_old_generation(source_item: dict) -> bool:
     sampled 2026-09-28 have none, their scaling lives in the stores' CF attributes). A mixed
     user-facing collection means double scaling and black nodata, so the pipeline refuses these.
     EODC's new layout has no ``SR_*`` asset and passes: its stores carry the CF scaling and
-    ``_FillValue``, and ``drop_raster_scaling`` removes the copies on its assets.
+    ``_FillValue``, and ``drop_raster_scaling`` removes the copies on its assets without
+    statistics.
     """
     return any(
         field in fields

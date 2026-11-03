@@ -43,6 +43,11 @@ OLD_GENERATION_FIXTURE = (
 NEW_LAYOUT_FIXTURE = (
     EODC_FIXTURES / "S2B_MSIL2A_20260721T100559_N0512_R022_T33UWQ_20260721T143508.json"
 )
+# The new layout from eopf-stac 1.1.0-rc2 (NRT from 2 Nov 2026): band statistics in stored
+# counts (EOPF-Explorer/data-model#333) next to the raster:scale/offset that converts them.
+STATISTICS_FIXTURE = (
+    EODC_FIXTURES / "S2C_MSIL2A_20261102T104211_N0513_R008_T33WWP_20261102T115100.json"
+)
 COLLECTION = "sentinel-2-l2a-samples-zarr3-rollback"
 NEW = "sentinel-2-l2a-new"  # the pipeline's user-facing target (plan rev 3)
 RASTER = "https://rstaging.invalid/rstaging"
@@ -86,6 +91,11 @@ def old_source():
 @pytest.fixture
 def new_source():
     return json.loads(NEW_LAYOUT_FIXTURE.read_text())
+
+
+@pytest.fixture
+def statistics_source():
+    return json.loads(STATISTICS_FIXTURE.read_text())
 
 
 @pytest.fixture
@@ -204,9 +214,10 @@ def test_the_new_layout_builds_the_same_item_as_the_current_one(source, new_sour
     assert store_link(new).endswith(f"/{new['id']}.zarr")
 
 
-def test_the_new_layout_carries_no_raster_scale(new_source):
+def test_the_new_layout_without_statistics_carries_no_raster_scale(new_source):
     """The stores carry the same scaling as CF attributes, which titiler decodes: a client
-    that also applied raster:scale would scale twice. `-new`'s items have none."""
+    that also applied raster:scale would scale twice. Without statistics to convert, the
+    item keeps none."""
     assert new_source["assets"]["reflectance"]["raster:scale"] == 0.0001  # control
     assert new_source["assets"]["atmosphere"]["raster:scale"] == 0.001
     item = build_proxy_item(new_source, NEW, RASTER, STAC_API, expires=None).to_dict()
@@ -214,6 +225,23 @@ def test_the_new_layout_carries_no_raster_scale(new_source):
         asset = item["assets"][key]
         for fields in (asset, *asset.get("bands", [])):
             assert not {"raster:scale", "raster:offset"} & set(fields), key
+
+
+def test_assets_with_statistics_keep_the_raster_scale_that_converts_them(statistics_source):
+    """The statistics are in stored counts (EOPF-Explorer/data-model#333): without the
+    raster:scale/offset next to them a client cannot turn them into reflectance
+    (radiantearth/stac-spec#1402)."""
+    source_assets = statistics_source["assets"]
+    assert all("statistics" in b for b in source_assets["reflectance"]["bands"])  # control
+    assert all("statistics" in b for b in source_assets["atmosphere"]["bands"])
+    assert "raster:scale" not in source_assets["scl"]
+    item = build_proxy_item(statistics_source, NEW, RASTER, STAC_API, expires=None).to_dict()
+    expected = {"reflectance": (0.0001, -0.1), "AOT_10m": (0.001, 0.0), "WVP_10m": (0.001, 0.0)}
+    for key, scaling in expected.items():
+        asset = item["assets"][key]
+        assert (asset.get("raster:scale"), asset.get("raster:offset")) == scaling, key
+        assert all("statistics" in band for band in asset["bands"]), key
+    assert not {"raster:scale", "raster:offset"} & set(item["assets"]["SCL_20m"])
 
 
 def test_a_new_layout_reflectance_without_a_true_colour_band_is_refused(new_source):
