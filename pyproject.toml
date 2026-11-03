@@ -45,7 +45,9 @@ dependencies = [
 #   PYSEC-2026-3546 / PYSEC-2026-3547 fixed in 3.14.2 and PYSEC-2026-3545 in 3.14.3.
 # pillow (via matplotlib): 2 high + 3 moderate CVEs (FITS bomb, OOB write, ...) fixed in 12.2.0.
 # pip (via pip-audit -> pip_api): PYSEC-2026-196 fixed in 26.1.2; PYSEC-2026-3721 fixed in 26.2.
-constraint-dependencies = ["aiohttp>=3.14.3", "pillow>=12.2.0", "pip>=26.2"]
+# tornado (via eopf-geozarr -> dask[distributed]): CVE-2026-116577 / CVE-2026-115927 / CVE-2026-116578
+#   (GHSA-pcg2-g6cj-q92c / GHSA-r4j5-9xpp-3985 / GHSA-pw9p-v7r6-gx4p) fixed in 6.6.
+constraint-dependencies = ["aiohttp>=3.14.3", "pillow>=12.2.0", "pip>=26.2", "tornado>=6.6"]
 
 [dependency-groups]
 dev = [
