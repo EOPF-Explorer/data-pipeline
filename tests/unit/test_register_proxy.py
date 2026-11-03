@@ -206,7 +206,8 @@ def item_shape(item):
 
 
 def test_the_new_layout_builds_the_same_item_as_the_current_one(source, new_source):
-    """EODC renames the groups, not the arrays: `-new` must hold one item shape, not two."""
+    """EODC renames the groups, not the arrays: without statistics, a new-layout item has the
+    current layout's shape. Items with statistics differ only by their scaling fields (below)."""
     current = build_proxy_item(source, NEW, RASTER, STAC_API, expires=None).to_dict()
     new = build_proxy_item(new_source, NEW, RASTER, STAC_API, expires=None).to_dict()
     assert set(new["assets"]) == set(current["assets"])
@@ -247,23 +248,36 @@ def test_assets_with_statistics_keep_the_raster_scale_that_converts_them(statist
     assert (reflectance["nodata"], reflectance["data_type"]) == (0, "uint16")
 
 
-def test_empty_statistics_and_bands_without_statistics_lose_the_scaling(statistics_source):
-    """Only real statistics keep a pair: `{}` counts as none, and a band-level pair stays
-    only on a band that has statistics itself."""
-    assets = statistics_source["assets"]
-    for band in assets["atmosphere"]["bands"]:
+def test_empty_statistics_count_as_none(statistics_source):
+    """`{}` is no statistics: the asset loses its scaling as if it had none."""
+    for band in statistics_source["assets"]["atmosphere"]["bands"]:
         band["statistics"] = {}
-    b01 = assets["reflectance"]["bands"][0]
-    assert b01["name"] == "b01"  # control
-    del b01["statistics"]
-    b01["raster:scale"], b01["raster:offset"] = 0.0001, -0.1
     item = build_proxy_item(statistics_source, NEW, RASTER, STAC_API, expires=None).to_dict()
     for key in ("AOT_10m", "WVP_10m"):
         assert not {"raster:scale", "raster:offset"} & set(item["assets"][key]), key
+
+
+def test_an_asset_with_statistics_keeps_every_band_level_pair(statistics_source):
+    """Dropping a band's own pair would make it inherit the asset's, which may differ."""
+    b01 = statistics_source["assets"]["reflectance"]["bands"][0]
+    assert b01["name"] == "b01"  # control
+    del b01["statistics"]
+    b01["raster:scale"], b01["raster:offset"] = 0.001, 0.0  # not the asset's 0.0001/-0.1
+    item = build_proxy_item(statistics_source, NEW, RASTER, STAC_API, expires=None).to_dict()
     reflectance = item["assets"]["reflectance"]
-    assert reflectance["raster:scale"] == 0.0001  # the other bands have statistics
     b01 = next(band for band in reflectance["bands"] if band["name"] == "b01")
-    assert not {"raster:scale", "raster:offset"} & set(b01)
+    assert (b01["raster:scale"], b01["raster:offset"]) == (0.001, 0.0)
+
+
+def test_band_level_scaling_alone_keeps_the_fill_value(statistics_source):
+    """The fill value follows any kept pair, not only an asset-level one."""
+    reflectance = statistics_source["assets"]["reflectance"]
+    scale, offset = reflectance.pop("raster:scale"), reflectance.pop("raster:offset")
+    for band in reflectance["bands"]:
+        band["raster:scale"], band["raster:offset"] = scale, offset
+    item = build_proxy_item(statistics_source, NEW, RASTER, STAC_API, expires=None).to_dict()
+    built = item["assets"]["reflectance"]
+    assert (built["nodata"], built["data_type"]) == (0, "uint16")
 
 
 def test_items_with_statistics_differ_from_the_others_only_by_the_scaling_fields(
@@ -276,17 +290,18 @@ def test_items_with_statistics_differ_from_the_others_only_by_the_scaling_fields
         build_proxy_item(statistics_source, NEW, RASTER, STAC_API, expires=None).to_dict()
     )
     assert set(with_statistics) == set(current)
-    extra = {
-        key: set(with_statistics[key][-1]) - set(current[key][-1])
-        for key in current
-        if with_statistics[key] != current[key]
-    }
     scaling = {"raster:scale", "raster:offset"}
-    assert extra == {
+    expected_extra = {
         "reflectance": scaling | {"nodata", "data_type"},
         "AOT_10m": scaling,
         "WVP_10m": scaling,
     }
+    for key in current:
+        *rest_s, fields_s = with_statistics[key]
+        *rest_c, fields_c = current[key]
+        assert rest_s == rest_c, key  # href, type, roles, band names, cube variables
+        assert set(fields_s) - set(fields_c) == expected_extra.get(key, set()), key
+        assert set(fields_c) - set(fields_s) == set(), key  # nothing lost
 
 
 def test_a_new_layout_reflectance_without_a_true_colour_band_is_refused(new_source):

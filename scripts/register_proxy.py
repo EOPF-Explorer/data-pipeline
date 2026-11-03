@@ -274,8 +274,10 @@ def drop_raster_scaling(item: Item) -> None:
     EODC's new layout puts them on ``reflectance`` and ``atmosphere``, while its stores
     carry the same scaling as CF ``scale_factor``/``add_offset``. Statistics keep them: they
     are in stored counts (EOPF-Explorer/data-model#333) and the scaling is what converts them
-    (radiantearth/stac-spec#1402). An asset keeps its asset-level pair if it or a band has
-    non-empty statistics; a band keeps its own pair only if it has statistics itself.
+    (radiantearth/stac-spec#1402). An asset whose own or band statistics are non-empty keeps
+    every pair it has, band-level ones included: dropping a band's own pair would make it
+    inherit the asset's. Statistics that hold only ``count``/``valid_percent`` (an all-fill
+    band, e.g. WVP on some rc2 items) still count, so rc2 items keep one shape.
 
     Two consequences, accepted on purpose:
 
@@ -283,38 +285,38 @@ def drop_raster_scaling(item: Item) -> None:
       scaling on ``reflectance``, ``AOT_10m`` and ``WVP_10m`` (``reflectance`` also keeps
       ``nodata``/``data_type``, see ``adopt_source_reflectance``); current-layout items and
       new-layout items without statistics carry none.
-    - A client that decodes the stores' CF attributes and also applies ``raster:scale``
-      scales twice (EOPF-Sample-Service/eopf-stac#82). titiler-eopf applies only the CF
-      scaling, for tiles and for openEO's ``load_collection``; a generic STAC loader may not.
+    - The scaling, ``nodata`` and the statistics describe stored counts. A client that
+      decodes the stores' CF attributes and then also applies ``raster:scale`` scales twice
+      (EOPF-Sample-Service/eopf-stac#82), and one that applies ``nodata`` to decoded values
+      masks the wrong pixels. titiler-eopf applies only the CF scaling, for tiles and for
+      openEO's ``load_collection``; a generic STAC loader may not.
 
     An old-generation source keeps what it published: the pipeline refuses it
     (``is_old_generation``), Track A takes it as is.
     """
     for asset in item.assets.values():
         bands = asset.extra_fields.get("bands", [])
-        asset_keeps = bool(asset.extra_fields.get("statistics")) or any(
-            band.get("statistics") for band in bands
-        )
-        for fields, keep in (
-            (asset.extra_fields, asset_keeps),
-            *((b, b.get("statistics")) for b in bands),
-        ):
-            if not keep:
-                fields.pop("raster:scale", None)
-                fields.pop("raster:offset", None)
+        if asset.extra_fields.get("statistics") or any(b.get("statistics") for b in bands):
+            continue
+        for fields in (asset.extra_fields, *bands):
+            fields.pop("raster:scale", None)
+            fields.pop("raster:offset", None)
 
 
 def adopt_source_reflectance(item: Item, root: str) -> None:
     """Fit EODC's own ``reflectance`` (new layout) to the one the current layout gets.
 
     ``consolidate_reflectance_assets`` passes it through as published, so its ``nodata`` and
-    ``data_type`` go (the built asset has neither), unless it kept ``raster:scale``
-    (``drop_raster_scaling``): a client converting its counts needs the fill value to mask.
-    It is refused, like a missing asset, if it lacks a band the render links name or sits
-    outside the store that the AOT/WVP/SCL assets and the ``store`` link point at.
+    ``data_type`` go (the built asset has neither), unless ``drop_raster_scaling`` kept a
+    ``raster:scale``/``raster:offset`` on it or its bands: a client converting its counts
+    needs the fill value to mask. It is refused, like a missing asset, if it lacks a band the
+    render links name or sits outside the store that the AOT/WVP/SCL assets and the
+    ``store`` link point at.
     """
     reflectance = item.assets["reflectance"]
-    if "raster:scale" not in reflectance.extra_fields:
+    bands = reflectance.extra_fields.get("bands", [])
+    scaling = ("raster:scale", "raster:offset")
+    if not any(key in fields for fields in (reflectance.extra_fields, *bands) for key in scaling):
         reflectance.extra_fields.pop("nodata", None)
         reflectance.extra_fields.pop("data_type", None)
     # Lowercased as consolidate_reflectance_assets does for SR_* bands.
@@ -516,8 +518,9 @@ def is_old_generation(source_item: dict) -> bool:
     sampled 2026-09-28 have none, their scaling lives in the stores' CF attributes). A mixed
     user-facing collection means double scaling and black nodata, so the pipeline refuses these.
     EODC's new layout has no ``SR_*`` asset and passes: its stores carry the CF scaling and
-    ``_FillValue``, and ``drop_raster_scaling`` removes the copies on its assets, except
-    next to statistics, where it keeps them on purpose (see there).
+    ``_FillValue``, and ``drop_raster_scaling`` removes the copies on its assets. Its items
+    with statistics are the exception: they bring ``raster:scale`` into the collection on
+    purpose, a second item shape that ``drop_raster_scaling`` documents.
     """
     return any(
         field in fields
