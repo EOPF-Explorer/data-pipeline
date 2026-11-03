@@ -242,6 +242,51 @@ def test_assets_with_statistics_keep_the_raster_scale_that_converts_them(statist
         assert (asset.get("raster:scale"), asset.get("raster:offset")) == scaling, key
         assert all("statistics" in band for band in asset["bands"]), key
     assert not {"raster:scale", "raster:offset"} & set(item["assets"]["SCL_20m"])
+    # A client converting the counts must be able to mask the fill value first.
+    reflectance = item["assets"]["reflectance"]
+    assert (reflectance["nodata"], reflectance["data_type"]) == (0, "uint16")
+
+
+def test_empty_statistics_and_bands_without_statistics_lose_the_scaling(statistics_source):
+    """Only real statistics keep a pair: `{}` counts as none, and a band-level pair stays
+    only on a band that has statistics itself."""
+    assets = statistics_source["assets"]
+    for band in assets["atmosphere"]["bands"]:
+        band["statistics"] = {}
+    b01 = assets["reflectance"]["bands"][0]
+    assert b01["name"] == "b01"  # control
+    del b01["statistics"]
+    b01["raster:scale"], b01["raster:offset"] = 0.0001, -0.1
+    item = build_proxy_item(statistics_source, NEW, RASTER, STAC_API, expires=None).to_dict()
+    for key in ("AOT_10m", "WVP_10m"):
+        assert not {"raster:scale", "raster:offset"} & set(item["assets"][key]), key
+    reflectance = item["assets"]["reflectance"]
+    assert reflectance["raster:scale"] == 0.0001  # the other bands have statistics
+    b01 = next(band for band in reflectance["bands"] if band["name"] == "b01")
+    assert not {"raster:scale", "raster:offset"} & set(b01)
+
+
+def test_items_with_statistics_differ_from_the_others_only_by_the_scaling_fields(
+    source, statistics_source
+):
+    """`-new` holds two item shapes on purpose (see drop_raster_scaling): this pins the
+    difference to the fields that let a client convert the statistics."""
+    current = item_shape(build_proxy_item(source, NEW, RASTER, STAC_API, expires=None).to_dict())
+    with_statistics = item_shape(
+        build_proxy_item(statistics_source, NEW, RASTER, STAC_API, expires=None).to_dict()
+    )
+    assert set(with_statistics) == set(current)
+    extra = {
+        key: set(with_statistics[key][-1]) - set(current[key][-1])
+        for key in current
+        if with_statistics[key] != current[key]
+    }
+    scaling = {"raster:scale", "raster:offset"}
+    assert extra == {
+        "reflectance": scaling | {"nodata", "data_type"},
+        "AOT_10m": scaling,
+        "WVP_10m": scaling,
+    }
 
 
 def test_a_new_layout_reflectance_without_a_true_colour_band_is_refused(new_source):
@@ -780,6 +825,18 @@ def test_the_pipeline_takes_the_new_layout_and_still_refuses_the_old_generation(
     posted = json.dumps(target.session.post.call_args.kwargs["json"])
     assert new_source["id"] in posted
     assert "raster:scale" not in posted and "raster:offset" not in posted
+
+
+def test_the_pipeline_posts_the_scaling_next_to_statistics(statistics_source, tmp_path, caplog):
+    """End to end: an rc2 item is created with its statistics and the pair that converts them."""
+    caplog.set_level("INFO", logger="register_proxy")
+    target = FakeTarget()
+    with patch("register_proxy.fetch_source_item", return_value=statistics_source):
+        assert run_pipeline(tmp_path, target, [statistics_source["id"]], collection=NEW) == 0
+    assert "created=1 exists=0 refused_generation=0 failed=0" in caplog.text
+    reflectance = target.session.post.call_args.kwargs["json"]["assets"]["reflectance"]
+    assert (reflectance["raster:scale"], reflectance["raster:offset"]) == (0.0001, -0.1)
+    assert all(band.get("statistics") for band in reflectance["bands"])
 
 
 def test_a_transition_item_has_no_expires_even_if_its_source_had_one(source, tmp_path):
