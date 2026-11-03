@@ -23,11 +23,11 @@ without one the items would be structurally undeletable.
 
 Render host is ``/rstaging`` (titiler-eopf **0.12.0**), not ``/raster`` (0.11.0): only
 0.12.0 serves the ``assets=<key>|bands=…`` / ``|variables=…`` notation these items use,
-and only 0.12.0 is being migrated to. See ``rgb_query``/``add_proxy_visualization``.
+and only 0.12.0 is being migrated to. See ``add_proxy_visualization`` and ``raster_links``.
 
 Asset mapping (see ``evidence-proxy-T1.md``, reader gate run 2026-09-11 on ``/raster``
 0.11). The last column is the reader-gate probe, not the render contract: the items'
-own links use the ``assets=<key>|bands=…`` form (``RGB_QUERY``), because ``/rstaging``
+own links use the ``assets=<key>|bands=…`` form (``raster_links.RGB_QUERY``), because ``/rstaging``
 0.12 answers the repeated ``variables=`` form with a 422.
 
 ==========  ================================  ===========================================
@@ -65,6 +65,7 @@ import requests
 import stac_auth
 from pystac import Asset, Item, Link
 from pystac_client import Client
+from raster_links import missing_rgb_bands, s2_true_colour_links, s2_true_colour_thumbnail
 from register_v1 import (
     TIMESTAMPS_EXTENSION,
     add_derived_from_link,
@@ -111,26 +112,6 @@ MAX_CONSECUTIVE_FAILURES = 10
 # --time-budget ceiling: the register step's 14400 s pod backstop (platform-deploy
 # templates/eopf-eodc-register-job.yaml) minus 30 min for pod start and the id in flight.
 MAX_TIME_BUDGET_SECONDS = 12_600
-
-# True-colour query for the visualization links, in the 0.12 notation: one `assets`
-# parameter whose value carries the per-asset band selection. The two deployments are
-# mirror images and neither accepts the other's form (measured 2026-09-11 against a prod
-# S2 item on /collections/sentinel-2-l2a/items/…/preview.png):
-#
-#   notation                  /raster 0.11.0   /rstaging 0.12.0
-#   assets=reflectance|bands=      500              200
-#   repeated variables=            200              422
-#
-# The proxy targets /rstaging, so it emits the `assets=…|bands=…` form and must NOT
-# reuse register_v1.add_visualization_links (which emits the `variables=` form).
-RGB_BANDS = ("b04", "b03", "b02")
-RGB_ASSETS = f"reflectance|bands={','.join(RGB_BANDS)}"
-S2_COLOR_FORMULA = "gamma rgb 1.3, sigmoidal rgb 6 0.1, saturation 1.2"
-RGB_QUERY = (
-    f"assets={urllib.parse.quote(RGB_ASSETS, safe='')}"
-    f"&rescale={urllib.parse.quote('0,1', safe='')}"
-    f"&color_formula={urllib.parse.quote(S2_COLOR_FORMULA, safe='')}"
-)
 
 # Proxy asset key -> (source asset keys, band name, title). The first key the source has
 # is used: ``ATM_10m``/``SCL_20m`` in EODC's current layout, ``atmosphere``/``scl`` in the
@@ -319,10 +300,8 @@ def adopt_source_reflectance(item: Item, root: str) -> None:
     if not any(key in fields for fields in (reflectance.extra_fields, *bands) for key in scaling):
         reflectance.extra_fields.pop("nodata", None)
         reflectance.extra_fields.pop("data_type", None)
-    # Lowercased as consolidate_reflectance_assets does for SR_* bands.
-    names = {band.get("name", "").lower() for band in reflectance.extra_fields.get("bands", [])}
-    missing = [band for band in RGB_BANDS if band not in names]
-    if missing:
+    # Case-insensitive, as consolidate_reflectance_assets lowercases SR_* bands.
+    if missing := missing_rgb_bands(reflectance.extra_fields):
         raise ValueError(f"{item.id}: reflectance has no {missing} band for the render links")
     if not reflectance.href.startswith(f"{root.rstrip('/')}/"):
         raise ValueError(f"{item.id}: reflectance {reflectance.href} is not in the store {root}")
@@ -355,45 +334,14 @@ def add_proxy_visualization(item: Item, raster_api_url: str, collection: str) ->
     ``hr-titiler-eopf-test.yaml``) and EODC publishes in one 00:00-07:30Z burst, so a
     preview warmed at registration would mostly expire before anyone browses.
 
-    Deliberately not ``register_v1.add_visualization_links`` /
-    ``add_thumbnail_asset``: for a ``sentinel-2*`` collection those emit repeated
-    full-path ``variables=`` and a **bare** ``/viewer``, and titiler-eopf 0.12.0 rejects
-    both — 422 for the query, and the bare ``/viewer`` route does not exist on 0.12.0 at
-    all (it is why the 2026-09-10 probe saw a 404). ``map.html`` replaces it.
+    The links and thumbnail come from ``raster_links``, the builder the catalogue link
+    migration shares, so these items and migrated ones carry identical links.
     """
-    base = f"{raster_api_url.rstrip('/')}/collections/{collection}/items/{item.id}"
-    item.add_link(
-        Link(
-            "viewer",
-            f"{base}/WebMercatorQuad/map.html?{RGB_QUERY}",
-            "text/html",
-            f"Viewer for {item.id}",
-        )
-    )
-    item.add_link(
-        Link(
-            "xyz",
-            f"{base}/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}.png?{RGB_QUERY}",
-            "image/png",
-            "Sentinel-2 L2A True Color",
-        )
-    )
-    item.add_link(
-        Link(
-            "tilejson",
-            f"{base}/WebMercatorQuad/tilejson.json?{RGB_QUERY}",
-            "application/json",
-            f"TileJSON for {item.id}",
-        )
-    )
+    for link in s2_true_colour_links(raster_api_url, collection, item.id):
+        item.add_link(Link.from_dict(link))
     item.add_asset(
         "thumbnail",
-        Asset(
-            href=f"{base}/preview?format=webp&max_size=512&{RGB_QUERY}",
-            media_type="image/webp",
-            roles=["thumbnail"],
-            title="Sentinel-2 L2A True Color Preview",
-        ),
+        Asset.from_dict(s2_true_colour_thumbnail(raster_api_url, collection, item.id)),
     )
 
 
