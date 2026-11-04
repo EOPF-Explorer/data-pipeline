@@ -15,6 +15,7 @@ from pystac import Asset, Item
 scripts_dir = Path(__file__).parent.parent.parent / "scripts"
 sys.path.insert(0, str(scripts_dir))
 
+from raster_links import s2_true_colour_links, s2_true_colour_thumbnail  # noqa: E402
 from register_v1 import (  # noqa: E402
     TIMESTAMPS_EXTENSION,
     _render_to_query,
@@ -398,16 +399,32 @@ class TestVisualizationFromRenders:
         # legacy VH grayscale path still applies when no render config present
         assert "thumbnail" in item.assets
 
-    def test_s2_fallback_xyz_unchanged(self):
-        # No-renders S2 item must keep the legacy hardcoded true-color xyz template
-        # untouched (no-regression guarantee for the deliberate reversal on S1).
+    def test_s2_l1c_fallback_xyz_unchanged(self):
+        # No-renders L1C item keeps the legacy hardcoded true-color xyz template untouched
+        # until its titiler-eopf 0.12 form is decided (S2 L2A moved to it, see below).
         item = _real_item()  # no renders property
-        add_visualization_links(item, RASTER_BASE, "sentinel-2-l2a")
+        add_visualization_links(item, RASTER_BASE, "sentinel-2-l1c")
         xyz = next(link for link in item.links if link.rel == "xyz")
         assert "/tiles/WebMercatorQuad/{z}/{x}/{y}.png?" in xyz.href
         assert xyz.media_type == "image/png"
         assert xyz.title == "Sentinel-2 L2A True Color"
-        assert "color_formula=" in xyz.href
+        assert "variables=%2Fmeasurements%2Freflectance%3Ab04" in xyz.href
+        viewer = next(link for link in item.links if link.rel == "viewer")
+        assert viewer.href.endswith("/viewer")
+
+    @pytest.mark.parametrize("collection", ["sentinel-2-l2a", "sentinel-2-l2a-staging"])
+    def test_s2_l2a_gets_the_012_links_from_the_shared_builder(self, collection):
+        item = _real_item()  # no renders property
+        bands = [{"name": b} for b in ("b02", "b03", "b04", "b08")]
+        item.add_asset("reflectance", Asset(href="s3://b/x.zarr", extra_fields={"bands": bands}))
+        add_visualization_links(item, RASTER_BASE, collection)
+        add_thumbnail_asset(item, RASTER_BASE, collection)
+        assert [link.to_dict() for link in item.links] == s2_true_colour_links(
+            RASTER_BASE, collection, item.id
+        )
+        assert item.assets["thumbnail"].to_dict() == s2_true_colour_thumbnail(
+            RASTER_BASE, collection, item.id
+        )
 
     @pytest.mark.parametrize(
         ("renders", "collection"),
@@ -421,6 +438,28 @@ class TestVisualizationFromRenders:
         item = _real_item(renders)
         add_visualization_links(item, RASTER_BASE, collection)
         assert [link.rel for link in item.links if link.rel == "via"] == []
+
+    def test_s2_l2a_keeps_an_existing_thumbnail(self):
+        """Review wave 1 #2: as add_thumbnail_asset always did, an existing thumbnail stays."""
+        item = _real_item()
+        bands = [{"name": b} for b in ("b02", "b03", "b04")]
+        item.add_asset("reflectance", Asset(href="s3://b/x.zarr", extra_fields={"bands": bands}))
+        item.add_asset("thumbnail", Asset(href="https://example.com/own.png", roles=["thumbnail"]))
+        add_visualization_links(item, RASTER_BASE, "sentinel-2-l2a")
+        add_thumbnail_asset(item, RASTER_BASE, "sentinel-2-l2a")
+        assert item.assets["thumbnail"].href == "https://example.com/own.png"
+        assert any(link.rel == "viewer" for link in item.links)
+
+    def test_s2_l2a_without_the_rgb_bands_gets_no_links_rather_than_broken_ones(self, caplog):
+        item = _real_item()
+        bands = [{"name": b} for b in ("b02", "b04", "b08")]  # no b03
+        item.add_asset("reflectance", Asset(href="s3://b/x.zarr", extra_fields={"bands": bands}))
+        add_visualization_links(item, RASTER_BASE, "sentinel-2-l2a")
+        add_thumbnail_asset(item, RASTER_BASE, "sentinel-2-l2a")
+        assert [link.rel for link in item.links if link.rel in ("viewer", "xyz", "tilejson")] == []
+        assert "thumbnail" not in item.assets
+        # one band check per item, so one warning (review 2 #5)
+        assert caplog.text.count("reflectance has no ['b03'] band") == 1
 
 
 _SEL = "2026-06-07T05:52:48"
@@ -681,6 +720,36 @@ def _s2_source_item_dict() -> dict:
         },
         "collection": "src-collection",
     }
+
+
+def test_run_registration_warms_the_thumbnail_after_the_upsert(monkeypatch) -> None:
+    """The 0.12 item route looks the item up in STAC: warming before the upsert 404s."""
+    import register_v1
+
+    resp = MagicMock()
+    resp.json.return_value = _s2_source_item_dict()
+    http = MagicMock()
+    http.get.return_value = resp
+    http.__enter__ = MagicMock(return_value=http)
+    http.__exit__ = MagicMock(return_value=False)
+    monkeypatch.setattr(register_v1.httpx, "Client", MagicMock(return_value=http))
+    monkeypatch.setattr(register_v1.zarr, "open", MagicMock(side_effect=OSError("offline")))
+    monkeypatch.setattr(register_v1, "get_s3_storage_class", lambda *a: "STANDARD")
+    monkeypatch.setattr(register_v1.stac_auth, "open_client", MagicMock())
+    events: list[str] = []
+    monkeypatch.setattr(register_v1, "upsert_item", lambda *a: events.append("upsert"))
+    monkeypatch.setattr(register_v1, "warm_thumbnail_cache", lambda item: events.append("warm"))
+
+    register_v1.run_registration(
+        "https://src/SRC_ITEM.json",
+        "sentinel-2-l2a",
+        "https://api.test/stac",
+        "https://raster.test",
+        "https://s3.de.io.cloud.ovh.net",
+        "bucket",
+        "prefix",
+    )
+    assert events == ["upsert", "warm"]
 
 
 def test_run_registration_keeps_the_array_s3_alternate(monkeypatch) -> None:

@@ -1,0 +1,280 @@
+{
+  "id": "s1-rtc-28RBS-20211109t071038",
+  "bbox": [
+    -18.0763361629,
+    27.90341568686007,
+    -16.93308378436229,
+    28.91414436420113
+  ],
+  "type": "Feature",
+  "links": [
+    {
+      "rel": "collection",
+      "type": "application/json",
+      "href": "https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-1-grd-rtc-acquisitions-staging"
+    },
+    {
+      "rel": "parent",
+      "type": "application/json",
+      "href": "https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-1-grd-rtc-acquisitions-staging"
+    },
+    {
+      "rel": "root",
+      "type": "application/json",
+      "href": "https://api.explorer.eopf.copernicus.eu/stac/"
+    },
+    {
+      "rel": "self",
+      "type": "application/geo+json",
+      "href": "https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-1-grd-rtc-acquisitions-staging/items/s1-rtc-28RBS-20211109t071038"
+    },
+    {
+      "rel": "store",
+      "href": "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-1-grd-rtc-staging/s1-rtc-28RBS.zarr",
+      "type": "application/octet-stream",
+      "title": "Zarr Store"
+    },
+    {
+      "rel": "viewer",
+      "href": "https://api.explorer.eopf.copernicus.eu/raster/collections/sentinel-1-grd-rtc-staging/items/s1-rtc-28RBS/WebMercatorQuad/map.html?expression=%2Fdescending%3Avv%3B%2Fdescending%3Avh%3B%28%2Fdescending%3Avv%29%2F%28%2Fdescending%3Avh%29&rescale=0.0%2C0.4&rescale=0.0%2C0.1&rescale=1.0%2C15.0&bidx=1&tilesize=256&sel=time=2021-11-09T07%3A10%3A38",
+      "type": "text/html",
+      "title": "VV, VH, VV/VH composite"
+    },
+    {
+      "rel": "tilejson",
+      "href": "https://api.explorer.eopf.copernicus.eu/raster/collections/sentinel-1-grd-rtc-staging/items/s1-rtc-28RBS/WebMercatorQuad/tilejson.json?expression=%2Fdescending%3Avv%3B%2Fdescending%3Avh%3B%28%2Fdescending%3Avv%29%2F%28%2Fdescending%3Avh%29&rescale=0.0%2C0.4&rescale=0.0%2C0.1&rescale=1.0%2C15.0&bidx=1&tilesize=256&sel=time=2021-11-09T07%3A10%3A38",
+      "type": "application/json",
+      "title": "TileJSON for s1-rtc-28RBS-20211109t071038"
+    },
+    {
+      "rel": "xyz",
+      "href": "https://api.explorer.eopf.copernicus.eu/raster/collections/sentinel-1-grd-rtc-staging/items/s1-rtc-28RBS/tiles/WebMercatorQuad/{z}/{x}/{y}.png?expression=%2Fdescending%3Avv%3B%2Fdescending%3Avh%3B%28%2Fdescending%3Avv%29%2F%28%2Fdescending%3Avh%29&rescale=0.0%2C0.4&rescale=0.0%2C0.1&rescale=1.0%2C15.0&bidx=1&tilesize=256&sel=time=2021-11-09T07%3A10%3A38",
+      "type": "image/png",
+      "title": "VV, VH, VV/VH composite"
+    },
+    {
+      "rel": "via",
+      "href": "https://explorer.eopf.copernicus.eu/collections/sentinel-1-grd-rtc-acquisitions-staging/items/s1-rtc-28RBS-20211109t071038",
+      "type": "text/html",
+      "title": "EOPF Explorer"
+    },
+    {
+      "rel": "related",
+      "href": "https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-1-grd-rtc-staging/items/s1-rtc-28RBS",
+      "type": "application/json",
+      "title": "Parent tile datacube"
+    },
+    {
+      "rel": "related",
+      "href": "https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-1-grd-rtc-acquisitions-staging",
+      "type": "application/json",
+      "title": "Per-acquisition items (filter by tile grid:code)"
+    }
+  ],
+  "assets": {
+    "thumbnail": {
+      "href": "https://api.explorer.eopf.copernicus.eu/raster/collections/sentinel-1-grd-rtc-staging/items/s1-rtc-28RBS/preview?format=png&expression=%2Fdescending%3Avv%3B%2Fdescending%3Avh%3B%28%2Fdescending%3Avv%29%2F%28%2Fdescending%3Avh%29&rescale=0.0%2C0.4&rescale=0.0%2C0.1&rescale=1.0%2C15.0&bidx=1&sel=time=2021-11-09T07%3A10%3A38",
+      "type": "image/png",
+      "roles": [
+        "thumbnail"
+      ],
+      "title": "Sentinel-1 GRD RGB composite preview"
+    },
+    "zarr-store": {
+      "href": "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-1-grd-rtc-staging/s1-rtc-28RBS.zarr",
+      "type": "application/vnd.zarr; version=3",
+      "roles": [
+        "data"
+      ],
+      "title": "Sentinel-1 GRD RTC Zarr store",
+      "alternate": {
+        "s3": {
+          "href": "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-1-grd-rtc-staging/s1-rtc-28RBS.zarr",
+          "storage:scheme": {
+            "tier": "STANDARD",
+            "region": "de",
+            "platform": "OVHcloud",
+            "requester_pays": false
+          }
+        }
+      }
+    },
+    "border-mask-desc": {
+      "gsd": 10,
+      "href": "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-1-grd-rtc-staging/s1-rtc-28RBS.zarr/descending",
+      "type": "application/vnd.zarr; version=3",
+      "bands": [
+        {
+          "name": "border_mask",
+          "nodata": 0,
+          "data_type": "uint8",
+          "description": "Valid-data mask (0 = border/no-data, non-zero = valid)"
+        }
+      ],
+      "roles": [
+        "data"
+      ],
+      "title": "Valid-data mask (descending)",
+      "alternate": {
+        "s3": {
+          "href": "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-1-grd-rtc-staging/s1-rtc-28RBS.zarr/descending",
+          "storage:scheme": {
+            "tier": "STANDARD",
+            "region": "de",
+            "platform": "OVHcloud",
+            "requester_pays": false
+          }
+        }
+      }
+    },
+    "gamma0-rtc-backscatter-desc": {
+      "gsd": 10,
+      "href": "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-1-grd-rtc-staging/s1-rtc-28RBS.zarr/descending",
+      "type": "application/vnd.zarr; version=3",
+      "unit": "gamma0 (linear power)",
+      "bands": [
+        {
+          "name": "vv",
+          "unit": "gamma0 (linear power)",
+          "nodata": "nan",
+          "data_type": "float32",
+          "description": "\u03b3\u2070 RTC backscatter, VV polarization"
+        },
+        {
+          "name": "vh",
+          "unit": "gamma0 (linear power)",
+          "nodata": "nan",
+          "data_type": "float32",
+          "description": "\u03b3\u2070 RTC backscatter, VH polarization"
+        }
+      ],
+      "roles": [
+        "data"
+      ],
+      "title": "\u03b3\u2070 RTC backscatter (descending)",
+      "nodata": "nan",
+      "alternate": {
+        "s3": {
+          "href": "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-1-grd-rtc-staging/s1-rtc-28RBS.zarr/descending",
+          "storage:scheme": {
+            "tier": "STANDARD",
+            "region": "de",
+            "platform": "OVHcloud",
+            "requester_pays": false
+          }
+        }
+      },
+      "data_type": "float32"
+    }
+  },
+  "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+      [
+        [
+          -18.0763361629,
+          27.90341568686007
+        ],
+        [
+          -16.93308378436229,
+          27.90341568686007
+        ],
+        [
+          -16.93308378436229,
+          28.91414436420113
+        ],
+        [
+          -18.0763361629,
+          28.91414436420113
+        ],
+        [
+          -18.0763361629,
+          27.90341568686007
+        ]
+      ]
+    ]
+  },
+  "collection": "sentinel-1-grd-rtc-acquisitions-staging",
+  "properties": {
+    "gsd": 10.0,
+    "title": "Sentinel-1 GRD RTC \u03b3\u2070 \u2014 tile 28RBS, 2021-11-09T07:10:38Z (descending)",
+    "renders": {
+      "rgb": {
+        "bidx": [
+          1
+        ],
+        "title": "VV, VH, VV/VH composite",
+        "rescale": [
+          [
+            0.0,
+            0.4
+          ],
+          [
+            0.0,
+            0.1
+          ],
+          [
+            1.0,
+            15.0
+          ]
+        ],
+        "tilesize": 256,
+        "expression": "/descending:vv;/descending:vh;(/descending:vv)/(/descending:vh)"
+      }
+    },
+    "updated": "2026-07-08T19:14:09.508110Z",
+    "datetime": "2021-11-09T07:10:38Z",
+    "grid:code": "MGRS-28RBS",
+    "proj:bbox": [
+      199980.0000018152,
+      3090239.9999991516,
+      309780.0000018152,
+      3200039.9999991516
+    ],
+    "proj:code": "EPSG:32628",
+    "proj:shape": [
+      10980,
+      10980
+    ],
+    "description": "Radiometric-terrain-corrected (RTC) \u03b3\u2070 backscatter from a single Sentinel-1 GRD acquisition, reprojected onto the Sentinel-2 MGRS/UTM grid.",
+    "instruments": [
+      "c-sar"
+    ],
+    "constellation": "sentinel-1",
+    "proj:transform": [
+      10.0,
+      0.0,
+      199980.0000018152,
+      0.0,
+      -10.0,
+      3200039.9999991516
+    ],
+    "sat:orbit_state": "descending",
+    "sar:product_type": "GRD",
+    "sar:polarizations": [
+      "VV",
+      "VH"
+    ],
+    "sar:frequency_band": "C",
+    "sar:instrument_mode": "IW",
+    "sar:center_frequency": 5.405,
+    "auth:schemes": {
+      "oidc": {
+        "type": "openIdConnect",
+        "openIdConnectUrl": "https://hub-eopf-explorer.eox.at/auth/realms/eoxhub/.well-known/openid-configuration"
+      }
+    }
+  },
+  "stac_version": "1.1.0",
+  "stac_extensions": [
+    "https://stac-extensions.github.io/sar/v1.0.0/schema.json",
+    "https://stac-extensions.github.io/projection/v2.0.0/schema.json",
+    "https://stac-extensions.github.io/render/v1.0.0/schema.json",
+    "https://stac-extensions.github.io/timestamps/v1.1.0/schema.json",
+    "https://stac-extensions.github.io/grid/v1.1.0/schema.json",
+    "https://stac-extensions.github.io/sat/v1.0.0/schema.json",
+    "https://stac-extensions.github.io/alternate-assets/v1.2.0/schema.json",
+    "https://stac-extensions.github.io/storage/v2.0.0/schema.json",
+    "https://stac-extensions.github.io/authentication/v1.1.0/schema.json"
+  ]
+}
