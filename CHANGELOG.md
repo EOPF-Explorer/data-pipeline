@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.21.2 (2026-11-09)
+
+## What's Changed
+* fix(cleanup): protect the 2026 NDCI story scenes from expiry by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/507
+* build(deps): bump uv from 0.13.5 to 0.13.6 in /docker in the all group by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/504
+* build(deps): bump the all group with 3 updates by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/506
+* build(deps): bump the minor-and-patch group with 6 updates by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/505
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.21.1...v1.21.2
+
 ## 1.21.1 (2026-11-03)
 
 ## What's Changed
