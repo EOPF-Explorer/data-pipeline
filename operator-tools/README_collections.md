@@ -191,6 +191,7 @@ uv run operator-tools/manage_collections.py clean sentinel-2-l2a-staging --clean
 - `--clean-s3`: **[NEW]** Delete all S3 data referenced by item assets with validation
 - `--confine-to`: **REQUIRED with `--clean-s3`.** Restrict deletion to an `s3://bucket/prefix/` (repeatable). Prefixes match with a trailing slash, so `s3://b/foo/` never matches `s3://b/foo-staging/`
 - `--s3-endpoint`: S3 endpoint URL (optional, uses `AWS_ENDPOINT_URL` env var if not specified)
+- `--allow-demo`: Also delete items on the demo denylist, listing each one. Without it they are skipped and reported as protected demo scenes (see [Demo scenes](#demo-scenes))
 
 **⚠️ WARNING - S3 Data Deletion:**
 
@@ -341,11 +342,31 @@ uv run operator-tools/manage_collections.py delete sentinel-2-l2a-staging --clea
 **Options:**
 - `--clean-first`: Remove all items from the collection before deleting it
 - `--yes, -y`: Skip confirmation prompt
+- `--allow-demo`: Delete the collection even if it still holds items on the demo denylist, listing each one
 
 **Safety Features:**
 - Confirmation prompt before deletion (unless `--yes` is used)
+- Deleting a collection deletes every item still in it, so it is refused while the collection holds an item on the demo denylist, or when that cannot be checked (see [Demo scenes](#demo-scenes)). With `--clean-first`, everything else is cleaned first and the delete is then refused
 - Option to automatically clean items first
 - Handles already-deleted collections gracefully
+
+#### Demo scenes
+
+`scripts/demo_exclude_ids.txt` lists the scenes behind public stories and demos.
+The expiry cleanup never deletes them, and the delete paths of these tools honour
+the same list, resolved the same way: `$EXPIRES_EXCLUDE_FILE` if set, else the
+baked `scripts/demo_exclude_ids.txt`.
+
+- `manage_item.py delete` refuses a listed id before any STAC or S3 call.
+- `manage_collections.py clean` skips listed ids and reports them as protected demo scenes.
+- `manage_collections.py delete` refuses while the collection still holds a listed id.
+- If the list cannot be read (or lists no ids), the command refuses before deleting
+  anything. If the collection check fails, `delete` refuses before deleting the
+  collection (with `--clean-first`, after the clean).
+- `--allow-demo` overrides all of the above and prints every listed id it deletes,
+  e.g. to purge copies of demo scenes from a staging collection.
+- The ids given to these commands must be plain STAC ids (letters, digits, `_`, `.`
+  and `-`), with or without `--allow-demo`.
 
 #### 5. `info` - Show Collection Information
 
@@ -704,6 +725,7 @@ uv run operator-tools/manage_item.py delete sentinel-2-l2a-staging ITEM_ID --cle
 - `--yes, -y`: Skip confirmation prompt
 - `--clean-s3`: Also delete S3 data with validation
 - `--s3-endpoint`: S3 endpoint URL (optional)
+- `--allow-demo`: Delete an item on the demo denylist. Without it a listed id is refused before any STAC or S3 call (see [Demo scenes](#demo-scenes))
 
 **How it works (with `--clean-s3`):**
 1. Extracts all S3 URLs from the item's assets

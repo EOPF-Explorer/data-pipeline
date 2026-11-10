@@ -10,6 +10,7 @@ Supports:
 """
 
 import os
+import re
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -39,6 +40,7 @@ from s3_item_cleanup import (  # noqa: E402
     delete_s3_objects_for_item,
     extract_s3_urls_from_item,
     parse_s3_prefix,
+    resolve_exclude_ids,
 )
 from storage_tier_utils import StorageTierInfo, get_s3_storage_info  # noqa: E402
 
@@ -129,6 +131,47 @@ def _replace_item(session: requests.Session, api_url: str, collection_id: str, i
         timeout=30,
     )
     response.raise_for_status()
+
+
+def load_demo_ids(allow_demo: bool) -> set[str]:
+    """The demo denylist: scenes behind public stories and demos, never deleted by default.
+
+    Resolved like the cleanup cron and register_v1 (``resolve_exclude_ids``:
+    ``$EXPIRES_EXCLUDE_FILE``, else the baked ``scripts/demo_exclude_ids.txt``). Fails
+    closed: a list that cannot be read, or that resolves to no ids, raises
+    ``click.ClickException`` before anything is deleted. With ``allow_demo`` the
+    operator has opted out of the guard, so it warns and returns an empty set instead.
+    """
+    problem = "it lists no ids"
+    ids: set[str]
+    try:
+        ids = resolve_exclude_ids()
+    except (OSError, UnicodeDecodeError) as exc:
+        ids, problem = set(), f"cannot read it: {exc}"
+    if ids:
+        return ids
+    if not allow_demo:
+        raise click.ClickException(
+            f"Refusing to delete: the demo denylist is unavailable ({problem}). "
+            "Fix $EXPIRES_EXCLUDE_FILE, or pass --allow-demo to delete without it."
+        )
+    click.echo(f"⚠️  Demo denylist unavailable ({problem}); continuing (--allow-demo)", err=True)
+    return ids
+
+
+def require_plain_ids(*ids: str) -> None:
+    """Refuse any id the demo guard cannot compare reliably, with or without --allow-demo.
+
+    The guard compares ids as given, but a request URL is normalised on its way to the
+    API (%-escapes decoded, ``.`` and ``..`` segments removed, ``?`` and ``#`` end the
+    path). Only a plain id is sure to name the item or collection that was checked.
+    """
+    for value in ids:
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", value) or value in (".", ".."):
+            raise click.ClickException(
+                f"Refusing to delete {value!r}: not a plain STAC id "
+                "(letters, digits, '_', '.' and '-' only)."
+            )
 
 
 class STACItemManager:
@@ -668,6 +711,15 @@ def info(
         "so s3://b/foo/ never matches s3://b/foo-staging/."
     ),
 )
+@click.option(
+    "--allow-demo",
+    is_flag=True,
+    help=(
+        "Allow deleting an item on the demo denylist ($EXPIRES_EXCLUDE_FILE, else the "
+        "baked scripts/demo_exclude_ids.txt). Without it a listed id is refused before "
+        "any STAC or S3 call, and so is any id when the list cannot be read."
+    ),
+)
 @click.pass_context
 def delete(
     ctx: click.Context,
@@ -678,9 +730,13 @@ def delete(
     clean_s3: bool,
     s3_endpoint: str | None,
     confine_to: tuple[str, ...],
+    allow_demo: bool,
 ) -> None:
     """
     Delete a single STAC item, optionally cleaning S3 data.
+
+    Items on the demo denylist are refused unless --allow-demo is given. Both ids
+    must be plain STAC ids (letters, digits, '_', '.' and '-').
 
     Example:
         manage_item.py delete sentinel-2-l2a-staging S2A_MSIL2A_20210917T115221_N0500_R123_T28RBS_20230110T165456 --dry-run
@@ -702,6 +758,16 @@ def delete(
             confinement = [parse_s3_prefix(spec) for spec in confine_to]
         except ValueError as exc:
             raise click.UsageError(str(exc)) from exc
+
+    # Before any STAC or S3 call, dry run included, so a refusal touches nothing.
+    require_plain_ids(collection_id, item_id)
+    if item_id in load_demo_ids(allow_demo):
+        if not allow_demo:
+            raise click.ClickException(
+                f"Refusing to delete {item_id}: it is on the demo denylist. "
+                "Pass --allow-demo to delete it anyway."
+            )
+        click.echo(f"⚠️  --allow-demo: deleting {item_id}, which is on the demo denylist")
 
     # Fetch item first
     item = manager.get_item(collection_id, item_id)
