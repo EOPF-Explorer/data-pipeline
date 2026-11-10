@@ -453,6 +453,9 @@ def run_cleanup(args: argparse.Namespace) -> int:
     # _monotonic(): that seam is the budget clock, which an unbudgeted run must not read.
     discovery_started: float | None = None
     discovery_seconds: float | None = None
+    # None until the denylist lookup after the item loop succeeds: same rule as
+    # `discovered`, an empty list would claim every listed id was found.
+    exclude_ids_missing: list[str] | None = None
 
     def emit_summary(*, aborted: bool = False) -> None:
         # Set at the end of the discovery read, or measured here if discovery is what
@@ -476,6 +479,11 @@ def run_cleanup(args: argparse.Namespace) -> int:
             "failures": failures,
             "time_budget_reached": time_budget_reached,
             "discovery_seconds": elapsed,
+            # The denylist as this run saw it: how many ids it loaded, and which of them
+            # match no item in the collection (a listed scene that is gone protects
+            # nothing). Additive, like `aborted`.
+            "exclude_ids_loaded": len(exclude_ids),
+            "exclude_ids_missing": exclude_ids_missing,
         }
         if aborted:
             # ADDITIVE, and present only on an aborted run: dashboards keyed on
@@ -617,6 +625,30 @@ def run_cleanup(args: argparse.Namespace) -> int:
                 "stac_delete_http_"
             ):
                 failures += 1
+
+        # Which denylist ids match no item in the collection: one read, after the last
+        # delete, so it cannot change what this run deletes or the budget the deletes
+        # get. Skipped once the budget is spent, and a single page whatever --page-size
+        # says (that sizes discovery): the README's sizing rule allows one more
+        # uninterruptible page past the budget, not two, and a kill there loses the
+        # summary. Never with no ids: pystac-client drops a falsy `ids` and
+        # `max_items`, so that search would walk the whole collection.
+        if exclude_ids and not budget_spent():
+            try:
+                lookup = client.search(
+                    collections=[args.collection],
+                    ids=sorted(exclude_ids),
+                    max_items=len(exclude_ids),
+                    limit=len(exclude_ids),
+                )
+                found = {item["id"] for item in lookup.items_as_dicts()}
+                exclude_ids_missing = sorted(exclude_ids - found)
+            except Exception:
+                # Broad, unlike the per-item guards: nothing here deletes, so a failure
+                # only means "unknown" and the run ends exactly as it would have. Not
+                # RequestException: pystac-client raises its own APIError for transport
+                # errors and non-200 responses.
+                logger.warning("Denylist lookup failed; exclude_ids_missing is null", exc_info=True)
     except Exception:
         # Deliberately broad, and ONLY here. The per-item guards inside
         # process_item stay narrow and fail closed -- they retain the STAC item

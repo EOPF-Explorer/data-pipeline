@@ -237,8 +237,31 @@ The final `cleanup_summary` line carries:
 
 ```
 ts, event, dry_run, collection, discovered, processed, by_status, failures,
-time_budget_reached, discovery_seconds, [aborted]
+time_budget_reached, discovery_seconds, exclude_ids_loaded, exclude_ids_missing,
+[aborted]
 ```
+
+`exclude_ids_loaded` is how many ids the denylist resolved to (`--exclude-file`,
+else `EXPIRES_EXCLUDE_FILE`, else the baked `demo_exclude_ids.txt`), on every
+run including an aborted one. After a pin bump that changes the list, the next
+tick's summary shows the new count.
+
+`exclude_ids_missing` is the sorted list of denylist ids that match no item in
+`--collection`; no other collection is checked. One list serves every
+collection (it already holds a staging-only id), so an entry means "renamed or
+removed, no longer protected" only for an id that belongs to `--collection`.
+Run against a collection the list was not written for, the field names nearly
+every id on every tick.
+
+The lookup is one read-only `/search` by `ids`, made after the last item is
+processed (dry-run included), so it cannot change what a run deletes.
+`exclude_ids_missing` is **`null`, not `[]`**, when that lookup did not run or
+failed: the run aborted, the budget was already spent when the batch finished
+(the lookup would be another uninterruptible page past it; see the sizing
+rule), the denylist is empty, or the read raised (logged as
+`Denylist lookup failed`). A failed lookup changes nothing else: same records,
+same exit code. Both fields need the first image after v1.21.2; an older image
+omits them.
 
 `discovered - processed` is what this run found but did not attempt. It is **not**
 the remaining backlog — `discovered` is already capped by `--max-items`.
