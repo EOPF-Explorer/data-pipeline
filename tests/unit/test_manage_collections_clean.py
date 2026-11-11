@@ -40,6 +40,15 @@ STAGING = (BUCKET, "tests-output/sentinel-2-l2a-staging/")
 PROD = (BUCKET, "tests-output/sentinel-2-l2a/")
 
 
+@pytest.fixture(autouse=True)
+def demo_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the demo denylist `clean` reads, so no test depends on $EXPIRES_EXCLUDE_FILE
+    or the baked file. It lists no item these tests create."""
+    path = tmp_path / "demo_exclude_ids.txt"
+    path.write_text("S2A_MSIL2A_DEMO_NOT_IN_THESE_TESTS\n")
+    monkeypatch.setenv("EXPIRES_EXCLUDE_FILE", str(path))
+
+
 def _item(i: int, href: str | None = None, acquired: str | None = None) -> dict:
     href = href or f"s3://{BUCKET}/tests-output/sentinel-2-l2a-staging/scene{i}/data.zarr/"
     item = {"id": f"ITEM_{i:05d}", "assets": {"data": {"alternate": {"s3": {"href": href}}}}}
@@ -104,7 +113,7 @@ def test_bounded_run_still_sweeps_the_whole_collection() -> None:
     items[60] = _item(60, f"s3://{BUCKET}/tests-output/sentinel-2-l2a/PROD/data.zarr/")
     mgr = _manager(items)
 
-    with pytest.raises(click.ClickException):
+    with pytest.raises(click.ClickException, match="outside the declared confinement"):
         mgr.clean_collection(
             "sentinel-2-l2a-staging",
             clean_s3=True,
@@ -236,7 +245,7 @@ def test_threshold_does_not_skip_the_sweep() -> None:
     items = [_item(0, acquired=OLD), _item(1, acquired=RECENT)]
     items[1] = _item(1, f"s3://{BUCKET}/tests-output/sentinel-2-l2a/PROD/data.zarr/", RECENT)
     mgr = _manager(items)
-    with pytest.raises(click.ClickException):
+    with pytest.raises(click.ClickException, match="outside the declared confinement"):
         _clean(mgr, datetime_before=THRESHOLD)
     mgr.item_manager.delete_item.assert_not_called()
 

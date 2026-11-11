@@ -5,19 +5,24 @@ The demo denylist (``resolve_exclude_ids``: ``$EXPIRES_EXCLUDE_FILE``, else the 
 cleanup. The operator CLIs honour it too:
 
 - ``manage_item.py delete`` refuses a listed id before any STAC or S3 call;
-- ``manage_collections.py clean`` skips listed ids and reports them on their own line;
+- ``manage_collections.py clean`` skips listed ids, reports them on their own line,
+  and asks its prompt after that;
 - ``manage_collections.py delete`` refuses while the collection still holds a listed
-  id, so ``--clean-first`` cleans everything else and then refuses;
-- ``--allow-demo`` overrides each guard and prints every listed id it deletes;
-- a list that cannot be read, or a lookup that fails, refuses (fails closed);
-- the ids given to the three commands must be plain STAC ids.
+  id, checked before its prompt and ``--clean-first``, and again before the DELETE;
+- ``--allow-demo`` lifts the refusal for listed ids only, printing every one it deletes;
+- a list that cannot be used, or a lookup that fails or answers malformed, refuses
+  with or without ``--allow-demo`` (fails closed);
+- the ids given to the three commands must be plain STAC ids, ids are percent-encoded
+  in DELETE paths, and ``--api-url`` must not contain ``?`` or ``#``.
 
 No network: HTTP, S3 and the STAC search are mocked.
 """
 
+import json
 import sys
+from collections.abc import Iterator
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import click
 import pytest
@@ -47,22 +52,66 @@ def demo_list(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return path
 
 
-@pytest.fixture(params=["missing", "empty", "not-utf8"])
-def unreadable_list(
+@pytest.fixture(params=["missing", "empty", "not-utf8", "not-plain"])
+def unusable_list(
     request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A denylist that cannot be resolved: missing, with no ids, or not UTF-8."""
+    """A denylist that cannot be used: missing, with no ids, not UTF-8, or with an entry
+    that no plain id can equal."""
     path = tmp_path / f"{request.param}.txt"
     if request.param == "empty":
         path.write_text("# nothing here\n")
     elif request.param == "not-utf8":
         path.write_bytes(b"S2A_MSIL2A_\xe9\n")
+    elif request.param == "not-plain":
+        path.write_text(f"{DEMO_A}  # hero scene\n")
     monkeypatch.setenv("EXPIRES_EXCLUDE_FILE", str(path))
 
 
 def _item(item_id: str) -> dict:
     href = f"{CONFINE}{item_id}/data.zarr/"
     return {"id": item_id, "assets": {"data": {"alternate": {"s3": {"href": href}}}}}
+
+
+def _response(body: object, status: int = 200) -> requests.Response:
+    """A real Response, so raise_for_status() and json() fail the way they do live."""
+    resp = requests.Response()
+    resp.status_code = status
+    resp._content = body if isinstance(body, bytes) else json.dumps(body).encode()
+    return resp
+
+
+def _found(*ids: str) -> requests.Response:
+    return _response({"features": [{"id": i} for i in ids]})
+
+
+# === the list ===
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [f"﻿{DEMO_A}", f"{DEMO_A} # hero", f"{DEMO_A}​"],
+    ids=["bom", "inline-comment", "zero-width"],
+)
+def test_the_list_refuses_naming_an_entry_that_is_not_plain(demo_list: Path, entry: str) -> None:
+    """Such an entry never equals an id, so the scene it means would go unprotected."""
+    demo_list.write_text(f"{entry}\n{DEMO_B}\n", encoding="utf-8")
+
+    with pytest.raises(click.ClickException) as exc:
+        manage_item.load_demo_ids()
+    assert f"not plain STAC ids: {entry!r})" in exc.value.message
+
+
+def test_a_missing_baked_list_is_called_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    baked = tmp_path / "baked" / "demo_exclude_ids.txt"
+    monkeypatch.delenv("EXPIRES_EXCLUDE_FILE")
+    monkeypatch.setattr(manage_item.s3_item_cleanup, "BAKED_EXCLUDE_FILE", baked)
+
+    with pytest.raises(click.ClickException) as exc:
+        manage_item.load_demo_ids()
+    assert f"({baked} is missing)" in exc.value.message
 
 
 # === manage_item.py delete ===
@@ -100,14 +149,19 @@ def test_item_delete_refuses_a_listed_id_before_any_stac_or_s3_call(
     assert [name for name, call in item_calls.items() if call.called] == []
 
 
+@pytest.mark.parametrize(
+    ("extra", "says", "deleted"),
+    [([], "deleting", [DEMO_A]), (["--dry-run"], "would delete", [])],
+    ids=["run", "dry-run"],
+)
 def test_item_delete_allow_demo_deletes_a_listed_id_and_prints_it(
-    item_calls: dict[str, MagicMock],
+    item_calls: dict[str, MagicMock], extra: list[str], says: str, deleted: list[str]
 ) -> None:
-    result = _delete_item(DEMO_A, "--allow-demo")
+    result = _delete_item(DEMO_A, "--allow-demo", *extra)
 
     assert result.exit_code == 0, result.output
-    assert f"--allow-demo: deleting {DEMO_A}" in result.output
-    assert item_calls["delete_item"].call_args.kwargs["item_id"] == DEMO_A
+    assert f"--allow-demo: {says} {DEMO_A}, which is on the demo denylist" in result.output
+    assert [c.kwargs["item_id"] for c in item_calls["delete_item"].call_args_list] == deleted
 
 
 @pytest.mark.parametrize(
@@ -140,26 +194,41 @@ def test_item_delete_of_an_unlisted_id_is_unchanged(item_calls: dict[str, MagicM
     assert item_calls["delete_item"].call_args.kwargs["item_id"] == "S2A_MSIL2A_NOT_A_DEMO"
 
 
-@pytest.mark.usefixtures("unreadable_list")
-def test_item_delete_refuses_when_the_list_cannot_be_resolved(
-    item_calls: dict[str, MagicMock],
+@pytest.mark.usefixtures("unusable_list")
+@pytest.mark.parametrize("flag", [[], ["--allow-demo"]], ids=["default", "allow-demo"])
+def test_item_delete_refuses_when_the_list_cannot_be_used(
+    item_calls: dict[str, MagicMock], flag: list[str]
 ) -> None:
-    result = _delete_item("S2A_MSIL2A_NOT_A_DEMO")
+    result = _delete_item("S2A_MSIL2A_NOT_A_DEMO", *flag)
 
     assert result.exit_code != 0
-    assert "demo denylist is unavailable" in result.output
+    assert "cannot use the demo denylist" in result.output
     assert [name for name, call in item_calls.items() if call.called] == []
 
 
-@pytest.mark.usefixtures("unreadable_list")
-def test_item_delete_allow_demo_proceeds_without_a_readable_list(
-    item_calls: dict[str, MagicMock],
+@pytest.mark.parametrize("end", ["?", "#"])
+@pytest.mark.parametrize(
+    ("cli", "args"),
+    [
+        (manage_item.cli, ["delete", COLLECTION, "S2A_MSIL2A_NOT_A_DEMO", "-y"]),
+        (manage_collections.cli, ["clean", COLLECTION, "-y"]),
+        (manage_collections.cli, ["delete", COLLECTION]),
+    ],
+    ids=["item-delete", "clean", "collection-delete"],
+)
+def test_an_api_url_with_a_query_or_fragment_is_refused(
+    monkeypatch: pytest.MonkeyPatch, cli: click.Group, args: list[str], end: str
 ) -> None:
-    result = _delete_item("S2A_MSIL2A_NOT_A_DEMO", "--allow-demo")
+    """Request paths are appended to it: after a '?' or '#', the DELETE names DEMO_A."""
+    http = MagicMock(side_effect=AssertionError("unexpected HTTP call"))
+    monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", http)
 
-    assert result.exit_code == 0, result.output
-    assert "Demo denylist unavailable" in result.output
-    item_calls["delete_item"].assert_called_once()
+    api_url = f"{API}/collections/{COLLECTION}/items/{DEMO_A}{end}"
+    result = CliRunner().invoke(cli, ["--api-url", api_url, *args], input="y\n")
+
+    assert result.exit_code == 2, result.output
+    assert "--api-url must not contain" in result.output
+    http.assert_not_called()
 
 
 # === manage_collections.py clean ===
@@ -239,20 +308,74 @@ def test_clean_refuses_an_id_that_is_not_plain() -> None:
     mgr.item_manager.delete_item.assert_not_called()
 
 
-@pytest.mark.usefixtures("unreadable_list")
-def test_clean_refuses_when_the_list_cannot_be_resolved() -> None:
+@pytest.mark.usefixtures("unusable_list")
+@pytest.mark.parametrize("allow_demo", [False, True], ids=["default", "allow-demo"])
+def test_clean_refuses_when_the_list_cannot_be_used(allow_demo: bool) -> None:
     mgr = _manager([_item("ITEM_0")])
 
-    with pytest.raises(click.ClickException, match="demo denylist is unavailable"):
-        _clean(mgr)
+    with pytest.raises(click.ClickException, match="cannot use the demo denylist"):
+        _clean(mgr, allow_demo=allow_demo)
+    mgr.get_collection_items.assert_not_called()  # type: ignore[attr-defined]
     mgr.item_manager.delete_item.assert_not_called()
 
 
-@pytest.mark.usefixtures("unreadable_list")
-def test_clean_allow_demo_proceeds_without_a_readable_list() -> None:
-    mgr = _manager([_item("ITEM_0")])
+def _transport(monkeypatch: pytest.MonkeyPatch) -> list[requests.PreparedRequest]:
+    """Record every request where it leaves for the network; each is answered 204."""
+    sent: list[requests.PreparedRequest] = []
 
-    assert _clean(mgr, allow_demo=True) == 1
+    def send(
+        adapter: object, request: requests.PreparedRequest, **kwargs: object
+    ) -> requests.Response:
+        sent.append(request)
+        return _response(b"", status=204)
+
+    monkeypatch.setattr(requests.adapters.HTTPAdapter, "send", send)
+    return sent
+
+
+@pytest.mark.parametrize(
+    ("alias", "sent_as"),
+    [
+        (f"./{DEMO_A}", f".%2F{DEMO_A}"),
+        (f"{DEMO_A}#copy", f"{DEMO_A}%23copy"),
+        ("S2A%5FMSIL2A_DEMO_A", "S2A%255FMSIL2A_DEMO_A"),
+    ],
+    ids=["dot-segment", "fragment", "percent-escape"],
+)
+def test_clean_deletes_an_item_listed_under_an_alias_by_its_own_id(
+    monkeypatch: pytest.MonkeyPatch, alias: str, sent_as: str
+) -> None:
+    """Ids the server lists are not checked like CLI ids. Put in the URL raw, each of
+    these aliases is normalised onto DEMO_A, the item this clean just kept."""
+    sent = _transport(monkeypatch)
+    mgr = manage_collections.STACCollectionManager(API)  # with its real STACItemManager
+    mgr.get_collection_items = MagicMock(return_value=[_item(DEMO_A), _item(alias)])  # type: ignore[method-assign]
+
+    assert mgr.clean_collection(COLLECTION) == (1, 0, 0)
+    assert [(r.method, r.url) for r in sent] == [
+        ("DELETE", f"{API}/collections/{COLLECTION}/items/{sent_as}")
+    ]
+
+
+@pytest.mark.parametrize("item_id", ["..", ".", ""], ids=["dot-dot", "dot", "empty"])
+def test_clean_refuses_an_item_it_cannot_address_before_touching_it(
+    monkeypatch: pytest.MonkeyPatch, item_id: str
+) -> None:
+    """`items/..` is the collection's URL: refused before the item's S3 delete or any request."""
+    sent = _transport(monkeypatch)
+    s3 = MagicMock()
+    mgr = manage_collections.STACCollectionManager(API)
+    mgr.get_collection_items = MagicMock(return_value=[{**_item("SCENE"), "id": item_id}])  # type: ignore[method-assign]
+
+    with pytest.raises(ValueError, match="not usable as a URL path segment"):
+        mgr.clean_collection(
+            COLLECTION,
+            clean_s3=True,
+            s3_client=s3,
+            confinement=[("bucket", "tests-output/sentinel-2-l2a-staging/")],
+        )
+    assert sent == []
+    assert s3.mock_calls == []
 
 
 @pytest.mark.parametrize("flag", [[], ["--allow-demo"]], ids=["default", "allow-demo"])
@@ -268,21 +391,52 @@ def test_cli_clean_passes_allow_demo(monkeypatch: pytest.MonkeyPatch, flag: list
     assert clean.call_args.kwargs["allow_demo"] is bool(flag)
 
 
+def _collections_cli(
+    monkeypatch: pytest.MonkeyPatch, items: list[dict], *args: str, answer: str = "y\n"
+) -> tuple[Result, MagicMock, MagicMock]:
+    """The collections CLI end to end over `items`: (result, item deletes, the walk)."""
+    delete_item = MagicMock(return_value=(True, 0, 0))
+    walk = MagicMock(return_value=items)
+    monkeypatch.setattr(manage_collections.STACItemManager, "delete_item", delete_item)
+    monkeypatch.setattr(manage_collections.STACCollectionManager, "get_collection_items", walk)
+    result = CliRunner().invoke(manage_collections.cli, ["--api-url", API, *args], input=answer)
+    return result, delete_item, walk
+
+
+@pytest.mark.parametrize(
+    ("flag", "listing", "scope"),
+    [
+        ([], f"demo scenes (demo denylist): 1\n    - {DEMO_A}", "except"),
+        (["--allow-demo"], f"NOT protected in this run:\n    - {DEMO_A}", "including"),
+    ],
+    ids=["default", "allow-demo"],
+)
+def test_cli_clean_asks_after_listing_the_demo_scenes(
+    monkeypatch: pytest.MonkeyPatch, flag: list[str], listing: str, scope: str
+) -> None:
+    """The listed ids it keeps or deletes are on screen when the prompt asks; "no" deletes nothing."""
+    result, delete_item, _ = _collections_cli(
+        monkeypatch, [_item("ITEM_0"), _item(DEMO_A)], "clean", COLLECTION, *flag, answer="n\n"
+    )
+
+    assert result.exit_code != 0
+    assert result.output.index(listing) < result.output.index("Continue?")
+    assert f"delete ALL items, {scope} those on the demo denylist, from" in result.output
+    assert "Operation failed" not in result.output
+    delete_item.assert_not_called()
+
+
 # === manage_collections.py delete ===
 
 
 @pytest.fixture
-def lookup(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
-    """The read client behind the denylist lookup; set .found or .search.side_effect."""
-    catalog = MagicMock()
-    monkeypatch.setattr(
-        manage_collections.stac_auth, "open_resilient_client", MagicMock(return_value=catalog)
-    )
-    catalog.found = []
-    catalog.search.return_value.items_as_dicts.side_effect = lambda: iter(
-        {"id": i} for i in catalog.found
-    )
-    return catalog
+def lookup() -> Iterator[MagicMock]:
+    """The denylist lookup: a POST on a requests.Session, autospecced so each call records
+    the session it went through. Answers with `.found`, unless a test sets `.side_effect`."""
+    with patch.object(requests.Session, "post", autospec=True) as post:
+        post.found = []
+        post.side_effect = lambda session, url, **kwargs: _found(*post.found)
+        yield post
 
 
 @pytest.fixture
@@ -295,16 +449,29 @@ def http_delete(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
 def test_collection_delete_refuses_while_a_listed_id_remains(
     lookup: MagicMock, http_delete: MagicMock, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    lookup.found = [DEMO_B]
+    lookup.found = [DEMO_B, "S2A_MSIL2A_NOT_A_DEMO"]  # only listed ids count
 
+    mgr = manage_collections.STACCollectionManager(API)
     with pytest.raises(click.ClickException, match="holds the 1 item"):
-        manage_collections.STACCollectionManager(API).delete_collection(COLLECTION)
+        mgr.delete_collection(COLLECTION)
 
     http_delete.assert_not_called()
-    assert f"    - {DEMO_B}" in capsys.readouterr().err
-    # One read for the whole list, scoped to this collection.
-    lookup.search.assert_called_once_with(
-        collections=[COLLECTION], ids=[DEMO_A, DEMO_B], max_items=2, limit=2
+    err = capsys.readouterr().err
+    assert f"    - {DEMO_B}" in err
+    assert "NOT_A_DEMO" not in err
+    # One attempt, on the session the DELETE uses and with its timeout, not following a
+    # redirect: the listed ids among this collection's items, ids only.
+    lookup.assert_called_once_with(
+        mgr.session,
+        f"{API}/search",
+        json={
+            "collections": [COLLECTION],
+            "ids": [DEMO_A, DEMO_B],
+            "limit": 2,
+            "fields": {"include": ["id"], "exclude": ["links"]},
+        },
+        timeout=30,
+        allow_redirects=False,
     )
 
 
@@ -315,13 +482,41 @@ def test_collection_delete_proceeds_when_no_listed_id_remains(
     http_delete.assert_called_once_with(f"{API}/collections/{COLLECTION}", timeout=30)
 
 
+@pytest.mark.parametrize("allow_demo", [False, True], ids=["default", "allow-demo"])
+@pytest.mark.parametrize(
+    "answer",
+    [
+        requests.ConnectionError("lookup down"),
+        RuntimeError("Failed to fetch OIDC token: 503"),
+        _response({"features": []}, status=502),  # parses, but is not an answer
+        _response({"features": []}, status=301),  # not followed, and not an answer
+        _response(b"<html>maintenance</html>"),
+        _response({}),
+        _response({"features": None}),
+        _response({"features": [{"collection": COLLECTION}]}),
+        _response({"features": [], "links": [{"rel": "next", "href": f"{API}/search"}]}),
+    ],
+    ids=[
+        "transport",
+        "auth-hook",
+        "http-502",
+        "redirect",
+        "2xx-not-json",
+        "no-features",
+        "null-features",
+        "feature-without-id",
+        "next-page",
+    ],
+)
 def test_collection_delete_refuses_when_the_lookup_fails(
-    lookup: MagicMock, http_delete: MagicMock
+    lookup: MagicMock, http_delete: MagicMock, answer: object, allow_demo: bool
 ) -> None:
-    lookup.search.side_effect = RuntimeError("502 Bad Gateway")
+    lookup.side_effect = [answer]
 
     with pytest.raises(click.ClickException, match="could not check it for demo scenes"):
-        manage_collections.STACCollectionManager(API).delete_collection(COLLECTION)
+        manage_collections.STACCollectionManager(API).delete_collection(
+            COLLECTION, allow_demo=allow_demo
+        )
     http_delete.assert_not_called()
 
 
@@ -332,17 +527,20 @@ def test_collection_delete_refuses_an_id_that_is_not_plain(
     """The lookup matches ids as given, but the DELETE URL is normalised to COLLECTION."""
     with pytest.raises(click.ClickException, match="not a plain STAC id"):
         manage_collections.STACCollectionManager(API).delete_collection(collection_id)
-    lookup.search.assert_not_called()
+    lookup.assert_not_called()
     http_delete.assert_not_called()
 
 
-@pytest.mark.usefixtures("unreadable_list")
-def test_collection_delete_refuses_when_the_list_cannot_be_resolved(
-    lookup: MagicMock, http_delete: MagicMock
+@pytest.mark.usefixtures("unusable_list")
+@pytest.mark.parametrize("allow_demo", [False, True], ids=["default", "allow-demo"])
+def test_collection_delete_refuses_when_the_list_cannot_be_used(
+    lookup: MagicMock, http_delete: MagicMock, allow_demo: bool
 ) -> None:
-    with pytest.raises(click.ClickException, match="demo denylist is unavailable"):
-        manage_collections.STACCollectionManager(API).delete_collection(COLLECTION)
-    lookup.search.assert_not_called()
+    with pytest.raises(click.ClickException, match="cannot use the demo denylist"):
+        manage_collections.STACCollectionManager(API).delete_collection(
+            COLLECTION, allow_demo=allow_demo
+        )
+    lookup.assert_not_called()
     http_delete.assert_not_called()
 
 
@@ -358,58 +556,54 @@ def test_collection_delete_allow_demo_deletes_and_prints_each_listed_id(
     assert f"on the demo denylist:\n    - {DEMO_A}\n    - {DEMO_B}" in capsys.readouterr().out
 
 
-def test_collection_delete_allow_demo_overrides_a_failed_lookup(
-    lookup: MagicMock, http_delete: MagicMock
-) -> None:
-    lookup.search.side_effect = RuntimeError("502 Bad Gateway")
-
-    assert manage_collections.STACCollectionManager(API).delete_collection(
-        COLLECTION, allow_demo=True
-    )
-    http_delete.assert_called_once()
-
-
-def _delete_collection_cli(
-    monkeypatch: pytest.MonkeyPatch, items: list[dict], *extra: str
-) -> tuple[Result, MagicMock]:
-    """`delete --clean-first` end to end: the clean, then the guarded DELETE."""
-    delete_item = MagicMock(return_value=(True, 0, 0))
-    monkeypatch.setattr(manage_collections.STACItemManager, "delete_item", delete_item)
-    monkeypatch.setattr(
-        manage_collections.STACCollectionManager,
-        "get_collection_items",
-        MagicMock(return_value=items),
-    )
-    result = CliRunner().invoke(
-        manage_collections.cli,
-        ["--api-url", API, "delete", COLLECTION, "--clean-first", *extra],
-        input="y\n",
-    )
-    return result, delete_item
-
-
-def test_delete_clean_first_cleans_the_rest_then_refuses(
+def test_delete_clean_first_refuses_before_the_prompt_and_the_clean(
     monkeypatch: pytest.MonkeyPatch, lookup: MagicMock, http_delete: MagicMock
 ) -> None:
-    lookup.found = [DEMO_A]  # what the clean left behind
-    result, delete_item = _delete_collection_cli(monkeypatch, [_item("ITEM_0"), _item(DEMO_A)])
+    lookup.found = [DEMO_A]
+    result, delete_item, walk = _collections_cli(
+        monkeypatch, [_item("ITEM_0"), _item(DEMO_A)], "delete", COLLECTION, "--clean-first"
+    )
+
+    assert result.exit_code != 0
+    assert f"    - {DEMO_A}" in result.output
+    assert f"Refusing to delete collection {COLLECTION}: it holds the 1 item" in result.output
+    assert "Continue?" not in result.output
+    walk.assert_not_called()
+    delete_item.assert_not_called()
+    http_delete.assert_not_called()
+
+
+def test_delete_clean_first_still_refuses_a_listed_id_found_after_the_clean(
+    monkeypatch: pytest.MonkeyPatch, lookup: MagicMock, http_delete: MagicMock
+) -> None:
+    """The check before the prompt finds none; the one before the DELETE finds DEMO_A."""
+    lookup.side_effect = [_found(), _found(DEMO_A)]
+    result, delete_item, _ = _collections_cli(
+        monkeypatch, [_item("ITEM_0"), _item(DEMO_A)], "delete", COLLECTION, "--clean-first"
+    )
 
     assert result.exit_code != 0
     assert "remove all items except those on the demo denylist" in result.output  # the prompt
     assert [c.kwargs["item_id"] for c in delete_item.call_args_list] == ["ITEM_0"]
-    assert f"Refusing to delete collection {COLLECTION}" in result.output
+    assert f"Refusing to delete collection {COLLECTION}: it holds the 1 item" in result.output
     http_delete.assert_not_called()
 
 
-def test_delete_clean_first_allow_demo_deletes_everything(
+def test_delete_clean_first_allow_demo_lists_the_demo_scenes_then_deletes_everything(
     monkeypatch: pytest.MonkeyPatch, lookup: MagicMock, http_delete: MagicMock
 ) -> None:
-    lookup.found = []  # the clean removed the demo too
-    result, delete_item = _delete_collection_cli(
-        monkeypatch, [_item("ITEM_0"), _item(DEMO_A)], "--allow-demo"
+    lookup.found = [DEMO_A]
+    result, delete_item, _ = _collections_cli(
+        monkeypatch,
+        [_item("ITEM_0"), _item(DEMO_A)],
+        "delete",
+        COLLECTION,
+        "--clean-first",
+        "--allow-demo",
     )
 
     assert result.exit_code == 0, result.output
+    assert result.output.index(f"    - {DEMO_A}") < result.output.index("Continue?")
     assert [c.kwargs["item_id"] for c in delete_item.call_args_list] == ["ITEM_0", DEMO_A]
     http_delete.assert_called_once()
 
@@ -426,5 +620,5 @@ def test_cli_delete_allow_demo_reaches_the_collection_delete(
     )
 
     assert result.exit_code == 0, result.output
-    assert f"    - {DEMO_A}" in result.output
+    assert result.output.index(f"    - {DEMO_A}") < result.output.index("Continue?")
     http_delete.assert_called_once()
