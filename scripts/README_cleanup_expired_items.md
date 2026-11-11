@@ -227,8 +227,10 @@ quiet tick is `time_budget_reached: false, discovered: 0`.
 
 A **configuration** error on a flag (a bad `--max-runtime-seconds`, `--max-items`
 or `--page-size` value) exits `2` at parse time, before anything is read or
-deleted, and writes no summary. That is the one case where a missing summary
-line is harmless — the run never started. A bad `STAC_HTTP_TIMEOUT` is different
+deleted, and writes no summary. So does a denylist file that cannot be read,
+with a traceback and exit `1`, also before anything is read or deleted. Those
+are the only cases where a missing summary line is harmless — the run never
+started. A bad `STAC_HTTP_TIMEOUT` is different
 on purpose: it is read when the search client opens, inside the guard, so it
 exits `1` with a normal `cleanup_summary` carrying `aborted: true` and
 `discovered: null` — the tick stays visible in the audit stream.
@@ -237,38 +239,53 @@ The final `cleanup_summary` line carries:
 
 ```
 ts, event, dry_run, collection, discovered, processed, by_status, failures,
-time_budget_reached, discovery_seconds, exclude_ids_loaded, exclude_ids_missing,
-[aborted]
+time_budget_reached, discovery_seconds, exclude_ids_loaded, exclude_ids_sha256,
+exclude_ids_missing, [aborted]
 ```
 
 `exclude_ids_loaded` is how many ids the denylist resolved to (`--exclude-file`,
-else `EXPIRES_EXCLUDE_FILE`, else the baked `demo_exclude_ids.txt`), on every
-run including an aborted one. After a pin bump that changes the list, the next
-tick's summary shows the new count.
+else `EXPIRES_EXCLUDE_FILE`, else the baked `demo_exclude_ids.txt`), and
+`exclude_ids_sha256` the first 12 hex digits of the sha256 of those ids, one per
+line in byte order, each line ending in a newline. Both are on every summary,
+an aborted one included; a denylist file that cannot be read writes no summary
+at all (traceback, exit `1`, before anything is read or deleted). After a pin
+bump that changes the list, the next tick's summary shows a new digest, even
+when the count is unchanged. This prints the digest for a file:
+
+```
+sed -e 's/^[[:space:]]*//;s/[[:space:]]*$//;/^#/d;/^$/d' demo_exclude_ids.txt \
+  | LC_ALL=C sort -u | shasum -a 256 | cut -c1-12
+```
 
 `exclude_ids_missing` is the sorted list of denylist ids that match no item in
 `--collection`; no other collection is checked. One list serves every
-collection (it already holds a staging-only id), so an entry means "renamed or
-removed, no longer protected" only for an id that belongs to `--collection`.
-Run against a collection the list was not written for, the field names nearly
-every id on every tick.
+collection, so an entry means "renamed or removed, no longer protected" only
+for an id that belongs to `--collection`. Run against a collection the list was
+not written for, the field names nearly every id on every tick.
 
 The lookup is one read-only `/search` by `ids`, made after the last item is
-processed (dry-run included), so it cannot change what a run deletes.
+processed (dry-run included), so it cannot change what a run deletes. It asks
+for ids only, in one page (a reply that links a `next` page counts as failed)
+and one attempt, on the no-retry session the re-fetch uses, with the same 30 s
+timeout, so it costs at most what one re-fetch does (~60 s on a stalled
+socket, plus a token fetch when none is cached). That is less than
+the worst item or page the sizing rule already allows past the budget, so the
+rule is unchanged. It logs
+`Denylist lookup: N ids in <collection>` before the request.
 `exclude_ids_missing` is **`null`, not `[]`**, when that lookup did not run or
 failed: the run aborted, the budget was already spent when the batch finished
-(the lookup would be another uninterruptible page past it; see the sizing
-rule), the denylist is empty, or the read raised (logged as
-`Denylist lookup failed`). A failed lookup changes nothing else: same records,
-same exit code. Both fields need the first image after v1.21.2; an older image
-omits them.
+(logged as `Denylist lookup skipped`), the denylist is empty, or the read
+raised (logged as `Denylist lookup failed`). A failed lookup changes nothing
+else: same records, same exit code. All three fields need the first image
+after v1.21.2; an older image omits them.
 
 `discovered - processed` is what this run found but did not attempt. It is **not**
 the remaining backlog — `discovered` is already capped by `--max-items`.
 
 `discovery_seconds` is the wall clock from opening the STAC read client to the
-end of the discovery read — the landing-page `GET`s and every `/search` page,
-everything that goes through the retrying search client and nothing else: the
+end of the discovery read — the landing-page `GET`s and every discovery
+`/search` page (the denylist lookup comes later, off the retrying client, with
+its own `Denylist lookup` log lines), and nothing else: the
 S3 client and the write session are built before the clock starts, so a
 credential-chain stall (boto3's IMDS probe in a pod without instance
 credentials) does not land in this number, and if that stall is what aborts
