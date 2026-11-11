@@ -10,11 +10,12 @@ Supports:
 """
 
 import os
+import re
 import sys
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import boto3
 import click
@@ -27,6 +28,7 @@ scripts_dir = Path(__file__).parent.parent / "scripts"
 if str(scripts_dir) not in sys.path:
     sys.path.insert(0, str(scripts_dir))
 
+import s3_item_cleanup  # noqa: E402
 import stac_auth  # noqa: E402
 
 # S3-deletion helpers now live in scripts/ (baked into the pipeline image) so
@@ -39,6 +41,7 @@ from s3_item_cleanup import (  # noqa: E402
     delete_s3_objects_for_item,
     extract_s3_urls_from_item,
     parse_s3_prefix,
+    resolve_exclude_ids,
 )
 from storage_tier_utils import StorageTierInfo, get_s3_storage_info  # noqa: E402
 
@@ -131,6 +134,67 @@ def _replace_item(session: requests.Session, api_url: str, collection_id: str, i
     response.raise_for_status()
 
 
+def load_demo_ids() -> set[str]:
+    """The demo denylist: scenes behind public stories and demos, never deleted by default.
+
+    Resolved like the cleanup cron and register_v1 (``resolve_exclude_ids``:
+    ``$EXPIRES_EXCLUDE_FILE``, else the baked ``scripts/demo_exclude_ids.txt``). Fails
+    closed, with or without --allow-demo (which only lets listed ids go): a list that
+    cannot be read, that resolves to no ids, or that has an entry no plain id can equal
+    (a BOM, an inline comment) raises ``click.ClickException`` before its caller deletes anything.
+    """
+    try:
+        ids: set[str] = resolve_exclude_ids()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise _unusable_demo_list(f"unreadable: {exc}") from exc
+    if not ids:
+        source = os.getenv("EXPIRES_EXCLUDE_FILE") or str(s3_item_cleanup.BAKED_EXCLUDE_FILE)
+        state = "lists no ids" if os.path.exists(source) else "is missing"
+        raise _unusable_demo_list(f"{source} {state}")
+    if not_plain := sorted(i for i in ids if not _is_plain_id(i)):
+        raise _unusable_demo_list("not plain STAC ids: " + ", ".join(map(repr, not_plain)))
+    return ids
+
+
+def _unusable_demo_list(problem: str) -> click.ClickException:
+    return click.ClickException(
+        f"Refusing to delete: cannot use the demo denylist ({problem}). "
+        "Fix it; --allow-demo does not override this."
+    )
+
+
+def _is_plain_id(value: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9_.-]+", value)) and value not in (".", "..")
+
+
+def require_plain_ids(*ids: str) -> None:
+    """Refuse any id the demo guard cannot compare reliably, with or without --allow-demo.
+
+    The guard compares ids as given, but a request URL is normalised on its way to the
+    API (%-escapes decoded, ``.`` and ``..`` segments removed, ``?`` and ``#`` end the
+    path). Only a plain id is sure to name the item or collection that was checked.
+    """
+    for value in ids:
+        if not _is_plain_id(value):
+            raise click.ClickException(
+                f"Refusing to delete {value!r}: not a plain STAC id "
+                "(letters, digits, '_', '.' and '-' only)."
+            )
+
+
+def path_segment(value: str) -> str:
+    """``value`` as one URL path segment, so the request names exactly this id.
+
+    Percent-encoded, as register_proxy's ``source_item_url`` does: raw, a ``/``, ``?``,
+    ``#`` or %-escape in an id (such as one the server lists to ``clean``) is normalised
+    on the way and can name another item. ``""``, ``.`` and ``..`` stay path syntax even
+    encoded (``items/..`` is the collection), so they are refused.
+    """
+    if value in ("", ".", ".."):
+        raise ValueError(f"Refusing to address {value!r}: not usable as a URL path segment")
+    return quote(value, safe="")
+
+
 class STACItemManager:
     """Manager for STAC item operations."""
 
@@ -201,6 +265,9 @@ class STACItemManager:
         Returns:
             Tuple of (success: bool, s3_deleted: int, s3_failed: int)
         """
+        # Built first: an id that cannot be addressed refuses before its S3 data is touched.
+        url = f"{self.api_url}/collections/{path_segment(collection_id)}/items/{path_segment(item_id)}"
+
         # Fetch item if not provided
         if item_dict is None and clean_s3:
             item_dict = self.get_item(collection_id, item_id)
@@ -253,8 +320,6 @@ class STACItemManager:
             return False, s3_deleted, s3_failed
 
         # Delete the STAC item
-        url = f"{self.api_url}/collections/{collection_id}/items/{item_id}"
-
         try:
             response = self.session.delete(url)
             response.raise_for_status()
@@ -451,6 +516,9 @@ class STACItemManager:
 @click.pass_context
 def cli(ctx: click.Context, api_url: str) -> None:
     """STAC Item Management Tool for EOPF Explorer."""
+    # Request paths are appended to it: after a '?' or '#' they no longer name the target.
+    if "?" in api_url or "#" in api_url:
+        raise click.UsageError(f"--api-url must not contain '?' or '#': {api_url!r}")
     ctx.ensure_object(dict)
     ctx.obj["manager"] = STACItemManager(api_url)
     ctx.obj["api_url"] = api_url
@@ -668,6 +736,16 @@ def info(
         "so s3://b/foo/ never matches s3://b/foo-staging/."
     ),
 )
+@click.option(
+    "--allow-demo",
+    is_flag=True,
+    help=(
+        "Allow deleting an item on the demo denylist ($EXPIRES_EXCLUDE_FILE, else the "
+        "baked scripts/demo_exclude_ids.txt). Without it a listed id is refused before "
+        "any STAC or S3 call. A list that cannot be read, has no ids or has an entry that "
+        "is not a plain id refuses any id, with or without this flag."
+    ),
+)
 @click.pass_context
 def delete(
     ctx: click.Context,
@@ -678,9 +756,13 @@ def delete(
     clean_s3: bool,
     s3_endpoint: str | None,
     confine_to: tuple[str, ...],
+    allow_demo: bool,
 ) -> None:
     """
     Delete a single STAC item, optionally cleaning S3 data.
+
+    Items on the demo denylist are refused unless --allow-demo is given. Both ids
+    must be plain STAC ids (letters, digits, '_', '.' and '-').
 
     Example:
         manage_item.py delete sentinel-2-l2a-staging S2A_MSIL2A_20210917T115221_N0500_R123_T28RBS_20230110T165456 --dry-run
@@ -702,6 +784,17 @@ def delete(
             confinement = [parse_s3_prefix(spec) for spec in confine_to]
         except ValueError as exc:
             raise click.UsageError(str(exc)) from exc
+
+    # Before any STAC or S3 call, dry run included, so a refusal touches nothing.
+    require_plain_ids(collection_id, item_id)
+    if item_id in load_demo_ids():
+        if not allow_demo:
+            raise click.ClickException(
+                f"Refusing to delete {item_id}: it is on the demo denylist. "
+                "Pass --allow-demo to delete it anyway."
+            )
+        verb = "would delete" if dry_run else "deleting"
+        click.echo(f"⚠️  --allow-demo: {verb} {item_id}, which is on the demo denylist")
 
     # Fetch item first
     item = manager.get_item(collection_id, item_id)

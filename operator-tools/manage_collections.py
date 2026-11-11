@@ -34,7 +34,10 @@ from manage_item import (
     extract_s3_object_counts,
     extract_s3_urls_from_item,
     extract_stac_object_counts,
+    load_demo_ids,
     parse_s3_prefix,
+    path_segment,
+    require_plain_ids,
 )
 from pystac import Collection, Item
 
@@ -204,6 +207,8 @@ class STACCollectionManager:
         confinement: Sequence[tuple[str, str]] | None = None,
         max_items: int | None = None,
         datetime_before: datetime | None = None,
+        allow_demo: bool = False,
+        prompt: str | None = None,
     ) -> tuple[int, int, int]:
         """
         Remove all items from a collection, optionally cleaning S3 data.
@@ -224,6 +229,11 @@ class STACCollectionManager:
                 readable datetime, are protected and reported, never deleted.
                 Applied after the sweep and before max_items, so the bound is
                 spent on eligible items only.
+            allow_demo: also delete items on the demo denylist, listing each one.
+                Without it they are skipped and reported, never deleted. A list that
+                cannot be used refuses the run first either way (see ``load_demo_ids``).
+            prompt: if set, asked (abort on "no") before the first delete, so after
+                the sweep and with the demo scenes kept or deleted listed above it.
 
         Returns:
             Tuple of (items_deleted, s3_objects_deleted, s3_objects_failed)
@@ -232,6 +242,8 @@ class STACCollectionManager:
         if clean_s3:
             click.echo("  📦 S3 data will also be deleted")
 
+        require_plain_ids(collection_id)
+        demo_ids = load_demo_ids()
         items = self.get_collection_items(collection_id)
 
         if not items:
@@ -247,6 +259,20 @@ class STACCollectionManager:
             # at item 20,000. Checking up front turns that into a 2-minute
             # answer, and the report names every offender at once.
             _report_confinement_sweep(items, confinement)
+
+        # Demo scenes, like recent items below: skipped AFTER the sweep (it still
+        # checks them) and BEFORE the bound, so max_items counts deletions only.
+        protected_demos: list[str] = []
+        if not allow_demo:
+            protected_demos = [item["id"] for item in items if item["id"] in demo_ids]
+            items = [item for item in items if item["id"] not in demo_ids]
+            if protected_demos:
+                click.echo(f"\n🛡️  Protected demo scenes (demo denylist): {len(protected_demos):,}")
+                for item_id in protected_demos:
+                    click.echo(f"    - {item_id}")
+            if not items:
+                click.echo("✅ Only protected demo scenes left; nothing deleted")
+                return 0, 0, 0
 
         # Protect AFTER the sweep (the sweep still sees every item) and BEFORE
         # the bound, so max_items counts deletions, not protected items. The
@@ -272,6 +298,17 @@ class STACCollectionManager:
                 f"\n🔢 Bounded run: {len(items):,} of {total_in_collection:,} items "
                 "(re-run to continue; the clean converges)"
             )
+
+        # After the threshold and the bound, so the list is exactly this run's.
+        if allow_demo:
+            listed = [item["id"] for item in items if item["id"] in demo_ids]
+            if listed:
+                click.echo(
+                    f"\n⚠️  --allow-demo: {len(listed):,} item(s) on the demo denylist "
+                    "are NOT protected in this run:"
+                )
+                for item_id in listed:
+                    click.echo(f"    - {item_id}")
 
         if dry_run:
             click.echo(f"\nWould delete {len(items)} STAC items:")
@@ -330,6 +367,9 @@ class STACCollectionManager:
 
             return 0, 0, 0
 
+        if prompt is not None:
+            click.confirm(prompt, abort=True)
+
         # Actual deletion
         items_deleted = 0
         items_skipped = 0
@@ -377,6 +417,8 @@ class STACCollectionManager:
         click.echo("=" * 60)
         click.echo(f"Total items processed: {len(items)}")
         click.echo(f"✅ STAC items deleted: {items_deleted}")
+        if protected_demos:
+            click.echo(f"🛡️  Demo scenes protected: {len(protected_demos)} (demo denylist)")
         if items_skipped > 0:
             click.echo(f"⏭️  STAC items skipped: {items_skipped} (due to S3 failures)")
 
@@ -591,17 +633,82 @@ class STACCollectionManager:
             "stac_object_counts": total_stac_object_counts,
         }
 
-    def delete_collection(self, collection_id: str) -> bool:
+    def check_demo_scenes(self, collection_id: str, allow_demo: bool = False) -> None:
+        """Refuse to delete a collection that holds an item on the demo denylist.
+
+        Deleting a collection also deletes every item still in it. ``allow_demo`` lets
+        the listed items go, each printed first. It does not override a list that
+        cannot be used, or a check that fails or answers malformed: those refuse too.
+
+        Raises:
+            click.ClickException: on a refusal.
+        """
+        require_plain_ids(collection_id)
+        demo_ids = load_demo_ids()
+        try:
+            # One attempt on the session (and with the timeout) the DELETE uses, ids
+            # only, one page: a server that caps `limit` links a `next` page, and the
+            # ids on it would read as absent. No redirects: requests resends a 301/302
+            # POST as a GET without the body, and drops the auth on a move to another host.
+            response = self.session.post(
+                f"{self.api_url}/search",
+                json={
+                    "collections": [collection_id],
+                    "ids": sorted(demo_ids),
+                    "limit": len(demo_ids),
+                    "fields": {"include": ["id"], "exclude": ["links"]},
+                },
+                timeout=30,
+                allow_redirects=False,
+            )
+            if response.status_code != 200:
+                raise ValueError(f"answered HTTP {response.status_code}, not 200")
+            body = response.json()
+            if any(link.get("rel") == "next" for link in body.get("links", [])):
+                raise ValueError("the answer links a next page")
+            # Only listed ids count, whatever else the server answers with.
+            listed = sorted(demo_ids & {feature["id"] for feature in body["features"]})
+        except Exception as e:
+            # Broad: the auth hook raises RuntimeError and a malformed body KeyError,
+            # TypeError or ValueError, and none of them may read as "no demo scenes".
+            raise click.ClickException(
+                f"Refusing to delete collection {collection_id}: could not check it "
+                f"for demo scenes ({e}). --allow-demo does not override this."
+            ) from e
+        if listed and allow_demo:
+            click.echo(
+                f"⚠️  --allow-demo: deleting {collection_id} also deletes "
+                f"{len(listed)} item(s) on the demo denylist:"
+            )
+        for item_id in listed:
+            click.echo(f"    - {item_id}", err=not allow_demo)
+        if listed and not allow_demo:
+            raise click.ClickException(
+                f"Refusing to delete collection {collection_id}: it holds the "
+                f"{len(listed)} item(s) on the demo denylist listed above. "
+                "Pass --allow-demo to delete them with it."
+            )
+
+    def delete_collection(self, collection_id: str, allow_demo: bool = False) -> bool:
         """
         Delete a collection using Transaction API.
 
+        ``check_demo_scenes`` runs first, even when the caller already ran it: the
+        collection may have changed since (with ``--clean-first``, it has).
+
         Args:
             collection_id: ID of the collection to delete
+            allow_demo: delete it even if it holds items on the demo denylist,
+                listing each one
 
         Returns:
             True if successful, False otherwise
+
+        Raises:
+            click.ClickException: on a refusal, before the DELETE is sent.
         """
-        url = f"{self.api_url}/collections/{collection_id}"
+        self.check_demo_scenes(collection_id, allow_demo)
+        url = f"{self.api_url}/collections/{path_segment(collection_id)}"
 
         try:
             response = self.session.delete(url, timeout=30)
@@ -718,6 +825,9 @@ class STACCollectionManager:
 @click.pass_context
 def cli(ctx: click.Context, api_url: str) -> None:
     """STAC Collection Management Tool for EOPF Explorer."""
+    # Request paths are appended to it: after a '?' or '#' they no longer name the target.
+    if "?" in api_url or "#" in api_url:
+        raise click.UsageError(f"--api-url must not contain '?' or '#': {api_url!r}")
     ctx.ensure_object(dict)
     ctx.obj["manager"] = STACCollectionManager(api_url)
     ctx.obj["api_url"] = api_url
@@ -776,6 +886,16 @@ def cli(ctx: click.Context, api_url: str) -> None:
         "are never deleted. Protects anything registered during a long drain."
     ),
 )
+@click.option(
+    "--allow-demo",
+    is_flag=True,
+    help=(
+        "Also delete items on the demo denylist ($EXPIRES_EXCLUDE_FILE, else the baked "
+        "scripts/demo_exclude_ids.txt), listing each one before the prompt. Without it "
+        "they are skipped and reported. A list that cannot be read, has no ids or has an "
+        "entry that is not a plain id refuses the run, with or without this flag."
+    ),
+)
 @click.pass_context
 def clean(
     ctx: click.Context,
@@ -787,9 +907,13 @@ def clean(
     confine_to: tuple[str, ...],
     max_items: int | None,
     datetime_before: str | None,
+    allow_demo: bool,
 ) -> None:
     """
     Remove all items from a collection.
+
+    Items on the demo denylist are skipped unless --allow-demo is given.
+    COLLECTION_ID must be a plain STAC id (letters, digits, '_', '.' and '-').
 
     Example:
         manage_collections.py clean sentinel-2-l2a-staging --dry-run
@@ -820,18 +944,21 @@ def clean(
         except ValueError as exc:
             raise click.UsageError(str(exc)) from exc
 
-    # Confirmation prompt
+    # Confirmation prompt, asked by clean_collection once it has listed the demo scenes
+    # it keeps (or, with --allow-demo, deletes) and before it deletes anything.
+    prompt = None
     if not dry_run and not yes:
         scope = "ALL items" if max_items is None else f"up to {max_items} items"
         if threshold is not None:
             scope += f" acquired before {threshold.isoformat()}"
+        scope += f", {'including' if allow_demo else 'except'} those on the demo denylist,"
         warning = f"⚠️  This will delete {scope} from collection '{collection_id}'."
         if clean_s3:
             warning += (
                 "\n⚠️  This will also DELETE ALL S3 DATA (Zarr stores) referenced by these items!"
             )
             warning += "\n⚠️  This action CANNOT be undone!"
-        click.confirm(f"{warning}\n\nContinue?", abort=True)
+        prompt = f"{warning}\n\nContinue?"
 
     try:
         # Initialize S3 client if needed
@@ -861,8 +988,12 @@ def clean(
             confinement=confinement,
             max_items=max_items,
             datetime_before=threshold,
+            allow_demo=allow_demo,
+            prompt=prompt,
         )
 
+    except click.Abort:
+        raise  # the prompt was declined: not a failure
     except Exception as e:
         click.echo(f"❌ Operation failed: {e}", err=True)
         raise click.Abort() from e
@@ -973,12 +1104,30 @@ def batch_create(ctx: click.Context, directory: Path, update: bool) -> None:
 @click.option(
     "--clean-first",
     is_flag=True,
-    help="Clean all items from collection before deleting it",
+    help=(
+        "Clean the collection before deleting it: every item, except those on the demo "
+        "denylist unless --allow-demo"
+    ),
+)
+@click.option(
+    "--allow-demo",
+    is_flag=True,
+    help=(
+        "Delete the collection even if it holds items on the demo denylist "
+        "($EXPIRES_EXCLUDE_FILE, else the baked scripts/demo_exclude_ids.txt), listing "
+        "each one before the prompt. Without it, a collection that holds a listed item "
+        "is refused before the prompt and before --clean-first. A list that cannot be "
+        "used, or a check that fails, refuses with or without this flag."
+    ),
 )
 @click.pass_context
-def delete(ctx: click.Context, collection_id: str, clean_first: bool) -> None:
+def delete(ctx: click.Context, collection_id: str, clean_first: bool, allow_demo: bool) -> None:
     """
-    Delete a collection.
+    Delete a collection, and with it every item still in it.
+
+    Refused while the collection holds an item on the demo denylist, unless
+    --allow-demo is given. COLLECTION_ID must be a plain STAC id (letters,
+    digits, '_', '.' and '-').
 
     Example:
         manage_collections.py delete sentinel-2-l2a-staging
@@ -987,10 +1136,19 @@ def delete(ctx: click.Context, collection_id: str, clean_first: bool) -> None:
     manager: STACCollectionManager = ctx.obj["manager"]
 
     try:
+        # Before the prompt and the clean: a refusal deletes nothing, and with
+        # --allow-demo the listed items it would delete are on screen when it asks.
+        manager.check_demo_scenes(collection_id, allow_demo)
+
         # Confirmation prompt
         warning = f"⚠️  This will DELETE collection '{collection_id}'."
-        if clean_first:
+        if clean_first and allow_demo:
             warning += "\n⚠️  This will first remove all items from the collection."
+        elif clean_first:
+            warning += (
+                "\n⚠️  This will first remove all items except those on the demo denylist,"
+                " then refuse the delete if any of those remain."
+            )
         warning += "\n⚠️  This action CANNOT be undone!"
 
         click.confirm(f"{warning}\n\nContinue?", abort=True)
@@ -998,11 +1156,11 @@ def delete(ctx: click.Context, collection_id: str, clean_first: bool) -> None:
         # Clean collection first if requested
         if clean_first:
             click.echo("\n📋 Cleaning collection before deletion...")
-            manager.clean_collection(collection_id, dry_run=False)
+            manager.clean_collection(collection_id, dry_run=False, allow_demo=allow_demo)
 
         # Delete the collection
         click.echo(f"\n🗑️  Deleting collection: {collection_id}")
-        success = manager.delete_collection(collection_id)
+        success = manager.delete_collection(collection_id, allow_demo=allow_demo)
 
         if not success:
             raise click.Abort()

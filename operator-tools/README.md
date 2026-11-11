@@ -113,6 +113,7 @@ uv run operator-tools/manage_item.py delete sentinel-2-l2a-staging ITEM_ID --cle
 - **Change S3 storage tier** for a single item and update STAC metadata
 - Debug mode for S3 URL extraction troubleshooting
 - Delete with automatic S3 validation
+- Demo scenes (`scripts/demo_exclude_ids.txt`) are refused unless `--allow-demo`
 - Dry-run mode for safe testing
 
 **When to use**: Always start with `manage_item.py` to debug individual items before running batch operations with `manage_collections.py`.
@@ -205,6 +206,7 @@ uv run operator-tools/manage_collections.py create --update stac/sentinel-1-grd-
 - **Change storage tier** - Move items to a different storage class, with date filtering
 - **Debug mode** - Detailed S3 URL extraction and validation info
 - **Safety first** - STAC items preserved if S3 cleanup fails
+- **Demo scenes protected** - `clean` skips ids on `scripts/demo_exclude_ids.txt` and `delete` refuses a collection that still holds one, unless `--allow-demo`
 
 **Documentation:** See [README_collections.md](./README_collections.md) for detailed usage and examples.
 
