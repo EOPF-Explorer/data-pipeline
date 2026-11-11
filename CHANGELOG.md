@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.22.0 (2026-11-11)
+
+## What's Changed
+* feat(cleanup): report the demo denylist in the cleanup summary by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/510
+* feat(operator-tools): honour the demo denylist in delete and clean by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/512
+* build(deps): bump the minor-and-patch group across 1 directory with 8 updates by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/511
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.21.2...v1.22.0
+
 ## 1.21.2 (2026-11-09)
 
 ## What's Changed
