@@ -918,7 +918,7 @@ distributed = [
 
 [[package]]
 name = "data-pipeline"
-version = "1.21.2"
+version = "1.22.0"
 source = { editable = "." }
 dependencies = [
     { name = "boto3" },
