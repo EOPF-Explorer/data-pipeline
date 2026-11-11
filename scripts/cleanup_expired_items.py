@@ -27,6 +27,7 @@ fan-out; concurrency is bounded by the CronWorkflow semaphore.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -453,6 +454,9 @@ def run_cleanup(args: argparse.Namespace) -> int:
     # _monotonic(): that seam is the budget clock, which an unbudgeted run must not read.
     discovery_started: float | None = None
     discovery_seconds: float | None = None
+    # None until the denylist lookup after the item loop succeeds: same rule as
+    # `discovered`, an empty list would claim every listed id was found.
+    exclude_ids_missing: list[str] | None = None
 
     def emit_summary(*, aborted: bool = False) -> None:
         # Set at the end of the discovery read, or measured here if discovery is what
@@ -476,6 +480,17 @@ def run_cleanup(args: argparse.Namespace) -> int:
             "failures": failures,
             "time_budget_reached": time_budget_reached,
             "discovery_seconds": elapsed,
+            # The denylist as this run saw it: how many ids it loaded, a digest that
+            # changes when the list does even at the same count, and which of them
+            # match no item in the collection (a listed scene that is gone protects
+            # nothing). Additive, like `aborted`.
+            "exclude_ids_loaded": len(exclude_ids),
+            # One id per line in byte order, newline-terminated, so the README's
+            # `LC_ALL=C sort -u | shasum -a 256` over the file reproduces it.
+            "exclude_ids_sha256": hashlib.sha256(
+                "".join(f"{i}\n" for i in sorted(exclude_ids)).encode()
+            ).hexdigest()[:12],
+            "exclude_ids_missing": exclude_ids_missing,
         }
         if aborted:
             # ADDITIVE, and present only on an aborted run: dashboards keyed on
@@ -485,10 +500,10 @@ def run_cleanup(args: argparse.Namespace) -> int:
             summary["aborted"] = True
         print(json.dumps(summary), flush=True)
 
-    # Guarded from here down. Everything ABOVE -- the three config checks and
-    # resolve_exclude_ids -- is a configuration error that exits 2 and writes no
-    # summary; README_cleanup_expired_items.md documents that as the one case
-    # where a missing summary line is harmless. Everything below talks to a live
+    # Guarded from here down. Everything ABOVE -- the config checks and
+    # resolve_exclude_ids -- writes no summary: argparse refuses a bad flag value
+    # first (exit 2) and an unreadable denylist file raises (traceback, exit 1),
+    # both before anything is read or deleted. Everything below talks to a live
     # endpoint and can fail at runtime, and those failures must stay visible in
     # the audit stream instead of ending the process silently.
     try:
@@ -617,6 +632,44 @@ def run_cleanup(args: argparse.Namespace) -> int:
                 "stac_delete_http_"
             ):
                 failures += 1
+
+        # Which denylist ids match no item in the collection: one read, after the last
+        # delete, so it cannot change what this run deletes or the budget the deletes
+        # get. Skipped once the budget is spent, and a single page whatever --page-size
+        # says (that sizes discovery). On the no-retry session the re-fetch uses, not the
+        # retrying discovery client: one attempt with the re-fetch's 30 s timeout, ids
+        # only. A failure already means null, so a retry ladder would only add a long
+        # uninterruptible unit past the budget, and a kill there loses the summary.
+        # Never with no ids: there is nothing to look up.
+        if exclude_ids and budget_spent():
+            logger.info("Denylist lookup skipped: budget spent; exclude_ids_missing is null")
+        elif exclude_ids:
+            logger.info("Denylist lookup: %d ids in %s", len(exclude_ids), args.collection)
+            try:
+                resp = session.post(
+                    f"{stac_base_url}/search",
+                    json={
+                        "collections": [args.collection],
+                        "ids": sorted(exclude_ids),
+                        "limit": len(exclude_ids),
+                        "fields": {"include": ["id"], "exclude": ["links"]},
+                    },
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                body = resp.json()
+                # One page only: a server that caps `limit` below len(ids) answers with
+                # some of them and a `next` link, and the rest would read as missing.
+                if any(link.get("rel") == "next" for link in body.get("links", [])):
+                    raise ValueError("Denylist lookup answered with more than one page")
+                found = {item["id"] for item in body["features"]}
+                exclude_ids_missing = sorted(exclude_ids - found)
+            except Exception:
+                # Broad, unlike the per-item guards: nothing here deletes, so a failure
+                # only means "unknown" and the run ends exactly as it would have. Not
+                # RequestException: the session's auth hook raises RuntimeError, and a
+                # malformed or multi-page body KeyError, TypeError or ValueError.
+                logger.warning("Denylist lookup failed; exclude_ids_missing is null", exc_info=True)
     except Exception:
         # Deliberately broad, and ONLY here. The per-item guards inside
         # process_item stay narrow and fail closed -- they retain the STAC item

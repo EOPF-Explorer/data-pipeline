@@ -1616,3 +1616,258 @@ def test_run_cleanup_healthy_summary_has_no_aborted_key(expired_item, capsys) ->
     assert summary["event"] == "cleanup_summary"
     assert "aborted" not in summary
     assert summary["discovered"] == 1
+
+
+# === The denylist in the summary: ids loaded, and ids that match no item ===
+#
+# A pin bump that changes demo_exclude_ids.txt shows up on the next tick as a new
+# `exclude_ids_sha256` (and `exclude_ids_loaded`, when the count changes); a listed id
+# that is not in `--collection` shows up in `exclude_ids_missing`, instead of silently
+# protecting nothing there.
+
+# Unsorted, and long enough that the tests below leave five ids missing: with two,
+# dropping sorted() still passed on about a third of hash seeds.
+LISTED = ["S2C_demo_c", "S2A_demo_a", "S2F_demo_f", "S2B_demo_b", "S2E_demo_e", "S2D_demo_d"]
+# The README's formula: sha256 of sorted(LISTED), one id per line, first 12 hex digits.
+LISTED_SHA256 = "615bba3ea690"
+
+
+def _search_response(body, status: int = 200) -> requests.Response:
+    """A real Response, so raise_for_status() and json() fail the way they do live."""
+    resp = requests.Response()
+    resp.status_code = status
+    resp._content = body if isinstance(body, bytes) else json.dumps(body).encode()
+    return resp
+
+
+def _run_denylist(tmp_path, listed, found, *, stale=(), clock=None, **args_kw):
+    """Drive run_cleanup with a real denylist file.
+
+    found: ids the denylist lookup returns, a Response it gets, or an exception
+        `session.post` raises.
+    stale: items discovery returns, or an exception it raises.
+    args_kw: passed to `_args`.
+    """
+    deny = tmp_path / "demo_exclude_ids.txt"
+    deny.write_text("# demo scenes\n\n" + "".join(f"{i}\n" for i in listed))
+
+    client = MagicMock()
+    client.self_href = "https://stac.example.com"
+    if isinstance(stale, Exception):
+        client.search.return_value.items_as_dicts.side_effect = stale
+    else:
+        client.search.return_value.items_as_dicts.return_value = iter(stale)
+
+    session = MagicMock()
+    session.get.side_effect = lambda url, timeout=30: MagicMock(
+        status_code=200, json=MagicMock(return_value=stale[0])
+    )
+    session.delete.return_value = _response(204)
+    if isinstance(found, list):
+        found = _search_response({"features": [{"id": i} for i in found]})
+    session.post.side_effect = found if isinstance(found, Exception) else [found]
+    s3 = MagicMock()
+    s3.get_paginator.return_value = _paginator([["a"], []])
+    s3.delete_objects.return_value = {"Deleted": [{"Key": "a"}], "Errors": []}
+
+    args = _args(**args_kw)
+    args.exclude_file = str(deny)
+    with (
+        patch("cleanup_expired_items.stac_auth.open_resilient_client", return_value=client),
+        patch("cleanup_expired_items._session", return_value=session),
+        patch("cleanup_expired_items._s3_client", return_value=s3),
+        patch("cleanup_expired_items._monotonic", side_effect=_clock(clock or [BOOT])),
+    ):
+        code = run_cleanup(args)
+    return code, client, session, s3
+
+
+def test_summary_counts_and_digests_the_denylist_it_loaded(tmp_path, capsys) -> None:
+    """The count cannot see a same-size swap (two ids out, two in); the digest does."""
+    swapped = [*LISTED[:-2], "S2X_demo_x", "S2Y_demo_y"]
+    summaries = []
+    for listed in (LISTED, swapped):
+        _run_denylist(tmp_path, listed, found=listed)
+        summaries.append(_capture_lines(capsys)[-1])
+
+    before, after = summaries
+    # the comment and blank line are not ids
+    assert before["exclude_ids_loaded"] == after["exclude_ids_loaded"] == 6
+    assert before["exclude_ids_sha256"] == LISTED_SHA256
+    assert after["exclude_ids_sha256"] != LISTED_SHA256
+    assert before["exclude_ids_missing"] == after["exclude_ids_missing"] == []
+
+
+def test_summary_lists_denylist_ids_missing_from_the_collection_sorted(
+    expired_item, tmp_path, capsys
+) -> None:
+    code, client, session, _ = _run_denylist(
+        tmp_path, LISTED, found=["S2B_demo_b"], stale=[expired_item], execute=True, page_size=2
+    )
+
+    records = _capture_lines(capsys)
+    assert code == 0
+    assert records[0]["status"] == "deleted"
+    assert records[-1]["exclude_ids_missing"] == [
+        "S2A_demo_a",
+        "S2C_demo_c",
+        "S2D_demo_d",
+        "S2E_demo_e",
+        "S2F_demo_f",
+    ]
+    # One read of ids only, scoped to the collection being cleaned, one page even when
+    # --page-size is smaller, on the no-retry session with the re-fetch's timeout. The
+    # retrying client ran discovery and nothing else.
+    session.post.assert_called_once_with(
+        "https://stac.example.com/search",
+        json={
+            "collections": ["sentinel-2-l2a-staging"],
+            "ids": sorted(LISTED),
+            "limit": 6,
+            "fields": {"include": ["id"], "exclude": ["links"]},
+        },
+        timeout=30,
+    )
+    client.search.assert_called_once()
+    assert session.delete.call_count == 1
+
+
+@pytest.mark.parametrize(
+    ("failure", "raised"),
+    [
+        (requests.ConnectionError("lookup down"), requests.ConnectionError),
+        (_search_response(b"upstream timeout", status=500), requests.HTTPError),
+        (_search_response(b"<html>maintenance</html>"), ValueError),
+        (_search_response({"features": [{"collection": "c"}]}), KeyError),
+        (_search_response({}), KeyError),
+        (_search_response({"features": None}), TypeError),
+        (
+            _search_response(
+                {
+                    "features": [{"id": "S2A_demo_a"}],
+                    "links": [{"rel": "next", "href": "https://stac.example.com/search"}],
+                }
+            ),
+            ValueError,
+        ),
+        (RuntimeError("Failed to fetch OIDC token: 503"), RuntimeError),
+    ],
+    ids=[
+        "transport",
+        "http-500",
+        "2xx-not-json",
+        "feature-without-id",
+        "no-features",
+        "null-features",
+        "next-page",
+        "auth-hook",
+    ],
+)
+def test_a_failed_denylist_lookup_is_null_and_changes_nothing_else(
+    failure, raised, expired_item, tmp_path, capsys, caplog
+) -> None:
+    """null, not []: an empty list would claim every listed id was found.
+
+    Not only requests exceptions: the session's auth hook raises RuntimeError, and a
+    body without usable features raises KeyError or TypeError; each must end as null,
+    not abort. A body that links a next page is incomplete, so it is null too."""
+    caplog.set_level(logging.INFO, logger="cleanup_expired_items")
+    runs = []
+    for found in (LISTED, failure):
+        caplog.clear()
+        code, _, session, s3 = _run_denylist(
+            tmp_path, LISTED, found=found, stale=[expired_item], execute=True
+        )
+        lines = _capture_lines(capsys)
+        for line in lines:
+            line.pop("ts")
+        lines[-1].pop("discovery_seconds")  # real wall clock, not the patched seam
+        runs.append((code, lines, s3.delete_objects.call_args_list, session.delete.call_args_list))
+
+    (ok_code, ok_lines, ok_s3, ok_stac), (code, lines, s3_calls, stac_calls) = runs
+    assert lines[-1]["exclude_ids_missing"] is None
+    assert "aborted" not in lines[-1]
+    # Same exit code, same per-item records, same deletes, same existing summary fields.
+    assert code == ok_code == 0
+    assert lines[:-1] == ok_lines[:-1]
+    assert (s3_calls, stac_calls) == (ok_s3, ok_stac)
+    assert ok_lines[-1] == {**lines[-1], "exclude_ids_missing": []}
+    # The failed run says what it tried and why it is null.
+    logged = [r for r in caplog.records if r.getMessage().startswith("Denylist lookup")]
+    assert [(r.levelname, r.getMessage()) for r in logged] == [
+        ("INFO", "Denylist lookup: 6 ids in sentinel-2-l2a-staging"),
+        ("WARNING", "Denylist lookup failed; exclude_ids_missing is null"),
+    ]
+    assert isinstance(logged[1].exc_info[1], raised)
+
+
+def test_dry_run_reports_missing_denylist_ids_without_deleting(
+    expired_item, tmp_path, capsys
+) -> None:
+    code, _, session, s3 = _run_denylist(
+        tmp_path, LISTED, found=["S2D_demo_d"], stale=[expired_item], execute=False
+    )
+
+    records = _capture_lines(capsys)
+    assert code == 0
+    assert records[0]["status"] == "dry_run"
+    assert records[-1]["dry_run"] is True
+    assert records[-1]["exclude_ids_missing"] == [
+        "S2A_demo_a",
+        "S2B_demo_b",
+        "S2C_demo_c",
+        "S2E_demo_e",
+        "S2F_demo_f",
+    ]
+    s3.delete_objects.assert_not_called()
+    session.delete.assert_not_called()
+
+
+def test_denylist_lookup_is_skipped_once_the_budget_is_spent(
+    expired_item, tmp_path, capsys, caplog
+) -> None:
+    """The item started inside the budget and the budget ran out while it ran: the
+    lookup would be one more request past it. Logged, because the summary keeps no
+    other trace of this cause (the loop checks the budget only before an item)."""
+    caplog.set_level(logging.INFO, logger="cleanup_expired_items")
+    _, _, session, _ = _run_denylist(
+        tmp_path,
+        LISTED,
+        found=LISTED,
+        stale=[expired_item],
+        max_runtime_seconds=100,
+        # deadline · discovery item1 · post-discovery · loop item1 · lookup gate (spent)
+        clock=[BOOT, BOOT + 1, BOOT + 2, BOOT + 3, BOOT + 150],
+    )
+
+    summary = _capture_lines(capsys)[-1]
+    assert summary["processed"] == 1
+    assert summary["time_budget_reached"] is False
+    assert summary["exclude_ids_loaded"] == 6
+    assert summary["exclude_ids_missing"] is None
+    session.post.assert_not_called()
+    assert "Denylist lookup skipped: budget spent" in caplog.text
+
+
+def test_aborted_run_reports_the_denylist_loaded_but_does_not_look_it_up(tmp_path, capsys) -> None:
+    code, _, session, _ = _run_denylist(
+        tmp_path, LISTED, found=LISTED, stale=requests.ConnectionError("boom")
+    )
+
+    summary = _capture_lines(capsys)[-1]
+    assert code == 1
+    assert summary["aborted"] is True
+    assert summary["exclude_ids_loaded"] == 6
+    assert summary["exclude_ids_sha256"] == LISTED_SHA256
+    assert summary["exclude_ids_missing"] is None
+    session.post.assert_not_called()
+
+
+def test_an_empty_denylist_is_never_looked_up(tmp_path, capsys) -> None:
+    """Nothing to look up: no request, and the field stays null."""
+    _, _, session, _ = _run_denylist(tmp_path, [], found=[])
+
+    summary = _capture_lines(capsys)[-1]
+    assert summary["exclude_ids_loaded"] == 0
+    assert summary["exclude_ids_missing"] is None
+    session.post.assert_not_called()
