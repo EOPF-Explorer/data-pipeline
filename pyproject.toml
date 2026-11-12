@@ -20,7 +20,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "pystac==1.15.2",
+    "pystac==1.16.0",
     "pystac-client==0.9.1",
     "httpx==0.28.1",
     "boto3==1.43.117",
@@ -54,7 +54,7 @@ dev = [
     "ruff==0.17.3",
     "mypy==2.4.1",
     "pre-commit==4.7.0",
-    "types-boto3==1.43.123",
+    "types-boto3==1.43.124",
     "types-requests==2.33.0.20261006",
     "pip-audit==2.10.1",
 ]
@@ -66,7 +66,7 @@ test = [
 notebooks = [
     "notebook==7.6.4",
     "ipykernel==7.4.0",
-    "pandas==3.1.0",
+    "pandas==3.1.1",
     "matplotlib==3.11.2",
     "shapely==2.2.0",
     "python-dotenv==1.2.4",
