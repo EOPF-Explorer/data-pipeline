@@ -55,7 +55,7 @@ dev = [
     "mypy==2.4.1",
     "pre-commit==4.7.0",
     "types-boto3==1.43.123",
-    "types-requests==2.33.0.20261006",
+    "types-requests==2.33.0.20261030",
     "pip-audit==2.10.1",
 ]
 test = [
