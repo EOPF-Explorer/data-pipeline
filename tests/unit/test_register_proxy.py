@@ -315,6 +315,15 @@ def test_a_new_layout_reflectance_without_a_true_colour_band_is_refused(new_sour
         build_proxy_item(new_source, NEW, RASTER, STAC_API, expires=None)
 
 
+def test_the_true_colour_band_check_is_the_shared_one(new_source):
+    """Review 2 #4: register_proxy uses raster_links' check, which reads a band with a null name
+    instead of crashing on it, and still names the missing band."""
+    bands = new_source["assets"]["reflectance"]["bands"]
+    bands[:] = [{"name": None}, *(band for band in bands if band["name"] != "b03")]
+    with pytest.raises(ValueError, match=r"no \['b03'\] band"):
+        build_proxy_item(new_source, NEW, RASTER, STAC_API, expires=None)
+
+
 def test_a_new_layout_reflectance_in_another_store_is_refused(new_source):
     """AOT/WVP/SCL and the store link name one store: a reflectance elsewhere would mix two."""
     reflectance = new_source["assets"]["reflectance"]

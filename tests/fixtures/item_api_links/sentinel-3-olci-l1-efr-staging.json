@@ -1,0 +1,1111 @@
+{
+  "id": "S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004",
+  "bbox": [
+    -43.9094,
+    29.0658,
+    -26.9453,
+    41.9706
+  ],
+  "type": "Feature",
+  "links": [
+    {
+      "rel": "collection",
+      "type": "application/json",
+      "href": "https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-3-olci-l1-efr-staging"
+    },
+    {
+      "rel": "parent",
+      "type": "application/json",
+      "href": "https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-3-olci-l1-efr-staging"
+    },
+    {
+      "rel": "root",
+      "type": "application/json",
+      "href": "https://api.explorer.eopf.copernicus.eu/stac/"
+    },
+    {
+      "rel": "self",
+      "type": "application/geo+json",
+      "href": "https://api.explorer.eopf.copernicus.eu/stac/collections/sentinel-3-olci-l1-efr-staging/items/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004"
+    },
+    {
+      "rel": "license",
+      "href": "https://sentinel.esa.int/documents/247904/690755/Sentinel_Data_Legal_Notice",
+      "type": "application/pdf",
+      "title": "Legal notice on the use of Copernicus Sentinel Data and Service Information"
+    },
+    {
+      "rel": "store",
+      "href": "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr",
+      "type": "application/octet-stream",
+      "title": "Zarr Store"
+    },
+    {
+      "rel": "viewer",
+      "href": "https://api.explorer.eopf.copernicus.eu/raster/collections/sentinel-3-olci-l1-efr-staging/items/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004/viewer",
+      "type": "text/html",
+      "title": "Viewer for S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004"
+    },
+    {
+      "rel": "xyz",
+      "href": "https://api.explorer.eopf.copernicus.eu/raster/collections/sentinel-3-olci-l1-efr-staging/items/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004/tiles/WebMercatorQuad/{z}/{x}/{y}.png?variables=%2Fmeasurements%2Fr0%3Aoa08_radiance&variables=%2Fmeasurements%2Fr0%3Aoa06_radiance&variables=%2Fmeasurements%2Fr0%3Aoa04_radiance&rescale=10%2C300&rescale=22%2C345&rescale=36%2C390&color_formula=gamma%20rgb%201.3%2C%20sigmoidal%20rgb%206%200.1%2C%20saturation%201.2&bidx=1",
+      "type": "image/png",
+      "title": "Sentinel-3 OLCI False Color"
+    },
+    {
+      "rel": "tilejson",
+      "href": "https://api.explorer.eopf.copernicus.eu/raster/collections/sentinel-3-olci-l1-efr-staging/items/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004/WebMercatorQuad/tilejson.json?variables=%2Fmeasurements%2Fr0%3Aoa08_radiance&variables=%2Fmeasurements%2Fr0%3Aoa06_radiance&variables=%2Fmeasurements%2Fr0%3Aoa04_radiance&rescale=10%2C300&rescale=22%2C345&rescale=36%2C390&color_formula=gamma%20rgb%201.3%2C%20sigmoidal%20rgb%206%200.1%2C%20saturation%201.2&bidx=1&minzoom=0&maxzoom=11",
+      "type": "application/json",
+      "title": "TileJSON for S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004"
+    },
+    {
+      "rel": "via",
+      "href": "https://explorer.eopf.copernicus.eu/collections/sentinel-3-olci-l1-efr-staging/items/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004",
+      "title": "EOPF Explorer"
+    },
+    {
+      "rel": "derived_from",
+      "href": "https://stac.core.eopf.eodc.eu/collections/sentinel-3-olci-l1-efr/items/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004",
+      "type": "application/json",
+      "title": "Derived from original Zarr STAC item"
+    }
+  ],
+  "assets": {
+    "product": {
+      "href": "https://objects.eodc.eu:443/e05ab01a9d56408d82ac32d69a5aae2a:202607-s03olcefr-eu/28/products/cpm_v270/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr",
+      "type": "application/vnd.zarr; version=3",
+      "roles": [
+        "data",
+        "metadata"
+      ],
+      "title": "EOPF Product",
+      "description": "The full Zarr store of the EOPF product"
+    },
+    "thumbnail": {
+      "href": "https://api.explorer.eopf.copernicus.eu/raster/collections/sentinel-3-olci-l1-efr-staging/items/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004/preview?format=png&variables=%2Fmeasurements%2Fr0%3Aoa08_radiance&variables=%2Fmeasurements%2Fr0%3Aoa06_radiance&variables=%2Fmeasurements%2Fr0%3Aoa04_radiance&rescale=10%2C300&rescale=22%2C345&rescale=36%2C390&color_formula=gamma%20rgb%201.3%2C%20sigmoidal%20rgb%206%200.1%2C%20saturation%201.2&bidx=1",
+      "type": "image/png",
+      "roles": [
+        "thumbnail"
+      ],
+      "title": "Sentinel-3 OLCI False Color Preview"
+    },
+    "radianceData": {
+      "href": "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements",
+      "type": "application/vnd.zarr; version=3",
+      "bands": [
+        {
+          "name": "Oa01",
+          "eo:center_wavelength": 400,
+          "eo:full_width_half_max": 15
+        },
+        {
+          "name": "Oa02",
+          "eo:center_wavelength": 412.5,
+          "eo:full_width_half_max": 10
+        },
+        {
+          "name": "Oa03",
+          "eo:common_name": "coastal",
+          "eo:center_wavelength": 442.5,
+          "eo:full_width_half_max": 10
+        },
+        {
+          "name": "Oa04",
+          "eo:common_name": "blue",
+          "eo:center_wavelength": 490,
+          "eo:full_width_half_max": 10
+        },
+        {
+          "name": "Oa05",
+          "eo:common_name": "green05",
+          "eo:center_wavelength": 510,
+          "eo:full_width_half_max": 10
+        },
+        {
+          "name": "Oa06",
+          "eo:common_name": "green",
+          "eo:center_wavelength": 560,
+          "eo:full_width_half_max": 10
+        },
+        {
+          "name": "Oa07",
+          "eo:common_name": "yellow",
+          "eo:center_wavelength": 620,
+          "eo:full_width_half_max": 10
+        },
+        {
+          "name": "Oa08",
+          "eo:center_wavelength": 665,
+          "eo:full_width_half_max": 10
+        },
+        {
+          "name": "Oa09",
+          "eo:common_name": "red",
+          "eo:center_wavelength": 673.75,
+          "eo:full_width_half_max": 7.5
+        },
+        {
+          "name": "Oa10",
+          "eo:center_wavelength": 681.25,
+          "eo:full_width_half_max": 7.5
+        },
+        {
+          "name": "Oa11",
+          "eo:common_name": "rededge071",
+          "eo:center_wavelength": 708.75,
+          "eo:full_width_half_max": 10
+        },
+        {
+          "name": "Oa12",
+          "eo:common_name": "rededge075",
+          "eo:center_wavelength": 753.75,
+          "eo:full_width_half_max": 7.5
+        },
+        {
+          "name": "Oa13",
+          "eo:center_wavelength": 761.25,
+          "eo:full_width_half_max": 2.5
+        },
+        {
+          "name": "Oa14",
+          "eo:center_wavelength": 764.375,
+          "eo:full_width_half_max": 3.75
+        },
+        {
+          "name": "Oa15",
+          "eo:center_wavelength": 767.5,
+          "eo:full_width_half_max": 2.5
+        },
+        {
+          "name": "Oa16",
+          "eo:common_name": "rededge078",
+          "eo:center_wavelength": 778.75,
+          "eo:full_width_half_max": 15
+        },
+        {
+          "name": "Oa17",
+          "eo:common_name": "nir08",
+          "eo:center_wavelength": 865,
+          "eo:full_width_half_max": 20
+        },
+        {
+          "name": "Oa18",
+          "eo:center_wavelength": 885,
+          "eo:full_width_half_max": 10
+        },
+        {
+          "name": "Oa19",
+          "eo:center_wavelength": 900,
+          "eo:full_width_half_max": 10
+        },
+        {
+          "name": "Oa20",
+          "eo:common_name": "nir09",
+          "eo:center_wavelength": 940,
+          "eo:full_width_half_max": 20
+        },
+        {
+          "name": "Oa21",
+          "eo:center_wavelength": 1020,
+          "eo:full_width_half_max": 40
+        }
+      ],
+      "roles": [
+        "data",
+        "dataset"
+      ],
+      "title": "TOA radiance for OLCI acquisition bands 01 to 21",
+      "alternate": {
+        "s3": {
+          "href": "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements",
+          "storage:refs": [
+            "standard"
+          ],
+          "objects_per_storage_class": {
+            "STANDARD": 4809
+          }
+        }
+      }
+    },
+    "product_metadata": {
+      "href": "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/.zmetadata",
+      "type": "application/json",
+      "roles": [
+        "metadata"
+      ],
+      "title": "Consolidated Metadata",
+      "alternate": {
+        "s3": {
+          "href": "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/.zmetadata",
+          "storage:refs": [
+            "standard"
+          ]
+        }
+      },
+      "description": "Consolidated metadata of the EOPF product"
+    },
+    "Oa01_radianceData": {
+      "href": "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa01_radiance",
+      "type": "application/vnd.zarr; version=3",
+      "bands": [
+        {
+          "name": "Oa01",
+          "eo:center_wavelength": 400,
+          "eo:full_width_half_max": 15
+        }
+      ],
+      "roles": [
+        "data"
+      ],
+      "title": "TOA radiance for OLCI acquisition band Oa01",
+      "alternate": {
+        "s3": {
+          "href": "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa01_radiance",
+          "storage:refs": [
+            "standard"
+          ],
+          "objects_per_storage_class": {
+            "STANDARD": 112
+          }
+        }
+      }
+    },
+    "Oa02_radianceData": {
+      "href": "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa02_radiance",
+      "type": "application/vnd.zarr; version=3",
+      "bands": [
+        {
+          "name": "Oa02",
+          "eo:center_wavelength": 412.5,
+          "eo:full_width_half_max": 10
+        }
+      ],
+      "roles": [
+        "data"
+      ],
+      "title": "TOA radiance for OLCI acquisition band Oa02",
+      "alternate": {
+        "s3": {
+          "href": "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa02_radiance",
+          "storage:refs": [
+            "standard"
+          ],
+          "objects_per_storage_class": {
+            "STANDARD": 112
+          }
+        }
+      }
+    },
+    "Oa03_radianceData": {
+      "href": "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa03_radiance",
+      "type": "application/vnd.zarr; version=3",
+      "bands": [
+        {
+          "name": "Oa03",
+          "eo:common_name": "coastal",
+          "eo:center_wavelength": 442.5,
+          "eo:full_width_half_max": 10
+        }
+      ],
+      "roles": [
+        "data"
+      ],
+      "title": "TOA radiance for OLCI acquisition band Oa03",
+      "alternate": {
+        "s3": {
+          "href": "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa03_radiance",
+          "storage:refs": [
+            "standard"
+          ],
+          "objects_per_storage_class": {
+            "STANDARD": 112
+          }
+        }
+      }
+    },
+    "Oa04_radianceData": {
+      "href": "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa04_radiance",
+      "type": "application/vnd.zarr; version=3",
+      "bands": [
+        {
+          "name": "Oa04",
+          "eo:common_name": "blue",
+          "eo:center_wavelength": 490,
+          "eo:full_width_half_max": 10
+        }
+      ],
+      "roles": [
+        "data"
+      ],
+      "title": "TOA radiance for OLCI acquisition band Oa04",
+      "alternate": {
+        "s3": {
+          "href": "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa04_radiance",
+          "storage:refs": [
+            "standard"
+          ],
+          "objects_per_storage_class": {
+            "STANDARD": 112
+          }
+        }
+      }
+    },
+    "Oa05_radianceData": {
+      "href": "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa05_radiance",
+      "type": "application/vnd.zarr; version=3",
+      "bands": [
+        {
+          "name": "Oa05",
+          "eo:common_name": "green05",
+          "eo:center_wavelength": 510,
+          "eo:full_width_half_max": 10
+        }
+      ],
+      "roles": [
+        "data"
+      ],
+      "title": "TOA radiance for OLCI acquisition band Oa05",
+      "alternate": {
+        "s3": {
+          "href": "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa05_radiance",
+          "storage:refs": [
+            "standard"
+          ],
+          "objects_per_storage_class": {
+            "STANDARD": 112
+          }
+        }
+      }
+    },
+    "Oa06_radianceData": {
+      "href": "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa06_radiance",
+      "type": "application/vnd.zarr; version=3",
+      "bands": [
+        {
+          "name": "Oa06",
+          "eo:common_name": "green",
+          "eo:center_wavelength": 560,
+          "eo:full_width_half_max": 10
+        }
+      ],
+      "roles": [
+        "data"
+      ],
+      "title": "TOA radiance for OLCI acquisition band Oa06",
+      "alternate": {
+        "s3": {
+          "href": "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa06_radiance",
+          "storage:refs": [
+            "standard"
+          ],
+          "objects_per_storage_class": {
+            "STANDARD": 112
+          }
+        }
+      }
+    },
+    "Oa07_radianceData": {
+      "href": "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa07_radiance",
+      "type": "application/vnd.zarr; version=3",
+      "bands": [
+        {
+          "name": "Oa07",
+          "eo:common_name": "yellow",
+          "eo:center_wavelength": 620,
+          "eo:full_width_half_max": 10
+        }
+      ],
+      "roles": [
+        "data"
+      ],
+      "title": "TOA radiance for OLCI acquisition band Oa07",
+      "alternate": {
+        "s3": {
+          "href": "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa07_radiance",
+          "storage:refs": [
+            "standard"
+          ],
+          "objects_per_storage_class": {
+            "STANDARD": 112
+          }
+        }
+      }
+    },
+    "Oa08_radianceData": {
+      "href": "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa08_radiance",
+      "type": "application/vnd.zarr; version=3",
+      "bands": [
+        {
+          "name": "Oa08",
+          "eo:center_wavelength": 665,
+          "eo:full_width_half_max": 10
+        }
+      ],
+      "roles": [
+        "data"
+      ],
+      "title": "TOA radiance for OLCI acquisition band Oa08",
+      "alternate": {
+        "s3": {
+          "href": "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa08_radiance",
+          "storage:refs": [
+            "standard"
+          ],
+          "objects_per_storage_class": {
+            "STANDARD": 112
+          }
+        }
+      }
+    },
+    "Oa09_radianceData": {
+      "href": "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa09_radiance",
+      "type": "application/vnd.zarr; version=3",
+      "bands": [
+        {
+          "name": "Oa09",
+          "eo:common_name": "red",
+          "eo:center_wavelength": 673.75,
+          "eo:full_width_half_max": 7.5
+        }
+      ],
+      "roles": [
+        "data"
+      ],
+      "title": "TOA radiance for OLCI acquisition band Oa09",
+      "alternate": {
+        "s3": {
+          "href": "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa09_radiance",
+          "storage:refs": [
+            "standard"
+          ],
+          "objects_per_storage_class": {
+            "STANDARD": 112
+          }
+        }
+      }
+    },
+    "Oa10_radianceData": {
+      "href": "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa10_radiance",
+      "type": "application/vnd.zarr; version=3",
+      "bands": [
+        {
+          "name": "Oa10",
+          "eo:center_wavelength": 681.25,
+          "eo:full_width_half_max": 7.5
+        }
+      ],
+      "roles": [
+        "data"
+      ],
+      "title": "TOA radiance for OLCI acquisition band Oa10",
+      "alternate": {
+        "s3": {
+          "href": "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa10_radiance",
+          "storage:refs": [
+            "standard"
+          ],
+          "objects_per_storage_class": {
+            "STANDARD": 112
+          }
+        }
+      }
+    },
+    "Oa11_radianceData": {
+      "href": "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa11_radiance",
+      "type": "application/vnd.zarr; version=3",
+      "bands": [
+        {
+          "name": "Oa11",
+          "eo:common_name": "rededge071",
+          "eo:center_wavelength": 708.75,
+          "eo:full_width_half_max": 10
+        }
+      ],
+      "roles": [
+        "data"
+      ],
+      "title": "TOA radiance for OLCI acquisition band Oa11",
+      "alternate": {
+        "s3": {
+          "href": "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa11_radiance",
+          "storage:refs": [
+            "standard"
+          ],
+          "objects_per_storage_class": {
+            "STANDARD": 112
+          }
+        }
+      }
+    },
+    "Oa12_radianceData": {
+      "href": "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa12_radiance",
+      "type": "application/vnd.zarr; version=3",
+      "bands": [
+        {
+          "name": "Oa12",
+          "eo:common_name": "rededge075",
+          "eo:center_wavelength": 753.75,
+          "eo:full_width_half_max": 7.5
+        }
+      ],
+      "roles": [
+        "data"
+      ],
+      "title": "TOA radiance for OLCI acquisition band Oa12",
+      "alternate": {
+        "s3": {
+          "href": "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa12_radiance",
+          "storage:refs": [
+            "standard"
+          ],
+          "objects_per_storage_class": {
+            "STANDARD": 112
+          }
+        }
+      }
+    },
+    "Oa13_radianceData": {
+      "href": "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa13_radiance",
+      "type": "application/vnd.zarr; version=3",
+      "bands": [
+        {
+          "name": "Oa13",
+          "eo:center_wavelength": 761.25,
+          "eo:full_width_half_max": 2.5
+        }
+      ],
+      "roles": [
+        "data"
+      ],
+      "title": "TOA radiance for OLCI acquisition band Oa13",
+      "alternate": {
+        "s3": {
+          "href": "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa13_radiance",
+          "storage:refs": [
+            "standard"
+          ],
+          "objects_per_storage_class": {
+            "STANDARD": 112
+          }
+        }
+      }
+    },
+    "Oa14_radianceData": {
+      "href": "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa14_radiance",
+      "type": "application/vnd.zarr; version=3",
+      "bands": [
+        {
+          "name": "Oa14",
+          "eo:center_wavelength": 764.375,
+          "eo:full_width_half_max": 3.75
+        }
+      ],
+      "roles": [
+        "data"
+      ],
+      "title": "TOA radiance for OLCI acquisition band Oa14",
+      "alternate": {
+        "s3": {
+          "href": "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa14_radiance",
+          "storage:refs": [
+            "standard"
+          ],
+          "objects_per_storage_class": {
+            "STANDARD": 112
+          }
+        }
+      }
+    },
+    "Oa15_radianceData": {
+      "href": "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa15_radiance",
+      "type": "application/vnd.zarr; version=3",
+      "bands": [
+        {
+          "name": "Oa15",
+          "eo:center_wavelength": 767.5,
+          "eo:full_width_half_max": 2.5
+        }
+      ],
+      "roles": [
+        "data"
+      ],
+      "title": "TOA radiance for OLCI acquisition band Oa15",
+      "alternate": {
+        "s3": {
+          "href": "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa15_radiance",
+          "storage:refs": [
+            "standard"
+          ],
+          "objects_per_storage_class": {
+            "STANDARD": 112
+          }
+        }
+      }
+    },
+    "Oa16_radianceData": {
+      "href": "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa16_radiance",
+      "type": "application/vnd.zarr; version=3",
+      "bands": [
+        {
+          "name": "Oa16",
+          "eo:common_name": "rededge078",
+          "eo:center_wavelength": 778.75,
+          "eo:full_width_half_max": 15
+        }
+      ],
+      "roles": [
+        "data"
+      ],
+      "title": "TOA radiance for OLCI acquisition band Oa16",
+      "alternate": {
+        "s3": {
+          "href": "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa16_radiance",
+          "storage:refs": [
+            "standard"
+          ],
+          "objects_per_storage_class": {
+            "STANDARD": 112
+          }
+        }
+      }
+    },
+    "Oa17_radianceData": {
+      "href": "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa17_radiance",
+      "type": "application/vnd.zarr; version=3",
+      "bands": [
+        {
+          "name": "Oa17",
+          "eo:common_name": "nir08",
+          "eo:center_wavelength": 865,
+          "eo:full_width_half_max": 20
+        }
+      ],
+      "roles": [
+        "data"
+      ],
+      "title": "TOA radiance for OLCI acquisition band Oa17",
+      "alternate": {
+        "s3": {
+          "href": "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa17_radiance",
+          "storage:refs": [
+            "standard"
+          ],
+          "objects_per_storage_class": {
+            "STANDARD": 112
+          }
+        }
+      }
+    },
+    "Oa18_radianceData": {
+      "href": "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa18_radiance",
+      "type": "application/vnd.zarr; version=3",
+      "bands": [
+        {
+          "name": "Oa18",
+          "eo:center_wavelength": 885,
+          "eo:full_width_half_max": 10
+        }
+      ],
+      "roles": [
+        "data"
+      ],
+      "title": "TOA radiance for OLCI acquisition band Oa18",
+      "alternate": {
+        "s3": {
+          "href": "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa18_radiance",
+          "storage:refs": [
+            "standard"
+          ],
+          "objects_per_storage_class": {
+            "STANDARD": 112
+          }
+        }
+      }
+    },
+    "Oa19_radianceData": {
+      "href": "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa19_radiance",
+      "type": "application/vnd.zarr; version=3",
+      "bands": [
+        {
+          "name": "Oa19",
+          "eo:center_wavelength": 900,
+          "eo:full_width_half_max": 10
+        }
+      ],
+      "roles": [
+        "data"
+      ],
+      "title": "TOA radiance for OLCI acquisition band Oa19",
+      "alternate": {
+        "s3": {
+          "href": "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa19_radiance",
+          "storage:refs": [
+            "standard"
+          ],
+          "objects_per_storage_class": {
+            "STANDARD": 112
+          }
+        }
+      }
+    },
+    "Oa20_radianceData": {
+      "href": "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa20_radiance",
+      "type": "application/vnd.zarr; version=3",
+      "bands": [
+        {
+          "name": "Oa20",
+          "eo:common_name": "nir09",
+          "eo:center_wavelength": 940,
+          "eo:full_width_half_max": 20
+        }
+      ],
+      "roles": [
+        "data"
+      ],
+      "title": "TOA radiance for OLCI acquisition band Oa20",
+      "alternate": {
+        "s3": {
+          "href": "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa20_radiance",
+          "storage:refs": [
+            "standard"
+          ],
+          "objects_per_storage_class": {
+            "STANDARD": 112
+          }
+        }
+      }
+    },
+    "Oa21_radianceData": {
+      "href": "https://s3.explorer.eopf.copernicus.eu/esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa21_radiance",
+      "type": "application/vnd.zarr; version=3",
+      "bands": [
+        {
+          "name": "Oa21",
+          "eo:center_wavelength": 1020,
+          "eo:full_width_half_max": 40
+        }
+      ],
+      "roles": [
+        "data"
+      ],
+      "title": "TOA radiance for OLCI acquisition band Oa21",
+      "alternate": {
+        "s3": {
+          "href": "s3://esa-zarr-sentinel-explorer-fra/tests-output/sentinel-3-olci-l1-efr-staging/S3B_OL_1_EFR____20260728T123330_20260728T123630_20260728T142857_0179_122_380_2340_ESA_O_NR_004.zarr/measurements/r0/oa21_radiance",
+          "storage:refs": [
+            "standard"
+          ],
+          "objects_per_storage_class": {
+            "STANDARD": 112
+          }
+        }
+      }
+    }
+  },
+  "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+      [
+        [
+          -43.9094,
+          31.4622
+        ],
+        [
+          -43.1887,
+          31.3717
+        ],
+        [
+          -42.4743,
+          31.2762
+        ],
+        [
+          -41.7573,
+          31.1763
+        ],
+        [
+          -41.0407,
+          31.0722
+        ],
+        [
+          -40.3272,
+          30.9672
+        ],
+        [
+          -39.617,
+          30.8559
+        ],
+        [
+          -38.907,
+          30.7399
+        ],
+        [
+          -38.1993,
+          30.6205
+        ],
+        [
+          -37.492,
+          30.497
+        ],
+        [
+          -36.7883,
+          30.3712
+        ],
+        [
+          -36.085,
+          30.2405
+        ],
+        [
+          -35.3851,
+          30.1064
+        ],
+        [
+          -34.6866,
+          29.9693
+        ],
+        [
+          -33.9879,
+          29.8273
+        ],
+        [
+          -33.2948,
+          29.6825
+        ],
+        [
+          -32.6003,
+          29.5329
+        ],
+        [
+          -31.9107,
+          29.3807
+        ],
+        [
+          -31.2202,
+          29.2241
+        ],
+        [
+          -30.5345,
+          29.0658
+        ],
+        [
+          -29.7134,
+          31.6918
+        ],
+        [
+          -28.8448,
+          34.3158
+        ],
+        [
+          -27.9251,
+          36.9346
+        ],
+        [
+          -26.9453,
+          39.5459
+        ],
+        [
+          -27.7192,
+          39.722
+        ],
+        [
+          -28.4951,
+          39.8937
+        ],
+        [
+          -29.2749,
+          40.0601
+        ],
+        [
+          -30.0557,
+          40.2211
+        ],
+        [
+          -30.8425,
+          40.3768
+        ],
+        [
+          -31.6339,
+          40.5274
+        ],
+        [
+          -32.4294,
+          40.6719
+        ],
+        [
+          -33.2277,
+          40.8117
+        ],
+        [
+          -34.0274,
+          40.9456
+        ],
+        [
+          -34.8318,
+          41.0734
+        ],
+        [
+          -35.6371,
+          41.1964
+        ],
+        [
+          -36.4476,
+          41.314
+        ],
+        [
+          -37.2615,
+          41.4264
+        ],
+        [
+          -38.0761,
+          41.5322
+        ],
+        [
+          -38.895,
+          41.6298
+        ],
+        [
+          -39.718,
+          41.7245
+        ],
+        [
+          -40.5344,
+          41.8124
+        ],
+        [
+          -41.3636,
+          41.8955
+        ],
+        [
+          -42.1903,
+          41.9706
+        ],
+        [
+          -42.6101,
+          39.3444
+        ],
+        [
+          -43.0365,
+          36.7162
+        ],
+        [
+          -43.4703,
+          34.0888
+        ],
+        [
+          -43.9094,
+          31.4622
+        ]
+      ]
+    ]
+  },
+  "collection": "sentinel-3-olci-l1-efr-staging",
+  "properties": {
+    "gsd": 300.0,
+    "created": "2026-07-28T15:40:15.158141Z",
+    "expires": "2027-04-07T15:45:03Z",
+    "mission": "Sentinel-3",
+    "updated": "2026-07-28T15:40:15.158141Z",
+    "datetime": "2026-07-28T12:35:00.427567Z",
+    "platform": "sentinel-3b",
+    "providers": [
+      {
+        "url": "https://commission.europa.eu/",
+        "name": "European Commission",
+        "roles": [
+          "licensor"
+        ]
+      },
+      {
+        "url": "https://sentinel.esa.int/web/sentinel/missions/sentinel-3",
+        "name": "ESA",
+        "roles": [
+          "producer",
+          "processor"
+        ]
+      },
+      {
+        "url": "https://zarr.eopf.copernicus.eu/",
+        "name": "EOPF Sentinel Zarr Samples Service",
+        "roles": [
+          "host",
+          "processor"
+        ]
+      }
+    ],
+    "published": "2026-07-28T15:40:15.158141Z",
+    "deprecated": false,
+    "instruments": [
+      "olci"
+    ],
+    "auth:schemes": {
+      "oidc": {
+        "type": "openIdConnect",
+        "openIdConnectUrl": "https://hub-eopf-explorer.eox.at/auth/realms/eoxhub/.well-known/openid-configuration"
+      }
+    },
+    "end_datetime": "2026-07-28T12:36:30.427567Z",
+    "product:type": "S03OLCEFR",
+    "constellation": "sentinel-3",
+    "start_datetime": "2026-07-28T12:33:30.427567Z",
+    "sat:orbit_state": "descending",
+    "storage:schemes": {
+      "mixed": {
+        "type": "custom-s3",
+        "bucket": "esa-zarr-sentinel-explorer-fra",
+        "region": "de",
+        "platform": "https://s3.de.io.cloud.ovh.net/",
+        "storage_class": "MIXED",
+        "requester_pays": false
+      },
+      "glacier": {
+        "type": "custom-s3",
+        "bucket": "esa-zarr-sentinel-explorer-fra",
+        "region": "de",
+        "platform": "https://s3.de.io.cloud.ovh.net/",
+        "storage_class": "STANDARD_IA",
+        "requester_pays": false
+      },
+      "standard": {
+        "type": "custom-s3",
+        "bucket": "esa-zarr-sentinel-explorer-fra",
+        "region": "de",
+        "platform": "https://s3.de.io.cloud.ovh.net/",
+        "storage_class": "STANDARD",
+        "requester_pays": false
+      },
+      "performance": {
+        "type": "custom-s3",
+        "bucket": "esa-zarr-sentinel-explorer-fra",
+        "region": "de",
+        "platform": "https://s3.de.io.cloud.ovh.net/",
+        "storage_class": "EXPRESS_ONEZONE",
+        "requester_pays": false
+      }
+    },
+    "processing:level": "L1",
+    "processing:lineage": "systematic",
+    "processing:version": "03.51",
+    "product:timeliness": "PT3H",
+    "sat:absolute_orbit": 43002,
+    "sat:relative_orbit": 380,
+    "processing:facility": "OPE",
+    "processing:software": {
+      "PUG": "03.51",
+      "EOPF-CPM": "2.7.0"
+    },
+    "product:acquisition_type": "Earth Observation",
+    "product:timeliness_category": "NR",
+    "sat:platform_international_designator": "2018-039A"
+  },
+  "stac_version": "1.1.0",
+  "stac_extensions": [
+    "https://stac-extensions.github.io/timestamps/v1.1.0/schema.json",
+    "https://stac-extensions.github.io/sat/v1.0.0/schema.json",
+    "https://stac-extensions.github.io/eo/v2.0.0/schema.json",
+    "https://stac-extensions.github.io/processing/v1.2.0/schema.json",
+    "https://stac-extensions.github.io/product/v0.1.0/schema.json",
+    "https://stac-extensions.github.io/version/v1.2.0/schema.json",
+    "https://stac-extensions.github.io/alternate-assets/v1.2.0/schema.json",
+    "https://stac-extensions.github.io/storage/v2.0.0/schema.json",
+    "https://stac-extensions.github.io/authentication/v1.1.0/schema.json"
+  ]
+}

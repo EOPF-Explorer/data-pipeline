@@ -17,6 +17,12 @@ import zarr
 from pystac import Asset, Item, Link
 from pystac.extensions.projection import ProjectionExtension
 from pystac_client import Client
+from raster_links import (
+    S2_LEGACY_QUERY,
+    missing_rgb_bands,
+    s2_true_colour_links,
+    s2_true_colour_thumbnail,
+)
 from s3_item_cleanup import (
     DEFAULT_RETENTION_DAYS,
     TIMESTAMPS_EXTENSION,
@@ -271,8 +277,9 @@ def add_visualization_links(
     """Add the TiTiler visualization links.
 
     The render path (producer ``renders`` config) emits an interactive ``map.html`` ``viewer``, a
-    ``tilejson`` and an ``xyz`` ``{z}/{x}/{y}`` tile template (for machine map clients); the mission
-    fallbacks keep the legacy bare ``/viewer`` + ``xyz`` tile template.
+    ``tilejson`` and an ``xyz`` ``{z}/{x}/{y}`` tile template (for machine map clients); S2 L2A gets
+    the titiler-eopf 0.12 links from ``raster_links``; the other mission fallbacks keep the legacy
+    bare ``/viewer`` + ``xyz`` tile template.
 
     ``sel_time`` (when set) pins the render to one cube slice by datetime — the cube item passes the
     best-recent acquisition so its preview isn't the default (oldest) slice.
@@ -315,6 +322,26 @@ def add_visualization_links(
         )
         return
 
+    # S2 L2A: titiler-eopf 0.12 item-route links, from the builder the catalogue link migration
+    # shares (operator-tools/migrate_item_api_links.py). S1 and L1C keep the 0.11 form below until
+    # their 0.12 form is decided.
+    # The thumbnail is added here too, so the band check (and its warning) runs once per item;
+    # add_thumbnail_asset then has nothing to do for S2 L2A.
+    if collection_id.lower().startswith("sentinel-2-l2a"):
+        reflectance = item.assets.get("reflectance")
+        if missing := missing_rgb_bands(reflectance.extra_fields if reflectance else None):
+            # No links beat links that 4xx.
+            logger.warning(f"{item.id}: reflectance has no {missing} band; no viz links")
+            return
+        for link in s2_true_colour_links(raster_base, collection_id, item.id):
+            item.add_link(Link.from_dict(link))
+        if "thumbnail" not in item.assets:  # an existing one is kept, as add_thumbnail_asset does
+            item.add_asset(
+                "thumbnail",
+                Asset.from_dict(s2_true_colour_thumbnail(raster_base, collection_id, item.id)),
+            )
+        return
+
     # Mission-specific tile configurations (no producer render config): bare viewer + legacy xyz.
     item.add_link(Link("viewer", f"{base_url}/viewer", "text/html", f"Viewer for {item.id}"))
     coll_lower = collection_id.lower()
@@ -345,7 +372,7 @@ def add_visualization_links(
             )
     elif coll_lower.startswith(("sentinel-2", "sentinel2")):
         # S2: True color from reflectance bands (B04=Red, B03=Green, B02=Blue)
-        query = "rescale=0%2C1&color_formula=gamma%20rgb%201.3%2C%20sigmoidal%20rgb%206%200.1%2C%20saturation%201.2&variables=%2Fmeasurements%2Freflectance%3Ab04&variables=%2Fmeasurements%2Freflectance%3Ab03&variables=%2Fmeasurements%2Freflectance%3Ab02&bidx=1"
+        query = S2_LEGACY_QUERY
         item.add_link(
             Link(
                 "xyz",
@@ -396,9 +423,12 @@ def add_thumbnail_asset(
         logger.debug(f"Added thumbnail asset from render config: {title}")
         return
 
+    if coll_lower.startswith("sentinel-2-l2a"):  # added with the links by add_visualization_links
+        return
+
     # Mission-specific thumbnail parameters
     if coll_lower.startswith(("sentinel-2", "sentinel2")):
-        params = "format=png&rescale=0%2C1&color_formula=gamma%20rgb%201.3%2C%20sigmoidal%20rgb%206%200.1%2C%20saturation%201.2&variables=%2Fmeasurements%2Freflectance%3Ab04&variables=%2Fmeasurements%2Freflectance%3Ab03&variables=%2Fmeasurements%2Freflectance%3Ab02&bidx=1"
+        params = f"format=png&{S2_LEGACY_QUERY}"
         title = "Sentinel-2 L2A True Color Preview"
     elif coll_lower.startswith(("sentinel-1", "sentinel1")):
         # Use VH band for S-1 thumbnail
@@ -1002,9 +1032,6 @@ def run_registration(
     # 10. Add thumbnail asset for STAC browsers
     add_thumbnail_asset(item, raster_api_url, collection)
 
-    # 11. Warm thumbnail cache
-    warm_thumbnail_cache(item)
-
     # 12. Add derived_from link to source item
     add_derived_from_link(item, source_url)
 
@@ -1022,6 +1049,9 @@ def run_registration(
     # 13. Register to STAC API
     client = stac_auth.open_client(stac_api_url)
     upsert_item(client, collection, item)
+
+    # 14. Warm the thumbnail cache, now the item exists: the 0.12 item route looks it up in STAC.
+    warm_thumbnail_cache(item)
 
     logger.info(
         f"✅ Registration complete → {stac_api_url}/collections/{collection}/items/{item_id}"
