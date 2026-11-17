@@ -72,7 +72,8 @@
 #   - October acquisitions: independent. EODC's October items carry no EOPF_GEOZARR (17 Nov
 #     2026), so this run skips them (skipped_no_key) and never writes them.
 # The clean re-reads each candidate just before its DELETE and keeps one now >= 0.13.0; an item it
-# deletes between this run's GET and PUT answers 404 (`gone`) and is created by the next run.
+# deletes between this run's GET and PUT answers 404 (`gone`) and is created by the next run,
+# unless it is in sentinel-2-l2a: then it is skipped_in_archive, as the archive holds it.
 #
 # This Workflow takes the register's one-slot `eodc-register-limit` semaphore, like every
 # eopf-eodc-register run: no register run creates an id while this run may be creating it, which

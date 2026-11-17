@@ -282,7 +282,8 @@ restored to its old state. The Task 7 exercise checks the mechanism, not the dat
   makes pages bigger. The `ids=` exclusion runs on the Explorer's pgstac; an answer with an unasked id
   refuses the run.
 - **Snapshot age.** The diff is a snapshot; each write re-reads (source fetch, target GET) before acting,
-  and an item the clean deletes between GET and PUT is `gone` and created by the next run.
+  and an item the clean deletes between GET and PUT is `gone` and created by the next run, unless it is in
+  `sentinel-2-l2a` (then `skipped_in_archive`: the archive holds it).
 - **Hourly register delay.** While this run holds the semaphore, register runs queue (their windows are
   fixed by `scheduledTime`, so nothing is lost). At ~1-2 s per write, a 500-write batch is ~10-15 min.
 - **Pre-image size.** ~15-45 KB per replace: a 500-replace batch writes ~10-20 MB of replaced-ids.

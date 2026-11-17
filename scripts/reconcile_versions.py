@@ -406,7 +406,8 @@ class Run:
             raise
         status = put.status_code
         # pgstac's update is a delete + create: a 404 means the item was deleted after the GET
-        # (the clean), and nothing was written. The next run creates it.
+        # (the clean), and nothing was written. The next run creates it, unless it is in the
+        # exclusion collection: then it is skipped_in_archive, as the archive holds it.
         if 200 <= status < 300:
             outcome = "replaced"
         elif status == 404:
