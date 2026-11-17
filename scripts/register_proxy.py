@@ -95,7 +95,9 @@ TRANSITION_COLLECTION = "sentinel-2-l2a-new"
 # near miss (``sentinel-2-l2a-staging``, ``…-samples-zarr3x``) would pass a substring check.
 # ``sentinel-2-l2a`` itself, our converted archive, is absent: no run may write it (plan
 # rev 3, R1). Into ``TRANSITION_COLLECTION`` only the pipeline may write, because it is the
-# one that never PUTs (``upsert_item`` replaces an existing id). ``-rollback`` is the
+# one that never PUTs (``upsert_item`` replaces an existing id). The one PUT into it comes from
+# outside this script: ``reconcile_versions.py``, an operator run with its own per-target
+# policy, replaces an item when EODC publishes a newer EOPF_GEOZARR. ``-rollback`` is the
 # scratch collection the pipeline's rollback is exercised in (plan rev 2, T10).
 TARGET_RUNS = {
     TRANSITION_COLLECTION: {"pipeline"},
