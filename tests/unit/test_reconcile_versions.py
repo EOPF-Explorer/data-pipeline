@@ -11,6 +11,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -19,6 +20,7 @@ import pytest
 import reconcile_versions as rv
 import requests
 from pystac_client.exceptions import APIError
+from pystac_client.item_search import ItemSearch
 from reconcile_versions import classify, main, open_write_client
 
 EODC_FIXTURES = Path(__file__).parent.parent / "fixtures/eodc"
@@ -110,14 +112,6 @@ def test_the_policy_is_fixed_in_code_not_by_flags():
 # --- fakes ---
 
 
-class FakeSearch:
-    def __init__(self, pages):
-        self.pages = pages
-
-    def pages_as_dicts(self):
-        yield from self.pages
-
-
 class FakeCatalogue:
     """A read Client over {collection: {id: properties} or a callable returning one}.
 
@@ -134,11 +128,8 @@ class FakeCatalogue:
         (collection,) = collections
         items = self.collections.get(collection, {})
         items = items() if callable(items) else items
-        hits = [(i, p) for i, p in items.items() if ids is None or i in ids]
-        return FakeSearch(
-            [{"features": [{"id": i, "properties": p} for i, p in hits[s : s + limit]]}
-             for s in range(0, len(hits), limit)]
-        )  # fmt: skip
+        hits = [{"id": i, "properties": p} for i, p in items.items() if ids is None or i in ids]
+        return SimpleNamespace(items_as_dicts=lambda: iter(hits))
 
 
 def answer(status, body=None):
@@ -197,7 +188,7 @@ class FakeTarget:
         self.items[json["id"]] = json
         return answer(201)
 
-    def put(self, url, *, json, headers, timeout, allow_redirects):
+    def put(self, url, *, json, timeout, allow_redirects):
         assert timeout and allow_redirects is False
         assert url == f"{STAC_API}/collections/{NEW}/items/{json['id']}"
         if self.put_hook:
@@ -317,7 +308,8 @@ def test_the_source_search_is_the_policy_range_with_the_registers_cloud_filter(t
     assert world.run(tmp_path, dry_run=True) == 0
     (search,) = world.eodc.searches
     assert search["collections"] == [ZARR3]
-    assert search["datetime"] == "2026-09-29T00:00:00Z/.."
+    sent = ItemSearch("https://eodc.invalid/search", datetime=search["datetime"]).get_parameters()
+    assert sent["datetime"] == "2026-09-29T00:00:00Z/.."
     assert search["filter"] == {"op": "<", "args": [{"property": "eo:cloud_cover"}, 90.0]}
     assert search["filter_lang"] == "cql2-json"
 

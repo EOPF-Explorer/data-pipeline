@@ -54,6 +54,7 @@ converges too: it is counted, and named on a ``Look:`` line after the summary, e
 """
 
 import argparse
+import itertools
 import json
 import logging
 import sys
@@ -185,11 +186,10 @@ def classify(source: dict, target: dict | None) -> str:
 
 def walk(client: Client, **search: Any) -> dict[str, dict]:
     """Every item the search pages through, as id -> properties (``FIELDS`` only)."""
-    found: dict[str, dict] = {}
-    for page in client.search(limit=PAGE_SIZE, fields=FIELDS, **search).pages_as_dicts():
-        for feature in page["features"]:
-            found[feature["id"]] = feature.get("properties") or {}
-    return found
+    return {
+        f["id"]: f.get("properties") or {}
+        for f in client.search(limit=PAGE_SIZE, fields=FIELDS, **search).items_as_dicts()
+    }
 
 
 def present_in(client: Client, collection: str, ids: list[str]) -> set[str]:
@@ -199,8 +199,7 @@ def present_in(client: Client, collection: str, ids: list[str]) -> set[str]:
     ``ids`` would otherwise page its whole collection once per batch.
     """
     present: set[str] = set()
-    for start in range(0, len(ids), IDS_PER_SEARCH):
-        batch = ids[start : start + IDS_PER_SEARCH]
+    for batch in itertools.batched(ids, IDS_PER_SEARCH):  # noqa: B911 -- pre-commit's mypy rejects strict=
         found = set(walk(client, collections=[collection], ids=batch))
         if found - set(batch):
             raise RuntimeError(f"{collection}: an ids= search returned ids it was not asked for")
@@ -373,7 +372,6 @@ class Run:
             put = session.put(
                 url,
                 json=item.to_dict(transform_hrefs=False),
-                headers={"Content-Type": "application/json"},
                 timeout=WRITE_TIMEOUT_S,
                 allow_redirects=False,
             )
@@ -500,7 +498,7 @@ def main(argv: list[str] | None = None) -> int:
         sources = walk(
             source_client,
             collections=[DEFAULT_SOURCE_COLLECTION],
-            datetime=f"{ACQUIRED_FROM.isoformat().replace('+00:00', 'Z')}/..",
+            datetime=(ACQUIRED_FROM, None),
             filter={"op": "<", "args": [{"property": "eo:cloud_cover"}, MAX_CLOUD_COVER]},
             filter_lang="cql2-json",
         )
