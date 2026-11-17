@@ -1,50 +1,23 @@
 # One-off Argo Workflow: bring the PRODUCTION sentinel-2-l2a-new collection in step with EODC's
 # re-processing, by processing:software EOPF_GEOZARR (scripts/reconcile_versions.py).
 #
-# The hourly eopf-eodc-register is create-only and stays so: it never rewrites an item, so a
-# scene EODC re-processes with a newer eopf-geozarr keeps its old item here, and a scene the
-# s2-new clean deleted never comes back. This run diffs EODC's sentinel-2-l2a-zarr3 (acquired
-# from 2026-09-29, eo:cloud_cover < 90, as the register) against the target by id + version:
-#   - EOPF_GEOZARR >= 0.13.0, absent from the target and from sentinel-2-l2a  -> CREATE
-#   - EOPF_GEOZARR >= 0.13.0 and strictly newer than the target's, or the target has none or a
-#     pre-release/dev/local one (a release then wins even if lower)           -> REPLACE (PUT)
-#   - eo:cloud_cover missing or >= 90 (checked here too, not only by the search filter), below
-#     0.13.0, no key, unreadable, a pre-release, equal to or older than a final target, or
-#     absent from the target but in sentinel-2-l2a (our converted archive: EODC's 30 Sep burst,
-#     ~800-1,000 ids)                                                          -> skipped, counted
-#   Only creates are checked against sentinel-2-l2a: an id already in the target (and in
-#   sentinel-2-l2a) is replaced like any other, which adds no duplicate.
-# The key, the floor, the range and the exclusion are fixed in the script's POLICIES table for
-# this collection, not parameters here; the script refuses any other collection.
+# The hourly eopf-eodc-register is create-only: a scene EODC re-processes keeps its old item
+# here, and one the s2-new clean deleted never comes back. This run diffs EODC's
+# sentinel-2-l2a-zarr3 (from 2026-09-29, eo:cloud_cover < 90) against the target by id +
+# EOPF_GEOZARR and, from final releases >= 0.13.0 only, CREATEs ids absent from the target and
+# from sentinel-2-l2a (~800-1,000 such: skipped_in_archive) and REPLACEs (PUT) older ones, an id
+# also in sentinel-2-l2a included; never a downgrade of a final release. Every verdict, summary
+# key and exit code: the docstring of scripts/reconcile_versions.py at the sha you run; key,
+# floor, range and exclusion: its module constants.
 #
-# Bounds, all enforced inside the tool, none by a timeout or a kill:
-#   --max-writes   POSTs + PUTs this run sends at most (a dry run: would send), newest acquisition
-#                  first; required, dry runs included. An id that ends before its write is
-#                  counted by reason and does not use the bound: skipped_old_generation,
-#                  skipped_unbuildable, skipped_source_changed, gone (target GET 404),
-#                  refused_target_unreadable or skipped_not_newer. Such ids end the same way on
-#                  every run, and never hold up the ones behind them. The ids not reached are
-#                  printed as `remaining=M`; re-run until it is 0. The run converges.
-#   --time-budget  time_budget_seconds (default 2700, as the register's budget): no new id
-#                  starts once the run has lasted that long. It logs `time_budget_reached`; the
-#                  ids not reached are `remaining`, and the run exits 0 unless an id failed.
-#                  It bounds how long the run holds the register's semaphore: ids that end
-#                  before their write, and timed-out reads, use no --max-writes.
-#   replace check  before fetching the source, the item is re-read (GET, no retries, 30 s
-#                  timeout). A body that is not that item with a readable version is
-#                  refused_target_unreadable, as in the diff; a 404 is `gone`; an item already
-#                  caught up is skipped. The pre-image goes to replaced-ids BEFORE the PUT, the
-#                  outcome after it.
-#   10 in a row    10 failures in a row (an outage) stop the run; skips never count toward it.
-#   loud failure   exit 1 (the Workflow shows Failed) after the summary if a write failed or was
-#                  refused, if a read an id needed failed (EODC fetch, target GET), or if no
-#                  source item in the range has a usable EOPF_GEOZARR >= 0.13.0 (a renamed key or
-#                  a new stamp format must not look like a converged run). An unbuildable source
-#                  (EODC changed its item schema?) or an unreadable target recurs on every run, so
-#                  it exits 0: counted, and named on a `Look:` line after the summary.
-# There is no activeDeadlineSeconds: the bounds are --max-writes and --time-budget, never a
-# kill. Every request has a 30 s client timeout (opening the write client included) and every
-# write is sent once, so a stalled one fails instead of hanging the run.
+# Bounds, all inside the tool, none a kill (no activeDeadlineSeconds):
+#   max_writes           POSTs + PUTs per run (dry run: would send), newest acquisition first;
+#                        an id that ends before its write does not count. Re-run until
+#                        `remaining=0`.
+#   time_budget_seconds  no new id starts after it (default 2700, the register's budget), so
+#                        it bounds how long the run holds the register's semaphore.
+# Exit 1 if a write or a read an id needed failed (10 in a row stop the run) or no source is
+# usable. An unbuildable source or unreadable target recurs every run: exit 0, `Look:` line.
 #
 # Usage. Use the SAME `sha-<merge-sha>` tag (see TAG GOTCHA) for the dry run and every real run,
 # so the real runs execute the code the dry run validated.
@@ -81,26 +54,16 @@
 # deletes between this run's GET and PUT answers 404 (`gone`) and is created by the next run,
 # unless it is in sentinel-2-l2a: then it is skipped_in_archive, as the archive holds it.
 #
-# This Workflow takes the register's one-slot `eodc-register-limit` semaphore, like every
-# eopf-eodc-register run: no register run creates an id while this run may be creating it, which
-# is what lets a created-ids "uncertain" line name only an item this run may have made. Hourly
-# register runs queue behind it (concurrencyPolicy: Allow) and keep their own windows.
-#
 # Artifacts (archived to the Argo artifact bucket, kept on exit 1 too):
 #   created-ids   one JSON line per created item, as the register writes it: the input of
 #                 scripts/rollback_created_items.py (branch feat/rollback-created-items).
 #   replaced-ids  per replaced item, a `before_put` line (item_id, run_id, old_version,
 #                 new_version, pre_image) and an `after_put` line (outcome). Lines name the item
-#                 `item_id`, not `id`, so the rollback tool refuses this file instead of deleting
-#                 items that existed before the run. Restoring a pre-image is in
-#                 claude-docs/plans/reconcile-s2-new-versions.md (Rollback). It restores the
-#                 METADATA only: once EODC has re-created a store at the same path (as for
-#                 1-10 Nov), the old bytes are gone at EODC, so a restored item points at the new
-#                 store and the replace cannot be undone.
+#                 `item_id`, not `id`, so the rollback tool refuses this file. Restoring a
+#                 pre-image (METADATA only: useless once EODC re-wrote the store at the same
+#                 path, as for 1-10 Nov) is in claude-docs/plans/reconcile-s2-new-versions.md.
 #
-# pipeline_image_version must contain scripts/reconcile_versions.py. A REAL run is refused unless
-# the tag names one image: `sha-*` or `<tag>@sha256:<digest>` (pr-<N>, v*, latest and main can
-# move). A dry run takes any tag, but use the `sha-*` tag the real runs will use.
+# A REAL run is refused unless the tag names one image: `sha-*` or `<tag>@sha256:<digest>`.
 #
 # TAG GOTCHA: a push to a non-main branch BUILDS but does not PUSH (build.yml gates the push step
 # on main/tags/PR). Only the pull_request run publishes, and it tags with the PR MERGE commit, so
@@ -128,7 +91,8 @@ metadata:
 spec:
   serviceAccountName: operate-workflow-sa
   entrypoint: reconcile
-  # One registration writer at a time (see the header): the register's own semaphore.
+  # The register's one-slot semaphore: no register run creates an id while this one may (which
+  # created-ids `uncertain` lines rely on); hourly register runs queue and keep their windows.
   synchronization:
     semaphore:
       configMapKeyRef:
