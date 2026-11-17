@@ -16,9 +16,10 @@ from unittest.mock import MagicMock, patch
 import httpx
 import pystac.stac_io
 import pytest
+import reconcile_versions as rv
 import requests
 from pystac_client.exceptions import APIError
-from reconcile_versions import POLICIES, classify, main, open_write_client
+from reconcile_versions import classify, main, open_write_client
 
 EODC_FIXTURES = Path(__file__).parent.parent / "fixtures/eodc"
 FIXTURE = EODC_FIXTURES / "S2C_MSIL2A_20260927T133931_N0513_R067_T28WDE_20260927T170511.json"
@@ -31,7 +32,7 @@ EODC = "https://stac.core.eopf.eodc.eu"
 STAC_API = "https://stac.invalid/stac"
 RASTER = "https://raster.invalid/raster"
 KEY = "EOPF_GEOZARR"
-POLICY = POLICIES[NEW]
+ZARR3 = "sentinel-2-l2a-zarr3"
 
 
 @pytest.fixture(autouse=True)
@@ -85,7 +86,7 @@ def props(version, dt="2026-11-01T10:00:00Z", *, as_string=False, cloud=12.5):
 )
 def test_the_verdict_for_each_source_and_target_version(source, target, verdict):
     target_props = None if target is None else props(None if target == "no-key" else target)
-    assert classify(props(source), target_props, POLICY) == verdict
+    assert classify(props(source), target_props) == verdict
 
 
 @pytest.mark.parametrize(
@@ -97,14 +98,13 @@ def test_the_verdict_for_each_source_and_target_version(source, target, verdict)
 )  # fmt: skip
 def test_cloud_cover_is_checked_here_not_only_by_the_search_filter(cloud, verdict):
     """Review finding 8: a missing or cloudy eo:cloud_cover is a counted skip, never a create."""
-    assert classify(props("0.13.1", cloud=cloud), None, POLICY) == verdict
+    assert classify(props("0.13.1", cloud=cloud), None) == verdict
 
 
-def test_the_policy_is_fixed_per_target_not_by_flags():
-    assert set(POLICIES) == {NEW}
-    assert (POLICY.key, str(POLICY.floor), POLICY.exclude_collection) == (KEY, "0.13.0", ARCHIVE)
-    assert POLICY.acquired_from.isoformat() == "2026-09-29T00:00:00+00:00"
-    assert (POLICY.source_stac_api, POLICY.source_collection) == (EODC, "sentinel-2-l2a-zarr3")
+def test_the_policy_is_fixed_in_code_not_by_flags():
+    assert (rv.SOFTWARE_KEY, str(rv.FLOOR), rv.EXCLUDE_COLLECTION) == (KEY, "0.13.0", ARCHIVE)
+    assert rv.ACQUIRED_FROM.isoformat() == "2026-09-29T00:00:00+00:00"
+    assert (rv.DEFAULT_SOURCE_STAC_API, rv.DEFAULT_SOURCE_COLLECTION) == (EODC, ZARR3)
 
 
 # --- fakes ---
@@ -223,7 +223,7 @@ class World:
         self.source = {i: props(v, f"2026-11-{10 + n:02d}T10:00:00Z", as_string=True)
                        for n, (i, v) in enumerate(source.items())}  # fmt: skip
         self.target = FakeTarget({i: props(v) for i, v in dict(target).items()}, overrides)
-        self.eodc = FakeCatalogue({POLICY.source_collection: self.source})
+        self.eodc = FakeCatalogue({ZARR3: self.source})
         # The target as a search sees it now: what the write side holds, so re-runs converge.
         live = lambda: {i: item["properties"] for i, item in self.target.items.items()}  # noqa: E731
         self.explorer = FakeCatalogue({NEW: live, ARCHIVE: dict.fromkeys(archive, {})})
@@ -233,7 +233,7 @@ class World:
 
     def _fetch(self, api, collection, item_id):
         """The fetched item at ``fetched[item_id]``: a version, or "old" / "unbuildable"."""
-        assert (api, collection) == (EODC, POLICY.source_collection)
+        assert (api, collection) == (EODC, ZARR3)
         version = self.fetched[item_id]
         base = json.loads(OLD_GENERATION_FIXTURE.read_text()) if version == "old" else self.base
         software = {"EOPF_CPM": "3.0.0", KEY: version}
@@ -316,7 +316,7 @@ def test_the_source_search_is_the_policy_range_with_the_registers_cloud_filter(t
     world = World(source={"A": "0.13.1"})
     assert world.run(tmp_path, dry_run=True) == 0
     (search,) = world.eodc.searches
-    assert search["collections"] == ["sentinel-2-l2a-zarr3"]
+    assert search["collections"] == [ZARR3]
     assert search["datetime"] == "2026-09-29T00:00:00Z/.."
     assert search["filter"] == {"op": "<", "args": [{"property": "eo:cloud_cover"}, 90.0]}
     assert search["filter_lang"] == "cql2-json"

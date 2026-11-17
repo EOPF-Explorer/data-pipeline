@@ -131,7 +131,7 @@ def test_a_parameter_cannot_inject_arguments(tmp_path: Path) -> None:
 
 
 def test_the_target_and_policy_are_not_parameters() -> None:
-    """The key, floor and range live in the tool's POLICIES table, keyed by this collection."""
+    """The key, floor and range are constants in the tool, which refuses any other collection."""
     params = {p["name"] for p in _spec()["arguments"]["parameters"]}
     assert params == {"pipeline_image_version", "max_writes", "dry_run", "time_budget_seconds"}
     script = _container()["args"][0]

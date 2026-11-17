@@ -7,7 +7,7 @@ item in the Explorer, and one the clean deleted never comes back. This is the se
 bounded run that closes both gaps. It diffs EODC's source collection against the target over
 a fixed acquisition range, by id and version only, and for each source id:
 
-- ``eo:cloud_cover`` absent or not below the policy's maximum (the search's CQL2 filter
+- ``eo:cloud_cover`` absent or not below ``MAX_CLOUD_COVER`` (the search's CQL2 filter
   asks EODC for the same, and this check does not rely on it being honoured), below the
   floor, without the key, unreadable, or a pre-release: skipped (counted);
 - absent from the target and from the exclusion collection: CREATED, by
@@ -23,8 +23,9 @@ a fixed acquisition range, by id and version only, and for each source id:
 - in the target at an equal or newer final version: skipped. Never a downgrade of a final
   release, so following an EODC revert is a manual decision.
 
-Everything a run may do to a target is fixed in ``POLICIES``, never by a flag, and any other
-target is refused. Each summary key counts source ids, and together they add up to all of them.
+Everything a run may do is fixed in the constants below, never by a flag, and any
+``--collection`` but ``sentinel-2-l2a-new`` is refused. Each summary key counts source ids,
+and together they add up to all of them.
 
 The diff is batched: one paged, ``fields``-limited search of the source and one of the target,
 plus one ``ids=`` search per ``IDS_PER_SEARCH`` create candidates against the exclusion
@@ -88,34 +89,16 @@ from register_proxy import (  # also configures logging, as the register does
 
 logger = logging.getLogger(__name__)
 
+# The policy for TRANSITION_COLLECTION, the one target: no flag sets any of it.
 SOFTWARE_KEY = "EOPF_GEOZARR"
-
-
-@dataclass(frozen=True)
-class Policy:
-    """What a reconcile run may do to one target collection."""
-
-    floor: Version
-    acquired_from: datetime
-    exclude_collection: str
-    max_cloud_cover: float
-    key: str = SOFTWARE_KEY
-    source_stac_api: str = DEFAULT_SOURCE_STAC_API
-    source_collection: str = DEFAULT_SOURCE_COLLECTION
-
-
-POLICIES = {
-    TRANSITION_COLLECTION: Policy(
-        # Loïc, 2026-11-17: the collection keeps EOPF_GEOZARR >= 0.13.0, the #519 clean's floor.
-        floor=Version("0.13.0"),
-        # The target's earliest acquisition is 2026-09-29T08:26Z (census, 17 Nov 2026).
-        acquired_from=datetime(2026, 9, 29, tzinfo=UTC),
-        exclude_collection="sentinel-2-l2a",
-        # The register template's --max-cloud-cover (the converter's filter, plan rev 2 D4):
-        # a scene the register would never create is not created here either.
-        max_cloud_cover=90.0,
-    ),
-}
+# Loïc, 2026-11-17: the collection keeps EOPF_GEOZARR >= 0.13.0, the #519 clean's floor.
+FLOOR = Version("0.13.0")
+# The target's earliest acquisition is 2026-09-29T08:26Z (census, 17 Nov 2026).
+ACQUIRED_FROM = datetime(2026, 9, 29, tzinfo=UTC)
+EXCLUDE_COLLECTION = "sentinel-2-l2a"
+# The register template's --max-cloud-cover (the converter's filter, plan rev 2 D4):
+# a scene the register would never create is not created here either.
+MAX_CLOUD_COVER = 90.0
 
 # The census read 34,672 target items in 35 pages of 1000 with these fields (17 Nov 2026).
 PAGE_SIZE = 1000
@@ -164,7 +147,7 @@ class ReplacedIdsError(Exception):
     """The replaced-ids list cannot be written: the run stops, as for ``CreatedIdsError``."""
 
 
-def classify(source: dict, target: dict | None, policy: Policy) -> str:
+def classify(source: dict, target: dict | None) -> str:
     """The diff verdict for one source id, from its properties and the target's (or None).
 
     ``create`` and ``replace`` are candidates; ``create`` still has to pass the exclusion
@@ -177,22 +160,22 @@ def classify(source: dict, target: dict | None, policy: Policy) -> str:
     cloud = source.get("eo:cloud_cover")
     if not isinstance(cloud, int | float) or isinstance(cloud, bool):  # a bool is an int
         return "skipped_cloud_cover"
-    if not cloud < policy.max_cloud_cover:
+    if not cloud < MAX_CLOUD_COVER:
         return "skipped_cloud_cover"
     try:
-        version = read_version(source, policy.key)
+        version = read_version(source, SOFTWARE_KEY)
     except ValueError:
         return "skipped_unreadable"
     if version is None:
         return "skipped_no_key"
-    if version < policy.floor:
+    if version < FLOOR:
         return "skipped_below_floor"
     if not is_final(version):
         return "skipped_prerelease"
     if target is None:
         return "create"
     try:
-        current = read_version(target, policy.key)
+        current = read_version(target, SOFTWARE_KEY)
     except ValueError:
         return "refused_target_unreadable"
     if current is not None and is_final(current) and version <= current:
@@ -267,7 +250,6 @@ class Run:
     """One reconcile run's target, its write client and its two lists."""
 
     collection: str
-    policy: Policy
     stac_api_url: str
     raster_api_url: str
     client: Client
@@ -288,16 +270,14 @@ class Run:
         on every run, so it must neither hold up the ids behind it nor trip the
         failures-in-a-row stop.
         """
-        source = fetch_source_item(
-            self.policy.source_stac_api, self.policy.source_collection, item_id
-        )
+        source = fetch_source_item(DEFAULT_SOURCE_STAC_API, DEFAULT_SOURCE_COLLECTION, item_id)
         if is_old_generation(source):
             logger.warning(
                 "   ⚠️  %s: old-generation source (raster:scale on SR_*), skipped", item_id
             )
             return "skipped_old_generation"
         properties = source.get("properties") or {}
-        verdict = classify(properties, target, self.policy)
+        verdict = classify(properties, target)
         if verdict != ("create" if target is None else "replace"):
             logger.warning("   ⚠️  %s: the source is now %s, skipped", item_id, verdict)
             return "skipped_source_changed"
@@ -309,7 +289,7 @@ class Run:
         except ValueError as exc:
             logger.warning("   ⚠️  %s: cannot be built (%s), skipped", item_id, exc)
             return "skipped_unbuildable"
-        version = read_version(properties, self.policy.key)
+        version = read_version(properties, SOFTWARE_KEY)
         assert version is not None  # noqa: S101  # nosec B101 -- classify said create/replace
         return item, version
 
@@ -322,7 +302,7 @@ class Run:
         item, version = built
         self.writes += 1  # before the POST: one that fails may still have landed
         if self.dry_run:
-            logger.info("   would create %s (%s %s)", item_id, self.policy.key, version)
+            logger.info("   would create %s (%s %s)", item_id, SOFTWARE_KEY, version)
             return "would_create"
         assert self.created_ids is not None  # noqa: S101  # nosec B101 -- main requires it
         # An uncertain line (a 5xx or no answer) names an item only this run may have made: the
@@ -365,19 +345,19 @@ class Run:
         if got.status_code != 200:
             raise RuntimeError(f"refused: the target GET answered {got.status_code}")
         current_item = got.json()
-        why = not_the_item(current_item, item_id, self.collection, self.policy.key)
+        why = not_the_item(current_item, item_id, self.collection, SOFTWARE_KEY)
         if why:  # as in the diff: the same answer on every run, so no failure
             logger.warning("   ⚠️  %s: refused, %s", item_id, why)
             return "refused_target_unreadable"
-        current = read_version(current_item["properties"], self.policy.key)
-        if classify(listed, current_item["properties"], self.policy) != "replace":
-            logger.info("   ⏭️  %s: the target is already %s %s", item_id, self.policy.key, current)
+        current = read_version(current_item["properties"], SOFTWARE_KEY)
+        if classify(listed, current_item["properties"]) != "replace":
+            logger.info("   ⏭️  %s: the target is already %s %s", item_id, SOFTWARE_KEY, current)
             return "skipped_not_newer"
         built = self.build(item_id, current_item["properties"])
         if isinstance(built, str):
             return built
         item, version = built
-        change = f"{self.policy.key} {current} -> {version}"
+        change = f"{SOFTWARE_KEY} {current} -> {version}"
         self.writes += 1  # before the PUT: one that fails may still have landed
         if self.dry_run:
             logger.info("   would replace %s (%s)", item_id, change)
@@ -422,7 +402,7 @@ class Run:
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--collection", required=True, help=f"One of {sorted(POLICIES)}")
+    parser.add_argument("--collection", required=True, help=f"Must be {TRANSITION_COLLECTION}")
     parser.add_argument("--stac-api-url", required=True, help="Target STAC API")
     parser.add_argument("--raster-api-url", required=True, help="TiTiler base URL for links")
     parser.add_argument(
@@ -485,11 +465,8 @@ def report(
 def main(argv: list[str] | None = None) -> int:
     started = monotonic()  # from here, as the register: the run holds its semaphore from the start
     args = parse_args(argv)
-    policy = POLICIES.get(args.collection)
-    if policy is None:
-        logger.error(
-            "Refusing --collection %r: only %s has a policy", args.collection, sorted(POLICIES)
-        )
+    if args.collection != TRANSITION_COLLECTION:
+        logger.error("Refusing --collection %r: only %s", args.collection, TRANSITION_COLLECTION)
         return 1
     for url, name in [
         (args.stac_api_url, "--stac-api-url"),
@@ -518,19 +495,19 @@ def main(argv: list[str] | None = None) -> int:
 
     # Read everything before the first write; a failure here writes nothing.
     try:
-        source_client = stac_auth.open_resilient_client(policy.source_stac_api)
+        source_client = stac_auth.open_resilient_client(DEFAULT_SOURCE_STAC_API)
         target_client = stac_auth.open_resilient_client(args.stac_api_url)
         sources = walk(
             source_client,
-            collections=[policy.source_collection],
-            datetime=f"{policy.acquired_from.isoformat().replace('+00:00', 'Z')}/..",
-            filter={"op": "<", "args": [{"property": "eo:cloud_cover"}, policy.max_cloud_cover]},
+            collections=[DEFAULT_SOURCE_COLLECTION],
+            datetime=f"{ACQUIRED_FROM.isoformat().replace('+00:00', 'Z')}/..",
+            filter={"op": "<", "args": [{"property": "eo:cloud_cover"}, MAX_CLOUD_COVER]},
             filter_lang="cql2-json",
         )
         targets = walk(target_client, collections=[args.collection])
-        verdicts = {i: classify(p, targets.get(i), policy) for i, p in sources.items()}
+        verdicts = {i: classify(p, targets.get(i)) for i, p in sources.items()}
         to_create = sorted(i for i, v in verdicts.items() if v == "create")
-        for item_id in present_in(target_client, policy.exclude_collection, to_create):
+        for item_id in present_in(target_client, EXCLUDE_COLLECTION, to_create):
             verdicts[item_id] = "skipped_in_archive"
     except Exception as exc:  # noqa: BLE001 - any read failure stops the run before a write
         logger.error("Reading the catalogues failed, nothing written: %s", exc)
@@ -540,9 +517,9 @@ def main(argv: list[str] | None = None) -> int:
     logger.info(
         "Diff for %s (%s >= %s, acquired from %s): source=%d target=%d",
         args.collection,
-        policy.key,
-        policy.floor,
-        policy.acquired_from.date(),
+        SOFTWARE_KEY,
+        FLOOR,
+        ACQUIRED_FROM.date(),
         len(sources),
         len(targets),
     )
@@ -567,9 +544,9 @@ def main(argv: list[str] | None = None) -> int:
             "Refusing: none of the %d source item(s) since %s has a usable %s >= %s. A renamed "
             "key, a new stamp format or an empty source would otherwise pass for a converged run",
             len(sources),
-            policy.acquired_from.date(),
-            policy.key,
-            policy.floor,
+            ACQUIRED_FROM.date(),
+            SOFTWARE_KEY,
+            FLOOR,
         )
         return 1
 
@@ -577,7 +554,6 @@ def main(argv: list[str] | None = None) -> int:
         return report(args.collection, len(sources), counts, fates)
     run = Run(
         collection=args.collection,
-        policy=policy,
         stac_api_url=args.stac_api_url,
         raster_api_url=args.raster_api_url,
         client=open_write_client(args.stac_api_url),

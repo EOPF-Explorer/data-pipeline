@@ -14,7 +14,7 @@ timeout or a kill; no new dependency beyond the direct `packaging` pin #519 also
 | Resource | Status |
 |---|---|
 | `scripts/processing_software.py`: the one `processing:software` parser (object or JSON string) | Built, unit-tested offline |
-| `scripts/reconcile_versions.py`: policy table, batched diff, create/replace, bound, exit code | Built, unit-tested offline; review findings #2, #3, #6, #7, #8, #10 fixed (Task 4) |
+| `scripts/reconcile_versions.py`: fixed policy, batched diff, create/replace, bound, exit code | Built, unit-tested offline; review findings #2, #3, #6, #7, #8, #10 fixed (Task 4) |
 | `deploy/reconcile-s2-new-versions-workflow.yaml`: one-off Workflow, dry run by default | Built; tests run its script with a stub `python3`; header fixed (#1, #4, run order, restore limit) |
 | `scripts/register_proxy.py` | `TARGET_RUNS` comment names this tool as the one PUT into `-new` (#5); `create_item` takes the target URL and records created-ids itself, for both tools; pipeline behaviour unchanged |
 | `scripts/query_stac.py` | Unchanged |
@@ -50,7 +50,7 @@ summary: one key per source-id fate, adding up to source=N; remaining = actions 
 ```
 
 Decisions:
-- **Policy from the target.** `POLICIES` in `reconcile_versions.py` holds, for `sentinel-2-l2a-new` only, the
+- **Policy fixed in code.** Constants in `reconcile_versions.py` hold, for `sentinel-2-l2a-new` only, the
   key (`SOFTWARE_KEY = "EOPF_GEOZARR"`), the floor (0.13.0, the #519 clean's), the acquisition start
   (2026-09-29, the target's earliest acquisition), the exclusion collection (`sentinel-2-l2a`), the cloud
   filter (90, the register template's) and the EODC source. No flag carries any of them; any other
