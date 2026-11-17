@@ -1,0 +1,188 @@
+# One-off Argo Workflow: bring the PRODUCTION sentinel-2-l2a-new collection in step with EODC's
+# re-processing, by processing:software EOPF_GEOZARR (scripts/reconcile_versions.py).
+#
+# The hourly eopf-eodc-register is create-only and stays so: it never rewrites an item, so a
+# scene EODC re-processes with a newer eopf-geozarr keeps its old item here, and a scene the
+# s2-new clean deleted never comes back. This run diffs EODC's sentinel-2-l2a-zarr3 (acquired
+# from 2026-09-29, eo:cloud_cover < 90, as the register) against the target by id + version:
+#   - EOPF_GEOZARR >= 0.13.0, absent from the target and from sentinel-2-l2a  -> CREATE
+#   - EOPF_GEOZARR >= 0.13.0 and strictly newer than the target's (or the target has none)
+#                                                                             -> REPLACE (PUT)
+#   - below 0.13.0, no key, unreadable, a pre-release, equal or older, or in sentinel-2-l2a
+#     (our converted archive: EODC's 30 Sep burst, ~800-1,000 ids)            -> skipped, counted
+# The key, the floor, the range and the exclusion are fixed in the script's POLICIES table for
+# this collection, not parameters here; the script refuses any other collection.
+#
+# Bounds, all enforced inside the tool, none by a timeout or a kill:
+#   --max-writes   creates + replaces this run makes at most, newest acquisition first. The rest
+#                  is printed as `remaining=M`; re-run until it is 0. The run converges.
+#   replace check  before each PUT the item is re-read (GET, no retries, 30 s timeout). A body
+#                  that is not that item with a readable version refuses the id; a 404 is
+#                  `gone`; an item already caught up is skipped. The pre-image goes to
+#                  replaced-ids BEFORE the PUT, the outcome after it.
+#   loud failure   exit 1 (the Workflow shows Failed) after the summary if any write failed or
+#                  was refused, if a target item's EOPF_GEOZARR cannot be read, or if no source
+#                  item in the range has a usable EOPF_GEOZARR >= 0.13.0 (a renamed key or a new
+#                  stamp format must not look like a converged run).
+# There is no activeDeadlineSeconds: the bound is --max-writes, never a kill. Every write has a
+# 30 s client timeout and is sent once, so a stalled one fails instead of hanging the run.
+#
+# Usage. Use the SAME `sha-<merge-sha>` tag (see TAG GOTCHA) for the dry run and every real run,
+# so the real runs execute the code the dry run validated.
+#   1. DRY RUN (default dry_run=true: diffs, prints every count with sample ids, and fetches,
+#      builds and re-checks the first max_writes items; writes nothing):
+#        argo submit -n devseed deploy/reconcile-s2-new-versions-workflow.yaml \
+#          -p pipeline_image_version=sha-<merge-sha>
+#   2. REAL canary, 10 writes, the same ids the dry run listed. Check them against the API and
+#      read the two artifacts before scaling:
+#        ... -p pipeline_image_version=sha-<merge-sha> -p dry_run=false -p max_writes=10
+#   3. BATCHES, repeated until a run prints `remaining=0`:
+#        ... -p pipeline_image_version=sha-<merge-sha> -p dry_run=false -p max_writes=500
+#   Read the counts at the top of each run: a skipped_unreadable or skipped_prerelease above 0
+#   means EODC changed how it stamps items.
+#
+# The s2-new clean (deploy/clean-s2-new-keep-geozarr-workflow.yaml, data-pipeline#519) re-reads
+# each candidate just before its DELETE and keeps one now >= 0.13.0, so the two may run in either
+# order. Run the clean first all the same: this run then has fewer replaces to make, and an item
+# the clean deletes between this run's GET and PUT answers 404 (`gone`) and is created by the
+# next run. This Workflow takes the register's one-slot `eodc-register-limit` semaphore, like
+# every eopf-eodc-register run: no register run creates an id while this run may be creating it,
+# which is what lets a created-ids "uncertain" line name only an item this run may have made.
+# Hourly register runs queue behind it (concurrencyPolicy: Allow) and keep their own windows.
+#
+# Artifacts (archived to the Argo artifact bucket, kept on exit 1 too):
+#   created-ids   one JSON line per created item, as the register writes it: the input of
+#                 scripts/rollback_created_items.py (branch feat/rollback-created-items).
+#   replaced-ids  per replaced item, a `before_put` line (item_id, run_id, old_version,
+#                 new_version, pre_image) and an `after_put` line (outcome). Lines name the item
+#                 `item_id`, not `id`, so the rollback tool refuses this file instead of deleting
+#                 items that existed before the run. Restoring a pre-image is in
+#                 claude-docs/plans/reconcile-s2-new-versions.md (Rollback).
+#
+# pipeline_image_version must contain scripts/reconcile_versions.py. A REAL run is refused unless
+# the tag names one image: `sha-*` or `<tag>@sha256:<digest>` (pr-<N>, v*, latest and main can
+# move). A dry run takes any tag, but use the `sha-*` tag the real runs will use.
+#
+# TAG GOTCHA: a push to a non-main branch BUILDS but does not PUSH (build.yml gates the push step
+# on main/tags/PR). Only the pull_request run publishes, and it tags with the PR MERGE commit, so
+# the pullable tags are `pr-<N>` and `sha-<merge-sha>`, never the branch-head sha you just pushed.
+# The Harbor cleanup deletes `sha-*` tags after 7 days; past that, dry-run and run again on
+# `<release tag>@sha256:<digest>`.
+#
+# Verify the tool is really in the image before pointing it at data:
+#   kubectl -n devseed run reconcile-tool-smoke --restart=Never \
+#     --image=<registry>/data-pipeline:<tag> \
+#     --overrides='{"spec":{"serviceAccountName":"operate-workflow-sa"}}' \
+#     --command -- python3 /app/scripts/reconcile_versions.py --help
+#
+# A one-off on purpose: a CronWorkflow that keeps the collection reconciled is out of scope here.
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: reconcile-s2-new-versions-
+  namespace: devseed
+  labels:
+    app: data-pipeline
+    component: s2-new-reconcile
+spec:
+  serviceAccountName: operate-workflow-sa
+  entrypoint: reconcile
+  # One registration writer at a time (see the header): the register's own semaphore.
+  synchronization:
+    semaphore:
+      configMapKeyRef:
+        name: eopf-workflow-concurrency
+        key: eodc-register-limit
+  podGC:
+    # Keep the pod past the controller's success bookkeeping so the audit output is still
+    # retrievable from Loki.
+    strategy: OnPodCompletion
+    deleteDelayDuration: 1800s
+  ttlStrategy:
+    secondsAfterSuccess: 604800
+    secondsAfterFailure: 604800
+  arguments:
+    parameters:
+    - name: pipeline_image_version          # REQUIRED: a build containing reconcile_versions.py
+      value: ""
+    - name: max_writes                      # creates + replaces per run; re-run to continue
+      value: "10"
+    - name: dry_run                         # SAFE DEFAULT: diff + checks, write nothing
+      value: "true"
+  templates:
+  - name: reconcile
+    container:
+      image: w9mllyot.c1.de1.container-registry.ovh.net/eopf-sentinel-zarr-explorer/data-pipeline:{{workflow.parameters.pipeline_image_version}}
+      imagePullPolicy: Always
+      resources:
+        requests:
+          # The diff holds id + version for every source and target item (~35k each today),
+          # and each replace holds one pre-image.
+          memory: 1Gi
+          cpu: 250m
+        limits:
+          memory: 2Gi
+      env:
+      - name: PYTHONUNBUFFERED
+        value: "1"
+      # Parameters reach the script as env, never interpolated into it: no injection.
+      - name: PIPELINE_IMAGE_VERSION
+        value: "{{workflow.parameters.pipeline_image_version}}"
+      - name: MAX_WRITES
+        value: "{{workflow.parameters.max_writes}}"
+      - name: DRY_RUN
+        value: "{{workflow.parameters.dry_run}}"
+      - name: RUN_ID
+        value: "{{workflow.name}}"
+      # STAC write enforcement is live: without these every POST and PUT returns 401.
+      - name: OIDC_TOKEN_URL
+        valueFrom:
+          secretKeyRef: { name: stac-auth-oidc, key: OIDC_TOKEN_URL }
+      - name: OIDC_CLIENT_ID
+        valueFrom:
+          secretKeyRef: { name: stac-auth-oidc, key: OIDC_CLIENT_ID }
+      - name: OIDC_CLIENT_SECRET
+        valueFrom:
+          secretKeyRef: { name: stac-auth-oidc, key: OIDC_CLIENT_SECRET }
+      command: [bash, -c]
+      args:
+      - |
+        set -euo pipefail
+        if [ -z "$PIPELINE_IMAGE_VERSION" ]; then
+          echo "pipeline_image_version is required" >&2; exit 2
+        fi
+        # Only the exact string "false" writes; any other value is a dry run.
+        MODE=(--dry-run)
+        if [ "$DRY_RUN" = "false" ]; then
+          # A real run must use the image the dry run validated: a tag that names one image.
+          case "$PIPELINE_IMAGE_VERSION" in
+            sha-*|*@sha256:*) ;;
+            *)
+              echo "REFUSING: image tag '$PIPELINE_IMAGE_VERSION' can move and dry_run=false." >&2
+              echo "Use the dry run's sha-<merge-sha> tag or <tag>@sha256:<digest> (see the manifest header)." >&2
+              exit 1
+              ;;
+          esac
+          MODE=(--created-ids /tmp/reconcile-out/created-ids.jsonl
+                --replaced-ids /tmp/reconcile-out/replaced-ids.jsonl
+                --run-id "$RUN_ID")
+        fi
+        exec python3 /app/scripts/reconcile_versions.py \
+          --collection sentinel-2-l2a-new \
+          --stac-api-url https://api.explorer.eopf.copernicus.eu/stac \
+          --raster-api-url https://api.explorer.eopf.copernicus.eu/raster \
+          --max-writes "$MAX_WRITES" \
+          "${MODE[@]}"
+    outputs:
+      artifacts:
+      # Optional: a dry run, or a run refused before its first write, creates neither.
+      - name: created-ids
+        path: /tmp/reconcile-out/created-ids.jsonl
+        optional: true
+        archive:
+          none: {}
+      - name: replaced-ids
+        path: /tmp/reconcile-out/replaced-ids.jsonl
+        optional: true
+        archive:
+          none: {}
