@@ -236,7 +236,9 @@ class World:
 
     def run(self, tmp_path, *extra, max_writes="10", dry_run=False):
         args = ["--collection", NEW, "--stac-api-url", STAC_API, "--raster-api-url", RASTER,
-                "--max-writes", max_writes, *extra]  # fmt: skip
+                *extra]  # fmt: skip
+        if max_writes is not None:
+            args += ["--max-writes", max_writes]
         if dry_run:
             args.append("--dry-run")
         else:
@@ -432,8 +434,19 @@ def test_max_writes_is_a_positive_whole_number(tmp_path, value):
     assert exc.value.code == 2
 
 
-@pytest.mark.parametrize("drop", ["--max-writes", "--created-ids", "--replaced-ids", "--run-id"])
-def test_a_real_run_needs_its_bound_and_both_lists(tmp_path, drop, caplog):
+@pytest.mark.parametrize("dry_run", [True, False], ids=["dry-run", "real-run"])
+def test_every_run_needs_max_writes(tmp_path, dry_run):
+    """Review finding 6: a dry run without it had a bound of 0, so it fetched and checked
+    nothing and still looked green."""
+    world = World(source={"A": "0.13.1"})
+    with pytest.raises(SystemExit) as exc:
+        world.run(tmp_path, max_writes=None, dry_run=dry_run)
+    assert exc.value.code == 2
+    assert not world.fetch.called and world.eodc.searches == []
+
+
+@pytest.mark.parametrize("drop", ["--created-ids", "--replaced-ids", "--run-id"])
+def test_a_real_run_needs_both_lists_and_a_run_id(tmp_path, drop, caplog):
     args = {"--max-writes": "10", "--created-ids": str(tmp_path / "c"),
             "--replaced-ids": str(tmp_path / "r"), "--run-id": "wf-1"}  # fmt: skip
     del args[drop]
@@ -445,14 +458,15 @@ def test_a_real_run_needs_its_bound_and_both_lists(tmp_path, drop, caplog):
 @pytest.mark.parametrize("collection", [ARCHIVE, "sentinel-2-l2a-staging", "sentinel-2-l2a-new "])
 def test_any_other_target_is_refused_before_any_network_call(caplog, collection):
     argv = ["--collection", collection, "--stac-api-url", STAC_API, "--raster-api-url", RASTER,
-            "--dry-run"]  # fmt: skip
+            "--max-writes", "10", "--dry-run"]  # fmt: skip
     assert main(argv) == 1
     assert f"Refusing --collection {collection!r}" in caplog.text, "refused, not failed later"
 
 
 @pytest.mark.parametrize("flag", ["--stac-api-url", "--raster-api-url"])
 def test_every_url_must_be_https(flag):
-    argv = {"--collection": NEW, "--stac-api-url": STAC_API, "--raster-api-url": RASTER}
+    argv = {"--collection": NEW, "--stac-api-url": STAC_API, "--raster-api-url": RASTER,
+            "--max-writes": "1"}  # fmt: skip
     argv[flag] = "http://stac.invalid"
     assert main([x for pair in argv.items() for x in pair] + ["--dry-run"]) == 1
 

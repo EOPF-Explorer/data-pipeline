@@ -403,9 +403,10 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--max-writes",
         type=positive_int,
+        required=True,  # a dry run too: without it, it would check nothing and look green
         metavar="N",
-        help="Creates + replaces this run makes at most; the rest is reported as remaining. "
-        "Required unless --dry-run",
+        help="POSTs + PUTs this run sends at most (a dry run: would send); the ids not "
+        "reached are reported as remaining",
     )
     parser.add_argument("--dry-run", action="store_true", help="Diff and check; write nothing")
     parser.add_argument(
@@ -447,7 +448,6 @@ def main(argv: list[str] | None = None) -> int:
             return 1
     if not args.dry_run:
         required = {
-            "--max-writes": args.max_writes,
             "--created-ids": args.created_ids,
             "--replaced-ids": args.replaced_ids,
             "--run-id": args.run_id,
@@ -505,7 +505,6 @@ def main(argv: list[str] | None = None) -> int:
         key=lambda action: (str(sources[action[1]].get("datetime") or ""), action[1]),
         reverse=True,
     )
-    bound = args.max_writes or 0
 
     usable = len(sources) - sum(counts[key] for key in UNUSABLE)
     if not usable:
@@ -535,7 +534,7 @@ def main(argv: list[str] | None = None) -> int:
     streak = visited = 0
     for kind, item_id in actions:
         # Every stop falls between ids, never inside one: a write and its line finish together.
-        if run.writes == bound:
+        if run.writes == args.max_writes:
             break
         if streak == MAX_CONSECUTIVE_FAILURES:
             logger.error("Stopping after %d failures in a row", streak)
