@@ -142,7 +142,8 @@ def answer(status, body=None):
 class FakeTarget:
     """The target behind the write client: GET/POST/PUT on an in-memory collection.
 
-    ``overrides`` maps (method, id) to a status, an exception, or for GET a raw body.
+    ``overrides`` maps (method, id) to a status, an exception, or for GET a raw body or a
+    (status, body) pair.
     """
 
     def __init__(self, items, overrides=None):
@@ -174,6 +175,8 @@ class FakeTarget:
         got = self._override("GET", item_id)
         if isinstance(got, int):
             return answer(got)
+        if isinstance(got, tuple):
+            return answer(*got)
         if got is not None:
             return answer(200, got)
         return answer(200, self.items[item_id]) if item_id in self.items else answer(404)
@@ -621,17 +624,20 @@ def test_a_replace_records_the_pre_image_before_the_put_and_the_outcome_after(tm
         {"type": "Feature", "id": "A", "collection": NEW, "properties": props("v0.13.1-0-g1")},
         200,
         302,
+        (302, FakeTarget.item("A", props("0.13.0"))),
         500,
     ],
     ids=["id-only", "null-properties", "feature-collection", "not-a-feature", "other-id",
-         "other-collection", "unreadable", "empty-200", "redirect", "server-error"],
+         "other-collection", "unreadable", "empty-200", "redirect", "redirect-with-the-item",
+         "server-error"],
 )  # fmt: skip
 def test_a_get_that_is_not_the_item_refuses_the_put(tmp_path, caplog, body):
     """A body that is not the item is refused as in the diff (#522 review 2): counted, not a
-    failure. A body that is not JSON, or a status other than 200 or 404, is a failure."""
+    failure. A body that is not JSON, or any status but 200 and 404, is a failure, even
+    when the body is the item."""
     world = World(source={"A": "0.13.1", "B": "0.13.1"}, target={"A": "0.13.0", "B": "0.13.0"},
                   overrides={("GET", "A"): body})  # fmt: skip
-    failed = isinstance(body, int)
+    failed = isinstance(body, int | tuple)
     assert world.run(tmp_path) == failed
     assert world.target.writes() == [("put", "B")], "A refused, B still replaced"
     assert [line["item_id"] for line in lines(tmp_path / "replaced.jsonl")] == ["B", "B"]
