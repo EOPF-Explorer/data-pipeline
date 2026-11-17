@@ -295,6 +295,11 @@ restored to its old state. The Task 7 exercise checks the mechanism, not the dat
   a failed id exits 1). Each fails its tests except M8a, `run` built under `if actions:`, which is a static
   bug: pytest passes, `mypy --enable-error-code possibly-undefined` flags it. Driver and output (run2) in
   `~/DevDS/EOPF/clean-s2-new-keep-geozarr_2026-11-17/mutation-runs/pr522-review-fixes/`.
+- Over-engineering pass (17 Nov): the same five test files, 244 passed; full suite 2145 passed, 5 skipped.
+  Every mutant caught before the pass is still caught, as is or re-anchored (`run_ponytail.py` in both
+  mutation directories); R3b is still missed, and A1 now fails on a missing import, so its copy A1p stands
+  in. The pass found that no test pinned the replace path's refusal of a non-200 GET: the 302 and 500 rows
+  send no body, so `.json()` failed first. A 302 that carries the item now fails only through that check.
 
 ## Risks
 - **EODC's page size and `fields`.** EODC's root declares `item-search#fields` (captured 26 Oct 2026);
