@@ -402,6 +402,14 @@ def test_one_usable_source_is_enough(tmp_path):
     assert world.run(tmp_path) == 0
 
 
+def test_a_converged_run_opens_no_write_client(tmp_path, caplog):
+    """#522 review 8: with no action, the run reports and returns before building its Run."""
+    world = World(source={"A": "0.13.1"}, target={"A": "0.13.1"})
+    with patch("reconcile_versions.Run", side_effect=AssertionError("built a Run")):
+        assert world.run(tmp_path) == 0
+    assert summary(caplog)["skipped_not_newer"] == 1 and summary(caplog)["remaining"] == 0
+
+
 def test_a_read_failure_writes_nothing(tmp_path, caplog):
     world = World(source={"A": "0.13.1"})
     world.explorer.search = MagicMock(side_effect=requests.ConnectionError("down"))

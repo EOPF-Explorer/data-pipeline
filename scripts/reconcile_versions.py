@@ -568,18 +568,19 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    if actions:
-        run = Run(
-            collection=args.collection,
-            policy=policy,
-            stac_api_url=args.stac_api_url,
-            raster_api_url=args.raster_api_url,
-            client=open_write_client(args.stac_api_url),
-            dry_run=args.dry_run,
-            created_ids=args.created_ids,
-            replaced_ids=args.replaced_ids,
-            run_id=args.run_id,
-        )
+    if not actions:  # converged: no write client to open
+        return report(args.collection, len(sources), counts, fates)
+    run = Run(
+        collection=args.collection,
+        policy=policy,
+        stac_api_url=args.stac_api_url,
+        raster_api_url=args.raster_api_url,
+        client=open_write_client(args.stac_api_url),
+        dry_run=args.dry_run,
+        created_ids=args.created_ids,
+        replaced_ids=args.replaced_ids,
+        run_id=args.run_id,
+    )
     streak = visited = 0
     for kind, item_id in actions:
         # Every stop falls between ids, never inside one: a write and its line finish together.
