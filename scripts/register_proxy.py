@@ -566,19 +566,26 @@ def read_item_ids(path: Path) -> list[str]:
     ]
 
 
+def item_url(stac_api: str, collection: str, item_id: str) -> str:
+    """One item's URL on ``stac_api``, both path components percent-encoded.
+
+    ``--item-ids-file`` is operator-edited and httpx normalises RFC 3986 dot-segments, so an
+    unquoted id of ``../../<other>/items/X`` would silently retarget the request at another
+    collection. ``quote(safe="")`` also stops ``#`` from truncating the URL.
+    """
+    return (
+        f"{stac_api.rstrip('/')}"
+        f"/collections/{urllib.parse.quote(collection, safe='')}"
+        f"/items/{urllib.parse.quote(item_id, safe='')}"
+    )
+
+
 def source_item_url(source_stac_api: str, source_collection: str, item_id: str) -> str:
     """Where one source item is fetched, and so where discover must have found it.
 
-    Both path components are percent-encoded: ``--item-ids-file`` is operator-edited and
-    httpx normalises RFC 3986 dot-segments, so an unquoted id of ``../../<other>/items/X``
-    would silently retarget the GET at another collection — making ``--source-collection``
-    no bound at all. ``quote(safe="")`` also stops ``#`` from truncating the URL.
+    ``item_url``: an unquoted id would make ``--source-collection`` no bound at all.
     """
-    return (
-        f"{source_stac_api.rstrip('/')}"
-        f"/collections/{urllib.parse.quote(source_collection, safe='')}"
-        f"/items/{urllib.parse.quote(item_id, safe='')}"
-    )
+    return item_url(source_stac_api, source_collection, item_id)
 
 
 def read_items_json(

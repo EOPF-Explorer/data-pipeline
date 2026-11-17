@@ -78,8 +78,8 @@ from register_proxy import (  # also configures logging, as the register does
     create_item,
     fetch_source_item,
     is_old_generation,
+    item_url,
     record_created,
-    source_item_url,
 )
 
 logger = logging.getLogger(__name__)
@@ -361,7 +361,7 @@ class Run:
         io = self.client._stac_io
         assert io is not None  # noqa: S101  # nosec B101 -- set by Client.open
         session = io.session
-        url = source_item_url(self.stac_api_url, self.collection, item_id)  # same path shape
+        url = item_url(self.stac_api_url, self.collection, item_id)
         got = session.get(url, timeout=WRITE_TIMEOUT_S, allow_redirects=False)
         if got.status_code == 404:
             logger.info("   ⏭️  %s: gone from the target (404), not replaced", item_id)
