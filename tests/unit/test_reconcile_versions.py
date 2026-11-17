@@ -17,6 +17,7 @@ import httpx
 import pystac.stac_io
 import pytest
 import requests
+from pystac_client.exceptions import APIError
 from reconcile_versions import POLICIES, classify, main, open_write_client
 
 EODC_FIXTURES = Path(__file__).parent.parent / "fixtures/eodc"
@@ -653,10 +654,12 @@ class _CountingHandler(BaseHTTPRequestHandler):
 
     seen: list[tuple[str, str, str | None]] = []
     delay = 0.0
+    landing_delay = 0.0
 
     def _respond(self):
         type(self).seen.append((self.command, self.path, self.headers.get("Authorization")))
         if self.path == "/" and self.command == "GET":
+            time.sleep(type(self).landing_delay)
             base = f"http://127.0.0.1:{self.server.server_port}"
             body = json.dumps({"type": "Catalog", "id": "t", "stac_version": "1.0.0",
                                "description": "t",
@@ -685,7 +688,7 @@ class _CountingHandler(BaseHTTPRequestHandler):
 @pytest.fixture
 def counting_server():
     _CountingHandler.seen = []
-    _CountingHandler.delay = 0.0
+    _CountingHandler.delay = _CountingHandler.landing_delay = 0.0
     server = HTTPServer(("127.0.0.1", 0), _CountingHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -713,6 +716,17 @@ def test_a_put_that_times_out_is_not_re_sent(counting_server):
         session.put(f"{counting_server}/collections/{NEW}/items/A", json={"id": "A"}, timeout=0.2)
     time.sleep(1.5)  # a retry would be queued behind the slow answer, then recorded
     assert [m for m, p, _ in _CountingHandler.seen if p != "/"] == ["PUT"]
+
+
+def test_opening_the_write_client_times_out(counting_server, monkeypatch):
+    """Review finding 3: a landing page that never answers must not hang the run while it
+    holds the register's semaphore."""
+    monkeypatch.setattr("reconcile_versions.WRITE_TIMEOUT_S", 0.2)
+    _CountingHandler.landing_delay = 1.0
+    started = time.monotonic()
+    with pytest.raises(APIError, match="timed out"):
+        open_write_client(counting_server)
+    assert time.monotonic() - started < 0.9
 
 
 def test_the_write_session_carries_the_bearer(counting_server, oidc_env, token_response):

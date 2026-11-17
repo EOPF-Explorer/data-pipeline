@@ -212,9 +212,16 @@ def open_write_client(url: str) -> Client:
     ``stac_auth.open_client`` keeps pystac-client's default ``Retry(total=5)``, which re-sends
     a PUT on a read timeout and sleeps a server's Retry-After. Here the session keeps
     requests' default adapter (no retries): every write is sent once, and a failure is
-    reported, not repeated. Each call passes its own timeout.
+    reported, not repeated. Each call passes its own timeout. Opening it fetches the landing
+    page, under the same timeout: the run holds the register's semaphore, so a hang here
+    would hold up the hourly register. ``Client.open`` resets the ``stac_io``'s timeout
+    unless it is also given one (see ``stac_auth.open_resilient_client``), hence both.
     """
-    client = Client.open(url, stac_io=StacApiIO(max_retries=None))
+    client = Client.open(
+        url,
+        stac_io=StacApiIO(timeout=WRITE_TIMEOUT_S, max_retries=None),
+        timeout=WRITE_TIMEOUT_S,
+    )
     assert client._stac_io is not None  # noqa: S101  # nosec B101 -- set by Client.open
     client._stac_io.session.auth = stac_auth.bearer_auth
     return client
