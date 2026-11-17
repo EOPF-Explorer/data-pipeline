@@ -13,7 +13,6 @@ Supports:
 This tool uses manage_item.py for all item-level operations.
 """
 
-import contextlib
 import json
 import os
 import sys
@@ -50,6 +49,7 @@ if str(scripts_dir) not in sys.path:
     sys.path.insert(0, str(scripts_dir))
 
 import stac_auth  # noqa: E402
+from processing_software import read_version  # noqa: E402
 from storage_tier_utils import get_s3_storage_info  # noqa: E402
 
 
@@ -115,30 +115,8 @@ def _protect_recent(
     return eligible, n_recent, n_undated
 
 
-def _software_value(item: dict[str, Any], key: str) -> str | None:
-    """The item's ``processing:software[key]``, or None if it has no such entry.
-
-    The API returns ``processing:software`` as an object in some responses and as a
-    JSON-encoded string in others, so both are read. Anything else, or a non-string
-    value under ``key``, raises ValueError.
-    """
-    software = (item.get("properties") or {}).get("processing:software")
-    if isinstance(software, str):
-        with contextlib.suppress(json.JSONDecodeError):  # still a str: refused below
-            software = json.loads(software)
-    if software is None:
-        return None
-    if not isinstance(software, dict):
-        raise ValueError(f"processing:software is not an object: {software!r:.80}")
-    value = software.get(key)
-    if value is not None and not isinstance(value, str):
-        raise ValueError(f"processing:software[{key!r}] is not a string: {value!r:.80}")
-    return value
-
-
-def _kept(value: str | None, floor: Version) -> bool:
-    """Whether a ``_software_value`` keeps its item; InvalidVersion (a ValueError) if unreadable."""
-    return value is not None and Version(value) >= floor
+def _kept(version: Version | None, floor: Version) -> bool:
+    return version is not None and version >= floor
 
 
 def _split_by_software(
@@ -147,10 +125,12 @@ def _split_by_software(
     """The deletion candidates for --keep-software-min.
 
     Kept: items whose ``processing:software[key]`` is a PEP 440 version >= ``floor``, so a
-    pre-release such as ``0.13.0rc1`` is below ``0.13.0``. Every other item is a candidate,
-    including one with no ``key`` or no ``processing:software`` at all. Prints the count per
-    value, unreadable ones included, and only then refuses the run (ClickException), before
-    anything is deleted, when:
+    pre-release such as ``0.13.0rc1`` is below ``0.13.0``. It is read by the reconcile's
+    parser (``processing_software.read_version``): a version needs ``major.minor`` and no
+    epoch, so an all-digit sha or ``1!0.1`` is unreadable, not newer than any floor. Every
+    other item is a candidate, including one with no ``key`` or no ``processing:software`` at
+    all. Prints the count per version, unreadable ones included, and only then refuses the
+    run (ClickException), before anything is deleted, when:
 
     - an item's ``processing:software``, or its ``key``, cannot be read as a version. That
       item is not provably below ``floor`` either, and the items likeliest to carry a new
@@ -160,24 +140,23 @@ def _split_by_software(
     So a dry run always shows the whole census, even one that is refused.
     """
     candidates: list[dict[str, Any]] = []
-    found: Counter[str | None] = Counter()
+    found: Counter[Version | None] = Counter()
     unreadable: list[str] = []
     for item in items:
         try:
-            value = _software_value(item, key)
-            keep = _kept(value, floor)
+            version = read_version(item.get("properties") or {}, key)
         except ValueError as exc:  # InvalidVersion is a ValueError
             unreadable.append(f"{item['id']} ({exc})")
             continue
-        found[value] += 1
-        if not keep:
+        found[version] += 1
+        if not _kept(version, floor):
             candidates.append(item)
 
     n_kept = len(items) - len(candidates) - len(unreadable)
     click.echo(f"\n🔎 processing:software[{key!r}] per item (keeping >= {floor}):")
-    for value, n in found.most_common():
-        label = "(missing)" if value is None else repr(value)
-        click.echo(f"    {'keep  ' if _kept(value, floor) else 'delete'} {label}: {n:,}")
+    for version, n in found.most_common():
+        label = "(missing)" if version is None else repr(str(version))
+        click.echo(f"    {'keep  ' if _kept(version, floor) else 'delete'} {label}: {n:,}")
     click.echo(f"    unreadable: {len(unreadable):,}")
     click.echo(f"    total: keep {n_kept:,}, delete {len(candidates):,}")
     if unreadable:
@@ -300,9 +279,9 @@ class STACCollectionManager:
             click.echo(f"  ❌ {item_id}: re-check GET failed, not deleted: {exc}", err=True)
             return "error"
         try:
-            value = _software_value(item, key)
-            if _kept(value, floor):
-                click.echo(f"  🛡️  {item_id}: kept on re-check ({key} {value})")
+            version = read_version(item.get("properties") or {}, key)
+            if _kept(version, floor):
+                click.echo(f"  🛡️  {item_id}: kept on re-check ({key} {version})")
                 return "kept"
         except (ValueError, AttributeError) as exc:  # AttributeError: a body that is no item
             click.echo(f"  ⛔ {item_id}: unreadable on re-check, not deleted: {exc}", err=True)

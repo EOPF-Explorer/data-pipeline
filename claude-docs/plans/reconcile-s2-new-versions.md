@@ -303,9 +303,6 @@ restored to its old state. The Task 7 exercise checks the mechanism, not the dat
    counted and sampled but exit 0. Fail on any (as the clean refuses any unreadable item)?
 5. **Recovery exercise.** Is exercising the rollback and the restore on one canary item each (Task 7) enough,
    or should the restore be scripted and tested first?
-6. **After #519 merges:** switch `manage_collections._software_value` / `_kept` to
-   `processing_software.read_version` (it is stricter: an all-digit sha becomes unreadable, which the clean
-   refuses).
 
 ### Resolved (Loïc, 17 Nov 2026)
 1. **Exclusion scope:** an id already in both `-new` and `sentinel-2-l2a` is replaced in `-new` like any
@@ -315,6 +312,9 @@ restored to its old state. The Task 7 exercise checks the mechanism, not the dat
    manifest header instead.
 - **Run order:** for the 1-10 Nov acquisitions this reconcile runs BEFORE the clean; October is independent
   (see Run order).
+6. **The clean's parser:** `manage_collections` reads versions with `processing_software.read_version` and
+   its own parser is gone (#522 review 4). An all-digit sha, a major-only version or an epoch is now
+   unreadable there too, so the clean refuses (census printed first, nothing deleted).
 7. **A recurring reconcile**, the dead-entry delete pass and one-item-per-scene (the 111 scenes with two
    generations at EODC): deferred until EODC answers on the scope of its re-publishing.
 8. **Unbuildable source, unreadable target:** counted, named on a `Look:` line, exit 0 (#522 review 1). Only

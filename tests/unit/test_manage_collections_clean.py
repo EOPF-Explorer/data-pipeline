@@ -466,12 +466,17 @@ def test_keep_software_min_is_applied_before_the_bound() -> None:
         13,
         {"EOPF_GEOZARR": 0.131},
         {"EOPF_GEOZARR": "latest"},
+        {"EOPF_GEOZARR": "1234567"},
+        {"EOPF_GEOZARR": "1"},
+        {"EOPF_GEOZARR": "1!0.1"},
     ],
-    ids=["not-json", "truncated-json", "list", "number", "non-string-value", "not-a-version"],
-)
+    ids=["not-json", "truncated-json", "list", "number", "non-string-value", "not-a-version",
+         "digit-sha", "major-only", "epoch"],
+)  # fmt: skip
 def test_keep_software_min_refuses_a_value_it_cannot_read(software: object) -> None:
     """Fail closed: not provably below the floor either. The whole run is refused before
-    any delete, and the offending id is named."""
+    any delete, and the offending id is named. The last three are valid PEP 440, above the
+    floor, but unreadable to the reconcile's parser, which the clean now shares (#522 review 4)."""
     mgr = _manager([_sw(0, _geozarr("0.13.1")), _sw(1, _geozarr("0.12.0")), _sw(2, software)])
     with pytest.raises(click.ClickException, match="not a readable version, e.g. ITEM_00002"):
         _keep(mgr)
@@ -609,11 +614,12 @@ def test_cli_keep_software_min_with_nothing_to_delete_exits_zero(
     assert "nothing deleted" in result.output
 
 
+@pytest.mark.parametrize("stamp", ["latest", "1234567", "1!0.1"])
 def test_keep_software_min_prints_the_census_before_refusing_an_unreadable_value(
-    capsys: pytest.CaptureFixture[str],
+    stamp: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """A refused dry run still shows every count, so the operator sees how big the problem is."""
-    items = [_sw(0, _geozarr("0.13.1")), _sw(1, _geozarr("0.12.0")), _sw(2, _geozarr("latest"))]
+    items = [_sw(0, _geozarr("0.13.1")), _sw(1, _geozarr("0.12.0")), _sw(2, _geozarr(stamp))]
     mgr = _manager(items)
     with pytest.raises(click.ClickException, match="not a readable version"):
         _keep(mgr, dry_run=True)
@@ -664,11 +670,13 @@ def test_recheck_counts_a_404_as_already_gone_not_a_failure(
         (requests.ConnectionError("connection reset"), "re-check failed 1"),
         (_response(200, b"<html>bad gateway</html>"), "re-check failed 1"),
         (_response(200, _sw(1, _geozarr("latest"))), "unreadable (refused) 1"),
+        (_response(200, _sw(1, _geozarr("1234567"))), "unreadable (refused) 1"),
         (_response(200, _sw(1, "EOPF_GEOZARR=0.13.1")), "unreadable (refused) 1"),
         (_response(200, ["not", "an", "item"]), "unreadable (refused) 1"),
     ],
-    ids=["http-500", "connection-error", "not-json", "not-a-version", "not-an-object", "no-item"],
-)
+    ids=["http-500", "connection-error", "not-json", "not-a-version", "digit-sha",
+         "not-an-object", "no-item"],
+)  # fmt: skip
 def test_a_recheck_that_cannot_decide_deletes_nothing_and_fails_the_run(
     served: requests.Response | Exception, counted: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
