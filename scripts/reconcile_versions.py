@@ -32,12 +32,15 @@ collection. Never one search per item.
 
 ``--max-writes N`` bounds the run from inside: the creates and replaces are taken newest
 acquisition first until N POSTs or PUTs have been sent (would have been, in a dry run), and
-the ids not reached are reported as ``remaining``; re-run until it is 0. An id that ends
+the ids not reached are reported as ``remaining``; re-run until it is 0. ``--time-budget
+SECONDS`` (optional) also stops it, between ids, once the run has lasted that long: it logs
+``time_budget_reached``, and the ids not reached are ``remaining`` too. An id that ends
 before its write (an old-generation or unbuildable source, a source changed since the diff,
-a target gone, unreadable or already caught up) is counted by reason and does not use the
-bound, so ids that end that way on every run never hold up the ones behind them. A replace GETs the target
-item on a session that never retries and checks that the body is that item with a readable
-version. It then re-compares, appends the pre-image to ``--replaced-ids`` and only then PUTs.
+a target gone, unreadable or already caught up) is counted by reason and does not use
+``--max-writes``, so ids that end that way on every run never hold up the ones behind them.
+A replace GETs the target item on a session that never retries and checks that the body is
+that item with a readable version. It then re-compares, appends the pre-image to
+``--replaced-ids`` and only then PUTs.
 A ``--replaced-ids`` line names its item ``item_id``, not ``id``, so
 ``rollback_created_items.py`` refuses that file rather than deleting the replaced items,
 which existed before the run.
@@ -57,6 +60,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
+from time import monotonic
 from typing import Any
 from urllib.parse import urlparse
 
@@ -73,6 +77,7 @@ from register_proxy import (  # also configures logging, as the register does
     MAX_CONSECUTIVE_FAILURES,
     TRANSITION_COLLECTION,
     CreatedIdsError,
+    _seconds,
     assert_no_s3_urls,
     build_proxy_item,
     create_item,
@@ -437,6 +442,12 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="POSTs + PUTs this run sends at most (a dry run: would send); the ids not "
         "reached are reported as remaining",
     )
+    parser.add_argument(
+        "--time-budget",
+        type=_seconds,  # the register's check: positive, finite, at most its ceiling
+        metavar="SECONDS",
+        help="Start no new id after this many seconds since the start; the rest are remaining",
+    )
     parser.add_argument("--dry-run", action="store_true", help="Diff and check; write nothing")
     parser.add_argument(
         "--created-ids",
@@ -481,6 +492,7 @@ def report(
 
 
 def main(argv: list[str] | None = None) -> int:
+    started = monotonic()  # from here, as the register: the run holds its semaphore from the start
     args = parse_args(argv)
     policy = POLICIES.get(args.collection)
     if policy is None:
@@ -587,6 +599,9 @@ def main(argv: list[str] | None = None) -> int:
     for kind, item_id in actions:
         # Every stop falls between ids, never inside one: a write and its line finish together.
         if run.writes == args.max_writes:
+            break
+        if args.time_budget is not None and monotonic() - started >= args.time_budget:
+            logger.warning("time_budget_reached: %g s, no new id started", args.time_budget)
             break
         if streak == MAX_CONSECUTIVE_FAILURES:
             logger.error("Stopping after %d failures in a row", streak)

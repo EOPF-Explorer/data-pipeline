@@ -475,6 +475,35 @@ def test_a_write_that_fails_counts_toward_the_bound(tmp_path, caplog):
     assert (summary(caplog)["failed"], summary(caplog)["remaining"]) == (2, 1)
 
 
+def test_a_time_budget_stops_between_ids_and_the_next_run_continues(tmp_path, caplog):
+    """platform-deploy#450 review: the run holds the register's semaphore, and ids that end
+    before their write or wait out timeouts use no --max-writes. Each fetch here takes 100 s."""
+    world = World(source=dict.fromkeys("ABCDE", "0.13.1"))
+    now = [0.0]
+
+    def slow_fetch(*args):
+        now[0] += 100
+        return world._fetch(*args)
+
+    world.fetch.side_effect = slow_fetch
+    with patch("reconcile_versions.monotonic", lambda: now[0]):
+        assert world.run(tmp_path, "--time-budget", "250") == 0, "a partial run, not a failure"
+        assert world.target.writes() == [("post", "E"), ("post", "D"), ("post", "C")]
+        assert summary(caplog)["remaining"] == 2
+        assert "time_budget_reached: 250 s" in caplog.text
+        now[0] = 0.0
+        caplog.clear()
+        assert world.run(tmp_path, "--time-budget", "250") == 0
+    assert summary(caplog)["remaining"] == 0 and "time_budget_reached" not in caplog.text
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "", "nan", "inf", "12601"])
+def test_a_time_budget_is_a_stop_that_can_fire(tmp_path, value):
+    with pytest.raises(SystemExit) as exc:
+        World(source={}).run(tmp_path, "--time-budget", value)
+    assert exc.value.code == 2
+
+
 @pytest.mark.parametrize("value", ["0", "-1", "", "ten", "1.5"])
 def test_max_writes_is_a_positive_whole_number(tmp_path, value):
     with pytest.raises(SystemExit) as exc:

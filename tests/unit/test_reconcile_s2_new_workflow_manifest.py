@@ -54,6 +54,7 @@ def _run(tmp_path: Path, **env: str) -> subprocess.CompletedProcess[str]:
         "PIPELINE_IMAGE_VERSION": "sha-abc1234",
         "MAX_WRITES": params["max_writes"],
         "DRY_RUN": params["dry_run"],
+        "TIME_BUDGET_SECONDS": params["time_budget_seconds"],
         "RUN_ID": "reconcile-s2-new-versions-x7k2p",
         **env,
     }
@@ -66,10 +67,12 @@ def _run(tmp_path: Path, **env: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_defaults_are_a_dry_run_of_ten_writes(tmp_path: Path) -> None:
+def test_defaults_are_a_dry_run_of_ten_writes_in_45_minutes(tmp_path: Path) -> None:
     result = _run(tmp_path)
     assert result.returncode == 0, result.stderr
-    assert result.stdout.split() == [*TOOL, "--max-writes", "10", "--dry-run"]
+    assert result.stdout.split() == [
+        *TOOL, "--max-writes", "10", "--time-budget", "2700", "--dry-run"
+    ]  # fmt: skip
 
 
 @pytest.mark.parametrize("dry_run", ["true", "False", "no", ""])
@@ -89,7 +92,7 @@ def test_a_real_run_records_both_lists_on_a_tag_that_names_one_image(
     result = _run(tmp_path, DRY_RUN="false", PIPELINE_IMAGE_VERSION=tag, MAX_WRITES="500")
     assert result.returncode == 0, result.stderr
     assert result.stdout.split() == [
-        *TOOL, "--max-writes", "500",
+        *TOOL, "--max-writes", "500", "--time-budget", "2700",
         "--created-ids", CREATED, "--replaced-ids", REPLACED,
         "--run-id", "reconcile-s2-new-versions-x7k2p",
     ]  # fmt: skip
@@ -130,7 +133,7 @@ def test_a_parameter_cannot_inject_arguments(tmp_path: Path) -> None:
 def test_the_target_and_policy_are_not_parameters() -> None:
     """The key, floor and range live in the tool's POLICIES table, keyed by this collection."""
     params = {p["name"] for p in _spec()["arguments"]["parameters"]}
-    assert params == {"pipeline_image_version", "max_writes", "dry_run"}
+    assert params == {"pipeline_image_version", "max_writes", "dry_run", "time_budget_seconds"}
     script = _container()["args"][0]
     for word in ("EOPF_GEOZARR", "0.13.0", "--key", "--floor"):
         assert word not in script
@@ -150,7 +153,7 @@ def test_the_image_is_pulled_every_time() -> None:
 
 
 def test_no_deadline_kills_the_run() -> None:
-    """The bound is --max-writes, inside the tool; never a timeout or a kill on a prod run."""
+    """The bounds are --max-writes and --time-budget, inside the tool; never a kill."""
     assert "activeDeadlineSeconds" not in _spec()
     assert "activeDeadlineSeconds" not in _template()
 

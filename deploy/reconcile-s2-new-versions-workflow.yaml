@@ -22,13 +22,19 @@
 #                  first; required, dry runs included. An id that ends before its write is
 #                  counted by reason and does not use the bound: skipped_old_generation,
 #                  skipped_unbuildable, skipped_source_changed, gone (target GET 404),
-#                  refused_target_unreadable or skipped_not_newer. Such ids end the same way on every run, and never hold up
-#                  the ones behind them. The ids not reached are printed as `remaining=M`;
-#                  re-run until it is 0. The run converges.
+#                  refused_target_unreadable or skipped_not_newer. Such ids end the same way on
+#                  every run, and never hold up the ones behind them. The ids not reached are
+#                  printed as `remaining=M`; re-run until it is 0. The run converges.
+#   --time-budget  time_budget_seconds (default 2700, as the register's budget): no new id
+#                  starts once the run has lasted that long. It logs `time_budget_reached`; the
+#                  ids not reached are `remaining`, and the run exits 0 unless an id failed.
+#                  It bounds how long the run holds the register's semaphore: ids that end
+#                  before their write, and timed-out reads, use no --max-writes.
 #   replace check  before fetching the source, the item is re-read (GET, no retries, 30 s
 #                  timeout). A body that is not that item with a readable version is
-#                  refused_target_unreadable, as in the diff; a 404 is `gone`; an item already caught up is skipped. The pre-image goes
-#                  to replaced-ids BEFORE the PUT, the outcome after it.
+#                  refused_target_unreadable, as in the diff; a 404 is `gone`; an item already
+#                  caught up is skipped. The pre-image goes to replaced-ids BEFORE the PUT, the
+#                  outcome after it.
 #   10 in a row    10 failures in a row (an outage) stop the run; skips never count toward it.
 #   loud failure   exit 1 (the Workflow shows Failed) after the summary if a write failed or was
 #                  refused, if a read an id needed failed (EODC fetch, target GET), or if no
@@ -36,9 +42,9 @@
 #                  a new stamp format must not look like a converged run). An unbuildable source
 #                  (EODC changed its item schema?) or an unreadable target recurs on every run, so
 #                  it exits 0: counted, and named on a `Look:` line after the summary.
-# There is no activeDeadlineSeconds: the bound is --max-writes, never a kill. Every request has a
-# 30 s client timeout (opening the write client included) and every write is sent once, so a
-# stalled one fails instead of hanging the run.
+# There is no activeDeadlineSeconds: the bounds are --max-writes and --time-budget, never a
+# kill. Every request has a 30 s client timeout (opening the write client included) and every
+# write is sent once, so a stalled one fails instead of hanging the run.
 #
 # Usage. Use the SAME `sha-<merge-sha>` tag (see TAG GOTCHA) for the dry run and every real run,
 # so the real runs execute the code the dry run validated.
@@ -144,6 +150,8 @@ spec:
       value: "10"
     - name: dry_run                         # SAFE DEFAULT: diff + checks, write nothing
       value: "true"
+    - name: time_budget_seconds             # no new id after this; re-run to continue
+      value: "2700"
   templates:
   - name: reconcile
     container:
@@ -167,6 +175,8 @@ spec:
         value: "{{workflow.parameters.max_writes}}"
       - name: DRY_RUN
         value: "{{workflow.parameters.dry_run}}"
+      - name: TIME_BUDGET_SECONDS
+        value: "{{workflow.parameters.time_budget_seconds}}"
       - name: RUN_ID
         value: "{{workflow.name}}"
       # STAC write enforcement is live: without these every POST and PUT returns 401.
@@ -207,6 +217,7 @@ spec:
           --stac-api-url https://api.explorer.eopf.copernicus.eu/stac \
           --raster-api-url https://api.explorer.eopf.copernicus.eu/raster \
           --max-writes "$MAX_WRITES" \
+          --time-budget "$TIME_BUDGET_SECONDS" \
           "${MODE[@]}"
     outputs:
       artifacts:

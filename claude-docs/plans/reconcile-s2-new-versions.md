@@ -36,7 +36,8 @@ Explorer sentinel-2-l2a-new ──search(fields=..., limit 1000)─────�
                                                                              └─► not:   CREATE
    >= floor, final, newer than target (or target has no key, or a non-final one) ─► REPLACE
    equal to or older than a final target ─► skipped_not_newer;   target unreadable ─► refused_target_unreadable (counted)
-actions = CREATE + REPLACE, newest acquisition first, then id; taken in order until --max-writes POSTs/PUTs are sent:
+actions = CREATE + REPLACE, newest acquisition first, then id; taken in order until --max-writes POSTs/PUTs are sent
+          (or --time-budget seconds have passed since the start, checked between ids):
    CREATE:  fetch the full source item (register's fetch_source_item), classify it again, build_proxy_item(expires=None)
             ─► register_proxy.create_item (POST, 409 = exists) + record_created, `uncertain` on a 5xx/no answer
    REPLACE: GET (no retries, 30 s, no redirects) ─► 404: gone | not the item / unreadable: refused_target_unreadable
@@ -82,6 +83,11 @@ Decisions:
   source fetch, the target GET), the 10-in-a-row stop, or no usable source. An unbuildable source or an
   unreadable target (at diff or at replace time) ends the same way on every run, so failing on it failed the
   run that converges too, forever: it is counted, and named on a `Look:` line after the summary, exit 0.
+- **A time budget** (platform-deploy#450 review): `--max-writes` does not bound how long the run holds the
+  register's semaphore, since ids that end before their write and 30 s timeouts use none of it.
+  `--time-budget SECONDS` (the register's `_seconds` check) starts no new id once the run has lasted that
+  long; it logs `time_budget_reached`, the rest is `remaining`, exit 0 unless an id failed. The Workflow
+  passes `time_budget_seconds`, 2700 by default, as the register's budget.
 - **`--max-writes` is required, dry runs included** (review #6): without it a dry run had a bound of 0 and
   checked nothing, green.
 - **Replace reads the target first** (review #10): the GET and the comparison with the diff's source version
@@ -186,6 +192,9 @@ ponytail-review pass, push `feat/reconcile-s2-new-versions`, PR opened by Loïc.
   `Look:` line); creates POST under `--stac-api-url`; a boolean `eo:cloud_cover` and an epoch version are
   refused; the clean reads versions with `processing_software.read_version`; a converged run opens no write
   client
+- [x] (platform-deploy#450 review) `--time-budget`: with a fake clock (100 s per fetch, budget 250 s) a run
+  writes 3 of 5, logs `time_budget_reached`, `remaining=2`, exits 0, and the next run finishes; 0, -1, "",
+  nan, inf and 12601 are refused; the Workflow passes `--time-budget 2700` by default
 - [ ] PR reviewed and merged
 
 ### Task 5 — image  (blocked on Task 4)
