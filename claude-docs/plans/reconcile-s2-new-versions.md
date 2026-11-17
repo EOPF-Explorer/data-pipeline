@@ -181,6 +181,11 @@ ponytail-review pass, push `feat/reconcile-s2-new-versions`, PR opened by Loïc.
 **Acceptance criteria**:
 - [x] full suite passes (`uv run --group test pytest -q`)
 - [x] each fix's test fails when its bug is reintroduced (see Verification)
+- [x] (#522 `/code-review high`, 17 Nov) the 10 findings fixed: only a failed id or no usable source exits 1
+  (an unbuildable source and an unreadable target, at diff or replace time, are counted and named on a
+  `Look:` line); creates POST under `--stac-api-url`; a boolean `eo:cloud_cover` and an epoch version are
+  refused; the clean reads versions with `processing_software.read_version`; a converged run opens no write
+  client
 - [ ] PR reviewed and merged
 
 ### Task 5 — image  (blocked on Task 4)
@@ -275,6 +280,12 @@ restored to its old state. The Task 7 exercise checks the mechanism, not the dat
   that argument has no effect and no test can see it go. Driver and output in
   `~/DevDS/EOPF/clean-s2-new-keep-geozarr_2026-11-17/mutation-runs/reconcile-review-fixes/`. A caught mutant
   shows that a test catches that bug, nothing about bugs no mutant encodes.
+- #522 `/code-review high` round: the three test files above plus `test_manage_collections_clean.py`
+  and `test_clean_s2_new_workflow_manifest.py`, 236 passed (220 before); full suite 2137 passed, 5 skipped.
+  10 mutants (M1a-M8b) reintroduce one finding's bug each (M1c is a guard: a failed id exits 1). Each fails
+  its tests except M8a, `run` built under `if actions:`, which is a static bug: pytest passes, `mypy
+  --enable-error-code possibly-undefined` flags it. Driver and output in
+  `~/DevDS/EOPF/clean-s2-new-keep-geozarr_2026-11-17/mutation-runs/pr522-review-fixes/`.
 
 ## Risks
 - **EODC's page size and `fields`.** EODC's root declares `item-search#fields` (captured 26 Oct 2026);
