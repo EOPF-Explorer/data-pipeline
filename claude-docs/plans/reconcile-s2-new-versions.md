@@ -290,10 +290,10 @@ restored to its old state. The Task 7 exercise checks the mechanism, not the dat
   `~/DevDS/EOPF/clean-s2-new-keep-geozarr_2026-11-17/mutation-runs/reconcile-review-fixes/`. A caught mutant
   shows that a test catches that bug, nothing about bugs no mutant encodes.
 - #522 `/code-review high` round: the three test files above plus `test_manage_collections_clean.py`
-  and `test_clean_s2_new_workflow_manifest.py`, 236 passed (220 before); full suite 2137 passed, 5 skipped.
-  10 mutants (M1a-M8b) reintroduce one finding's bug each (M1c is a guard: a failed id exits 1). Each fails
-  its tests except M8a, `run` built under `if actions:`, which is a static bug: pytest passes, `mypy
-  --enable-error-code possibly-undefined` flags it. Driver and output in
+  and `test_clean_s2_new_workflow_manifest.py`, 243 passed (220 before); full suite 2144 passed, 5 skipped.
+  11 mutants (M1a-M8b, M11) reintroduce one finding's bug each, M11 the missing time budget (M1c is a guard:
+  a failed id exits 1). Each fails its tests except M8a, `run` built under `if actions:`, which is a static
+  bug: pytest passes, `mypy --enable-error-code possibly-undefined` flags it. Driver and output (run2) in
   `~/DevDS/EOPF/clean-s2-new-keep-geozarr_2026-11-17/mutation-runs/pr522-review-fixes/`.
 
 ## Risks
