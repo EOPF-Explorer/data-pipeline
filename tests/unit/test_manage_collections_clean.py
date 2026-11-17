@@ -516,6 +516,7 @@ def test_keep_software_min_dry_run_prints_the_count_per_value_and_deletes_nothin
         "    keep   '0.13.0': 3\n"
         "    keep   '0.13.1': 2\n"
         "    delete '0.12.0': 1\n"
+        "    unreadable: 0\n"
         "    total: keep 5, delete 5\n"
     ) in out
     assert "Bounded run: 4 of 5 items" in out
@@ -604,3 +605,19 @@ def test_the_delete_has_a_client_timeout() -> None:
     manager.session.delete.assert_called_once_with(
         "https://stac.example.com/collections/c/items/ITEM_00001", timeout=30
     )
+
+
+def test_keep_software_min_prints_the_census_before_refusing_an_unreadable_value(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A refused dry run still shows every count, so the operator sees how big the problem is."""
+    items = [_sw(0, _geozarr("0.13.1")), _sw(1, _geozarr("0.12.0")), _sw(2, _geozarr("latest"))]
+    mgr = _manager(items)
+    with pytest.raises(click.ClickException, match="not a readable version"):
+        _keep(mgr, dry_run=True)
+    assert (
+        "    keep   '0.13.1': 1\n"
+        "    delete '0.12.0': 1\n"
+        "    unreadable: 1\n"
+        "    total: keep 1, delete 1\n"
+    ) in capsys.readouterr().out

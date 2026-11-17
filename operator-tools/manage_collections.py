@@ -136,50 +136,55 @@ def _software_value(item: dict[str, Any], key: str) -> str | None:
     return value
 
 
+def _kept(value: str | None, floor: Version) -> bool:
+    """Whether a ``_software_value`` keeps its item; InvalidVersion (a ValueError) if unreadable."""
+    return value is not None and Version(value) >= floor
+
+
 def _split_by_software(
     items: list[dict[str, Any]], key: str, floor: Version
 ) -> list[dict[str, Any]]:
-    """The deletion candidates for --keep-software-min, after printing the count per value.
+    """The deletion candidates for --keep-software-min.
 
     Kept: items whose ``processing:software[key]`` is a PEP 440 version >= ``floor``, so a
     pre-release such as ``0.13.0rc1`` is below ``0.13.0``. Every other item is a candidate,
-    including one with no ``key`` or no ``processing:software`` at all. Refuses the run
-    (ClickException), before anything is deleted, when:
+    including one with no ``key`` or no ``processing:software`` at all. Prints the count per
+    value, unreadable ones included, and only then refuses the run (ClickException), before
+    anything is deleted, when:
 
     - an item's ``processing:software``, or its ``key``, cannot be read as a version. That
       item is not provably below ``floor`` either, and the items likeliest to carry a new
       shape are the ones being registered now, which are the ones to keep;
     - no item is kept: a typo in KEY or VERSION would otherwise delete the whole collection.
+
+    So a dry run always shows the whole census, even one that is refused.
     """
-
-    def kept(value: str | None) -> bool:
-        return value is not None and Version(value) >= floor
-
     candidates: list[dict[str, Any]] = []
     found: Counter[str | None] = Counter()
     unreadable: list[str] = []
     for item in items:
         try:
             value = _software_value(item, key)
-            keep = kept(value)
+            keep = _kept(value, floor)
         except ValueError as exc:  # InvalidVersion is a ValueError
             unreadable.append(f"{item['id']} ({exc})")
             continue
         found[value] += 1
         if not keep:
             candidates.append(item)
+
+    n_kept = len(items) - len(candidates) - len(unreadable)
+    click.echo(f"\n🔎 processing:software[{key!r}] per item (keeping >= {floor}):")
+    for value, n in found.most_common():
+        label = "(missing)" if value is None else repr(value)
+        click.echo(f"    {'keep  ' if _kept(value, floor) else 'delete'} {label}: {n:,}")
+    click.echo(f"    unreadable: {len(unreadable):,}")
+    click.echo(f"    total: keep {n_kept:,}, delete {len(candidates):,}")
     if unreadable:
         raise click.ClickException(
             f"Refusing to clean: {len(unreadable)} item(s) have a processing:software "
             f"{key!r} that is not a readable version, e.g. " + "; ".join(unreadable[:5])
         )
-
-    n_kept = len(items) - len(candidates)
-    click.echo(f"\n🔎 processing:software[{key!r}] per item (keeping >= {floor}):")
-    for value, n in found.most_common():
-        label = "(missing)" if value is None else repr(value)
-        click.echo(f"    {'keep  ' if kept(value) else 'delete'} {label}: {n:,}")
-    click.echo(f"    total: keep {n_kept:,}, delete {len(candidates):,}")
     if not n_kept:
         raise click.ClickException(
             f"--keep-software-min {key}={floor} keeps no item, so it would delete them all. "
@@ -927,10 +932,13 @@ def _parse_keep_software_min(
     if raw is None:
         return None
     key, _, version = raw.partition("=")
-    with contextlib.suppress(InvalidVersion):
-        if key:
-            return key, Version(version)
-    raise click.BadParameter(f"expected KEY=VERSION (a PEP 440 version), got {raw!r}")
+    try:
+        floor = Version(version)
+    except InvalidVersion:
+        floor = None
+    if not key or floor is None:
+        raise click.BadParameter(f"expected KEY=VERSION (a PEP 440 version), got {raw!r}")
+    return key, floor
 
 
 @cli.command()
