@@ -20,6 +20,7 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock
+from urllib.parse import unquote
 
 import click
 import pytest
@@ -70,11 +71,24 @@ def _response(status: int, body: object = None) -> requests.Response:
     return response
 
 
-def _manager(items: list[dict]) -> STACCollectionManager:
+def _manager(
+    items: list[dict], served: dict[str, requests.Response | Exception] | None = None
+) -> STACCollectionManager:
+    """`served` overrides what the re-check GET before a --keep-software-min DELETE gets
+    for an id (a Response, or an exception it raises); by default the item as walked."""
     mgr = STACCollectionManager("https://stac.example.com")
     mgr.get_collection_items = MagicMock(return_value=items)  # type: ignore[method-assign]
     mgr.item_manager = MagicMock()
     mgr.item_manager.delete_item.return_value = (True, 1, 0)
+    responses = {item["id"]: _response(200, item) for item in items} | (served or {})
+
+    def get(url: str, **_: object) -> requests.Response:
+        response = responses[unquote(url.rsplit("/", 1)[-1])]
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    mgr.item_manager.session.get.side_effect = get
     return mgr
 
 
@@ -595,18 +609,6 @@ def test_cli_keep_software_min_with_nothing_to_delete_exits_zero(
     assert "nothing deleted" in result.output
 
 
-def test_the_delete_has_a_client_timeout() -> None:
-    """No activeDeadlineSeconds backs the clean Workflow, so a stalled DELETE must fail its
-    item (and the run, which converges on a re-run), not hang the run."""
-    manager = STACItemManager("https://stac.example.com")
-    manager.session = MagicMock()
-    manager.session.delete.return_value = _response(204)
-    assert manager.delete_item("c", "ITEM_00001") == (True, 0, 0)
-    manager.session.delete.assert_called_once_with(
-        "https://stac.example.com/collections/c/items/ITEM_00001", timeout=30
-    )
-
-
 def test_keep_software_min_prints_the_census_before_refusing_an_unreadable_value(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -621,3 +623,125 @@ def test_keep_software_min_prints_the_census_before_refusing_an_unreadable_value
         "    unreadable: 1\n"
         "    total: keep 1, delete 1\n"
     ) in capsys.readouterr().out
+
+
+# === the re-check before each --keep-software-min DELETE ===
+# The walk is a snapshot; a batch deletes for hours while the register cron writes to the
+# collection, and may come to PUT-upgrade an item the walk saw below the floor.
+
+THREE = [_sw(0, _geozarr("0.13.1")), _sw(1, _geozarr("0.12.0")), _sw(2, _geozarr("0.12.0"))]
+
+
+def test_recheck_keeps_a_candidate_that_is_now_at_or_above_the_floor(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Walked as 0.12.0, re-registered as 0.13.1 since: not deleted."""
+    upgraded = _sw(1, json.dumps(_geozarr("0.13.1")))  # JSON-encoded, as some responses are
+    mgr = _manager(THREE, served={"ITEM_00001": _response(200, upgraded)})
+    assert _keep(mgr) == 1
+    assert _deleted_ids(mgr) == ["ITEM_00002"]
+    out = capsys.readouterr().out
+    assert "ITEM_00001: kept on re-check (EOPF_GEOZARR 0.13.1)" in out
+    assert (
+        "Re-checked before DELETE: already gone 0, kept on re-check 1, "
+        "unreadable (refused) 0, re-check failed 0"
+    ) in out
+
+
+def test_recheck_counts_a_404_as_already_gone_not_a_failure(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    mgr = _manager(THREE, served={"ITEM_00001": _response(404, {"code": "NotFoundError"})})
+    assert _keep(mgr) == 1  # returns: a 404 is no failure
+    assert _deleted_ids(mgr) == ["ITEM_00002"]
+    assert "already gone 1, kept on re-check 0" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("served", "counted"),
+    [
+        (_response(500, {"detail": "boom"}), "re-check failed 1"),
+        (requests.ConnectionError("connection reset"), "re-check failed 1"),
+        (_response(200, b"<html>bad gateway</html>"), "re-check failed 1"),
+        (_response(200, _sw(1, _geozarr("latest"))), "unreadable (refused) 1"),
+        (_response(200, _sw(1, "EOPF_GEOZARR=0.13.1")), "unreadable (refused) 1"),
+        (_response(200, ["not", "an", "item"]), "unreadable (refused) 1"),
+    ],
+    ids=["http-500", "connection-error", "not-json", "not-a-version", "not-an-object", "no-item"],
+)
+def test_a_recheck_that_cannot_decide_deletes_nothing_and_fails_the_run(
+    served: requests.Response | Exception, counted: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Fail closed: no DELETE for that item, the rest of the batch still runs, and the run
+    fails after its summary instead of exiting 0."""
+    mgr = _manager(THREE, served={"ITEM_00001": served})
+    with pytest.raises(click.ClickException, match=r"1 item\(s\) were not deleted"):
+        _keep(mgr)
+    assert _deleted_ids(mgr) == ["ITEM_00002"]
+    out = capsys.readouterr().out
+    assert counted in out
+    assert "CLEANUP SUMMARY" in out
+
+
+def test_recheck_gets_each_candidate_through_the_delete_session_just_before_its_delete() -> None:
+    """One GET per candidate, none for a kept item, each right before that item's DELETE:
+    re-reading them all up front would only be a second snapshot."""
+    items = [_sw(0, _geozarr("0.13.1"))] + [_sw(i, _geozarr("0.12.0")) for i in (1, 2)]
+    items[2]["id"] = "S2A_MSIL2A_X/Y"  # proves the id is one encoded path segment
+    mgr = _manager(items)
+    _keep(mgr)
+    order = [c[0] for c in mgr.item_manager.mock_calls if c[0] in ("session.get", "delete_item")]
+    assert order == ["session.get", "delete_item"] * 2
+    assert [c.args for c in mgr.item_manager.session.get.call_args_list] == [
+        (f"https://stac.example.com/collections/{NEW}/items/ITEM_00001",),
+        (f"https://stac.example.com/collections/{NEW}/items/S2A_MSIL2A_X%2FY",),
+    ]
+    assert {c.kwargs["timeout"] for c in mgr.item_manager.session.get.call_args_list} == {30}
+
+
+def test_clean_without_keep_software_min_does_not_recheck() -> None:
+    mgr = _manager([_item(i) for i in range(3)])
+    assert _clean(mgr) == 3
+    mgr.item_manager.session.get.assert_not_called()
+
+
+# === a failed delete fails the run (every clean, with or without --keep-software-min) ===
+
+
+def test_a_failed_delete_fails_the_run_after_the_whole_batch(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Catalogue-only, so the summary blames the DELETE, not S3."""
+    mgr = _manager([_sw(0, _geozarr("0.13.1"))] + [_sw(i, _geozarr("0.12.0")) for i in (1, 2, 3)])
+    mgr.item_manager.delete_item.side_effect = [(True, 0, 0), (False, 0, 0), (True, 0, 0)]
+    with pytest.raises(click.ClickException, match=r"1 item\(s\) were not deleted"):
+        _keep(mgr)
+    assert mgr.item_manager.delete_item.call_count == 3, "stopped before the end of the batch"
+    out = capsys.readouterr().out
+    assert "❌ STAC items not deleted: 1 (the STAC DELETE failed)\n" in out
+    assert "S3" not in out
+
+
+def test_cli_exits_non_zero_when_a_delete_failed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A plain clean too: a failed delete fails its Workflow pod instead of exiting 0."""
+    delete_item = MagicMock(side_effect=[(False, 0, 0), (True, 0, 0)])
+    monkeypatch.setattr("manage_collections.STACItemManager.delete_item", delete_item)
+    walk = MagicMock(return_value=[_item(0), _item(1)])
+    monkeypatch.setattr(STACCollectionManager, "get_collection_items", walk)
+    result = CliRunner().invoke(cli, ["--api-url", "https://stac.example.com", "clean", "c", "-y"])
+    assert result.exit_code == 1, result.output
+    assert delete_item.call_count == 2
+    assert "STAC items not deleted: 1 (the STAC DELETE failed)" in result.output
+    assert "1 item(s) were not deleted" in result.output
+
+
+def test_the_delete_has_a_client_timeout() -> None:
+    """No activeDeadlineSeconds backs the clean Workflow, so a stalled DELETE must fail its
+    item (and the run, which converges on a re-run), not hang the run."""
+    manager = STACItemManager("https://stac.example.com")
+    manager.session = MagicMock()
+    manager.session.delete.return_value = _response(204)
+    assert manager.delete_item("c", "ITEM_00001") == (True, 0, 0)
+    manager.session.delete.assert_called_once_with(
+        "https://stac.example.com/collections/c/items/ITEM_00001", timeout=30
+    )

@@ -279,6 +279,36 @@ class STACCollectionManager:
             click.echo(f"❌ Error fetching items: {e}", err=True)
             raise
 
+    def _recheck(self, collection_id: str, item_id: str, key: str, floor: Version) -> str:
+        """Re-read a --keep-software-min candidate just before its DELETE; only "delete" deletes.
+
+        The walk is a snapshot and a batch deletes for hours while the register cron writes to
+        the collection, so the version that made this item a candidate can be stale. GETs it
+        through the session that sends the DELETE and returns "delete" (still below ``floor``),
+        "kept" (now >= ``floor``), "gone" (404), "unreadable" (refused, as at walk time) or
+        "error" (any other failure of the GET).
+        """
+        url = f"{self.api_url}/collections/{path_segment(collection_id)}/items/{path_segment(item_id)}"
+        try:
+            response = self.item_manager.session.get(url, timeout=30)
+            if response.status_code == 404:
+                click.echo(f"  ⏭️  {item_id}: already gone (404 on re-check)")
+                return "gone"
+            response.raise_for_status()
+            item = response.json()
+        except requests.RequestException as exc:  # includes a body that is not JSON
+            click.echo(f"  ❌ {item_id}: re-check GET failed, not deleted: {exc}", err=True)
+            return "error"
+        try:
+            value = _software_value(item, key)
+            if _kept(value, floor):
+                click.echo(f"  🛡️  {item_id}: kept on re-check ({key} {value})")
+                return "kept"
+        except (ValueError, AttributeError) as exc:  # AttributeError: a body that is no item
+            click.echo(f"  ⛔ {item_id}: unreadable on re-check, not deleted: {exc}", err=True)
+            return "unreadable"
+        return "delete"
+
     def clean_collection(
         self,
         collection_id: str,
@@ -319,10 +349,15 @@ class STACCollectionManager:
             keep_software_min: (KEY, VERSION): keep items whose processing:software[KEY]
                 is a version >= VERSION and print the count per value found (see
                 ``_split_by_software``). Applied after the demo scenes and before the
-                threshold and max_items.
+                threshold and max_items. Each candidate is re-read just before its
+                DELETE (``_recheck``).
 
         Returns:
             Tuple of (items_deleted, s3_objects_deleted, s3_objects_failed)
+
+        Raises:
+            click.ClickException: after the summary, if any item was not deleted because a
+                delete or a re-check failed.
         """
         click.echo(f"\n{'DRY RUN: ' if dry_run else ''}Cleaning collection: {collection_id}")
         if clean_s3:
@@ -465,7 +500,8 @@ class STACCollectionManager:
 
         # Actual deletion
         items_deleted = 0
-        items_skipped = 0
+        items_failed = 0
+        recheck: Counter[str] = Counter()
         s3_objects_deleted = 0
         s3_objects_failed = 0
 
@@ -485,6 +521,12 @@ class STACCollectionManager:
             for item in bar:
                 item_id = item["id"]
 
+                if keep_software_min is not None:
+                    verdict = self._recheck(collection_id, item_id, *keep_software_min)
+                    if verdict != "delete":
+                        recheck[verdict] += 1
+                        continue
+
                 # Use item manager's delete_item method
                 success, s3_deleted, s3_failed = self.item_manager.delete_item(
                     collection_id=collection_id,
@@ -499,7 +541,7 @@ class STACCollectionManager:
                 if success:
                     items_deleted += 1
                 else:
-                    items_skipped += 1
+                    items_failed += 1
 
                 s3_objects_deleted += s3_deleted
                 s3_objects_failed += s3_failed
@@ -512,22 +554,35 @@ class STACCollectionManager:
         click.echo(f"✅ STAC items deleted: {items_deleted}")
         if protected_demos:
             click.echo(f"🛡️  Demo scenes protected: {len(protected_demos)} (demo denylist)")
-        if items_skipped > 0:
-            click.echo(f"⏭️  STAC items skipped: {items_skipped} (due to S3 failures)")
+        if keep_software_min is not None:
+            click.echo(
+                f"🔁 Re-checked before DELETE: already gone {recheck['gone']}, "
+                f"kept on re-check {recheck['kept']}, unreadable (refused) "
+                f"{recheck['unreadable']}, re-check failed {recheck['error']}"
+            )
+        if items_failed > 0:
+            cause = "S3 cleanup or the STAC DELETE failed" if clean_s3 else "the STAC DELETE failed"
+            click.echo(f"❌ STAC items not deleted: {items_failed} ({cause})")
 
         if clean_s3:
             click.echo(f"\n✅ S3 objects deleted: {s3_objects_deleted:,}")
             if s3_objects_failed > 0:
                 click.echo(f"❌ S3 objects failed: {s3_objects_failed:,}")
 
-            if items_skipped > 0:
-                click.echo(
-                    f"\n⚠️  WARNING: {items_skipped} items were NOT deleted from STAC catalog"
-                )
+            if items_failed > 0:
+                click.echo(f"\n⚠️  WARNING: {items_failed} items were NOT deleted from STAC catalog")
                 click.echo("    because their S3 data could not be fully removed.")
                 click.echo("    Fix S3 access issues and re-run to process these items.")
 
         click.echo("=" * 60)
+
+        # After the whole batch and its summary, never mid-item: a failure must fail the run.
+        n_failed = items_failed + recheck["unreadable"] + recheck["error"]
+        if n_failed:
+            raise click.ClickException(
+                f"{n_failed} item(s) were not deleted (see the summary above). "
+                "Fix the cause and re-run: the clean converges."
+            )
 
         return items_deleted, s3_objects_deleted, s3_objects_failed
 
@@ -1014,7 +1069,8 @@ def _parse_keep_software_min(
         "Keep items whose processing:software[KEY] is a PEP 440 version >= VERSION and "
         "delete every other item, including those without KEY; prints the count per value "
         "first. Catalogue-only: refused with --clean-s3. An item whose KEY is not a readable "
-        "version, or a KEY=VERSION that keeps no item, refuses the run."
+        "version, or a KEY=VERSION that keeps no item, refuses the run. Each candidate is "
+        "re-read just before its DELETE and skipped if it is now kept or already gone."
     ),
 )
 @click.pass_context
