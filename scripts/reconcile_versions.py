@@ -310,7 +310,8 @@ class Run:
         return item, version
 
     def create(self, item_id: str) -> str:
-        """POST one absent id, recorded in --created-ids as ``register_proxy`` records it."""
+        """POST one absent id under --stac-api-url, as the replace, recorded in --created-ids
+        as ``register_proxy`` records it."""
         built = self.build(item_id)
         if isinstance(built, str):
             return built
@@ -321,7 +322,7 @@ class Run:
             return "would_create"
         assert self.created_ids is not None  # noqa: S101  # nosec B101 -- main requires it
         try:
-            outcome = create_item(self.client, self.collection, item)
+            outcome = create_item(self.client, self.collection, item, self.stac_api_url)
         except requests.RequestException as exc:
             # As in register_proxy.register_one: a 5xx or no answer may have committed. The id
             # was absent from the target at diff time, and the workflow holds the register's

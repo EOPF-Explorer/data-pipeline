@@ -157,7 +157,8 @@ class FakeTarget:
     def __init__(self, items, overrides=None):
         self.items = {i: self.item(i, p) for i, p in items.items()}
         self.overrides = overrides or {}
-        self.client = MagicMock(self_href=STAC_API)
+        # #522 review 5: writes go to --stac-api-url, never to the landing page's self link.
+        self.client = MagicMock(self_href="https://landing-page-self.invalid/stac")
         self.session = self.client._stac_io.session
         self.session.get.side_effect = self.get
         self.session.post.side_effect = self.post

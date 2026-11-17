@@ -533,18 +533,20 @@ def is_old_generation(source_item: dict) -> bool:
     )
 
 
-def create_item(client: Client, collection_id: str, item: Item) -> str:
+def create_item(
+    client: Client, collection_id: str, item: Item, stac_api_url: str | None = None
+) -> str:
     """POST one item: ``created``, or ``exists`` on a 409. Never a PUT, unlike ``upsert_item``.
 
     A PUT on 409 would replace whatever the target already holds under that id: an item an
     earlier run registered, or the test collection's comparison items. An existing item is
     left exactly as it is. ``transform_hrefs=False`` for the reason ``upsert_item``
-    gives.
+    gives. The POST goes under ``stac_api_url``, or the landing page's self href when None.
     """
     io = client._stac_io
     assert io is not None  # noqa: S101  # nosec B101 -- pystac-client always sets this after open()
     resp = io.session.post(
-        f"{str(client.self_href).rstrip('/')}/collections/{collection_id}/items",
+        f"{(stac_api_url or str(client.self_href)).rstrip('/')}/collections/{collection_id}/items",
         json=item.to_dict(transform_hrefs=False),
         headers={"Content-Type": "application/json"},
         timeout=30,
