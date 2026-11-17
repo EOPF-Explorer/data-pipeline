@@ -1,8 +1,8 @@
 """The sentinel-2-l2a-new clean workflow, its script run under bash with a stub `python3`.
 
-What it passes to the tool is the contract: the fixed collection, --keep-software-min, the bound,
+What it passes to the tool is the contract: the fixed collection and floor, the bound,
 --dry-run unless dry_run is exactly "false", never --clean-s3, and a real run only on an
-immutable image tag.
+image tag that names one image.
 """
 
 import os
@@ -20,9 +20,13 @@ def _spec() -> dict:
     return spec
 
 
-def _container() -> dict:
+def _template() -> dict:
     (template,) = _spec()["templates"]
-    container: dict = template["container"]
+    return template
+
+
+def _container() -> dict:
+    container: dict = _template()["container"]
     return container
 
 
@@ -37,7 +41,6 @@ def _run(tmp_path: Path, **env: str) -> subprocess.CompletedProcess[str]:
     full_env = {
         "PATH": f"{stub_dir}:{os.environ['PATH']}",
         "PIPELINE_IMAGE_VERSION": "sha-abc1234",
-        "KEEP_SOFTWARE_MIN": params["keep_software_min"],
         "MAX_ITEMS": params["max_items"],
         "DRY_RUN": params["dry_run"],
         **env,
@@ -78,15 +81,17 @@ def test_only_false_is_a_real_run(tmp_path: Path, dry_run: str) -> None:
     assert " -y" not in result.stdout
 
 
-@pytest.mark.parametrize("tag", ["v1.23.0", "sha-33f03f8", "pr-515@sha256:" + "0" * 64])
-def test_real_run_on_an_immutable_tag(tmp_path: Path, tag: str) -> None:
+@pytest.mark.parametrize(
+    "tag", ["sha-33f03f8", "v1.23.0@sha256:" + "0" * 64, "pr-515@sha256:" + "0" * 64]
+)
+def test_real_run_on_a_tag_that_names_one_image(tmp_path: Path, tag: str) -> None:
     result = _run(tmp_path, DRY_RUN="false", PIPELINE_IMAGE_VERSION=tag, MAX_ITEMS="2000")
     assert result.returncode == 0, result.stderr
     assert result.stdout.split()[-3:] == ["--max-items", "2000", "-y"]
     assert "--dry-run" not in result.stdout
 
 
-@pytest.mark.parametrize("tag", ["pr-515", "latest", "main", "feat-clean-keep-software"])
+@pytest.mark.parametrize("tag", ["v1.23.0", "pr-515", "latest", "main", "feat-clean-keep-software"])
 def test_real_run_on_a_moving_tag_is_refused(tmp_path: Path, tag: str) -> None:
     result = _run(tmp_path, DRY_RUN="false", PIPELINE_IMAGE_VERSION=tag)
     assert result.returncode == 1
@@ -107,6 +112,22 @@ def test_catalogue_only_no_clean_s3_and_no_s3_credentials() -> None:
     assert not [e for e in container["env"] if e["name"].startswith("AWS_")]
 
 
-def test_the_collection_and_api_are_fixed_not_parameters() -> None:
+def test_the_collection_api_and_floor_are_fixed_not_parameters(tmp_path: Path) -> None:
+    """A floor typed at submit time (0.13.1 for 0.13.0) would keep 3,943 items, pass the
+    "keeps no item" guard and delete the 4,876 wanted 0.13.0 items."""
     params = {p["name"] for p in _spec()["arguments"]["parameters"]}
-    assert params == {"pipeline_image_version", "keep_software_min", "max_items", "dry_run"}
+    assert params == {"pipeline_image_version", "max_items", "dry_run"}
+    result = _run(tmp_path, KEEP_SOFTWARE_MIN="EOPF_GEOZARR=0.13.1", DRY_RUN="false")
+    assert result.returncode == 0, result.stderr
+    assert "--keep-software-min EOPF_GEOZARR=0.13.0 " in result.stdout
+
+
+def test_the_image_is_pulled_every_time() -> None:
+    """A node's cached copy of the tag must not stand in for the image the dry run used."""
+    assert _container()["imagePullPolicy"] == "Always"
+
+
+def test_no_deadline_kills_the_run() -> None:
+    """The bound is --max-items, inside the tool; never a timeout or a kill on a prod run."""
+    assert "activeDeadlineSeconds" not in _spec()
+    assert "activeDeadlineSeconds" not in _template()
