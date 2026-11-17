@@ -21,21 +21,9 @@ TOOL = [
     "--stac-api-url", "https://api.explorer.eopf.copernicus.eu/stac",
     "--raster-api-url", "https://api.explorer.eopf.copernicus.eu/raster",
 ]  # fmt: skip
-
-
-def _spec() -> dict:
-    spec: dict = yaml.safe_load(MANIFEST.read_text())["spec"]
-    return spec
-
-
-def _template() -> dict:
-    (template,) = _spec()["templates"]
-    return template
-
-
-def _container() -> dict:
-    container: dict = _template()["container"]
-    return container
+SPEC: dict = yaml.safe_load(MANIFEST.read_text())["spec"]
+(TEMPLATE,) = SPEC["templates"]
+CONTAINER: dict = TEMPLATE["container"]
 
 
 def _run(tmp_path: Path, **env: str) -> subprocess.CompletedProcess[str]:
@@ -48,7 +36,7 @@ def _run(tmp_path: Path, **env: str) -> subprocess.CompletedProcess[str]:
     stub = stub_dir / "python3"
     stub.write_text("#!/bin/sh\necho STUB PYTHON\nprintf '%s\\n' \"$@\"\n")
     stub.chmod(0o755)
-    params = {p["name"]: p["value"] for p in _spec()["arguments"]["parameters"]}
+    params = {p["name"]: p["value"] for p in SPEC["arguments"]["parameters"]}
     full_env = {
         "PATH": f"{stub_dir}:{os.environ['PATH']}",
         "PIPELINE_IMAGE_VERSION": "sha-abc1234",
@@ -59,7 +47,7 @@ def _run(tmp_path: Path, **env: str) -> subprocess.CompletedProcess[str]:
         **env,
     }
     return subprocess.run(  # noqa: S603  # nosec B603 B607 -- this repo's own manifest
-        ["bash", "-c", _container()["args"][0]],  # noqa: S607
+        ["bash", "-c", CONTAINER["args"][0]],  # noqa: S607
         env=full_env,
         capture_output=True,
         text=True,
@@ -99,7 +87,7 @@ def test_a_real_run_records_both_lists_on_a_tag_that_names_one_image(
 
 
 def test_the_lists_are_the_workflows_optional_artifacts() -> None:
-    artifacts = {a["name"]: a for a in _template()["outputs"]["artifacts"]}
+    artifacts = {a["name"]: a for a in TEMPLATE["outputs"]["artifacts"]}
     assert {name: a["path"] for name, a in artifacts.items()} == {
         "created-ids": CREATED,
         "replaced-ids": REPLACED,
@@ -132,16 +120,16 @@ def test_a_parameter_cannot_inject_arguments(tmp_path: Path) -> None:
 
 def test_the_target_and_policy_are_not_parameters() -> None:
     """The key, floor and range are constants in the tool, which refuses any other collection."""
-    params = {p["name"] for p in _spec()["arguments"]["parameters"]}
+    params = {p["name"] for p in SPEC["arguments"]["parameters"]}
     assert params == {"pipeline_image_version", "max_writes", "dry_run", "time_budget_seconds"}
-    script = _container()["args"][0]
+    script = CONTAINER["args"][0]
     for word in ("EOPF_GEOZARR", "0.13.0", "--key", "--floor"):
         assert word not in script
 
 
 def test_it_holds_the_registers_semaphore() -> None:
     """No register run creates an id while this one may be creating it (created-ids)."""
-    assert _spec()["synchronization"]["semaphore"]["configMapKeyRef"] == {
+    assert SPEC["synchronization"]["semaphore"]["configMapKeyRef"] == {
         "name": "eopf-workflow-concurrency",
         "key": "eodc-register-limit",
     }
@@ -149,16 +137,16 @@ def test_it_holds_the_registers_semaphore() -> None:
 
 def test_the_image_is_pulled_every_time() -> None:
     """A node's cached copy of the tag must not stand in for the image the dry run used."""
-    assert _container()["imagePullPolicy"] == "Always"
+    assert CONTAINER["imagePullPolicy"] == "Always"
 
 
 def test_no_deadline_kills_the_run() -> None:
     """The bounds are --max-writes and --time-budget, inside the tool; never a kill."""
-    assert "activeDeadlineSeconds" not in _spec()
-    assert "activeDeadlineSeconds" not in _template()
+    assert "activeDeadlineSeconds" not in SPEC
+    assert "activeDeadlineSeconds" not in TEMPLATE
 
 
 def test_catalogue_only_with_the_stac_write_credentials() -> None:
-    env = {e["name"] for e in _container()["env"]}
+    env = {e["name"] for e in CONTAINER["env"]}
     assert {"OIDC_TOKEN_URL", "OIDC_CLIENT_ID", "OIDC_CLIENT_SECRET"} <= env
     assert not [name for name in env if name.startswith("AWS_")]

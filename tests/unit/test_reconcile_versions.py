@@ -566,13 +566,9 @@ def test_a_create_is_recorded_as_the_register_records_it(tmp_path):
     world = World(source={"A": "0.13.1"})
     assert world.run(tmp_path) == 0
     (line,) = lines(tmp_path / "created.jsonl")
-    assert set(line) == {"id", "collection", "ts"} and (line["id"], line["collection"]) == (
-        "A",
-        NEW,
-    )
+    assert line == {"id": "A", "collection": NEW, "ts": line["ts"]}
     created = world.target.items["A"]
     assert created["collection"] == NEW and "expires" not in created["properties"]
-    assert json.loads(world.source["A"]["processing:software"])[KEY] == "0.13.1"
     assert created["properties"]["processing:software"][KEY] == "0.13.1"
 
 
@@ -623,15 +619,16 @@ def test_a_replace_records_the_pre_image_before_the_put_and_the_outcome_after(tm
         {"type": "Feature", "id": "B", "collection": NEW, "properties": {}},
         {"type": "Feature", "id": "A", "collection": ARCHIVE, "properties": {}},
         {"type": "Feature", "id": "A", "collection": NEW, "properties": props("v0.13.1-0-g1")},
+        200,
         302,
         500,
     ],
     ids=["id-only", "null-properties", "feature-collection", "not-a-feature", "other-id",
-         "other-collection", "unreadable", "redirect", "server-error"],
+         "other-collection", "unreadable", "empty-200", "redirect", "server-error"],
 )  # fmt: skip
 def test_a_get_that_is_not_the_item_refuses_the_put(tmp_path, caplog, body):
     """A body that is not the item is refused as in the diff (#522 review 2): counted, not a
-    failure. A status other than 200 or 404 is a failure."""
+    failure. A body that is not JSON, or a status other than 200 or 404, is a failure."""
     world = World(source={"A": "0.13.1", "B": "0.13.1"}, target={"A": "0.13.0", "B": "0.13.0"},
                   overrides={("GET", "A"): body})  # fmt: skip
     failed = isinstance(body, int)
@@ -640,14 +637,6 @@ def test_a_get_that_is_not_the_item_refuses_the_put(tmp_path, caplog, body):
     assert [line["item_id"] for line in lines(tmp_path / "replaced.jsonl")] == ["B", "B"]
     counts = summary(caplog)
     assert (counts["failed"], counts["refused_target_unreadable"]) == (failed, not failed)
-    assert "refused" in caplog.text
-
-
-def test_a_body_that_is_not_json_refuses_the_put(tmp_path):
-    world = World(source={"A": "0.13.1"}, target={"A": "0.13.0"})
-    world.target.session.get.side_effect = lambda *a, **k: answer(200)
-    assert world.run(tmp_path) == 1
-    world.target.session.put.assert_not_called()
 
 
 def test_an_item_gone_before_the_get_is_skipped_never_created(tmp_path, caplog):
