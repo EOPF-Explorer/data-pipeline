@@ -5,41 +5,46 @@ branch `feat/register-reprocessed-items` (3785add), replacing that branch. The r
 reports are in `~/DevDS/EOPF/clean-s2-new-keep-geozarr_2026-11-17/REVIEWS.md`.
 **Goal**: `sentinel-2-l2a-new` holds, for every EODC scene acquired since 2026-09-29 (cloud < 90 %) and not
 in `sentinel-2-l2a`, the item built from EODC's newest final `EOPF_GEOZARR >= 0.13.0` version.
-**Constraint**: the hourly register is unchanged (create-only, no new flag, `TARGET_RUNS` untouched); every
-bound is enforced inside the tool, never by a timeout or a kill; no new dependency beyond the direct
-`packaging` pin #519 also adds.
+**Constraint**: the hourly register is unchanged (create-only, no new flag, `TARGET_RUNS` behaviour
+untouched: only its comment now names this tool); every bound is enforced inside the tool, never by a
+timeout or a kill; no new dependency beyond the direct `packaging` pin #519 also adds.
 
-## Current state (2026-11-17)
+## Current state (2026-11-17, after the /code-review high round)
 
 | Resource | Status |
 |---|---|
 | `scripts/processing_software.py`: the one `processing:software` parser (object or JSON string) | Built, unit-tested offline |
-| `scripts/reconcile_versions.py`: policy table, batched diff, create/replace, bound, exit code | Built, unit-tested offline |
-| `deploy/reconcile-s2-new-versions-workflow.yaml`: one-off Workflow, dry run by default | Built; tests run its script with a stub `python3` |
-| `scripts/register_proxy.py`, `scripts/query_stac.py` | Unchanged (`git diff origin/main -- scripts/register_proxy.py scripts/query_stac.py` is empty) |
+| `scripts/reconcile_versions.py`: policy table, batched diff, create/replace, bound, exit code | Built, unit-tested offline; review findings #2, #3, #6, #7, #8, #10 fixed (Task 4) |
+| `deploy/reconcile-s2-new-versions-workflow.yaml`: one-off Workflow, dry run by default | Built; tests run its script with a stub `python3`; header fixed (#1, #4, run order, restore limit) |
+| `scripts/register_proxy.py` | Comment only: `TARGET_RUNS` names this tool as the one PUT into `-new` (#5); behaviour unchanged |
+| `scripts/query_stac.py` | Unchanged |
 | Image containing the tool | Not yet: CI's pull_request build publishes `sha-<merge-sha>` |
 | Dry run, canary, batches against production | Not run |
-| s2-new clean (data-pipeline#519) | In review; recommended to run first (see Rollout) |
-| `rollback_created_items.py` (branch `feat/rollback-created-items`) | Not on main; reads this tool's created-ids unchanged |
-| Restore of a replaced item from its pre-image | Steps below; not exercised |
+| s2-new clean (data-pipeline#519) | Merged (289ae5a). Dry run and 10-item canary done 17 Nov; batches ON HOLD: October kept for now, 1-10 Nov cleaned only after this reconcile and after EODC's re-publishing (see Run order) |
+| `rollback_created_items.py` (branch `feat/rollback-created-items`, #445) | Not on main; reads this tool's created-ids unchanged |
+| Restore of a replaced item from its pre-image | Steps below; not exercised; metadata only (see Rollback) |
 
 ## Design
 
 ```
-EODC sentinel-2-l2a-zarr3 ──search(datetime>=2026-09-29, cloud<90, fields=id+datetime+software, limit 1000)──┐
-Explorer sentinel-2-l2a-new ──search(fields=..., limit 1000)──────────────────────────────────────────────────┤
-                                                                                         classify(id) ◄──────┘
-   no key / below floor / unreadable / pre-release ─► skipped_* (counted; ALL of them, or an empty source ─► exit 1)
+EODC sentinel-2-l2a-zarr3 ──search(datetime>=2026-09-29, cloud<90, fields=id+datetime+software+cloud, limit 1000)──┐
+Explorer sentinel-2-l2a-new ──search(fields=..., limit 1000)────────────────────────────────────────────────────────┤
+                                                                                               classify(id) ◄──────┘
+   cloud missing or >= 90 / no key / below floor / unreadable / pre-release
+                                    ─► skipped_* (counted; ALL of them, or an empty source ─► exit 1)
    >= floor, final, absent ──► ids= search on sentinel-2-l2a, 100 per search ─► in it: skipped_in_archive
                                                                              └─► not:   CREATE
-   >= floor, final, newer than target (or target has no key) ─► REPLACE
-   equal or older ─► skipped_not_newer;   target unreadable ─► refused_target_unreadable (exit 1)
-actions = CREATE + REPLACE, newest acquisition first, then id; the first --max-writes are processed:
-   fetch the full source item (register's fetch_source_item), classify it again, build_proxy_item(expires=None)
-   CREATE:  register_proxy.create_item (POST, 409 = exists) + record_created, `uncertain` on a 5xx/no answer
+   >= floor, final, newer than target (or target has no key, or a non-final one) ─► REPLACE
+   equal to or older than a final target ─► skipped_not_newer;   target unreadable ─► refused_target_unreadable (exit 1)
+actions = CREATE + REPLACE, newest acquisition first, then id; taken in order until --max-writes POSTs/PUTs are sent:
+   CREATE:  fetch the full source item (register's fetch_source_item), classify it again, build_proxy_item(expires=None)
+            ─► register_proxy.create_item (POST, 409 = exists) + record_created, `uncertain` on a 5xx/no answer
    REPLACE: GET (no retries, 30 s, no redirects) ─► 404: gone | not the item / unreadable: refused (failed)
-            ─► re-compare ─► append before_put {item_id, run_id, old, new, pre_image} ─► PUT ─► append after_put
-summary: one key per source-id fate, adding up to source=N; remaining = actions beyond --max-writes
+            ─► compare with the diff's source version (caught up: skipped_not_newer) ─► fetch, classify against
+            the target as just read, build ─► append before_put {item_id, run_id, old, new, pre_image} ─► PUT
+            ─► append after_put
+   ends before a write (old generation, unbuildable, source changed, gone, not newer): counted, does not use the bound
+summary: one key per source-id fate, adding up to source=N; remaining = actions not reached
 ```
 
 Decisions:
@@ -53,25 +58,63 @@ Decisions:
   `skipped_prerelease`. A post-release (`0.13.1.post1`) is final.
 - **A version needs at least `major.minor`**, so a bare all-digit commit sha (`1234567`, a valid PEP 440
   release) is unreadable, not "newer than everything".
-- **Never a downgrade.** An equal or older source is skipped. Following an EODC revert (EODC re-publishes
-  an older version on purpose) needs a manual decision: restore the pre-images (below) or re-register.
-- **The bound processes the first N, it does not refuse.** `remaining=M` is printed; the run exits 0 when
-  nothing failed, and is re-run until `remaining=0`, like the clean.
+- **Never a downgrade of a final release.** A source equal to or older than a final target is skipped.
+  Following an EODC revert (EODC re-publishes an older version on purpose) needs a manual decision: restore
+  the pre-images (below) or re-register. A target on a pre-release, dev build or local label is replaced by
+  any final version >= floor, even one PEP 440 orders lower (`0.13.1` over `0.14.0rc1`, review #7).
+- **Cloud cover is checked here too** (review #8): the search's CQL2 filter asks EODC for `< 90`, and
+  `classify` re-checks `eo:cloud_cover` (now in `FIELDS`). A missing or non-numeric value is
+  `skipped_cloud_cover`, never a create, and counts as unusable for the "nothing usable" refusal.
+- **The bound counts writes sent, it does not refuse** (review #2). Actions are taken newest first until
+  `--max-writes` POSTs/PUTs have been sent (would be, in a dry run); `remaining=M` counts the actions not
+  reached. A write that fails counts (it may have landed). An id that ends before its write does not:
+  old generation, unbuildable, source changed since the diff, target GET 404, target already caught up.
+  Those end the same way on every run, so counting them made a handful at the head of the order fill every
+  run's bound (or, for unbuildable sources, then raised as failures, trip the 10-in-a-row stop), forever.
+  No state is carried between runs: they are re-visited each run (one target GET, or one EODC fetch +
+  build, each) and never hold up the ids behind them. The alternative, a skip-list file the next run reads,
+  needs an input artifact chained between one-off Workflows that an operator can forget or point at the
+  wrong run. Other failures stay failures: 5xx, timeouts, and a source GET 404 (an EODC change could turn
+  every id into one, which must stop the run, not look like a converged one). They exit 1, and 10 in a row
+  stop the run, with the ids not reached reported as `remaining`, not as `failed`.
+- **An unbuildable source fails the run** (exit 1) although it neither uses the bound nor the 10-in-a-row
+  stop: `build_proxy_item` refusing an item means EODC's schema changed, which must not pass for a
+  converged run. If that turns out to be noise (one odd item), the exit condition is one line.
+- **`--max-writes` is required, dry runs included** (review #6): without it a dry run had a bound of 0 and
+  checked nothing, green.
+- **Replace reads the target first** (review #10): the GET and the comparison with the diff's source version
+  come before the EODC fetch and build, so a gone or caught-up item costs one GET.
 - **Writes never retry.** `open_write_client` keeps requests' default adapter (no retries), unlike
   `stac_auth.open_client` (pystac-client's `Retry(total=5)`). Reads use `stac_auth.open_resilient_client`.
+  Opening it (the landing-page GET) has the same 30 s timeout (review #3): the run holds the register's
+  semaphore, so a hang there would hold up the hourly register.
 - **Replaced-ids is not rollback input.** Its lines name the item `item_id`, so
   `rollback_created_items.read_created_ids` refuses the file instead of deleting pre-existing items.
 - **The register's semaphore.** The Workflow takes `eodc-register-limit`, so no register run creates an id
   while this run may create it, the condition under which a created-ids `uncertain` line names only an item
   this run may have made (the rollback tool's docstring relies on it). Hourly runs queue behind it
-  (`concurrencyPolicy: Allow`) and keep their scheduled windows.
+  (`concurrencyPolicy: Allow`) and keep their scheduled windows. It has no deadline (no time-based kill,
+  review #1): a reconcile pod stuck Pending (an expired tag in ImagePullBackOff) would hold it forever, so
+  the manifest's step 0 is an image smoke check, and its header says a Pending pod has written nothing and
+  its Workflow can be deleted to release the semaphore; a Running real run is never deleted.
+
+## Run order (Loïc, 17 Nov 2026)
+
+EODC is re-publishing its 1-10 Nov 2026 acquisitions at 0.13.1 under the same ids and the same store paths
+(since 17 Nov 10:07Z; `~/DevDS/EOPF/clean-s2-new-keep-geozarr_2026-11-17/FINDINGS-2026-11-17-eodc-drift.md`).
+- **1-10 Nov: this reconcile BEFORE the clean**, and the clean of that window only once EODC's re-publishing
+  is over. The reconcile replaces the old items in place and the clean then keeps them; cleaning first would
+  delete them and leave a gap until a reconcile re-creates them (the hourly register's 14-day acquisition
+  floor will not).
+- **October: independent.** EODC's October items carry no `EOPF_GEOZARR` (17 Nov), so the reconcile skips
+  them (`skipped_no_key`) and never writes them. October stays in `-new` for now (Loïc, 17 Nov).
 
 ## Dependency graph
 
 ```
-T1 parser ─► T2 tool + tests ─► T3 manifest + tests ─► T4 review, push, PR ─► T5 image sha-<merge-sha>
+T1 parser ─► T2 tool + tests ─► T3 manifest + tests ─► T4 review fixes, push, PR ─► T5 image sha-<merge-sha>
    ─► T6 dry run ─► T7 10-write canary + recovery exercise ─► T8 batches until remaining=0
-                    (Loïc's go for each real run, same tag throughout; #519's clean ideally done first)
+                    (Loïc's go for each real run, same tag throughout; for 1-10 Nov BEFORE the #519 clean)
 ```
 
 ## Tasks
@@ -100,9 +143,20 @@ absent; ValueError if unreadable) and `is_final(version)`.
 - [x] the write session sends a GET and a PUT exactly once on 503 + Retry-After and does not re-send a
   timed-out PUT (real socket); it carries the bearer
 - [x] `--max-writes 2` over 5 actions: the 2 newest written, `remaining=3`, re-runs converge to 0 writes
-- [x] a real run without `--max-writes`, either list or `--run-id` is refused; `--max-writes` 0/-1/""/x
-  refused by argparse; any other collection refused; http URLs refused
+- [x] a real run without either list or `--run-id` is refused; `--max-writes` missing (any run, since the
+  review round) or 0/-1/""/x refused by argparse; any other collection refused; http URLs refused
 - [x] each review finding's test fails when its bug is reintroduced (mutation runs, see Verification)
+- [x] (review round, 17 Nov) 11 ids at the head of the order that end before their write (unbuildable, old
+  generation, source changed, target GET 404) do not stop `--max-writes 1` writing the next id, and two runs
+  converge to `remaining=0`; an unbuildable source exits 1; a POST or PUT that fails counts toward the bound
+- [x] (review) opening the write client times out (landing page held 1 s, timeout 0.2 s, real socket)
+- [x] (review) `--max-writes` missing: argparse exit 2 for a dry run and a real run, nothing searched
+- [x] (review) `eo:cloud_cover` 90, missing, a string or NaN: `skipped_cloud_cover`; a catalogue that ignores
+  the CQL2 filter gets no write for a cloudy or cloud-less source, and an all-cloudy source exits 1
+- [x] (review) a target gone (GET 404) or caught up since the diff costs no source fetch; a fetched source
+  no newer than the target as just read is `skipped_source_changed`, no PUT
+- [x] (review) a target on `0.14.0rc1`, `0.13.2.dev3` or `0.13.1+eodc.1` is replaced by a final release;
+  final targets are still never downgraded; the re-run converges
 
 ### Task 3 — the Workflow  ✅ DONE
 **What**: `deploy/reconcile-s2-new-versions-workflow.yaml`.
@@ -115,27 +169,36 @@ absent; ValueError if unreadable) and `is_final(version)`.
 - [x] `imagePullPolicy: Always`, no `activeDeadlineSeconds`, the `eodc-register-limit` semaphore, both
   lists as optional archived artifacts, OIDC secrets and no AWS env
 
-### Task 4 — review, push, PR  (NEXT)
-**What**: ponytail-review pass, push `feat/reconcile-s2-new-versions`, PR opened by Loïc.
+### Task 4 — review fixes, push, PR  (NEXT)
+**What**: the `/code-review high` findings of 17 Nov (triage in
+`~/DevDS/EOPF/clean-s2-new-keep-geozarr_2026-11-17/REVIEWS.md`): #2, #3, #6, #7, #8, #10 in the tool, #1, #4
+and the run order in the manifest header, #5 in the `TARGET_RUNS` comment, the restore limit in Rollback.
+#9 (duplicate write-session setup) is deferred to when `stac_auth` gets timeout/retry parameters. Then a
+ponytail-review pass, push `feat/reconcile-s2-new-versions`, PR opened by Loïc.
+**Verify**: `uv run --group test pytest -q`
 **Acceptance criteria**:
 - [x] full suite passes (`uv run --group test pytest -q`)
+- [x] each fix's test fails when its bug is reintroduced (see Verification)
 - [ ] PR reviewed and merged
 
 ### Task 5 — image  (blocked on Task 4)
 **What**: take the `sha-<merge-sha>` tag from CI's pull_request build (`sha-` + first 7 of
 `refs/pull/<N>/merge`); check the tool is in it.
-**Verify**: the `kubectl run reconcile-tool-smoke ... --help` command in the manifest header.
+**Verify**: the `kubectl run reconcile-tool-smoke ... --help` command in the manifest header (step 0).
 **Acceptance criteria**:
-- [ ] `reconcile_versions.py --help` runs in that image
+- [ ] `reconcile_versions.py --help` runs in that image and lists `--max-writes` as required
 
 ### Task 6 — dry run  (blocked on Task 5)
 **What**: `argo submit -n devseed deploy/reconcile-s2-new-versions-workflow.yaml -p pipeline_image_version=sha-<merge-sha>`
 **Verify**: the `Diff for sentinel-2-l2a-new` block and the summary line in the pod log.
 **Acceptance criteria**:
 - [ ] `target` matches a fresh count of the collection (34,672 on 17 Nov before the clean; ~8.8k after it)
-- [ ] `skipped_unreadable=0`, `skipped_prerelease=0`, `refused_target_unreadable=0`, `failed=0`
+- [ ] `skipped_unreadable=0`, `skipped_prerelease=0`, `skipped_cloud_cover=0`, `skipped_unbuildable=0`,
+  `refused_target_unreadable=0`, `failed=0`
 - [ ] `skipped_in_archive` is in the expected ~800-1,000 range, or explained
-- [ ] the 10 `would create` / `would replace` lines name real ids, with plausible version changes
+- [ ] the 10 `would create` / `would replace` lines name real ids, with plausible version changes; the
+  1-10 Nov acquisitions EODC has re-published at 0.13.1 appear as `would replace` (or `would create` for
+  ids the clean canary deleted)
 - [ ] the Workflow succeeds
 
 ### Task 7 — 10-write canary and the recovery exercise  (blocked on Task 6, Loïc's go)
@@ -151,7 +214,8 @@ each (see Rollback), then let the next run re-apply them.
 ### Task 8 — batches  (blocked on Task 7, Loïc's go)
 **What**: the same tag, `-p dry_run=false -p max_writes=500`, repeated.
 **Acceptance criteria**:
-- [ ] no run shows `failed`, `skipped_unreadable` or `refused_target_unreadable` above 0 (or each is explained)
+- [ ] no run shows `failed`, `skipped_unreadable`, `skipped_unbuildable`, `skipped_cloud_cover` or
+  `refused_target_unreadable` above 0 (or each is explained)
 - [ ] the last run prints `remaining=0` with no writes and exits 0
 
 ## Rollback
@@ -186,16 +250,28 @@ diff time, under the register's semaphore.
 5. PUT the body to the same URL with a bearer from `stac-auth-oidc`, once, no retry, 30 s timeout; then GET
    and check `EOPF_GEOZARR` equals the line's `old_version`.
 
+**What a restore cannot undo.** A pre-image restores the item's METADATA. When EODC re-creates a store at the
+same path, as it is doing for the 1-10 Nov acquisitions (same ids, same cpm_v300 paths, new bytes with
+`EOPF_GEOZARR: "0.13.1"`), the old bytes are gone at EODC. A restored item then describes the old version
+but points at the new store, so the replace cannot be undone; only a store EODC has left in place can be
+restored to its old state. The Task 7 exercise checks the mechanism, not the data.
+
 ## Verification (2026-11-17)
 
 - `uv run --group test pytest tests/unit/test_processing_software.py tests/unit/test_reconcile_versions.py
-  tests/unit/test_reconcile_s2_new_workflow_manifest.py -q`: all pass.
-- Full suite: `uv run --group test pytest -q`: 2041 passed, 5 skipped.
-- Mutation runs: 33 mutants, each reintroducing one review finding's bug (or a manifest guard's) and running
-  its tests; all 33 fail their tests on the final test files. The first run missed one (G3, the body's
-  `type` check alone), which a new test case now pins. Driver and output in
-  `~/DevDS/EOPF/clean-s2-new-keep-geozarr_2026-11-17/mutation-runs/reconcile/`. A caught mutant shows that a
-  test catches that bug, nothing about bugs no mutant encodes.
+  tests/unit/test_reconcile_s2_new_workflow_manifest.py -q`: all pass (129 after the review round).
+- Full suite: `uv run --group test pytest -q`: 2059 passed, 5 skipped (2041 before the review round).
+- Mutation runs, first round: 33 mutants, each reintroducing one review finding's bug (or a manifest guard's)
+  and running its tests; all 33 fail their tests on the final test files. The first run missed one (G3, the
+  body's `type` check alone), which a new test case now pins. Driver and output in
+  `~/DevDS/EOPF/clean-s2-new-keep-geozarr_2026-11-17/mutation-runs/reconcile/`.
+- Mutation runs, review round: 15 new mutants (R2a-R10c, R7) reintroduce this round's findings; the 26
+  earlier mutants whose code did not move re-run as is, and 7 whose code moved re-run re-anchored. 47 of 48
+  fail their tests. The one missed, R3b, drops the `StacApiIO(timeout=...)` while keeping
+  `Client.open(timeout=...)`: in pystac-client 0.9.1 `Client.open` overwrites the `stac_io`'s timeout, so
+  that argument has no effect and no test can see it go. Driver and output in
+  `~/DevDS/EOPF/clean-s2-new-keep-geozarr_2026-11-17/mutation-runs/reconcile-review-fixes/`. A caught mutant
+  shows that a test catches that bug, nothing about bugs no mutant encodes.
 
 ## Risks
 - **EODC's page size and `fields`.** EODC's root declares `item-search#fields` (captured 26 Oct 2026);
@@ -208,24 +284,40 @@ diff time, under the register's semaphore.
   fixed by `scheduledTime`, so nothing is lost). At ~1-2 s per write, a 500-write batch is ~10-15 min.
 - **Pre-image size.** ~15-45 KB per replace: a 500-replace batch writes ~10-20 MB of replaced-ids.
 - **Tag expiry.** Harbor deletes `sha-*` tags after 7 days; past that, dry-run again on
-  `<release tag>@sha256:<digest>`.
+  `<release tag>@sha256:<digest>`. A tag that has expired leaves the pod Pending with the semaphore held:
+  smoke-check the image first (manifest step 0).
+- **Schema drift makes a run long.** Unbuildable sources do not use the bound, so if EODC changes its item
+  schema and every build fails, a run (a dry run too) fetches every action before it ends, exit 1. At
+  ~0.3-1 s per fetch that is minutes to an hour or two for ~12k actions, holding the semaphore. A dry run
+  writes nothing and can be deleted at any time; a Running real run is never deleted.
+- **EODC removing items mid-run.** A source the diff listed and EODC has since removed answers 404 to the
+  fetch: a failure (exit 1; 10 in a row stop the run). The next run's diff no longer lists it.
 
 ## Open questions (owner: Loïc)
-1. **Exclusion scope.** An id in `sentinel-2-l2a` is never created, but an id already in both collections is
-   still replaced in `-new`. Keep?
 2. **Acquisition start 2026-09-29.** The target's earliest acquisition is 2026-09-29T08:26Z. A later start
    (after the 30 Sep burst) would shrink `skipped_in_archive` but leave late-September scenes unreconciled.
 3. **Unreadable sources.** Only an all-unusable source fails the run; a few unreadable source stamps are
    counted and sampled but exit 0. Fail on any (as the clean refuses any unreadable item)?
-4. **Semaphore.** Taking `eodc-register-limit` delays hourly register runs during a batch. Keep, or drop it
-   and accept that a created-ids `uncertain` line may name an item a concurrent register run created?
 5. **Recovery exercise.** Is exercising the rollback and the restore on one canary item each (Task 7) enough,
    or should the restore be scripted and tested first?
 6. **After #519 merges:** switch `manage_collections._software_value` / `_kept` to
    `processing_software.read_version` (it is stricter: an all-digit sha becomes unreadable, which the clean
    refuses).
-7. **A recurring reconcile** (CronWorkflow) is out of scope. Wanted after the batches converge?
+8. **An unbuildable source fails the run** (exit 1) without holding up the others (Design). Keep, or make
+   it a counted skip that exits 0?
+
+### Resolved (Loïc, 17 Nov 2026)
+1. **Exclusion scope:** an id already in both `-new` and `sentinel-2-l2a` is replaced in `-new` like any
+   other (it adds no duplicate). Only creates are checked against `sentinel-2-l2a`. The manifest header and
+   the module docstring now say so (review #4).
+4. **Semaphore:** kept. No deadline on it (review #1): the image smoke check and the Pending-pod step in the
+   manifest header instead.
+- **Run order:** for the 1-10 Nov acquisitions this reconcile runs BEFORE the clean; October is independent
+  (see Run order).
+7. **A recurring reconcile**, the dead-entry delete pass and one-item-per-scene (the 111 scenes with two
+   generations at EODC): deferred until EODC answers on the scope of its re-publishing.
 
 ## Done definition
-A real run of the Workflow prints `remaining=0`, writes nothing, `failed=0`, `skipped_unreadable=0` and
-exits 0, and the canary's created and replaced items were each recovered once and re-applied.
+A real run of the Workflow prints `remaining=0`, writes nothing, `failed=0`, `skipped_unreadable=0`,
+`skipped_unbuildable=0` and exits 0, and the canary's created and replaced items were each recovered once
+and re-applied.
