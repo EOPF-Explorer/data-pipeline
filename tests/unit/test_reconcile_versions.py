@@ -608,6 +608,7 @@ def test_an_item_gone_before_the_get_is_skipped_never_created(tmp_path, caplog):
     world = World(source={"A": "0.13.1"}, target={"A": "0.13.0"}, overrides={("GET", "A"): 404})
     assert world.run(tmp_path) == 0
     assert world.target.writes() == []
+    assert not world.fetch.called, "review finding 10: the GET comes before the source fetch"
     assert summary(caplog)["gone"] == 1
     assert lines(tmp_path / "created.jsonl") == lines(tmp_path / "replaced.jsonl") == []
 
@@ -619,13 +620,14 @@ def test_an_item_gone_between_the_get_and_the_put_is_gone(tmp_path, caplog):
     assert summary(caplog)["gone"] == 1
 
 
-def test_the_get_is_re_compared_so_a_newer_target_is_never_downgraded(tmp_path, caplog):
-    world = World(source={"A": "0.13.1"}, target={"A": "0.13.0"})
-    world.after_the_diff(
-        lambda: world.target.items.update(A=world.target.item("A", props("0.13.1")))
-    )
+def test_a_target_caught_up_since_the_diff_costs_no_fetch_and_no_put(tmp_path, caplog):
+    """The GET is re-compared, so a newer target is never downgraded; and it comes first
+    (review finding 10), so the EODC fetch and build are skipped too."""
+    world = World(source={"A": "0.13.1"}, target={"A": "0.13.0"},
+                  overrides={("GET", "A"): FakeTarget.item("A", props("0.13.1"))})  # fmt: skip
     assert world.run(tmp_path) == 0
     world.target.session.put.assert_not_called()
+    assert not world.fetch.called
     assert summary(caplog)["skipped_not_newer"] == 1
 
 
@@ -644,12 +646,14 @@ def test_a_failed_put_fails_the_run_and_never_lands_in_created_ids(tmp_path, cap
 
 
 def test_a_source_that_changed_since_the_diff_is_not_written(tmp_path, caplog):
-    world = World(source={"A": "0.13.1", "B": "0.13.1"}, target={"A": "0.13.0"},
-                  fetched={"A": "0.12.0", "B": "old"})  # fmt: skip
+    """C: the fetched source is no newer than the target as just read, so no PUT."""
+    world = World(source={"A": "0.13.1", "B": "0.13.1", "C": "0.13.1"},
+                  target={"A": "0.13.0", "C": "0.13.0"},
+                  fetched={"A": "0.12.0", "B": "old", "C": "0.13.0"})  # fmt: skip
     assert world.run(tmp_path) == 0
     assert world.target.writes() == []
     counts = summary(caplog)
-    assert (counts["skipped_source_changed"], counts["skipped_old_generation"]) == (1, 1)
+    assert (counts["skipped_source_changed"], counts["skipped_old_generation"]) == (2, 1)
 
 
 def test_the_fetched_version_is_the_one_written_and_compared(tmp_path, caplog):

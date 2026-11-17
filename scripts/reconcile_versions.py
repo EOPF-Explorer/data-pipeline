@@ -262,13 +262,15 @@ class Run:
     # POSTs and PUTs sent (or, in a dry run, that would be): what --max-writes bounds.
     writes: int = 0
 
-    def build(self, item_id: str) -> tuple[Item, Version] | str:
+    def build(self, item_id: str, target: dict | None = None) -> tuple[Item, Version] | str:
         """Fetch and build one source item as the register would, or a skip verdict.
 
         The fetched item, not the diff's snapshot, is what gets written, so it is classified
-        again: EODC may have changed it since the diff. A source ``build_proxy_item`` refuses
-        is ``skipped_unbuildable``, not a failure: the same item fails the same way on every
-        run, so it must neither hold up the ids behind it nor trip the failures-in-a-row stop.
+        again, against ``target`` (the target item's properties as just read, None for a
+        create): EODC may have changed it since the diff. A source ``build_proxy_item``
+        refuses is ``skipped_unbuildable``, not a failure: the same item fails the same way
+        on every run, so it must neither hold up the ids behind it nor trip the
+        failures-in-a-row stop.
         """
         source = fetch_source_item(
             self.policy.source_stac_api, self.policy.source_collection, item_id
@@ -279,8 +281,8 @@ class Run:
             )
             return "skipped_old_generation"
         properties = source.get("properties") or {}
-        verdict = classify(properties, None, self.policy)
-        if verdict != "create":
+        verdict = classify(properties, target, self.policy)
+        if verdict != ("create" if target is None else "replace"):
             logger.warning("   ⚠️  %s: the source is now %s, skipped", item_id, verdict)
             return "skipped_source_changed"
         try:
@@ -292,7 +294,7 @@ class Run:
             logger.warning("   ⚠️  %s: cannot be built (%s), skipped", item_id, exc)
             return "skipped_unbuildable"
         version = read_version(properties, self.policy.key)
-        assert version is not None  # noqa: S101  # nosec B101 -- classify said "create"
+        assert version is not None  # noqa: S101  # nosec B101 -- classify said create/replace
         return item, version
 
     def create(self, item_id: str) -> str:
@@ -337,12 +339,12 @@ class Run:
                 f"cannot record {item_id} in {self.replaced_ids} ({exc})"
             ) from exc
 
-    def replace(self, item_id: str) -> str:
-        """Re-read the target item, check it, record its pre-image, then PUT the new one."""
-        built = self.build(item_id)
-        if isinstance(built, str):
-            return built
-        item, version = built
+    def replace(self, item_id: str, listed: dict) -> str:
+        """Re-read the target item and check it, then build, record the pre-image and PUT.
+
+        ``listed`` is the source's properties as the diff read them. The target comes first,
+        compared with that version: an item gone or already caught up costs no source fetch.
+        """
         io = self.client._stac_io
         assert io is not None  # noqa: S101  # nosec B101 -- set by Client.open
         session = io.session
@@ -358,9 +360,13 @@ class Run:
         if why:
             raise RuntimeError(f"refused: {why}")
         current = read_version(current_item["properties"], self.policy.key)
-        if current is not None and version <= current:
+        if classify(listed, current_item["properties"], self.policy) != "replace":
             logger.info("   ⏭️  %s: the target is already %s %s", item_id, self.policy.key, current)
             return "skipped_not_newer"
+        built = self.build(item_id, current_item["properties"])
+        if isinstance(built, str):
+            return built
+        item, version = built
         change = f"{self.policy.key} {current} -> {version}"
         self.writes += 1  # before the PUT: one that fails may still have landed
         if self.dry_run:
@@ -560,7 +566,10 @@ def main(argv: list[str] | None = None) -> int:
             break
         visited += 1
         try:
-            counts[run.create(item_id) if kind == "create" else run.replace(item_id)] += 1
+            if kind == "create":
+                counts[run.create(item_id)] += 1
+            else:
+                counts[run.replace(item_id, sources[item_id])] += 1
             streak = 0
         except (CreatedIdsError, ReplacedIdsError) as exc:
             logger.error("Stopping: %s", exc)
