@@ -14,7 +14,9 @@ a fixed acquisition range, by id and version only, and for each source id:
   ``register_proxy.create_item``, and recorded in ``--created-ids`` exactly as the register
   records it;
 - absent from the target but in the exclusion collection (``sentinel-2-l2a``, our converted
-  archive): skipped. EODC's 30 Sep 2026 burst holds ~800-1,000 such scenes;
+  archive): skipped. EODC's 30 Sep 2026 burst holds ~800-1,000 such scenes. Only creates
+  are checked against it: an id already in the target is replaced like any other, which
+  adds no duplicate;
 - in the target with an older version, none, or a pre-release, dev or local-label one:
   REPLACED. A final release replaces a non-final target even where PEP 440 orders it lower
   (``0.13.1`` over ``0.14.0rc1``);

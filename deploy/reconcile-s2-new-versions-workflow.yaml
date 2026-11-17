@@ -6,31 +6,45 @@
 # s2-new clean deleted never comes back. This run diffs EODC's sentinel-2-l2a-zarr3 (acquired
 # from 2026-09-29, eo:cloud_cover < 90, as the register) against the target by id + version:
 #   - EOPF_GEOZARR >= 0.13.0, absent from the target and from sentinel-2-l2a  -> CREATE
-#   - EOPF_GEOZARR >= 0.13.0 and strictly newer than the target's (or the target has none)
-#                                                                             -> REPLACE (PUT)
-#   - below 0.13.0, no key, unreadable, a pre-release, equal or older, or in sentinel-2-l2a
-#     (our converted archive: EODC's 30 Sep burst, ~800-1,000 ids)            -> skipped, counted
+#   - EOPF_GEOZARR >= 0.13.0 and strictly newer than the target's, or the target has none or a
+#     pre-release/dev/local one (a release then wins even if lower)           -> REPLACE (PUT)
+#   - eo:cloud_cover missing or >= 90 (checked here too, not only by the search filter), below
+#     0.13.0, no key, unreadable, a pre-release, equal to or older than a final target, or
+#     absent from the target but in sentinel-2-l2a (our converted archive: EODC's 30 Sep burst,
+#     ~800-1,000 ids)                                                          -> skipped, counted
+#   Only creates are checked against sentinel-2-l2a: an id already in the target (and in
+#   sentinel-2-l2a) is replaced like any other, which adds no duplicate.
 # The key, the floor, the range and the exclusion are fixed in the script's POLICIES table for
 # this collection, not parameters here; the script refuses any other collection.
 #
 # Bounds, all enforced inside the tool, none by a timeout or a kill:
-#   --max-writes   creates + replaces this run makes at most, newest acquisition first. The rest
-#                  is printed as `remaining=M`; re-run until it is 0. The run converges.
-#   replace check  before each PUT the item is re-read (GET, no retries, 30 s timeout). A body
-#                  that is not that item with a readable version refuses the id; a 404 is
-#                  `gone`; an item already caught up is skipped. The pre-image goes to
-#                  replaced-ids BEFORE the PUT, the outcome after it.
+#   --max-writes   POSTs + PUTs this run sends at most (a dry run: would send), newest acquisition
+#                  first; required, dry runs included. An id that ends before its write is
+#                  counted by reason and does not use the bound: skipped_old_generation,
+#                  skipped_unbuildable, skipped_source_changed, gone (target GET 404) or
+#                  skipped_not_newer. Such ids end the same way on every run, and never hold up
+#                  the ones behind them. The ids not reached are printed as `remaining=M`;
+#                  re-run until it is 0. The run converges.
+#   replace check  before fetching the source, the item is re-read (GET, no retries, 30 s
+#                  timeout). A body that is not that item with a readable version refuses the
+#                  id; a 404 is `gone`; an item already caught up is skipped. The pre-image goes
+#                  to replaced-ids BEFORE the PUT, the outcome after it.
+#   10 in a row    10 failures in a row (an outage) stop the run; skips never count toward it.
 #   loud failure   exit 1 (the Workflow shows Failed) after the summary if any write failed or
-#                  was refused, if a target item's EOPF_GEOZARR cannot be read, or if no source
-#                  item in the range has a usable EOPF_GEOZARR >= 0.13.0 (a renamed key or a new
-#                  stamp format must not look like a converged run).
-# There is no activeDeadlineSeconds: the bound is --max-writes, never a kill. Every write has a
-# 30 s client timeout and is sent once, so a stalled one fails instead of hanging the run.
+#                  was refused, if a target item's EOPF_GEOZARR cannot be read, if a source item
+#                  cannot be built (skipped_unbuildable: EODC changed its item schema?), or if no
+#                  source item in the range has a usable EOPF_GEOZARR >= 0.13.0 (a renamed key or
+#                  a new stamp format must not look like a converged run).
+# There is no activeDeadlineSeconds: the bound is --max-writes, never a kill. Every request has a
+# 30 s client timeout (opening the write client included) and every write is sent once, so a
+# stalled one fails instead of hanging the run.
 #
 # Usage. Use the SAME `sha-<merge-sha>` tag (see TAG GOTCHA) for the dry run and every real run,
 # so the real runs execute the code the dry run validated.
+#   0. SMOKE-CHECK the image first (the command below). A tag that cannot be pulled leaves the
+#      reconcile pod Pending (ImagePullBackOff) while the Workflow holds the register's semaphore.
 #   1. DRY RUN (default dry_run=true: diffs, prints every count with sample ids, and fetches,
-#      builds and re-checks the first max_writes items; writes nothing):
+#      builds and re-checks ids until max_writes would-be writes; writes nothing):
 #        argo submit -n devseed deploy/reconcile-s2-new-versions-workflow.yaml \
 #          -p pipeline_image_version=sha-<merge-sha>
 #   2. REAL canary, 10 writes, the same ids the dry run listed. Check them against the API and
@@ -38,17 +52,30 @@
 #        ... -p pipeline_image_version=sha-<merge-sha> -p dry_run=false -p max_writes=10
 #   3. BATCHES, repeated until a run prints `remaining=0`:
 #        ... -p pipeline_image_version=sha-<merge-sha> -p dry_run=false -p max_writes=500
-#   Read the counts at the top of each run: a skipped_unreadable or skipped_prerelease above 0
-#   means EODC changed how it stamps items.
+#   Read the counts at the top of each run: a skipped_unreadable, skipped_prerelease or
+#   skipped_cloud_cover above 0 means EODC changed how it stamps or filters items, and a
+#   skipped_unbuildable above 0 that its item schema changed.
 #
-# The s2-new clean (deploy/clean-s2-new-keep-geozarr-workflow.yaml, data-pipeline#519) re-reads
-# each candidate just before its DELETE and keeps one now >= 0.13.0, so the two may run in either
-# order. Run the clean first all the same: this run then has fewer replaces to make, and an item
-# the clean deletes between this run's GET and PUT answers 404 (`gone`) and is created by the
-# next run. This Workflow takes the register's one-slot `eodc-register-limit` semaphore, like
-# every eopf-eodc-register run: no register run creates an id while this run may be creating it,
-# which is what lets a created-ids "uncertain" line name only an item this run may have made.
-# Hourly register runs queue behind it (concurrencyPolicy: Allow) and keep their own windows.
+# A reconcile pod stuck Pending (ImagePullBackOff, unschedulable) has written nothing: delete
+# that Workflow (`argo delete -n devseed <name>`) to release `eodc-register-limit`, fix the cause,
+# then submit again. Never delete a Running REAL run: it may be between a write and its line in
+# created-ids/replaced-ids; let it end (its bound ends it). A dry run writes nothing.
+#
+# Order with the s2-new clean (deploy/clean-s2-new-keep-geozarr-workflow.yaml, data-pipeline#519):
+#   - Acquisitions 1-10 Nov 2026: run this reconcile BEFORE the clean, and clean them only once
+#     EODC's re-publishing is over. EODC is re-publishing those scenes at 0.13.1 under the same
+#     ids and store paths (since 17 Nov 2026): this run replaces the old items in place, and the
+#     clean then keeps them. Cleaning first deletes them and leaves a gap until a reconcile
+#     re-creates them: the hourly register will not, past its 14-day acquisition floor.
+#   - October acquisitions: independent. EODC's October items carry no EOPF_GEOZARR (17 Nov
+#     2026), so this run skips them (skipped_no_key) and never writes them.
+# The clean re-reads each candidate just before its DELETE and keeps one now >= 0.13.0; an item it
+# deletes between this run's GET and PUT answers 404 (`gone`) and is created by the next run.
+#
+# This Workflow takes the register's one-slot `eodc-register-limit` semaphore, like every
+# eopf-eodc-register run: no register run creates an id while this run may be creating it, which
+# is what lets a created-ids "uncertain" line name only an item this run may have made. Hourly
+# register runs queue behind it (concurrencyPolicy: Allow) and keep their own windows.
 #
 # Artifacts (archived to the Argo artifact bucket, kept on exit 1 too):
 #   created-ids   one JSON line per created item, as the register writes it: the input of
@@ -57,7 +84,10 @@
 #                 new_version, pre_image) and an `after_put` line (outcome). Lines name the item
 #                 `item_id`, not `id`, so the rollback tool refuses this file instead of deleting
 #                 items that existed before the run. Restoring a pre-image is in
-#                 claude-docs/plans/reconcile-s2-new-versions.md (Rollback).
+#                 claude-docs/plans/reconcile-s2-new-versions.md (Rollback). It restores the
+#                 METADATA only: once EODC has re-created a store at the same path (as for
+#                 1-10 Nov), the old bytes are gone at EODC, so a restored item points at the new
+#                 store and the replace cannot be undone.
 #
 # pipeline_image_version must contain scripts/reconcile_versions.py. A REAL run is refused unless
 # the tag names one image: `sha-*` or `<tag>@sha256:<digest>` (pr-<N>, v*, latest and main can
@@ -69,11 +99,13 @@
 # The Harbor cleanup deletes `sha-*` tags after 7 days; past that, dry-run and run again on
 # `<release tag>@sha256:<digest>`.
 #
-# Verify the tool is really in the image before pointing it at data:
+# Smoke check: verify the tool is really in the image before pointing it at data (step 0):
 #   kubectl -n devseed run reconcile-tool-smoke --restart=Never \
 #     --image=<registry>/data-pipeline:<tag> \
 #     --overrides='{"spec":{"serviceAccountName":"operate-workflow-sa"}}' \
 #     --command -- python3 /app/scripts/reconcile_versions.py --help
+#   kubectl -n devseed logs reconcile-tool-smoke     # the --help text, or the pod never started
+#   kubectl -n devseed delete pod reconcile-tool-smoke
 #
 # A one-off on purpose: a CronWorkflow that keeps the collection reconciled is out of scope here.
 apiVersion: argoproj.io/v1alpha1
@@ -105,7 +137,7 @@ spec:
     parameters:
     - name: pipeline_image_version          # REQUIRED: a build containing reconcile_versions.py
       value: ""
-    - name: max_writes                      # creates + replaces per run; re-run to continue
+    - name: max_writes                      # POSTs + PUTs per run; re-run to continue
       value: "10"
     - name: dry_run                         # SAFE DEFAULT: diff + checks, write nothing
       value: "true"
