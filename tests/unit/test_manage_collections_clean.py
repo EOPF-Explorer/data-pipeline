@@ -15,6 +15,7 @@ both are tested below:
 No network: the item manager and S3 client are mocked.
 """
 
+import json
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,6 +24,7 @@ from unittest.mock import MagicMock
 import click
 import pytest
 from click.testing import CliRunner
+from packaging.version import Version
 
 OPERATOR_TOOLS = Path(__file__).parent.parent.parent / "operator-tools"
 if str(OPERATOR_TOOLS) not in sys.path:
@@ -347,3 +349,235 @@ def test_the_resilient_client_never_carries_the_write_session() -> None:
     # The session used for every write carries no urllib3 status-retry policy.
     for adapter in manager.session.adapters.values():
         assert not getattr(adapter.max_retries, "status_forcelist", None)
+
+
+# === --keep-software-min: keep a minimum processing:software version (catalogue-only) ===
+
+FLOOR = ("EOPF_GEOZARR", Version("0.13.0"))
+NEW = "sentinel-2-l2a-new"
+
+
+def _sw(i: int, software: object = None, *, encode: bool = False) -> dict:
+    """An item whose processing:software is `software` (left out when None); `encode`
+    sends it JSON-encoded, as some API responses do."""
+    item = _item(i)
+    if software is not None:
+        item["properties"] = {"processing:software": json.dumps(software) if encode else software}
+    return item
+
+
+def _geozarr(version: str) -> dict:
+    return {"EOPF_CPM": "3.0.0", "EOPF_GEOZARR": version}
+
+
+def _keep(mgr: STACCollectionManager, **kwargs: object) -> int:
+    deleted, _, _ = mgr.clean_collection(NEW, keep_software_min=FLOOR, **kwargs)  # type: ignore[arg-type]
+    return deleted
+
+
+@pytest.mark.parametrize(
+    ("version", "kept"),
+    [
+        ("0.13.0", True),  # the floor itself
+        ("0.13.1", True),
+        ("0.14.0", True),
+        ("1.0.0", True),
+        ("0.13", True),  # PEP 440: 0.13 == 0.13.0
+        ("0.12.0", False),
+        ("0.9.9", False),
+        ("0.13.0rc1", False),  # PEP 440: a pre-release sorts below its release
+    ],
+)
+def test_keep_software_min_compares_versions_not_strings(version: str, kept: bool) -> None:
+    """As strings "0.9.9" > "0.13.0"; as versions it is below the floor."""
+    mgr = _manager([_sw(0, _geozarr("0.13.1")), _sw(1, _geozarr(version))])
+    assert _keep(mgr) == (0 if kept else 1)
+    assert _deleted_ids(mgr) == ([] if kept else ["ITEM_00001"])
+
+
+def test_keep_software_min_reads_an_object_and_a_json_encoded_string() -> None:
+    items = [
+        _sw(0, _geozarr("0.13.0")),
+        _sw(1, _geozarr("0.13.1"), encode=True),
+        _sw(2, _geozarr("0.12.0")),
+        _sw(3, _geozarr("0.12.0"), encode=True),
+    ]
+    mgr = _manager(items)
+    assert _keep(mgr) == 2
+    assert _deleted_ids(mgr) == ["ITEM_00002", "ITEM_00003"]
+
+
+def test_keep_software_min_deletes_items_without_the_key_or_the_property() -> None:
+    """The census's 23,802 items without EOPF_GEOZARR are deletion candidates, not kept."""
+    items = [
+        _sw(0, _geozarr("0.13.1")),
+        _sw(1, {"EOPF_CPM": "3.0.0", "EOPF_MODEL": "1.0.0"}),
+        _sw(2, {"EOPF_CPM": "3.0.0"}, encode=True),
+        _sw(3),  # no properties at all
+        {**_item(4), "properties": {"datetime": OLD}},  # properties, no processing:software
+    ]
+    mgr = _manager(items)
+    assert _keep(mgr) == 4
+    assert _deleted_ids(mgr) == [f"ITEM_{i:05d}" for i in range(1, 5)]
+
+
+def test_keep_software_min_is_applied_before_the_bound() -> None:
+    """The API lists newest first, so the kept items head the list: --max-items 10 must
+    still delete 10 candidates, not spend the bound on kept items and delete nothing."""
+    items = [_sw(i, _geozarr("0.13.1")) for i in range(30)] + [
+        _sw(i, _geozarr("0.12.0")) for i in range(30, 100)
+    ]
+    mgr = _manager(items)
+    assert _keep(mgr, max_items=10) == 10
+    assert _deleted_ids(mgr) == [f"ITEM_{i:05d}" for i in range(30, 40)]
+
+
+@pytest.mark.parametrize(
+    "software",
+    [
+        "EOPF_GEOZARR=0.13.1",
+        '{"EOPF_GEOZARR": "0.13.1"',
+        ["0.13.1"],
+        13,
+        {"EOPF_GEOZARR": 0.131},
+        {"EOPF_GEOZARR": "latest"},
+    ],
+    ids=["not-json", "truncated-json", "list", "number", "non-string-value", "not-a-version"],
+)
+def test_keep_software_min_refuses_a_value_it_cannot_read(software: object) -> None:
+    """Fail closed: not provably below the floor either. The whole run is refused before
+    any delete, and the offending id is named."""
+    mgr = _manager([_sw(0, _geozarr("0.13.1")), _sw(1, _geozarr("0.12.0")), _sw(2, software)])
+    with pytest.raises(click.ClickException, match="not a readable version, e.g. ITEM_00002"):
+        _keep(mgr)
+    mgr.item_manager.delete_item.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "floor", [("EOPF_GEOZAR", Version("0.13.0")), ("EOPF_GEOZARR", Version("1.13.0"))]
+)
+def test_keep_software_min_keeping_no_item_refuses(floor: tuple[str, Version]) -> None:
+    """A typo in KEY or VERSION keeps nothing, which would delete the whole collection."""
+    mgr = _manager([_sw(i, _geozarr("0.13.1")) for i in range(5)] + [_sw(5, _geozarr("0.12.0"))])
+    with pytest.raises(click.ClickException, match="keeps no item"):
+        mgr.clean_collection(NEW, keep_software_min=floor)
+    mgr.item_manager.delete_item.assert_not_called()
+
+
+def test_keep_software_min_with_nothing_to_delete_is_a_no_op(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    mgr = _manager([_sw(i, _geozarr("0.13.1")) for i in range(5)])
+    assert _keep(mgr) == 0
+    mgr.item_manager.delete_item.assert_not_called()
+    assert "Every item is kept; nothing deleted" in capsys.readouterr().out
+
+
+def test_keep_software_min_still_keeps_demo_scenes(capsys: pytest.CaptureFixture[str]) -> None:
+    """A demo-listed item is kept even when its version makes it a candidate, and is
+    reported as a demo scene, not counted in the per-value tally."""
+    demo = {**_sw(0, _geozarr("0.12.0")), "id": "S2A_MSIL2A_DEMO_NOT_IN_THESE_TESTS"}
+    mgr = _manager([demo, _sw(1, _geozarr("0.13.1")), _sw(2, _geozarr("0.12.0"))])
+    assert _keep(mgr) == 1
+    assert _deleted_ids(mgr) == ["ITEM_00002"]
+    out = capsys.readouterr().out
+    assert "Protected demo scenes (demo denylist): 1" in out
+    assert "delete '0.12.0': 1\n" in out
+
+
+def test_keep_software_min_dry_run_prints_the_count_per_value_and_deletes_nothing(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The operator compares these lines with the census before any real run."""
+    items = (
+        [_sw(i, _geozarr("0.13.0"), encode=True) for i in range(3)]
+        + [_sw(i, _geozarr("0.13.1")) for i in range(3, 5)]
+        + [_sw(5, _geozarr("0.12.0"))]
+        + [_sw(i, {"EOPF_CPM": "3.0.0"}) for i in range(6, 10)]
+    )
+    mgr = _manager(items)
+    assert _keep(mgr, dry_run=True, max_items=4) == 0
+    mgr.item_manager.delete_item.assert_not_called()
+    out = capsys.readouterr().out
+    assert (
+        "processing:software['EOPF_GEOZARR'] per item (keeping >= 0.13.0):\n"
+        "    delete (missing): 4\n"
+        "    keep   '0.13.0': 3\n"
+        "    keep   '0.13.1': 2\n"
+        "    delete '0.12.0': 1\n"
+        "    total: keep 5, delete 5\n"
+    ) in out
+    assert "Bounded run: 4 of 5 items" in out
+    assert "Would delete 4 STAC items" in out
+
+
+def test_cli_refuses_keep_software_min_with_clean_s3(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Catalogue-only by design: the stores behind sentinel-2-l2a-new are EODC's."""
+    clean = MagicMock(side_effect=AssertionError("clean_collection must not run"))
+    monkeypatch.setattr(STACCollectionManager, "clean_collection", clean)
+    boto = MagicMock(side_effect=AssertionError("no S3 client may be built"))
+    monkeypatch.setattr("manage_collections.boto3.client", boto)
+    result = CliRunner().invoke(
+        cli,
+        ["--api-url", "https://stac.example.com", "clean", NEW, "-y"]
+        + ["--keep-software-min", "EOPF_GEOZARR=0.13.0"]
+        + ["--clean-s3", "--confine-to", f"s3://{BUCKET}/x/"],
+    )
+    assert result.exit_code == 2, result.output
+    assert "--keep-software-min is catalogue-only" in result.output
+    clean.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "raw", ["EOPF_GEOZARR", "EOPF_GEOZARR=", "=0.13.0", "=", "EOPF_GEOZARR=latest"]
+)
+def test_cli_refuses_a_malformed_keep_software_min(
+    monkeypatch: pytest.MonkeyPatch, raw: str
+) -> None:
+    clean = MagicMock(side_effect=AssertionError("clean_collection must not run"))
+    monkeypatch.setattr(STACCollectionManager, "clean_collection", clean)
+    result = CliRunner().invoke(
+        cli,
+        ["--api-url", "https://stac.example.com", "clean", NEW, "-y", "--keep-software-min", raw],
+    )
+    assert result.exit_code == 2, result.output
+    assert "expected KEY=VERSION" in result.output
+
+
+def test_cli_keep_software_min_lists_the_counts_before_asking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End to end: the counts are on screen when the prompt asks, and "no" deletes nothing."""
+    delete_item = MagicMock(return_value=(True, 0, 0))
+    monkeypatch.setattr("manage_collections.STACItemManager.delete_item", delete_item)
+    walk = MagicMock(return_value=[_sw(0, _geozarr("0.13.1")), _sw(1, _geozarr("0.12.0"))])
+    monkeypatch.setattr(STACCollectionManager, "get_collection_items", walk)
+    result = CliRunner().invoke(
+        cli,
+        ["--api-url", "https://stac.example.com", "clean", NEW]
+        + ["--keep-software-min", "EOPF_GEOZARR=0.13.0", "--max-items", "10"],
+        input="n\n",
+    )
+    assert result.exit_code != 0
+    assert result.output.index("delete '0.12.0': 1") < result.output.index("Continue?")
+    assert (
+        "delete up to 10 items without processing:software EOPF_GEOZARR >= 0.13.0, "
+        "except those on the demo denylist, from collection 'sentinel-2-l2a-new'"
+    ) in result.output
+    delete_item.assert_not_called()
+
+
+def test_cli_keep_software_min_with_nothing_to_delete_exits_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    delete_item = MagicMock(side_effect=AssertionError("nothing may be deleted"))
+    monkeypatch.setattr("manage_collections.STACItemManager.delete_item", delete_item)
+    walk = MagicMock(return_value=[_sw(0, _geozarr("0.13.1"))])
+    monkeypatch.setattr(STACCollectionManager, "get_collection_items", walk)
+    result = CliRunner().invoke(
+        cli,
+        ["--api-url", "https://stac.example.com", "clean", NEW, "-y"]
+        + ["--keep-software-min", "EOPF_GEOZARR=0.13.0"],
+    )
+    assert result.exit_code == 0, result.output
+    assert "nothing deleted" in result.output

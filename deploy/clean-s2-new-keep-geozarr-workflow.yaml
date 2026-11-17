@@ -1,0 +1,155 @@
+# One-off Argo Workflow: clean the PRODUCTION sentinel-2-l2a-new collection down to the items EODC
+# converted with EOPF_GEOZARR 0.13.0 or later. CATALOGUE-ONLY: these items' Zarr stores are EODC's
+# (data.eodc.eu), so it deletes STAC items and nothing else. The pod gets no S3 credentials, and
+# the tool refuses --keep-software-min with --clean-s3.
+#
+# Census, 2026-11-17 ~13:45Z, 34,672 items: keep 8,819 (0.13.0: 4,876, 0.13.1: 3,943); delete
+# 25,853 (0.12.0: 2,051, no EOPF_GEOZARR key: 23,802). Every run prints the same per-value counts
+# before it deletes anything; the 0.13.x lines grow as the register cron adds items.
+#
+# Bounds, both enforced inside the tool, neither by a timeout or a kill:
+#   --keep-software-min  an item whose processing:software EOPF_GEOZARR is a PEP 440 version
+#                        >= 0.13.0 is never deleted (0.13.0rc1 is below 0.13.0). Items without
+#                        the key are deleted. The run is refused before any delete if an item's
+#                        value is not a readable version, or if the rule would keep no item (a
+#                        typo in the key). Demo-denylisted items are kept too.
+#   --max-items          how many items this run deletes, counted after the filter. Re-run to
+#                        continue: the clean converges, and its last run is a no-op (exit 0).
+#
+# Usage:
+#   1. CANARY (default is dry_run=true: walks the collection and prints the counts, deletes
+#      nothing). Compare the counts with the census above:
+#        argo submit -n devseed deploy/clean-s2-new-keep-geozarr-workflow.yaml \
+#          -p pipeline_image_version=<tag>
+#   2. REAL canary, 10 items. Check the deleted ids in the log against the API before scaling:
+#        ... -p pipeline_image_version=<sha-tag> -p dry_run=false -p max_items=10
+#   3. BATCHES, repeated until a run reads "nothing deleted":
+#        ... -p pipeline_image_version=<sha-tag> -p dry_run=false -p max_items=2000
+#   Read the per-value counts at the top of each run: a value outside the census (say '0.14.0',
+#   kept, or a new shape, refused) means EODC changed something during the drain.
+#
+# The register cron keeps writing to this collection during the drain: eopf-eodc-register
+# (hourly) creates new EODC items, today 0.13.1, which the filter keeps. An item created after a
+# run's walk is not seen by that run at all. A deleted item comes back only if EODC re-stamps its
+# `updated` inside a register window (1 h; 72 h for the catch-up cron, suspended) AND it was
+# acquired in the last 14 days (max_acquisition_age_days). It then comes back with whatever
+# EOPF_GEOZARR EODC serves at that moment: >= 0.13.0 stays, older is deleted again by the next
+# batch. The no-key items (acquired 29 Sep-1 Nov) are past the 14 days: no cron brings them back.
+# Register is create-only, so it never rewrites an item this run keeps.
+#
+# pipeline_image_version must contain --keep-software-min. A REAL run is refused unless the tag
+# is immutable: `v*`, `sha-*` or `<tag>@sha256:<digest>` (pr-<N>, latest and main move).
+#
+# TAG GOTCHA: a push to a non-main branch BUILDS but does not PUSH (build.yml gates the push step
+# on main/tags/PR). Only the pull_request run publishes, and it tags with the PR MERGE commit, so
+# the pullable tags are `pr-<N>` and `sha-<merge-sha>`, never the branch-head sha you just pushed.
+# Prefer the immutable `sha-<merge-sha>`: `pr-<N>` moves under you on the next push to the PR.
+# The Harbor cleanup deletes `sha-*` tags after 7 days; past that, use the release tag.
+#
+# Verify the flag is really in the image before pointing it at data:
+#   kubectl -n devseed run clean-tool-smoke --restart=Never \
+#     --image=<registry>/data-pipeline:<tag> \
+#     --overrides='{"spec":{"serviceAccountName":"operate-workflow-sa"}}' \
+#     --command -- python3 /app/operator-tools/manage_collections.py clean --help
+#
+# The run's exit code does not count failed deletes: a run with "STAC items skipped: N" in its
+# summary still succeeds. Read the summary.
+#
+# Deliberately does NOT take the `cron-cleanup-limit` semaphore that the historical-cleanup cron
+# uses: sharing it would stall the hourly prod drain for the length of this clean, and the two
+# touch different collections.
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: clean-s2-new-keep-geozarr-
+  namespace: devseed
+  labels:
+    app: data-pipeline
+    component: s2-new-clean
+spec:
+  serviceAccountName: operate-workflow-sa
+  entrypoint: clean
+  podGC:
+    # Match the cleanup cron: keep the pod past the controller's success bookkeeping
+    # so the audit output is still retrievable from Loki.
+    strategy: OnPodCompletion
+    deleteDelayDuration: 1800s
+  ttlStrategy:
+    secondsAfterSuccess: 604800
+    secondsAfterFailure: 604800
+  arguments:
+    parameters:
+    - name: pipeline_image_version          # REQUIRED: a build containing --keep-software-min
+      value: ""
+    - name: keep_software_min               # KEY=VERSION: kept at or above VERSION
+      value: EOPF_GEOZARR=0.13.0
+    - name: max_items                       # items deleted per run; re-run to continue
+      value: "10"
+    - name: dry_run                         # SAFE DEFAULT: walk + counts, delete nothing
+      value: "true"
+  templates:
+  - name: clean
+    # Backstop only, never the operating bound: --max-items is the bound. Each item is a single
+    # STAC DELETE, so a kill cannot leave an item half-deleted the way the purge's S3-then-STAC
+    # unit can. That DELETE has no client timeout (manage_item.py): this also ends a stalled one.
+    activeDeadlineSeconds: 14400
+    container:
+      image: w9mllyot.c1.de1.container-registry.ovh.net/eopf-sentinel-zarr-explorer/data-pipeline:{{workflow.parameters.pipeline_image_version}}
+      imagePullPolicy: IfNotPresent
+      resources:
+        requests:
+          # The tool holds every item of the collection in memory before deleting: ~44 KB
+          # per item, so ~1.5 GiB at 35k items, growing as the cron adds items.
+          memory: 3Gi
+          cpu: 500m
+        limits:
+          memory: 6Gi
+      env:
+      - name: PYTHONUNBUFFERED
+        value: "1"
+      # Parameters reach the script as env, never interpolated into it: no injection.
+      - name: PIPELINE_IMAGE_VERSION
+        value: "{{workflow.parameters.pipeline_image_version}}"
+      - name: KEEP_SOFTWARE_MIN
+        value: "{{workflow.parameters.keep_software_min}}"
+      - name: MAX_ITEMS
+        value: "{{workflow.parameters.max_items}}"
+      - name: DRY_RUN
+        value: "{{workflow.parameters.dry_run}}"
+      # STAC write enforcement is live: without these every DELETE returns 401.
+      - name: OIDC_TOKEN_URL
+        valueFrom:
+          secretKeyRef: { name: stac-auth-oidc, key: OIDC_TOKEN_URL }
+      - name: OIDC_CLIENT_ID
+        valueFrom:
+          secretKeyRef: { name: stac-auth-oidc, key: OIDC_CLIENT_ID }
+      - name: OIDC_CLIENT_SECRET
+        valueFrom:
+          secretKeyRef: { name: stac-auth-oidc, key: OIDC_CLIENT_SECRET }
+      command: [bash, -c]
+      args:
+      - |
+        set -euo pipefail
+        if [ -z "$PIPELINE_IMAGE_VERSION" ]; then
+          echo "pipeline_image_version is required" >&2; exit 2
+        fi
+        # Only the exact string "false" deletes; any other value is a dry run.
+        MODE="--dry-run"
+        if [ "$DRY_RUN" = "false" ]; then
+          # A real run must use the image the dry run validated: an allowlist of immutable tags.
+          case "$PIPELINE_IMAGE_VERSION" in
+            v*|sha-*|*@sha256:*) ;;
+            *)
+              echo "REFUSING: image tag '$PIPELINE_IMAGE_VERSION' is not immutable and dry_run=false." >&2
+              echo "Use v<release>, sha-<commit> or <tag>@sha256:<digest> (see the manifest header)." >&2
+              exit 1
+              ;;
+          esac
+          MODE="-y"
+        fi
+        exec python3 /app/operator-tools/manage_collections.py \
+          --api-url https://api.explorer.eopf.copernicus.eu/stac \
+          clean sentinel-2-l2a-new \
+          --keep-software-min "$KEEP_SOFTWARE_MIN" \
+          --max-items "$MAX_ITEMS" \
+          $MODE
