@@ -39,11 +39,12 @@ Explorer sentinel-2-l2a-new ──search(fields=..., limit 1000)─────�
 actions = CREATE + REPLACE, newest acquisition first, then id; taken in order until --max-writes POSTs/PUTs are sent:
    CREATE:  fetch the full source item (register's fetch_source_item), classify it again, build_proxy_item(expires=None)
             ─► register_proxy.create_item (POST, 409 = exists) + record_created, `uncertain` on a 5xx/no answer
-   REPLACE: GET (no retries, 30 s, no redirects) ─► 404: gone | not the item / unreadable: refused (failed)
+   REPLACE: GET (no retries, 30 s, no redirects) ─► 404: gone | not the item / unreadable: refused_target_unreadable
             ─► compare with the diff's source version (caught up: skipped_not_newer) ─► fetch, classify against
             the target as just read, build ─► append before_put {item_id, run_id, old, new, pre_image} ─► PUT
             ─► append after_put
-   ends before a write (old generation, unbuildable, source changed, gone, not newer): counted, does not use the bound
+   ends before a write (old generation, unbuildable, source changed, gone, not newer, target unreadable): counted,
+   does not use the bound
 summary: one key per source-id fate, adding up to source=N; remaining = actions not reached
 ```
 

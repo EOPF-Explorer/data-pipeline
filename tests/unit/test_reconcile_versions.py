@@ -430,26 +430,29 @@ def test_max_writes_takes_the_newest_n_and_reports_the_rest_then_converges(tmp_p
     assert summary(caplog)["remaining"] == 0 and summary(caplog)["skipped_not_newer"] == 5
 
 
-@pytest.mark.parametrize("bad", ["unbuildable", "old", "0.12.0", "gone"])
+@pytest.mark.parametrize("bad", ["unbuildable", "old", "0.12.0", "gone", "unreadable"])
 def test_ids_that_end_before_their_write_never_hold_up_the_rest(tmp_path, caplog, bad):
     """Review finding 2: such ids end the same way on every run. Eleven of them at the head
-    of the order used to fill every run's bound, or trip the 10-failures stop, forever."""
+    of the order used to fill every run's bound, or trip the 10-failures stop, forever.
+    "unreadable" (#522 review 2): readable in the diff, not when the replace GETs it."""
     head = [f"S{n:02d}" for n in range(11)]
     source = dict.fromkeys(["G1", "G2", *head], "0.13.1")  # the head ids are the newest
-    if bad == "gone":  # the target search lists them, their GET answers 404
+    if bad in ("gone", "unreadable"):  # the target search lists them; their GET does not
         world = World(source, target=dict.fromkeys(head, "0.13.0"),
-                      overrides={("GET", i): 404 for i in head})  # fmt: skip
+                      overrides={("GET", i): 404 if bad == "gone"
+                                 else FakeTarget.item(i, props("v0.13.1-0-g1")) for i in head})  # fmt: skip
     else:
         world = World(source, fetched=dict.fromkeys(head, bad))
     key = {"unbuildable": "skipped_unbuildable", "old": "skipped_old_generation",
-           "0.12.0": "skipped_source_changed", "gone": "gone"}[bad]  # fmt: skip
+           "0.12.0": "skipped_source_changed", "gone": "gone",
+           "unreadable": "refused_target_unreadable"}[bad]  # fmt: skip
     for created, remaining in [(["G2"], 1), (["G2", "G1"], 0)]:  # two runs, one write each
         caplog.clear()
         code = world.run(tmp_path, max_writes="1")
         assert world.target.writes() == [("post", i) for i in created]
         counts = summary(caplog)
         assert (counts[key], counts["failed"], counts["remaining"]) == (11, 0, remaining)
-        assert code == (1 if bad == "unbuildable" else 0), "an unbuildable source fails the run"
+        assert code == (1 if bad in ("unbuildable", "unreadable") else 0)
 
 
 def test_a_write_that_fails_counts_toward_the_bound(tmp_path, caplog):
@@ -595,12 +598,17 @@ def test_a_replace_records_the_pre_image_before_the_put_and_the_outcome_after(tm
          "other-collection", "unreadable", "redirect", "server-error"],
 )  # fmt: skip
 def test_a_get_that_is_not_the_item_refuses_the_put(tmp_path, caplog, body):
+    """A body that is not the item is refused as in the diff (#522 review 2): counted, not a
+    failure. A status other than 200 or 404 is a failure."""
     world = World(source={"A": "0.13.1", "B": "0.13.1"}, target={"A": "0.13.0", "B": "0.13.0"},
                   overrides={("GET", "A"): body})  # fmt: skip
     assert world.run(tmp_path) == 1
     assert world.target.writes() == [("put", "B")], "A refused, B still replaced"
     assert [line["item_id"] for line in lines(tmp_path / "replaced.jsonl")] == ["B", "B"]
-    assert summary(caplog)["failed"] == 1 and "refused" in caplog.text
+    counts = summary(caplog)
+    failed = isinstance(body, int)
+    assert (counts["failed"], counts["refused_target_unreadable"]) == (failed, not failed)
+    assert "refused" in caplog.text
 
 
 def test_a_body_that_is_not_json_refuses_the_put(tmp_path):

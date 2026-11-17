@@ -21,13 +21,13 @@
 #   --max-writes   POSTs + PUTs this run sends at most (a dry run: would send), newest acquisition
 #                  first; required, dry runs included. An id that ends before its write is
 #                  counted by reason and does not use the bound: skipped_old_generation,
-#                  skipped_unbuildable, skipped_source_changed, gone (target GET 404) or
-#                  skipped_not_newer. Such ids end the same way on every run, and never hold up
+#                  skipped_unbuildable, skipped_source_changed, gone (target GET 404),
+#                  refused_target_unreadable or skipped_not_newer. Such ids end the same way on every run, and never hold up
 #                  the ones behind them. The ids not reached are printed as `remaining=M`;
 #                  re-run until it is 0. The run converges.
 #   replace check  before fetching the source, the item is re-read (GET, no retries, 30 s
-#                  timeout). A body that is not that item with a readable version refuses the
-#                  id; a 404 is `gone`; an item already caught up is skipped. The pre-image goes
+#                  timeout). A body that is not that item with a readable version is
+#                  refused_target_unreadable, as in the diff; a 404 is `gone`; an item already caught up is skipped. The pre-image goes
 #                  to replaced-ids BEFORE the PUT, the outcome after it.
 #   10 in a row    10 failures in a row (an outage) stop the run; skips never count toward it.
 #   loud failure   exit 1 (the Workflow shows Failed) after the summary if any write failed or

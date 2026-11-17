@@ -34,8 +34,8 @@ collection. Never one search per item.
 acquisition first until N POSTs or PUTs have been sent (would have been, in a dry run), and
 the ids not reached are reported as ``remaining``; re-run until it is 0. An id that ends
 before its write (an old-generation or unbuildable source, a source changed since the diff,
-a target gone or already caught up) is counted by reason and does not use the bound, so ids
-that end that way on every run never hold up the ones behind them. A replace GETs the target
+a target gone, unreadable or already caught up) is counted by reason and does not use the
+bound, so ids that end that way on every run never hold up the ones behind them. A replace GETs the target
 item on a session that never retries and checks that the body is that item with a readable
 version. It then re-compares, appends the pre-image to ``--replaced-ids`` and only then PUTs.
 A ``--replaced-ids`` line names its item ``item_id``, not ``id``, so
@@ -366,8 +366,9 @@ class Run:
             raise RuntimeError(f"refused: the target GET answered {got.status_code}")
         current_item = got.json()
         why = not_the_item(current_item, item_id, self.collection, self.policy.key)
-        if why:
-            raise RuntimeError(f"refused: {why}")
+        if why:  # as in the diff: the same answer on every run, so no failure
+            logger.warning("   ⚠️  %s: refused, %s", item_id, why)
+            return "refused_target_unreadable"
         current = read_version(current_item["properties"], self.policy.key)
         if classify(listed, current_item["properties"], self.policy) != "replace":
             logger.info("   ⏭️  %s: the target is already %s %s", item_id, self.policy.key, current)
