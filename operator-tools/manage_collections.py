@@ -13,9 +13,11 @@ Supports:
 This tool uses manage_item.py for all item-level operations.
 """
 
+import contextlib
 import json
 import os
 import sys
+from collections import Counter
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
@@ -39,6 +41,7 @@ from manage_item import (
     path_segment,
     require_plain_ids,
 )
+from packaging.version import InvalidVersion, Version
 from pystac import Collection, Item
 
 # Add scripts directory to path for storage tier utilities
@@ -110,6 +113,84 @@ def _protect_recent(
         else:
             eligible.append(item)
     return eligible, n_recent, n_undated
+
+
+def _software_value(item: dict[str, Any], key: str) -> str | None:
+    """The item's ``processing:software[key]``, or None if it has no such entry.
+
+    The API returns ``processing:software`` as an object in some responses and as a
+    JSON-encoded string in others, so both are read. Anything else, or a non-string
+    value under ``key``, raises ValueError.
+    """
+    software = (item.get("properties") or {}).get("processing:software")
+    if isinstance(software, str):
+        with contextlib.suppress(json.JSONDecodeError):  # still a str: refused below
+            software = json.loads(software)
+    if software is None:
+        return None
+    if not isinstance(software, dict):
+        raise ValueError(f"processing:software is not an object: {software!r:.80}")
+    value = software.get(key)
+    if value is not None and not isinstance(value, str):
+        raise ValueError(f"processing:software[{key!r}] is not a string: {value!r:.80}")
+    return value
+
+
+def _kept(value: str | None, floor: Version) -> bool:
+    """Whether a ``_software_value`` keeps its item; InvalidVersion (a ValueError) if unreadable."""
+    return value is not None and Version(value) >= floor
+
+
+def _split_by_software(
+    items: list[dict[str, Any]], key: str, floor: Version
+) -> list[dict[str, Any]]:
+    """The deletion candidates for --keep-software-min.
+
+    Kept: items whose ``processing:software[key]`` is a PEP 440 version >= ``floor``, so a
+    pre-release such as ``0.13.0rc1`` is below ``0.13.0``. Every other item is a candidate,
+    including one with no ``key`` or no ``processing:software`` at all. Prints the count per
+    value, unreadable ones included, and only then refuses the run (ClickException), before
+    anything is deleted, when:
+
+    - an item's ``processing:software``, or its ``key``, cannot be read as a version. That
+      item is not provably below ``floor`` either, and the items likeliest to carry a new
+      shape are the ones being registered now, which are the ones to keep;
+    - no item is kept: a typo in KEY or VERSION would otherwise delete the whole collection.
+
+    So a dry run always shows the whole census, even one that is refused.
+    """
+    candidates: list[dict[str, Any]] = []
+    found: Counter[str | None] = Counter()
+    unreadable: list[str] = []
+    for item in items:
+        try:
+            value = _software_value(item, key)
+            keep = _kept(value, floor)
+        except ValueError as exc:  # InvalidVersion is a ValueError
+            unreadable.append(f"{item['id']} ({exc})")
+            continue
+        found[value] += 1
+        if not keep:
+            candidates.append(item)
+
+    n_kept = len(items) - len(candidates) - len(unreadable)
+    click.echo(f"\n🔎 processing:software[{key!r}] per item (keeping >= {floor}):")
+    for value, n in found.most_common():
+        label = "(missing)" if value is None else repr(value)
+        click.echo(f"    {'keep  ' if _kept(value, floor) else 'delete'} {label}: {n:,}")
+    click.echo(f"    unreadable: {len(unreadable):,}")
+    click.echo(f"    total: keep {n_kept:,}, delete {len(candidates):,}")
+    if unreadable:
+        raise click.ClickException(
+            f"Refusing to clean: {len(unreadable)} item(s) have a processing:software "
+            f"{key!r} that is not a readable version, e.g. " + "; ".join(unreadable[:5])
+        )
+    if not n_kept:
+        raise click.ClickException(
+            f"--keep-software-min {key}={floor} keeps no item, so it would delete them all. "
+            "Check KEY and VERSION; to empty the collection, run clean without it."
+        )
+    return candidates
 
 
 def _report_confinement_sweep(
@@ -198,6 +279,36 @@ class STACCollectionManager:
             click.echo(f"❌ Error fetching items: {e}", err=True)
             raise
 
+    def _recheck(self, collection_id: str, item_id: str, key: str, floor: Version) -> str:
+        """Re-read a --keep-software-min candidate just before its DELETE; only "delete" deletes.
+
+        The walk is a snapshot and a batch deletes for hours while the register cron writes to
+        the collection, so the version that made this item a candidate can be stale. GETs it
+        through the session that sends the DELETE and returns "delete" (still below ``floor``),
+        "kept" (now >= ``floor``), "gone" (404), "unreadable" (refused, as at walk time) or
+        "error" (any other failure of the GET).
+        """
+        url = f"{self.api_url}/collections/{path_segment(collection_id)}/items/{path_segment(item_id)}"
+        try:
+            response = self.item_manager.session.get(url, timeout=30)
+            if response.status_code == 404:
+                click.echo(f"  ⏭️  {item_id}: already gone (404 on re-check)")
+                return "gone"
+            response.raise_for_status()
+            item = response.json()
+        except requests.RequestException as exc:  # includes a body that is not JSON
+            click.echo(f"  ❌ {item_id}: re-check GET failed, not deleted: {exc}", err=True)
+            return "error"
+        try:
+            value = _software_value(item, key)
+            if _kept(value, floor):
+                click.echo(f"  🛡️  {item_id}: kept on re-check ({key} {value})")
+                return "kept"
+        except (ValueError, AttributeError) as exc:  # AttributeError: a body that is no item
+            click.echo(f"  ⛔ {item_id}: unreadable on re-check, not deleted: {exc}", err=True)
+            return "unreadable"
+        return "delete"
+
     def clean_collection(
         self,
         collection_id: str,
@@ -209,6 +320,7 @@ class STACCollectionManager:
         datetime_before: datetime | None = None,
         allow_demo: bool = False,
         prompt: str | None = None,
+        keep_software_min: tuple[str, Version] | None = None,
     ) -> tuple[int, int, int]:
         """
         Remove all items from a collection, optionally cleaning S3 data.
@@ -234,9 +346,18 @@ class STACCollectionManager:
                 cannot be used refuses the run first either way (see ``load_demo_ids``).
             prompt: if set, asked (abort on "no") before the first delete, so after
                 the sweep and with the demo scenes kept or deleted listed above it.
+            keep_software_min: (KEY, VERSION): keep items whose processing:software[KEY]
+                is a version >= VERSION and print the count per value found (see
+                ``_split_by_software``). Applied after the demo scenes and before the
+                threshold and max_items. Each candidate is re-read just before its
+                DELETE (``_recheck``).
 
         Returns:
             Tuple of (items_deleted, s3_objects_deleted, s3_objects_failed)
+
+        Raises:
+            click.ClickException: after the summary, if any item was not deleted because a
+                delete or a re-check failed.
         """
         click.echo(f"\n{'DRY RUN: ' if dry_run else ''}Cleaning collection: {collection_id}")
         if clean_s3:
@@ -272,6 +393,13 @@ class STACCollectionManager:
                     click.echo(f"    - {item_id}")
             if not items:
                 click.echo("✅ Only protected demo scenes left; nothing deleted")
+                return 0, 0, 0
+
+        # Like the demo scenes: before the bound, so max_items counts deletions only.
+        if keep_software_min is not None:
+            items = _split_by_software(items, *keep_software_min)
+            if not items:
+                click.echo("✅ Every item is kept; nothing deleted")
                 return 0, 0, 0
 
         # Protect AFTER the sweep (the sweep still sees every item) and BEFORE
@@ -372,7 +500,8 @@ class STACCollectionManager:
 
         # Actual deletion
         items_deleted = 0
-        items_skipped = 0
+        items_failed = 0
+        recheck: Counter[str] = Counter()
         s3_objects_deleted = 0
         s3_objects_failed = 0
 
@@ -392,6 +521,12 @@ class STACCollectionManager:
             for item in bar:
                 item_id = item["id"]
 
+                if keep_software_min is not None:
+                    verdict = self._recheck(collection_id, item_id, *keep_software_min)
+                    if verdict != "delete":
+                        recheck[verdict] += 1
+                        continue
+
                 # Use item manager's delete_item method
                 success, s3_deleted, s3_failed = self.item_manager.delete_item(
                     collection_id=collection_id,
@@ -406,7 +541,7 @@ class STACCollectionManager:
                 if success:
                     items_deleted += 1
                 else:
-                    items_skipped += 1
+                    items_failed += 1
 
                 s3_objects_deleted += s3_deleted
                 s3_objects_failed += s3_failed
@@ -419,22 +554,35 @@ class STACCollectionManager:
         click.echo(f"✅ STAC items deleted: {items_deleted}")
         if protected_demos:
             click.echo(f"🛡️  Demo scenes protected: {len(protected_demos)} (demo denylist)")
-        if items_skipped > 0:
-            click.echo(f"⏭️  STAC items skipped: {items_skipped} (due to S3 failures)")
+        if keep_software_min is not None:
+            click.echo(
+                f"🔁 Re-checked before DELETE: already gone {recheck['gone']}, "
+                f"kept on re-check {recheck['kept']}, unreadable (refused) "
+                f"{recheck['unreadable']}, re-check failed {recheck['error']}"
+            )
+        if items_failed > 0:
+            cause = "S3 cleanup or the STAC DELETE failed" if clean_s3 else "the STAC DELETE failed"
+            click.echo(f"❌ STAC items not deleted: {items_failed} ({cause})")
 
         if clean_s3:
             click.echo(f"\n✅ S3 objects deleted: {s3_objects_deleted:,}")
             if s3_objects_failed > 0:
                 click.echo(f"❌ S3 objects failed: {s3_objects_failed:,}")
 
-            if items_skipped > 0:
-                click.echo(
-                    f"\n⚠️  WARNING: {items_skipped} items were NOT deleted from STAC catalog"
-                )
+            if items_failed > 0:
+                click.echo(f"\n⚠️  WARNING: {items_failed} items were NOT deleted from STAC catalog")
                 click.echo("    because their S3 data could not be fully removed.")
                 click.echo("    Fix S3 access issues and re-run to process these items.")
 
         click.echo("=" * 60)
+
+        # After the whole batch and its summary, never mid-item: a failure must fail the run.
+        n_failed = items_failed + recheck["unreadable"] + recheck["error"]
+        if n_failed:
+            raise click.ClickException(
+                f"{n_failed} item(s) were not deleted (see the summary above). "
+                "Fix the cause and re-run: the clean converges."
+            )
 
         return items_deleted, s3_objects_deleted, s3_objects_failed
 
@@ -833,6 +981,21 @@ def cli(ctx: click.Context, api_url: str) -> None:
     ctx.obj["api_url"] = api_url
 
 
+def _parse_keep_software_min(
+    ctx: click.Context, param: click.Parameter, raw: str | None
+) -> tuple[str, Version] | None:
+    if raw is None:
+        return None
+    key, _, version = raw.partition("=")
+    try:
+        floor = Version(version)
+    except InvalidVersion:
+        floor = None
+    if not key or floor is None:
+        raise click.BadParameter(f"expected KEY=VERSION (a PEP 440 version), got {raw!r}")
+    return key, floor
+
+
 @cli.command()
 @click.argument("collection_id")
 @click.option(
@@ -896,6 +1059,20 @@ def cli(ctx: click.Context, api_url: str) -> None:
         "entry that is not a plain id refuses the run, with or without this flag."
     ),
 )
+@click.option(
+    "--keep-software-min",
+    "keep_software_min",
+    default=None,
+    metavar="KEY=VERSION",
+    callback=_parse_keep_software_min,
+    help=(
+        "Keep items whose processing:software[KEY] is a PEP 440 version >= VERSION and "
+        "delete every other item, including those without KEY; prints the count per value "
+        "first. Catalogue-only: refused with --clean-s3. An item whose KEY is not a readable "
+        "version, or a KEY=VERSION that keeps no item, refuses the run. Each candidate is "
+        "re-read just before its DELETE and skipped if it is now kept or already gone."
+    ),
+)
 @click.pass_context
 def clean(
     ctx: click.Context,
@@ -908,6 +1085,7 @@ def clean(
     max_items: int | None,
     datetime_before: str | None,
     allow_demo: bool,
+    keep_software_min: tuple[str, Version] | None,
 ) -> None:
     """
     Remove all items from a collection.
@@ -921,8 +1099,14 @@ def clean(
         manage_collections.py clean sentinel-2-l2a-staging --clean-s3 \\
             --confine-to s3://my-bucket/tests-output/sentinel-2-l2a-staging/ \\
             --max-items 2000 --datetime-before 2026-09-01
+        manage_collections.py clean sentinel-2-l2a-new --dry-run \\
+            --keep-software-min EOPF_GEOZARR=0.13.0
     """
     manager: STACCollectionManager = ctx.obj["manager"]
+
+    # Written for sentinel-2-l2a-new, whose Zarr stores are EODC's, not ours.
+    if keep_software_min is not None and clean_s3:
+        raise click.UsageError("--keep-software-min is catalogue-only: it refuses --clean-s3.")
 
     confinement = None
     if clean_s3:
@@ -951,6 +1135,9 @@ def clean(
         scope = "ALL items" if max_items is None else f"up to {max_items} items"
         if threshold is not None:
             scope += f" acquired before {threshold.isoformat()}"
+        if keep_software_min is not None:
+            key, floor = keep_software_min
+            scope += f" without processing:software {key} >= {floor}"
         scope += f", {'including' if allow_demo else 'except'} those on the demo denylist,"
         warning = f"⚠️  This will delete {scope} from collection '{collection_id}'."
         if clean_s3:
@@ -990,6 +1177,7 @@ def clean(
             datetime_before=threshold,
             allow_demo=allow_demo,
             prompt=prompt,
+            keep_software_min=keep_software_min,
         )
 
     except click.Abort:

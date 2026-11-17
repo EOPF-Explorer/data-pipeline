@@ -321,7 +321,7 @@ class STACItemManager:
 
         # Delete the STAC item
         try:
-            response = self.session.delete(url)
+            response = self.session.delete(url, timeout=30)
             response.raise_for_status()
             click.echo(f"  ✅ Deleted STAC item {item_id}")
             return True, s3_deleted, s3_failed
