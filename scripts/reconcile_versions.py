@@ -168,7 +168,9 @@ def classify(source: dict, target: dict | None, policy: Policy) -> str:
     dropped it.
     """
     cloud = source.get("eo:cloud_cover")
-    if not isinstance(cloud, int | float) or not cloud < policy.max_cloud_cover:
+    if not isinstance(cloud, int | float) or isinstance(cloud, bool):  # a bool is an int
+        return "skipped_cloud_cover"
+    if not cloud < policy.max_cloud_cover:
         return "skipped_cloud_cover"
     try:
         version = read_version(source, policy.key)

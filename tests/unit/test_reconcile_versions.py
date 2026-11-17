@@ -92,7 +92,8 @@ def test_the_verdict_for_each_source_and_target_version(source, target, verdict)
     ("cloud", "verdict"),
     [(89.9, "create"), (0, "create"), (90.0, "skipped_cloud_cover"),
      (None, "skipped_cloud_cover"), ("12.5", "skipped_cloud_cover"),
-     (float("nan"), "skipped_cloud_cover")],
+     (float("nan"), "skipped_cloud_cover"), (False, "skipped_cloud_cover"),
+     (True, "skipped_cloud_cover")],
 )  # fmt: skip
 def test_cloud_cover_is_checked_here_not_only_by_the_search_filter(cloud, verdict):
     """Review finding 8: a missing or cloudy eo:cloud_cover is a counted skip, never a create."""
