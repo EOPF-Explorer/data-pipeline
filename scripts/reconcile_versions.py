@@ -239,8 +239,9 @@ def open_write_client(url: str) -> Client:
     requests' default adapter (no retries): every write is sent once, and a failure is
     reported, not repeated. Each call passes its own timeout. Opening it fetches the landing
     page, under the same timeout: the run holds the register's semaphore, so a hang here
-    would hold up the hourly register. ``Client.open`` resets the ``stac_io``'s timeout
-    unless it is also given one (see ``stac_auth.open_resilient_client``), hence both.
+    would hold up the hourly register. ``Client.open`` overwrites the ``stac_io``'s timeout
+    with its own (None when not given), so the one that applies is ``Client.open``'s; the
+    ``StacApiIO`` copy, as in ``stac_auth.open_resilient_client``, only mirrors it.
     """
     client = Client.open(
         url,
@@ -415,17 +416,6 @@ class Run:
         return outcome
 
 
-def positive_int(raw: str) -> int:
-    """argparse type for --max-writes: a whole number >= 1."""
-    try:
-        value = int(raw)
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"must be a whole number (got {raw!r})") from None
-    if value < 1:
-        raise argparse.ArgumentTypeError(f"must be >= 1 (got {value})")
-    return value
-
-
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--collection", required=True, help=f"One of {sorted(POLICIES)}")
@@ -433,7 +423,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--raster-api-url", required=True, help="TiTiler base URL for links")
     parser.add_argument(
         "--max-writes",
-        type=positive_int,
+        type=int,
         required=True,  # a dry run too: without it, it would check nothing and look green
         metavar="N",
         help="POSTs + PUTs this run sends at most (a dry run: would send); the ids not "
@@ -453,7 +443,10 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         help="JSON lines of each replaced item's pre-image and outcome",
     )
     parser.add_argument("--run-id", default="", help="Written on each --replaced-ids line")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.max_writes < 1:
+        parser.error(f"--max-writes must be >= 1 (got {args.max_writes})")
+    return args
 
 
 def log_summary(collection: str, n_source: int, counts: Counter[str]) -> None:
