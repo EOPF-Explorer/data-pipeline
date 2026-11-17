@@ -23,6 +23,7 @@ from unittest.mock import MagicMock
 
 import click
 import pytest
+import requests
 from click.testing import CliRunner
 from packaging.version import Version
 
@@ -36,6 +37,7 @@ from manage_collections import (  # noqa: E402
     cli,
     parse_threshold,
 )
+from manage_item import STACItemManager  # noqa: E402
 
 BUCKET = "esa-zarr-sentinel-explorer-fra"
 STAGING = (BUCKET, "tests-output/sentinel-2-l2a-staging/")
@@ -57,6 +59,15 @@ def _item(i: int, href: str | None = None, acquired: str | None = None) -> dict:
     if acquired is not None:
         item["properties"] = {"datetime": acquired}
     return item
+
+
+def _response(status: int, body: object = None) -> requests.Response:
+    """A real Response, so raise_for_status() and json() behave as in production; bytes
+    are sent as the raw body."""
+    response = requests.Response()
+    response.status_code = status
+    response._content = body if isinstance(body, bytes) else json.dumps(body).encode()
+    return response
 
 
 def _manager(items: list[dict]) -> STACCollectionManager:
@@ -581,3 +592,15 @@ def test_cli_keep_software_min_with_nothing_to_delete_exits_zero(
     )
     assert result.exit_code == 0, result.output
     assert "nothing deleted" in result.output
+
+
+def test_the_delete_has_a_client_timeout() -> None:
+    """No activeDeadlineSeconds backs the clean Workflow, so a stalled DELETE must fail its
+    item (and the run, which converges on a re-run), not hang the run."""
+    manager = STACItemManager("https://stac.example.com")
+    manager.session = MagicMock()
+    manager.session.delete.return_value = _response(204)
+    assert manager.delete_item("c", "ITEM_00001") == (True, 0, 0)
+    manager.session.delete.assert_called_once_with(
+        "https://stac.example.com/collections/c/items/ITEM_00001", timeout=30
+    )
