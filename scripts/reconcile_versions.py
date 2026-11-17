@@ -84,7 +84,6 @@ from register_proxy import (  # also configures logging, as the register does
     fetch_source_item,
     is_old_generation,
     item_url,
-    record_created,
 )
 
 logger = logging.getLogger(__name__)
@@ -316,7 +315,7 @@ class Run:
 
     def create(self, item_id: str) -> str:
         """POST one absent id under --stac-api-url, as the replace, recorded in --created-ids
-        as ``register_proxy`` records it."""
+        by the register's ``create_item``."""
         built = self.build(item_id)
         if isinstance(built, str):
             return built
@@ -326,18 +325,10 @@ class Run:
             logger.info("   would create %s (%s %s)", item_id, self.policy.key, version)
             return "would_create"
         assert self.created_ids is not None  # noqa: S101  # nosec B101 -- main requires it
-        try:
-            outcome = create_item(self.client, self.collection, item, self.stac_api_url)
-        except requests.RequestException as exc:
-            # As in register_proxy.register_one: a 5xx or no answer may have committed. The id
-            # was absent from the target at diff time, and the workflow holds the register's
-            # semaphore, so no other run can have created it in between.
-            if exc.response is None or exc.response.status_code >= 500:
-                record_created(self.created_ids, self.collection, item.id, uncertain=True)
-            raise
-        if outcome == "created":
-            record_created(self.created_ids, self.collection, item.id)
-        return outcome
+        # An uncertain line (a 5xx or no answer) names an item only this run may have made: the
+        # id was absent from the target at diff time, and the workflow holds the register's
+        # semaphore, so no other run can have created it in between.
+        return create_item(self.client, self.collection, item, self.created_ids, self.stac_api_url)
 
     def record_replace(self, item_id: str, **fields: Any) -> None:
         """Append one line to --replaced-ids; a failed append stops the run."""

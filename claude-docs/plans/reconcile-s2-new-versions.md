@@ -16,7 +16,7 @@ timeout or a kill; no new dependency beyond the direct `packaging` pin #519 also
 | `scripts/processing_software.py`: the one `processing:software` parser (object or JSON string) | Built, unit-tested offline |
 | `scripts/reconcile_versions.py`: policy table, batched diff, create/replace, bound, exit code | Built, unit-tested offline; review findings #2, #3, #6, #7, #8, #10 fixed (Task 4) |
 | `deploy/reconcile-s2-new-versions-workflow.yaml`: one-off Workflow, dry run by default | Built; tests run its script with a stub `python3`; header fixed (#1, #4, run order, restore limit) |
-| `scripts/register_proxy.py` | Comment only: `TARGET_RUNS` names this tool as the one PUT into `-new` (#5); behaviour unchanged |
+| `scripts/register_proxy.py` | `TARGET_RUNS` comment names this tool as the one PUT into `-new` (#5); `create_item` takes the target URL and records created-ids itself, for both tools; pipeline behaviour unchanged |
 | `scripts/query_stac.py` | Unchanged |
 | Image containing the tool | Not yet: CI's pull_request build publishes `sha-<merge-sha>` |
 | Dry run, canary, batches against production | Not run |

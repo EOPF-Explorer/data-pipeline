@@ -534,7 +534,11 @@ def is_old_generation(source_item: dict) -> bool:
 
 
 def create_item(
-    client: Client, collection_id: str, item: Item, stac_api_url: str | None = None
+    client: Client,
+    collection_id: str,
+    item: Item,
+    created_ids: Path,
+    stac_api_url: str | None = None,
 ) -> str:
     """POST one item: ``created``, or ``exists`` on a 409. Never a PUT, unlike ``upsert_item``.
 
@@ -542,20 +546,35 @@ def create_item(
     earlier run registered, or the test collection's comparison items. An existing item is
     left exactly as it is. ``transform_hrefs=False`` for the reason ``upsert_item``
     gives. The POST goes under ``stac_api_url``, or the landing page's self href when None.
+
+    A created item is recorded in ``created_ids`` (``record_created``): that list, not the
+    item's own ``created`` (EODC's timestamp, copied from the source), is what tells a
+    rollback which items this run created.
     """
     io = client._stac_io
     assert io is not None  # noqa: S101  # nosec B101 -- pystac-client always sets this after open()
-    resp = io.session.post(
-        f"{(stac_api_url or str(client.self_href)).rstrip('/')}/collections/{collection_id}/items",
-        json=item.to_dict(transform_hrefs=False),
-        headers={"Content-Type": "application/json"},
-        timeout=30,
-    )
-    if resp.status_code == 409:
-        logger.info(f"   ⏭️  {item.id} exists (HTTP 409), left unchanged")
-        return "exists"
-    resp.raise_for_status()
+    try:
+        resp = io.session.post(
+            f"{(stac_api_url or str(client.self_href)).rstrip('/')}/collections/{collection_id}/items",
+            json=item.to_dict(transform_hrefs=False),
+            headers={"Content-Type": "application/json"},
+            timeout=30,
+        )
+        if resp.status_code == 409:
+            logger.info(f"   ⏭️  {item.id} exists (HTTP 409), left unchanged")
+            return "exists"
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        # A timeout, a reset or a 5xx can arrive after the server committed the item, and the
+        # next run's 409 would then hide it from every list. Record it as uncertain. A line
+        # can be false (an error before anything was sent), and its id may name an item this
+        # run did not create, so a rollback must re-check each item's CONTENT before deleting
+        # it (EODC data hrefs, no alternate.s3), never just that it exists.
+        if exc.response is None or exc.response.status_code >= 500:
+            record_created(created_ids, collection_id, item.id, uncertain=True)
+        raise
     logger.info(f"✅ Created {item.id} (HTTP {resp.status_code})")
+    record_created(created_ids, collection_id, item.id)
     return "created"
 
 
@@ -767,22 +786,7 @@ def register_one(
     if not args.items_json:
         upsert_item(client, args.collection, item)
         return "registered"
-    # The created-ids list, not the item's own `created` (EODC's timestamp, copied from the
-    # source), is what tells a rollback which items this run created.
-    try:
-        outcome = create_item(client, args.collection, item)
-    except requests.RequestException as exc:
-        # A timeout, a reset or a 5xx can arrive after the server committed the item, and the
-        # next run's 409 would then hide it from every list. Record it as uncertain. A line
-        # can be false (an error before anything was sent), and its id may name an item this
-        # run did not create, so a rollback must re-check each item's CONTENT before deleting
-        # it (EODC data hrefs, no alternate.s3), never just that it exists.
-        if exc.response is None or exc.response.status_code >= 500:
-            record_created(args.created_ids, args.collection, item.id, uncertain=True)
-        raise
-    if outcome == "created":
-        record_created(args.created_ids, args.collection, item.id)
-    return outcome
+    return create_item(client, args.collection, item, args.created_ids)
 
 
 def log_summary(collection: str, counts: Counter[str]) -> None:
