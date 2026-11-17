@@ -27,10 +27,6 @@ Everything a run may do is fixed in the constants below, never by a flag, and an
 ``--collection`` but ``sentinel-2-l2a-new`` is refused. Each summary key counts source ids,
 and together they add up to all of them.
 
-The diff is batched: one paged, ``fields``-limited search of the source and one of the target,
-plus one ``ids=`` search per ``IDS_PER_SEARCH`` create candidates against the exclusion
-collection. Never one search per item.
-
 ``--max-writes N`` bounds the run from inside: the creates and replaces are taken newest
 acquisition first until N POSTs or PUTs have been sent (would have been, in a dry run), and
 the ids not reached are reported as ``remaining``; re-run until it is 0. ``--time-budget
@@ -39,9 +35,7 @@ SECONDS`` (optional) also stops it, between ids, once the run has lasted that lo
 before its write (an old-generation or unbuildable source, a source changed since the diff,
 a target gone, unreadable or already caught up) is counted by reason and does not use
 ``--max-writes``, so ids that end that way on every run never hold up the ones behind them.
-A replace GETs the target item on a session that never retries and checks that the body is
-that item with a readable version. It then re-compares, appends the pre-image to
-``--replaced-ids`` and only then PUTs.
+10 failures in a row (an outage) stop the run; skips never count toward them.
 A ``--replaced-ids`` line names its item ``item_id``, not ``id``, so
 ``rollback_created_items.py`` refuses that file rather than deleting the replaced items,
 which existed before the run.
