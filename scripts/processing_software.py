@@ -15,9 +15,10 @@ def read_version(properties: dict, key: str) -> Version | None:
 
     Raises ValueError (``InvalidVersion`` is one) when the entry is there but unreadable:
     ``processing:software`` that is not an object, a value that is not a string, or one that
-    is not a version with at least ``major.minor``. That covers data-model's git-describe
-    stamp (``v0.13.1-0-g…``) and a bare commit sha, including an all-digit one, which PEP 440
-    alone would read as a huge release (``1234567``) and so as newer than every real one.
+    is not a version with at least ``major.minor`` and no epoch. That covers data-model's
+    git-describe stamp (``v0.13.1-0-g…``) and a bare commit sha, including an all-digit one,
+    which PEP 440 alone would read as a huge release (``1234567``) and so as newer than every
+    real one, as it would any epoch (``1!0.1``).
     """
     software = properties.get("processing:software")
     if isinstance(software, str):
@@ -35,7 +36,7 @@ def read_version(properties: dict, key: str) -> Version | None:
     if not isinstance(value, str):
         raise ValueError(f"processing:software[{key!r}] is not a string: {value!r:.80}")
     version = Version(value)
-    if len(version.release) < 2:
+    if len(version.release) < 2 or version.epoch:
         raise ValueError(f"processing:software[{key!r}] is not major.minor[.patch]: {value!r}")
     return version
 

@@ -64,6 +64,7 @@ def props(version, dt="2026-11-01T10:00:00Z", *, as_string=False, cloud=12.5):
         ("0.12.0", None, "skipped_below_floor"),
         ("0.13.0rc1", None, "skipped_below_floor"),
         ("v0.13.1-0-g1a2b3c4", None, "skipped_unreadable"),
+        ("1!0.1", None, "skipped_unreadable"),  # an epoch would replace every final target
         ("0.14.0rc1", None, "skipped_prerelease"),
         ("0.13.2.dev3", None, "skipped_prerelease"),
         ("0.13.0+eodc.1", None, "skipped_prerelease"),
@@ -79,6 +80,7 @@ def props(version, dt="2026-11-01T10:00:00Z", *, as_string=False, cloud=12.5):
         ("0.13.0", "0.13.1", "skipped_not_newer"),  # never a downgrade of a final release
         ("0.13.1", "0.13.1.post1", "skipped_not_newer"),  # a post-release is final
         ("0.13.1", "v0.13.1-0-g1a2b3c4", "refused_target_unreadable"),
+        ("0.13.1", "1!0.1", "refused_target_unreadable"),
     ],
 )
 def test_the_verdict_for_each_source_and_target_version(source, target, verdict):

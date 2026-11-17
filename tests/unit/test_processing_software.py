@@ -30,12 +30,13 @@ def test_absent_is_none(properties):
         {KEY: "v0.13.1-0-g1a2b3c4"},  # data-model's git-describe stamp
         {KEY: "1a2b3c4"},  # a bare sha
         {KEY: "1234567"},  # an all-digit sha: PEP 440 alone reads it as release 1234567
+        {KEY: "1!0.1"},  # an epoch: PEP 440 orders it above every epoch-0 release, and final
         {KEY: ""},
         {KEY: 13},
         "not json",
         ["0.13.1"],
     ],
-    ids=["git-describe", "sha", "digit-sha", "empty", "number", "not-json", "list"],
+    ids=["git-describe", "sha", "digit-sha", "epoch", "empty", "number", "not-json", "list"],
 )
 def test_unreadable_raises(software):
     with pytest.raises(ValueError):
