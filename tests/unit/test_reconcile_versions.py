@@ -298,7 +298,8 @@ def test_each_source_id_gets_one_verdict_and_the_counts_add_up(tmp_path, caplog)
         target={"same": "0.13.1", "down": "0.13.1", "up": "0.13.0", "bad": "v0.13.1-0-g1"},
         archive={"arch", "unrelated"},
     )  # fmt: skip
-    assert world.run(tmp_path) == 1, "an unreadable target version fails the run"
+    assert world.run(tmp_path) == 0, "#522 review 1: an unreadable target is counted, loudly"
+    assert "Look: refused_target_unreadable=1, e.g. bad" in caplog.text
     counts = summary(caplog)
     assert counts["source"] == 10
     assert sum(v for k, v in counts.items() if k != "source") == 10
@@ -453,7 +454,7 @@ def test_ids_that_end_before_their_write_never_hold_up_the_rest(tmp_path, caplog
         assert world.target.writes() == [("post", i) for i in created]
         counts = summary(caplog)
         assert (counts[key], counts["failed"], counts["remaining"]) == (11, 0, remaining)
-        assert code == (1 if bad in ("unbuildable", "unreadable") else 0)
+        assert code == 0, "#522 review 1: else the run that converges fails too"
 
 
 def test_a_write_that_fails_counts_toward_the_bound(tmp_path, caplog):
@@ -603,11 +604,11 @@ def test_a_get_that_is_not_the_item_refuses_the_put(tmp_path, caplog, body):
     failure. A status other than 200 or 404 is a failure."""
     world = World(source={"A": "0.13.1", "B": "0.13.1"}, target={"A": "0.13.0", "B": "0.13.0"},
                   overrides={("GET", "A"): body})  # fmt: skip
-    assert world.run(tmp_path) == 1
+    failed = isinstance(body, int)
+    assert world.run(tmp_path) == failed
     assert world.target.writes() == [("put", "B")], "A refused, B still replaced"
     assert [line["item_id"] for line in lines(tmp_path / "replaced.jsonl")] == ["B", "B"]
     counts = summary(caplog)
-    failed = isinstance(body, int)
     assert (counts["failed"], counts["refused_target_unreadable"]) == (failed, not failed)
     assert "refused" in caplog.text
 
@@ -690,6 +691,36 @@ def test_the_fetched_version_is_the_one_written_and_compared(tmp_path, caplog):
 
 
 # --- failures and stops ---
+
+
+def test_ends_that_recur_on_every_run_exit_0_and_name_sample_ids(tmp_path, caplog):
+    """#522 review 1: an unbuildable source or an unreadable target ends the same way on every
+    run, the one that converges included. Counted and named, never a failed run."""
+    world = World(source={"A": "0.13.1", "B": "0.13.1", "C": "0.13.1", "D": "0.13.1"},
+                  target={"C": "v0.13.1-0-g1", "D": "0.13.0"}, fetched={"A": "unbuildable"},
+                  overrides={("GET", "D"): FakeTarget.item("D", props("1!0.1"))})  # fmt: skip
+    assert world.run(tmp_path) == 0
+    assert world.target.writes() == [("post", "B")]
+    counts = summary(caplog)
+    assert (counts["skipped_unbuildable"], counts["refused_target_unreadable"]) == (1, 2)
+    assert "Look: skipped_unbuildable=1, e.g. A\n" in caplog.text
+    assert "Look: refused_target_unreadable=2, e.g. C, D\n" in caplog.text
+
+
+@pytest.mark.parametrize("failure", [requests.ConnectionError("reset"), requests.HTTPError("404")])
+def test_a_source_fetch_that_fails_fails_the_run(tmp_path, caplog, failure):
+    """Transient, or a 404 an EODC change could turn every id into: never a converged run."""
+    world = World(source={"A": "0.13.1", "B": "0.13.1"})
+
+    def fetch(api, collection, item_id):
+        if item_id == "B":
+            raise failure
+        return world._fetch(api, collection, item_id)
+
+    world.fetch.side_effect = fetch
+    assert world.run(tmp_path) == 1
+    assert world.target.writes() == [("post", "A")]
+    assert summary(caplog)["failed"] == 1
 
 
 def test_one_failing_write_does_not_stop_the_batch_and_fails_the_run(tmp_path, caplog):

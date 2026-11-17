@@ -30,11 +30,12 @@
 #                  refused_target_unreadable, as in the diff; a 404 is `gone`; an item already caught up is skipped. The pre-image goes
 #                  to replaced-ids BEFORE the PUT, the outcome after it.
 #   10 in a row    10 failures in a row (an outage) stop the run; skips never count toward it.
-#   loud failure   exit 1 (the Workflow shows Failed) after the summary if any write failed or
-#                  was refused, if a target item's EOPF_GEOZARR cannot be read, if a source item
-#                  cannot be built (skipped_unbuildable: EODC changed its item schema?), or if no
+#   loud failure   exit 1 (the Workflow shows Failed) after the summary if a write failed or was
+#                  refused, if a read an id needed failed (EODC fetch, target GET), or if no
 #                  source item in the range has a usable EOPF_GEOZARR >= 0.13.0 (a renamed key or
-#                  a new stamp format must not look like a converged run).
+#                  a new stamp format must not look like a converged run). An unbuildable source
+#                  (EODC changed its item schema?) or an unreadable target recurs on every run, so
+#                  it exits 0: counted, and named on a `Look:` line after the summary.
 # There is no activeDeadlineSeconds: the bound is --max-writes, never a kill. Every request has a
 # 30 s client timeout (opening the write client included) and every write is sent once, so a
 # stalled one fails instead of hanging the run.
@@ -52,9 +53,10 @@
 #        ... -p pipeline_image_version=sha-<merge-sha> -p dry_run=false -p max_writes=10
 #   3. BATCHES, repeated until a run prints `remaining=0`:
 #        ... -p pipeline_image_version=sha-<merge-sha> -p dry_run=false -p max_writes=500
-#   Read the counts at the top of each run: a skipped_unreadable, skipped_prerelease or
-#   skipped_cloud_cover above 0 means EODC changed how it stamps or filters items, and a
-#   skipped_unbuildable above 0 that its item schema changed.
+#   Read the counts at the top of each run and the `Look:` lines after the summary, even of a
+#   run that succeeded: a skipped_unreadable, skipped_prerelease or skipped_cloud_cover above 0
+#   means EODC changed how it stamps or filters items, and a skipped_unbuildable above 0 that
+#   its item schema changed.
 #
 # A reconcile pod stuck Pending (ImagePullBackOff, unschedulable) has written nothing: delete
 # that Workflow (`argo delete -n devseed <name>`) to release `eodc-register-limit`, fix the cause,

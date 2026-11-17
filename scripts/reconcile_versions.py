@@ -42,10 +42,11 @@ A ``--replaced-ids`` line names its item ``item_id``, not ``id``, so
 ``rollback_created_items.py`` refuses that file rather than deleting the replaced items,
 which existed before the run.
 
-Exit 1, after the summary, if any write failed or was refused, if a target item's version
-cannot be read, if a source item could not be built, or if no source item in the range is
-usable: a renamed key, a new stamp format or a new item schema must not pass for a converged
-run.
+Exit 1, after the summary, if a write failed or was refused, if a read an id needed failed
+(the source fetch, the target GET), or if no source item in the range is usable: a renamed
+key or a new stamp format must not pass for a converged run. An unbuildable source or an
+unreadable target ends the same way on every run, so failing on it would fail the run that
+converges too: it is counted, and named on a ``Look:`` line after the summary, exit 0.
 """
 
 import argparse
@@ -151,6 +152,8 @@ SUMMARY_KEYS = (
     "remaining",
 )
 SAMPLES = 5
+# Ends that recur on every run, so they exit 0, but say EODC's or the target's items changed.
+LOOK = ("skipped_unbuildable", "refused_target_unreadable")
 
 
 class ReplacedIdsError(Exception):
@@ -452,10 +455,27 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     return args
 
 
-def log_summary(collection: str, n_source: int, counts: Counter[str]) -> None:
-    """The run's one-line result: fixed keys, each counting source ids."""
+def report(
+    collection: str, n_source: int, counts: Counter[str], fates: dict[str, list[str]]
+) -> int:
+    """Log the run's one-line result (fixed keys, each counting source ids); the exit code.
+
+    1 only if an id ``failed``: a write, or a read it needed. A ``LOOK`` end is logged with
+    sample ids instead: it recurs on every run, so failing on it would fail the last one too.
+    """
     summary = " ".join(f"{key}={counts[key]}" for key in SUMMARY_KEYS)
     logger.info("Summary for %s: source=%d %s", collection, n_source, summary)
+    if counts["remaining"]:
+        logger.info("remaining: %d id(s) not reached; re-run to continue", counts["remaining"])
+    for key in LOOK:
+        if counts[key]:
+            logger.warning(
+                "Look: %s=%d, e.g. %s", key, counts[key], ", ".join(fates[key][:SAMPLES])
+            )
+    if counts["failed"]:
+        logger.error("Failed: %d id(s): a write, or a read it needed, failed", counts["failed"])
+        return 1
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -521,7 +541,7 @@ def main(argv: list[str] | None = None) -> int:
         len(sources),
         len(targets),
     )
-    fates: defaultdict[str, list[str]] = defaultdict(list)  # verdict -> its ids, sorted
+    fates: defaultdict[str, list[str]] = defaultdict(list)  # verdict, then outcome -> ids
     for item_id in sorted(verdicts):
         fates[verdicts[item_id]].append(item_id)
     for verdict, ids in sorted(fates.items()):
@@ -537,7 +557,7 @@ def main(argv: list[str] | None = None) -> int:
 
     usable = len(sources) - sum(counts[key] for key in UNUSABLE)
     if not usable:
-        log_summary(args.collection, len(sources), counts)
+        report(args.collection, len(sources), counts, fates)
         logger.error(
             "Refusing: none of the %d source item(s) since %s has a usable %s >= %s. A renamed "
             "key, a new stamp format or an empty source would otherwise pass for a converged run",
@@ -571,9 +591,11 @@ def main(argv: list[str] | None = None) -> int:
         visited += 1
         try:
             if kind == "create":
-                counts[run.create(item_id)] += 1
+                outcome = run.create(item_id)
             else:
-                counts[run.replace(item_id, sources[item_id])] += 1
+                outcome = run.replace(item_id, sources[item_id])
+            counts[outcome] += 1
+            fates[outcome].append(item_id)
             streak = 0
         except (CreatedIdsError, ReplacedIdsError) as exc:
             logger.error("Stopping: %s", exc)
@@ -584,21 +606,7 @@ def main(argv: list[str] | None = None) -> int:
             streak += 1
             logger.error("   ❌ %s %s: %s", kind, item_id, exc)
     counts["remaining"] = len(actions) - visited
-
-    log_summary(args.collection, len(sources), counts)
-    if counts["remaining"]:
-        logger.info("remaining: %d id(s) not reached; re-run to continue", counts["remaining"])
-    if counts["failed"] or counts["refused_target_unreadable"] or counts["skipped_unbuildable"]:
-        logger.error(
-            "Failed: %d write(s) failed or were refused, %d target item(s) have an unreadable "
-            "%s, %d source item(s) cannot be built",
-            counts["failed"],
-            counts["refused_target_unreadable"],
-            policy.key,
-            counts["skipped_unbuildable"],
-        )
-        return 1
-    return 0
+    return report(args.collection, len(sources), counts, fates)
 
 
 if __name__ == "__main__":

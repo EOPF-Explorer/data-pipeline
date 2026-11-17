@@ -35,7 +35,7 @@ Explorer sentinel-2-l2a-new ──search(fields=..., limit 1000)─────�
    >= floor, final, absent ──► ids= search on sentinel-2-l2a, 100 per search ─► in it: skipped_in_archive
                                                                              └─► not:   CREATE
    >= floor, final, newer than target (or target has no key, or a non-final one) ─► REPLACE
-   equal to or older than a final target ─► skipped_not_newer;   target unreadable ─► refused_target_unreadable (exit 1)
+   equal to or older than a final target ─► skipped_not_newer;   target unreadable ─► refused_target_unreadable (counted)
 actions = CREATE + REPLACE, newest acquisition first, then id; taken in order until --max-writes POSTs/PUTs are sent:
    CREATE:  fetch the full source item (register's fetch_source_item), classify it again, build_proxy_item(expires=None)
             ─► register_proxy.create_item (POST, 409 = exists) + record_created, `uncertain` on a 5xx/no answer
@@ -78,9 +78,10 @@ Decisions:
   wrong run. Other failures stay failures: 5xx, timeouts, and a source GET 404 (an EODC change could turn
   every id into one, which must stop the run, not look like a converged one). They exit 1, and 10 in a row
   stop the run, with the ids not reached reported as `remaining`, not as `failed`.
-- **An unbuildable source fails the run** (exit 1) although it neither uses the bound nor the 10-in-a-row
-  stop: `build_proxy_item` refusing an item means EODC's schema changed, which must not pass for a
-  converged run. If that turns out to be noise (one odd item), the exit condition is one line.
+- **Only failures exit 1** (#522 review 1, Loïc 17 Nov): a write failed or refused, a read an id needed (the
+  source fetch, the target GET), the 10-in-a-row stop, or no usable source. An unbuildable source or an
+  unreadable target (at diff or at replace time) ends the same way on every run, so failing on it failed the
+  run that converges too, forever: it is counted, and named on a `Look:` line after the summary, exit 0.
 - **`--max-writes` is required, dry runs included** (review #6): without it a dry run had a bound of 0 and
   checked nothing, green.
 - **Replace reads the target first** (review #10): the GET and the comparison with the diff's source version
@@ -149,7 +150,7 @@ absent; ValueError if unreadable) and `is_final(version)`.
 - [x] each review finding's test fails when its bug is reintroduced (mutation runs, see Verification)
 - [x] (review round, 17 Nov) 11 ids at the head of the order that end before their write (unbuildable, old
   generation, source changed, target GET 404) do not stop `--max-writes 1` writing the next id, and two runs
-  converge to `remaining=0`; an unbuildable source exits 1; a POST or PUT that fails counts toward the bound
+  converge to `remaining=0`; a POST or PUT that fails counts toward the bound
 - [x] (review) opening the write client times out (landing page held 1 s, timeout 0.2 s, real socket)
 - [x] (review) `--max-writes` missing: argparse exit 2 for a dry run and a real run, nothing searched
 - [x] (review) `eo:cloud_cover` 90, missing, a string or NaN: `skipped_cloud_cover`; a catalogue that ignores
@@ -216,7 +217,8 @@ each (see Rollback), then let the next run re-apply them.
 **What**: the same tag, `-p dry_run=false -p max_writes=500`, repeated.
 **Acceptance criteria**:
 - [ ] no run shows `failed`, `skipped_unreadable`, `skipped_unbuildable`, `skipped_cloud_cover` or
-  `refused_target_unreadable` above 0 (or each is explained)
+  `refused_target_unreadable` above 0 (or each is explained). Only `failed` fails a run: read the counts
+  and the `Look:` lines of each green one too
 - [ ] the last run prints `remaining=0` with no writes and exits 0
 
 ## Rollback
@@ -304,8 +306,6 @@ restored to its old state. The Task 7 exercise checks the mechanism, not the dat
 6. **After #519 merges:** switch `manage_collections._software_value` / `_kept` to
    `processing_software.read_version` (it is stricter: an all-digit sha becomes unreadable, which the clean
    refuses).
-8. **An unbuildable source fails the run** (exit 1) without holding up the others (Design). Keep, or make
-   it a counted skip that exits 0?
 
 ### Resolved (Loïc, 17 Nov 2026)
 1. **Exclusion scope:** an id already in both `-new` and `sentinel-2-l2a` is replaced in `-new` like any
@@ -317,6 +317,8 @@ restored to its old state. The Task 7 exercise checks the mechanism, not the dat
   (see Run order).
 7. **A recurring reconcile**, the dead-entry delete pass and one-item-per-scene (the 111 scenes with two
    generations at EODC): deferred until EODC answers on the scope of its re-publishing.
+8. **Unbuildable source, unreadable target:** counted, named on a `Look:` line, exit 0 (#522 review 1). Only
+   failures and an all-unusable source exit 1 (Design).
 
 ## Done definition
 A real run of the Workflow prints `remaining=0`, writes nothing, `failed=0`, `skipped_unreadable=0`,
