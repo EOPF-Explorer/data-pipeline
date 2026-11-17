@@ -211,12 +211,17 @@ class World:
         self.fetch = MagicMock(side_effect=self._fetch)
 
     def _fetch(self, api, collection, item_id):
+        """The fetched item at ``fetched[item_id]``: a version, or "old" / "unbuildable"."""
         assert (api, collection) == (EODC, POLICY.source_collection)
         version = self.fetched[item_id]
         base = json.loads(OLD_GENERATION_FIXTURE.read_text()) if version == "old" else self.base
-        software = {"EOPF_CPM": "3.0.0", KEY: "0.13.1" if version == "old" else version}
-        return {**base, "id": item_id, "properties": {**base["properties"],
-                "processing:software": software}}  # fmt: skip
+        software = {"EOPF_CPM": "3.0.0", KEY: version}
+        if version in ("old", "unbuildable"):
+            software[KEY] = "0.13.1"
+        properties = {**base["properties"], "processing:software": software}
+        if version == "unbuildable":
+            del properties["proj:code"]  # build_proxy_item refuses it (ValueError)
+        return {**base, "id": item_id, "properties": properties}
 
     def after_the_diff(self, change):
         """Apply ``change`` as each id is fetched: after the diff, before its write."""
@@ -375,7 +380,7 @@ def test_max_writes_takes_the_newest_n_and_reports_the_rest_then_converges(tmp_p
     assert world.run(tmp_path, max_writes="2") == 0
     assert world.target.writes() == [("put", "E"), ("post", "D")], "newest acquisition first"
     assert summary(caplog)["remaining"] == 3
-    assert "remaining: 3 write(s) beyond --max-writes 2" in caplog.text
+    assert "remaining: 3 id(s) not reached" in caplog.text
     caplog.clear()
     assert world.run(tmp_path, max_writes="2") == 0
     assert summary(caplog)["remaining"] == 1
@@ -386,6 +391,37 @@ def test_max_writes_takes_the_newest_n_and_reports_the_rest_then_converges(tmp_p
     assert world.run(tmp_path, max_writes="2") == 0
     assert world.target.writes() == []
     assert summary(caplog)["remaining"] == 0 and summary(caplog)["skipped_not_newer"] == 5
+
+
+@pytest.mark.parametrize("bad", ["unbuildable", "old", "0.12.0", "gone"])
+def test_ids_that_end_before_their_write_never_hold_up_the_rest(tmp_path, caplog, bad):
+    """Review finding 2: such ids end the same way on every run. Eleven of them at the head
+    of the order used to fill every run's bound, or trip the 10-failures stop, forever."""
+    head = [f"S{n:02d}" for n in range(11)]
+    source = dict.fromkeys(["G1", "G2", *head], "0.13.1")  # the head ids are the newest
+    if bad == "gone":  # the target search lists them, their GET answers 404
+        world = World(source, target=dict.fromkeys(head, "0.13.0"),
+                      overrides={("GET", i): 404 for i in head})  # fmt: skip
+    else:
+        world = World(source, fetched=dict.fromkeys(head, bad))
+    key = {"unbuildable": "skipped_unbuildable", "old": "skipped_old_generation",
+           "0.12.0": "skipped_source_changed", "gone": "gone"}[bad]  # fmt: skip
+    for created, remaining in [(["G2"], 1), (["G2", "G1"], 0)]:  # two runs, one write each
+        caplog.clear()
+        code = world.run(tmp_path, max_writes="1")
+        assert world.target.writes() == [("post", i) for i in created]
+        counts = summary(caplog)
+        assert (counts[key], counts["failed"], counts["remaining"]) == (11, 0, remaining)
+        assert code == (1 if bad == "unbuildable" else 0), "an unbuildable source fails the run"
+
+
+def test_a_write_that_fails_counts_toward_the_bound(tmp_path, caplog):
+    """A POST or PUT that fails may have landed: --max-writes caps what is SENT."""
+    world = World(source=dict.fromkeys("ABC", "0.13.1"), target={"C": "0.13.0"},
+                  overrides={("POST", "B"): 502, ("PUT", "C"): requests.ReadTimeout("slow")})  # fmt: skip
+    assert world.run(tmp_path, max_writes="2") == 1
+    assert world.target.writes() == [("put", "C"), ("post", "B")]
+    assert (summary(caplog)["failed"], summary(caplog)["remaining"]) == (2, 1)
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "", "ten", "1.5"])
@@ -596,7 +632,7 @@ def test_an_unwritable_replaced_ids_list_stops_the_run_before_the_put(tmp_path, 
     world.after_the_diff(lambda: (tmp_path / "replaced.jsonl").chmod(0o444))
     assert world.run(tmp_path) == 1
     world.target.session.put.assert_not_called()
-    assert summary(caplog)["failed"] == 2
+    assert (summary(caplog)["failed"], summary(caplog)["remaining"]) == (1, 1)
     assert "Stopping: cannot record B" in caplog.text
 
 
@@ -606,7 +642,7 @@ def test_ten_failures_in_a_row_stop_the_run(tmp_path, caplog):
                   overrides={("POST", i): 503 for i in ids})  # fmt: skip
     assert world.run(tmp_path, max_writes="20") == 1
     assert len(world.target.writes()) == 10
-    assert summary(caplog)["failed"] == 12
+    assert (summary(caplog)["failed"], summary(caplog)["remaining"]) == (10, 2)
 
 
 # --- the write session, over a real socket ---

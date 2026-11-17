@@ -24,17 +24,22 @@ The diff is batched: one paged, ``fields``-limited search of the source and one 
 plus one ``ids=`` search per ``IDS_PER_SEARCH`` create candidates against the exclusion
 collection. Never one search per item.
 
-``--max-writes N`` bounds the run from inside: the first N creates and replaces, newest
-acquisition first, are processed and the rest reported as ``remaining``; re-run until it is
-0. A replace GETs the target item on a session that never retries and checks that the body
-is that item with a readable version. It then re-compares, appends the pre-image to
-``--replaced-ids`` and only then PUTs. A ``--replaced-ids`` line names its item ``item_id``,
-not ``id``, so ``rollback_created_items.py`` refuses that file rather than deleting the
-replaced items, which existed before the run.
+``--max-writes N`` bounds the run from inside: the creates and replaces are taken newest
+acquisition first until N POSTs or PUTs have been sent (would have been, in a dry run), and
+the ids not reached are reported as ``remaining``; re-run until it is 0. An id that ends
+before its write (an old-generation or unbuildable source, a source changed since the diff,
+a target gone or already caught up) is counted by reason and does not use the bound, so ids
+that end that way on every run never hold up the ones behind them. A replace GETs the target
+item on a session that never retries and checks that the body is that item with a readable
+version. It then re-compares, appends the pre-image to ``--replaced-ids`` and only then PUTs.
+A ``--replaced-ids`` line names its item ``item_id``, not ``id``, so
+``rollback_created_items.py`` refuses that file rather than deleting the replaced items,
+which existed before the run.
 
-Exit 1, after the whole batch and the summary, if any write failed or was refused, if a
-target item's version cannot be read, or if no source item in the range is usable: a renamed
-key or a new stamp format must not pass for a converged run.
+Exit 1, after the summary, if any write failed or was refused, if a target item's version
+cannot be read, if a source item could not be built, or if no source item in the range is
+usable: a renamed key, a new stamp format or a new item schema must not pass for a converged
+run.
 """
 
 import argparse
@@ -121,6 +126,7 @@ SUMMARY_KEYS = (
     "skipped_not_newer",
     "skipped_source_changed",
     "skipped_old_generation",
+    "skipped_unbuildable",
     "refused_target_unreadable",
     "failed",
     "remaining",
@@ -227,12 +233,16 @@ class Run:
     created_ids: Path | None
     replaced_ids: Path | None
     run_id: str
+    # POSTs and PUTs sent (or, in a dry run, that would be): what --max-writes bounds.
+    writes: int = 0
 
     def build(self, item_id: str) -> tuple[Item, Version] | str:
         """Fetch and build one source item as the register would, or a skip verdict.
 
         The fetched item, not the diff's snapshot, is what gets written, so it is classified
-        again: EODC may have changed it since the diff.
+        again: EODC may have changed it since the diff. A source ``build_proxy_item`` refuses
+        is ``skipped_unbuildable``, not a failure: the same item fails the same way on every
+        run, so it must neither hold up the ids behind it nor trip the failures-in-a-row stop.
         """
         source = fetch_source_item(
             self.policy.source_stac_api, self.policy.source_collection, item_id
@@ -247,10 +257,14 @@ class Run:
         if verdict != "create":
             logger.warning("   ⚠️  %s: the source is now %s, skipped", item_id, verdict)
             return "skipped_source_changed"
-        item = build_proxy_item(
-            source, self.collection, self.raster_api_url, self.stac_api_url, expires=None
-        )
-        assert_no_s3_urls(item)
+        try:
+            item = build_proxy_item(
+                source, self.collection, self.raster_api_url, self.stac_api_url, expires=None
+            )
+            assert_no_s3_urls(item)
+        except ValueError as exc:
+            logger.warning("   ⚠️  %s: cannot be built (%s), skipped", item_id, exc)
+            return "skipped_unbuildable"
         version = read_version(properties, self.policy.key)
         assert version is not None  # noqa: S101  # nosec B101 -- classify said "create"
         return item, version
@@ -261,6 +275,7 @@ class Run:
         if isinstance(built, str):
             return built
         item, version = built
+        self.writes += 1  # before the POST: one that fails may still have landed
         if self.dry_run:
             logger.info("   would create %s (%s %s)", item_id, self.policy.key, version)
             return "would_create"
@@ -321,6 +336,7 @@ class Run:
             logger.info("   ⏭️  %s: the target is already %s %s", item_id, self.policy.key, current)
             return "skipped_not_newer"
         change = f"{self.policy.key} {current} -> {version}"
+        self.writes += 1  # before the PUT: one that fails may still have landed
         if self.dry_run:
             logger.info("   would replace %s (%s)", item_id, change)
             return "would_replace"
@@ -483,7 +499,6 @@ def main(argv: list[str] | None = None) -> int:
         reverse=True,
     )
     bound = args.max_writes or 0
-    counts["remaining"] = max(len(actions) - bound, 0)
 
     usable = len(sources) - sum(counts[key] for key in UNUSABLE)
     if not usable:
@@ -498,8 +513,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    batch = actions[:bound]
-    if batch:
+    if actions:
         run = Run(
             collection=args.collection,
             policy=policy,
@@ -511,42 +525,39 @@ def main(argv: list[str] | None = None) -> int:
             replaced_ids=args.replaced_ids,
             run_id=args.run_id,
         )
-    streak = 0
-    for n, (kind, item_id) in enumerate(batch):
-        # Both stops fall between ids, never inside one: a write and its line finish together.
-        if streak == MAX_CONSECUTIVE_FAILURES:
-            logger.error(
-                "Stopping after %d failures in a row: %d id(s) not attempted, counted as failed",
-                streak,
-                len(batch) - n,
-            )
-            counts["failed"] += len(batch) - n
+    streak = visited = 0
+    for kind, item_id in actions:
+        # Every stop falls between ids, never inside one: a write and its line finish together.
+        if run.writes == bound:
             break
+        if streak == MAX_CONSECUTIVE_FAILURES:
+            logger.error("Stopping after %d failures in a row", streak)
+            break
+        visited += 1
         try:
             counts[run.create(item_id) if kind == "create" else run.replace(item_id)] += 1
             streak = 0
         except (CreatedIdsError, ReplacedIdsError) as exc:
-            logger.error("Stopping: %s. %d id(s) not attempted", exc, len(batch) - n - 1)
-            counts["failed"] += len(batch) - n
+            logger.error("Stopping: %s", exc)
+            counts["failed"] += 1
             break
         except Exception as exc:  # noqa: BLE001 - one bad item must not hide the rest
             counts["failed"] += 1
             streak += 1
             logger.error("   ❌ %s %s: %s", kind, item_id, exc)
+    counts["remaining"] = len(actions) - visited
 
     log_summary(args.collection, len(sources), counts)
     if counts["remaining"]:
-        logger.info(
-            "remaining: %d write(s) beyond --max-writes %d; re-run to continue",
-            counts["remaining"],
-            bound,
-        )
-    if counts["failed"] or counts["refused_target_unreadable"]:
+        logger.info("remaining: %d id(s) not reached; re-run to continue", counts["remaining"])
+    if counts["failed"] or counts["refused_target_unreadable"] or counts["skipped_unbuildable"]:
         logger.error(
-            "Failed: %d write(s) failed or were refused, %d target item(s) have an unreadable %s",
+            "Failed: %d write(s) failed or were refused, %d target item(s) have an unreadable "
+            "%s, %d source item(s) cannot be built",
             counts["failed"],
             counts["refused_target_unreadable"],
             policy.key,
+            counts["skipped_unbuildable"],
         )
         return 1
     return 0
