@@ -7,7 +7,9 @@ item in the Explorer, and one the clean deleted never comes back. This is the se
 bounded run that closes both gaps. It diffs EODC's source collection against the target over
 a fixed acquisition range, by id and version only, and for each source id:
 
-- below the floor, without the key, unreadable, or a pre-release: skipped (counted);
+- ``eo:cloud_cover`` absent or not below the policy's maximum (the search's CQL2 filter
+  asks EODC for the same, and this check does not rely on it being honoured), below the
+  floor, without the key, unreadable, or a pre-release: skipped (counted);
 - absent from the target and from the exclusion collection: CREATED, by
   ``register_proxy.create_item``, and recorded in ``--created-ids`` exactly as the register
   records it;
@@ -108,12 +110,25 @@ POLICIES = {
 
 # The census read 34,672 target items in 35 pages of 1000 with these fields (17 Nov 2026).
 PAGE_SIZE = 1000
-FIELDS = {"include": ["id", "properties.datetime", "properties.processing:software"]}
+FIELDS = {
+    "include": [
+        "id",
+        "properties.datetime",
+        "properties.processing:software",
+        "properties.eo:cloud_cover",
+    ]
+}
 IDS_PER_SEARCH = 100
 WRITE_TIMEOUT_S = 30
 
-# Diff verdicts that mean "the source carries no version a write may come from".
-UNUSABLE = ("skipped_no_key", "skipped_below_floor", "skipped_unreadable", "skipped_prerelease")
+# Diff verdicts that mean "the source is not one a write may come from".
+UNUSABLE = (
+    "skipped_cloud_cover",
+    "skipped_no_key",
+    "skipped_below_floor",
+    "skipped_unreadable",
+    "skipped_prerelease",
+)
 SUMMARY_KEYS = (
     "created",
     "replaced",
@@ -143,8 +158,12 @@ def classify(source: dict, target: dict | None, policy: Policy) -> str:
 
     ``create`` and ``replace`` are candidates; ``create`` still has to pass the exclusion
     collection. A target without the key counts as older than any version: EODC's items from
-    before EOPF_GEOZARR was stamped have none.
+    before EOPF_GEOZARR was stamped have none. A source without a numeric ``eo:cloud_cover``
+    below the maximum is skipped, as the search's filter would have dropped it.
     """
+    cloud = source.get("eo:cloud_cover")
+    if not isinstance(cloud, int | float) or not cloud < policy.max_cloud_cover:
+        return "skipped_cloud_cover"
     try:
         version = read_version(source, policy.key)
     except ValueError:

@@ -47,10 +47,11 @@ def no_network(monkeypatch):
     monkeypatch.setattr(httpx.HTTPTransport, "handle_request", _explode)
 
 
-def props(version, dt="2026-11-01T10:00:00Z", *, as_string=False):
-    """Item properties carrying one EOPF_GEOZARR value (None: no key)."""
+def props(version, dt="2026-11-01T10:00:00Z", *, as_string=False, cloud=12.5):
+    """Item properties carrying one EOPF_GEOZARR value (None: no key) and a cloud cover."""
     software = {"EOPF_CPM": "3.0.0"} if version is None else {"EOPF_CPM": "3.0.0", KEY: version}
-    return {"datetime": dt, "processing:software": json.dumps(software) if as_string else software}
+    return {"datetime": dt, "processing:software": json.dumps(software) if as_string else software,
+            "eo:cloud_cover": cloud}  # fmt: skip
 
 
 # --- the verdict table ---
@@ -79,6 +80,17 @@ def props(version, dt="2026-11-01T10:00:00Z", *, as_string=False):
 def test_the_verdict_for_each_source_and_target_version(source, target, verdict):
     target_props = None if target is None else props(None if target == "no-key" else target)
     assert classify(props(source), target_props, POLICY) == verdict
+
+
+@pytest.mark.parametrize(
+    ("cloud", "verdict"),
+    [(89.9, "create"), (0, "create"), (90.0, "skipped_cloud_cover"),
+     (None, "skipped_cloud_cover"), ("12.5", "skipped_cloud_cover"),
+     (float("nan"), "skipped_cloud_cover")],
+)  # fmt: skip
+def test_cloud_cover_is_checked_here_not_only_by_the_search_filter(cloud, verdict):
+    """Review finding 8: a missing or cloudy eo:cloud_cover is a counted skip, never a create."""
+    assert classify(props("0.13.1", cloud=cloud), None, POLICY) == verdict
 
 
 def test_the_policy_is_fixed_per_target_not_by_flags():
@@ -314,7 +326,8 @@ def test_the_diff_is_batched_never_one_search_per_candidate(tmp_path):
     for search in world.eodc.searches + world.explorer.searches:
         assert search["limit"] == 1000
         assert search["fields"] == {"include": ["id", "properties.datetime",
-                                                "properties.processing:software"]}  # fmt: skip
+                                                "properties.processing:software",
+                                                "properties.eo:cloud_cover"]}  # fmt: skip
 
 
 def test_an_id_in_the_converted_archive_is_never_created(tmp_path, caplog):
@@ -325,6 +338,20 @@ def test_an_id_in_the_converted_archive_is_never_created(tmp_path, caplog):
     assert summary(caplog)["skipped_in_archive"] == 1
     assert [line["id"] for line in lines(tmp_path / "created.jsonl")] == ["B"]
     world.fetch.assert_called_once()
+
+
+def test_a_source_the_cloud_filter_should_have_dropped_is_never_written(tmp_path, caplog):
+    """The fake catalogue ignores CQL2 `filter`, as EODC could: the policy must still hold."""
+    world = World(source={"A": "0.13.1", "B": "0.13.1", "C": "0.13.1"})
+    world.source["A"]["eo:cloud_cover"] = 96.7
+    del world.source["B"]["eo:cloud_cover"]
+    assert world.run(tmp_path) == 0
+    assert world.target.writes() == [("post", "C")]
+    assert summary(caplog)["skipped_cloud_cover"] == 2
+    caplog.clear()
+    world.source["C"]["eo:cloud_cover"] = 90.0
+    assert world.run(tmp_path) == 1, "no usable source: e.g. EODC dropped the field"
+    assert "has a usable EOPF_GEOZARR" in caplog.text
 
 
 def test_an_ids_search_that_ignores_ids_is_refused_before_any_write(tmp_path, caplog):
