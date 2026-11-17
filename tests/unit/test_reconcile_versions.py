@@ -343,6 +343,7 @@ def test_an_id_in_the_converted_archive_is_never_created(tmp_path, caplog):
     assert world.run(tmp_path) == 0
     assert world.target.writes() == [("post", "B")]
     assert summary(caplog)["skipped_in_archive"] == 1
+    assert "   skipped_in_archive: 1, e.g. A\n" in caplog.text
     assert [line["id"] for line in lines(tmp_path / "created.jsonl")] == ["B"]
     world.fetch.assert_called_once()
 

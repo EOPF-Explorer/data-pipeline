@@ -52,7 +52,7 @@ import argparse
 import json
 import logging
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -521,8 +521,10 @@ def main(argv: list[str] | None = None) -> int:
         len(sources),
         len(targets),
     )
-    for verdict in sorted(set(verdicts.values())):
-        ids = sorted(i for i, v in verdicts.items() if v == verdict)
+    fates: defaultdict[str, list[str]] = defaultdict(list)  # verdict -> its ids, sorted
+    for item_id in sorted(verdicts):
+        fates[verdicts[item_id]].append(item_id)
+    for verdict, ids in sorted(fates.items()):
         logger.info("   %s: %d, e.g. %s", verdict, len(ids), ", ".join(ids[:SAMPLES]))
 
     # Newest acquisition first, then id: the same order every run, so a canary's ids are the
