@@ -15,9 +15,11 @@ a fixed acquisition range, by id and version only, and for each source id:
   records it;
 - absent from the target but in the exclusion collection (``sentinel-2-l2a``, our converted
   archive): skipped. EODC's 30 Sep 2026 burst holds ~800-1,000 such scenes;
-- in the target with an older version (or none): REPLACED;
-- in the target at an equal or newer version: skipped. Never a downgrade, so following an
-  EODC revert is a manual decision.
+- in the target with an older version, none, or a pre-release, dev or local-label one:
+  REPLACED. A final release replaces a non-final target even where PEP 440 orders it lower
+  (``0.13.1`` over ``0.14.0rc1``);
+- in the target at an equal or newer final version: skipped. Never a downgrade of a final
+  release, so following an EODC revert is a manual decision.
 
 Everything a run may do to a target is fixed in ``POLICIES``, never by a flag, and any other
 target is refused. Each summary key counts source ids, and together they add up to all of them.
@@ -158,8 +160,10 @@ def classify(source: dict, target: dict | None, policy: Policy) -> str:
 
     ``create`` and ``replace`` are candidates; ``create`` still has to pass the exclusion
     collection. A target without the key counts as older than any version: EODC's items from
-    before EOPF_GEOZARR was stamped have none. A source without a numeric ``eo:cloud_cover``
-    below the maximum is skipped, as the search's filter would have dropped it.
+    before EOPF_GEOZARR was stamped have none. A target on a non-final version counts as
+    older than any final one, so it is brought back to a release. A source without a numeric
+    ``eo:cloud_cover`` below the maximum is skipped, as the search's filter would have
+    dropped it.
     """
     cloud = source.get("eo:cloud_cover")
     if not isinstance(cloud, int | float) or not cloud < policy.max_cloud_cover:
@@ -180,7 +184,7 @@ def classify(source: dict, target: dict | None, policy: Policy) -> str:
         current = read_version(target, policy.key)
     except ValueError:
         return "refused_target_unreadable"
-    if current is not None and version <= current:
+    if current is not None and is_final(current) and version <= current:
         return "skipped_not_newer"
     return "replace"
 

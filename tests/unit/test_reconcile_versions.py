@@ -71,9 +71,13 @@ def props(version, dt="2026-11-01T10:00:00Z", *, as_string=False, cloud=12.5):
         ("0.13.1", "0.13.0", "replace"),
         ("0.13.1", "no-key", "replace"),
         ("0.14.0", "0.14.0rc1", "replace"),
+        # Review finding 7: a non-final target goes back to a release, even a lower one.
+        ("0.13.1", "0.14.0rc1", "replace"),
+        ("0.13.0", "0.13.2.dev3", "replace"),
+        ("0.13.1", "0.13.1+eodc.1", "replace"),
         ("0.13.1", "0.13.1", "skipped_not_newer"),
-        ("0.13.0", "0.13.1", "skipped_not_newer"),  # never a downgrade
-        ("0.13.1", "0.14.0rc1", "skipped_not_newer"),
+        ("0.13.0", "0.13.1", "skipped_not_newer"),  # never a downgrade of a final release
+        ("0.13.1", "0.13.1.post1", "skipped_not_newer"),  # a post-release is final
         ("0.13.1", "v0.13.1-0-g1a2b3c4", "refused_target_unreadable"),
     ],
 )
@@ -654,6 +658,17 @@ def test_a_source_that_changed_since_the_diff_is_not_written(tmp_path, caplog):
     assert world.target.writes() == []
     counts = summary(caplog)
     assert (counts["skipped_source_changed"], counts["skipped_old_generation"]) == (2, 1)
+
+
+def test_a_pre_release_target_is_brought_back_to_a_release_once(tmp_path, caplog):
+    world = World(source={"A": "0.13.1"}, target={"A": "0.14.0rc1"})
+    assert world.run(tmp_path) == 0
+    assert world.target.writes() == [("put", "A")]
+    assert lines(tmp_path / "replaced.jsonl")[0]["old_version"] == "0.14.0rc1"
+    caplog.clear()
+    assert world.run(tmp_path) == 0
+    assert world.target.writes() == [("put", "A")], "converged: 0.13.1 is final"
+    assert summary(caplog)["skipped_not_newer"] == 1
 
 
 def test_the_fetched_version_is_the_one_written_and_compared(tmp_path, caplog):
