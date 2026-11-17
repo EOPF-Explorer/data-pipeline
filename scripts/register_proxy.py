@@ -571,21 +571,14 @@ def item_url(stac_api: str, collection: str, item_id: str) -> str:
 
     ``--item-ids-file`` is operator-edited and httpx normalises RFC 3986 dot-segments, so an
     unquoted id of ``../../<other>/items/X`` would silently retarget the request at another
-    collection. ``quote(safe="")`` also stops ``#`` from truncating the URL.
+    collection, making ``--source-collection`` no bound at all. ``quote(safe="")`` also stops
+    ``#`` from truncating the URL.
     """
     return (
         f"{stac_api.rstrip('/')}"
         f"/collections/{urllib.parse.quote(collection, safe='')}"
         f"/items/{urllib.parse.quote(item_id, safe='')}"
     )
-
-
-def source_item_url(source_stac_api: str, source_collection: str, item_id: str) -> str:
-    """Where one source item is fetched, and so where discover must have found it.
-
-    ``item_url``: an unquoted id would make ``--source-collection`` no bound at all.
-    """
-    return item_url(source_stac_api, source_collection, item_id)
 
 
 def read_items_json(
@@ -595,7 +588,7 @@ def read_items_json(
 
     Each row names the collection discover deduplicated against, and the ``source_url`` it
     found the item at. A row for another collection means the list was made for a different
-    target, and its dedup proves nothing here. A row found anywhere but ``source_item_url``
+    target, and its dedup proves nothing here. A row found anywhere but ``item_url``
     was discovered on another source than the one each id is fetched from. Exact equality
     with EODC's self links: if they ever change form, every run is refused, loudly.
     """
@@ -610,13 +603,12 @@ def read_items_json(
     elsewhere = [
         (row["item_id"], row.get("source_url"))
         for row in rows
-        if row.get("source_url")
-        != source_item_url(source_stac_api, source_collection, row["item_id"])
+        if row.get("source_url") != item_url(source_stac_api, source_collection, row["item_id"])
     ]
     if elsewhere:
         raise ValueError(
             f"{path}: {len(elsewhere)} row(s) not found at "
-            f"{source_item_url(source_stac_api, source_collection, '<id>')}, e.g. {elsewhere[0]}"
+            f"{item_url(source_stac_api, source_collection, '<id>')}, e.g. {elsewhere[0]}"
         )
     return [row["item_id"] for row in rows]
 
@@ -664,7 +656,7 @@ def _is_transient(exc: BaseException) -> bool:
 def fetch_source_item(source_stac_api: str, source_collection: str, item_id: str) -> dict:
     """GET one source item. A direct GET avoids depending on the source's conformance.
 
-    The URL is ``source_item_url``'s, percent-encoded. Redirects are NOT followed: the HTTPS
+    The URL is ``item_url``'s, percent-encoded. Redirects are NOT followed: the HTTPS
     check in ``main`` validates the URL the operator typed, and a 3xx could downgrade it to
     http or move it to another host, after which whatever came back would be registered as
     if it had been asked for.
@@ -672,7 +664,7 @@ def fetch_source_item(source_stac_api: str, source_collection: str, item_id: str
     Up to three attempts on a transient error (``_is_transient``): EODC does return 502s
     (see ``upsert_item``), and one must not turn an hourly run red.
     """
-    url = source_item_url(source_stac_api, source_collection, item_id)
+    url = item_url(source_stac_api, source_collection, item_id)
     with httpx.Client(timeout=30.0, follow_redirects=False) as http:
         resp = http.get(url)
         resp.raise_for_status()

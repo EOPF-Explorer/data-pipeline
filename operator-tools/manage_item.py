@@ -185,7 +185,7 @@ def require_plain_ids(*ids: str) -> None:
 def path_segment(value: str) -> str:
     """``value`` as one URL path segment, so the request names exactly this id.
 
-    Percent-encoded, as register_proxy's ``source_item_url`` does: raw, a ``/``, ``?``,
+    Percent-encoded, as register_proxy's ``item_url`` does: raw, a ``/``, ``?``,
     ``#`` or %-escape in an id (such as one the server lists to ``clean``) is normalised
     on the way and can name another item. ``""``, ``.`` and ``..`` stay path syntax even
     encoded (``items/..`` is the collection), so they are refused.
