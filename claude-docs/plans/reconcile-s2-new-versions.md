@@ -309,6 +309,12 @@ restored to its old state. The Task 7 exercise checks the mechanism, not the dat
   mutation directories); R3b is still missed, and A1 now fails on a missing import, so its copy A1p stands
   in. The pass found that no test pinned the replace path's refusal of a non-200 GET: the 302 and 500 rows
   send no body, so `.json()` failed first. A 302 that carries the item now fails only through that check.
+- xhigh reviews (18 Nov; `~/DevDS/EOPF/clean-s2-new-keep-geozarr_2026-11-17/reviews-xhigh-2026-11-17/`):
+  the same five test files, 250 passed; full suite 2151 passed, 5 skipped. 21 mutants, each a fixed
+  finding's bug or an earlier mutant re-anchored on lines the fixes moved, all fail their tests (mypy for
+  the static one); driver and output in `.../mutation-runs/xhigh-fixes/`. Not changed: 522-9 (the register's
+  POST target, its own PR), 522-12 and 522-14 (a shared appender and a classify that returns the version
+  would touch the hourly register or ~30 verdict tests for a few lines), 450-15 (dry runs take the semaphore).
 
 ## Risks
 - **EODC's page size and `fields`.** EODC's root declares `item-search#fields` (captured 26 Oct 2026);
