@@ -282,6 +282,22 @@ same path, as it is doing for the 1-10 Nov acquisitions (same ids, same cpm_v300
 but points at the new store, so the replace cannot be undone; only a store EODC has left in place can be
 restored to its old state. The Task 7 exercise checks the mechanism, not the data.
 
+**A stopped run archives neither list** (`argo stop`/`terminate`, a deleted pod). The tool finishes the id in
+flight, but Argo's wait container saves the outputs about 1 s after the stop, before the main container has
+written them, and its archived `main.log` is cut there too (tested 18 Nov 2026:
+`~/DevDS/EOPF/clean-s2-new-keep-geozarr_2026-11-17/stop-artifact-test_2026-11-18/RESULT.md`). Rebuild the ids
+from Loki (31 days; a port-forward to `svc/mon-loki` in `core`, `LOKI_ADDR=http://localhost:13100`). Each
+`❌ create` is marked uncertain: it may have committed, and the rollback re-checks content anyway. The
+replace pre-images are lost.
+```bash
+logcli query --since=30d --limit=200000 --output=raw \
+  '{namespace="devseed", pod=~"<workflow-name>.*", container="main"} |~ "✅ Created|❌ create|🔁 Replaced|❌ replace"' > run.log
+grep -oE '(✅ Created|❌ create) [A-Za-z0-9_]+' run.log | awk '{printf "{\"id\": \"%s\", \"collection\": \"sentinel-2-l2a-new\"%s}\n", $3, ($2 == "create" ? ", \"uncertain\": true" : "")}' | sort -u > created-ids.jsonl
+grep -oE '(🔁 Replaced|❌ replace) [A-Za-z0-9_]+' run.log | awk '{print $3}' | sort -u > replaced-ids.txt
+```
+`--limit` truncates silently: check the line count against `sum(count_over_time(...[30d]))` with the same
+selector. (awk compares on `$2`, not the emoji: macOS awk treats the two emojis as equal.)
+
 ## Verification (2026-11-17)
 
 - `uv run --group test pytest tests/unit/test_processing_software.py tests/unit/test_reconcile_versions.py

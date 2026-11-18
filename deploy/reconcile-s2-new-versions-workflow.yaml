@@ -52,13 +52,11 @@
 #
 # Stopping a run: `argo stop` or `argo terminate` (or deleting its pod) sends SIGTERM, then
 # SIGKILL after the pod's 300 s grace period (podSpecPatch). On SIGTERM the tool finishes the id in
-# flight, its write and its list line, starts no other and prints the summary (`stop_requested`).
-# One id takes at most ~3 min (30 s GET, three source tries, 30 s PUT). A SIGKILL (grace exceeded,
-# a lost node) can still tear one id: a create may be missing from created-ids (the next run
-# counts it `exists`); a replace keeps its `before_put` line. A stopped run usually archives
-# NEITHER list (Argo's wait container uploads before the tool exits): rebuild the ids from Loki
-# (`✅ Created`, `🔁 Replaced`, `❌ create`); the pre-images are lost. A pod stuck Pending
-# (ImagePullBackOff, unschedulable) has written nothing: `argo stop` deletes it and releases
+# flight (one id takes at most ~3 min), starts no other and prints the summary (`stop_requested`).
+# But a stopped run archives NEITHER list: Argo saves the outputs before the tool has written them
+# (tested 18 Nov 2026). Rebuild the ids from Loki as in claude-docs/plans/reconcile-s2-new-versions.md
+# (Rollback, "A stopped run"); the pre-images are lost. So let the bounds end a run. A pod stuck
+# Pending (ImagePullBackOff, unschedulable) has written nothing: `argo stop` deletes it and releases
 # `eodc-register-limit`. It is also how a malformed tag (a truncated digest) ends.
 #
 # Order with the s2-new clean (deploy/clean-s2-new-keep-geozarr-workflow.yaml, data-pipeline#519):
