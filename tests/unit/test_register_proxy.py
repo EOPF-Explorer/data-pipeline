@@ -93,6 +93,15 @@ def new_source():
     return json.loads(NEW_LAYOUT_FIXTURE.read_text())
 
 
+def stamped(item, version="0.13.1"):
+    """``item`` with its EOPF_GEOZARR set (None: removed), as EODC publishes since 16 Nov 2026."""
+    software = item["properties"]["processing:software"]
+    software.pop("EOPF_GEOZARR", None)
+    if version is not None:
+        software["EOPF_GEOZARR"] = version
+    return item
+
+
 @pytest.fixture
 def statistics_source():
     return json.loads(STATISTICS_FIXTURE.read_text())
@@ -808,6 +817,81 @@ def test_pipeline_refuses_an_old_generation_source_and_exits_0(old_source, tmp_p
     assert "created=0 exists=0 refused_generation=1 failed=0" in caplog.text
 
 
+def window(source, versions):
+    """fetch_source_item answering each id with ``source`` stamped at its version."""
+    sources = {i: {**stamped(deepcopy(source), v), "id": i} for i, v in versions.items()}
+    return patch("register_proxy.fetch_source_item", side_effect=lambda _a, _c, i: sources[i])
+
+
+@pytest.mark.parametrize(
+    ("version", "why"),
+    [(None, "no_key"), ("0.12.0", "below_floor"), ("0.13.0rc1", "below_floor"),
+     ("0.14.0rc1", "prerelease"), ("0.13.1.dev0", "prerelease"), ("0.13.0+eodc.1", "prerelease")],
+)  # fmt: skip
+def test_the_transition_pipeline_takes_only_a_final_release_from_the_floor(
+    source, tmp_path, caplog, version, why
+):
+    """Loïc, 18 Nov 2026: only a final EOPF_GEOZARR >= 0.13.0 enters -new, as the reconcile
+    writes. Content-based, so counted, never failed; the id next to it is still created."""
+    caplog.set_level("INFO", logger="register_proxy")
+    target = FakeTarget()
+    with window(source, {"A": version, "B": "0.13.0"}):
+        assert run_pipeline(tmp_path, target, ["A", "B"], collection=NEW) == 0
+    assert [c.kwargs["json"]["id"] for c in target.session.post.call_args_list] == ["B"]
+    assert "created=1 exists=0 refused_generation=0 failed=0 refused_version=1" in caplog.text
+    assert f"A: EOPF_GEOZARR {version}, refused ({why})" in caplog.text
+
+
+def test_an_unreadable_stamp_is_counted_apart_and_fails_the_run(source, tmp_path, caplog):
+    """data-model's git-describe form (#522 review): EODC changed its stamp, so say so."""
+    caplog.set_level("INFO", logger="register_proxy")
+    target = FakeTarget()
+    with window(source, {"A": "v0.13.1-0-g1a2b3c4", "B": "0.13.1"}):
+        assert run_pipeline(tmp_path, target, ["A", "B"], collection=NEW) == 1
+    assert [c.kwargs["json"]["id"] for c in target.session.post.call_args_list] == ["B"]
+    assert "refused_version=0 refused_unreadable=1" in caplog.text
+
+
+def test_a_window_with_nothing_usable_fails_the_run(source, tmp_path, caplog):
+    """A renamed key would refuse every id: that must not pass for a quiet hour (review 1)."""
+    caplog.set_level("INFO", logger="register_proxy")
+    target = FakeTarget()
+    with window(source, {"A": None, "B": "0.12.0"}):
+        assert run_pipeline(tmp_path, target, ["A", "B"], collection=NEW) == 1
+    target.session.post.assert_not_called()
+    assert "2 of 2 id(s) refused for their EOPF_GEOZARR" in caplog.text
+
+
+def test_a_dry_run_counts_the_refusals_and_writes_only_the_rest(source, tmp_path, caplog):
+    """The check comes before any write, the dry run's file included, and its summary shows it."""
+    caplog.set_level("INFO", logger="register_proxy")
+    out = tmp_path / "out"
+    with window(source, {"A": None, "B": "0.13.1"}):
+        assert pipeline_cli(tmp_path, ["A", "B"], "--dry-run", str(out), collection=NEW) == 0
+    assert sorted(f.name for f in out.iterdir()) == ["B.json"]
+    assert "refused_version=1" in caplog.text
+
+
+def test_an_unstamped_source_that_cannot_be_built_still_fails(source, tmp_path, caplog):
+    """The build comes first: EODC schema drift fails the id, never hides as a refusal."""
+    caplog.set_level("INFO", logger="register_proxy")
+    broken = stamped(deepcopy(source), None)
+    del broken["properties"]["proj:code"]
+    with patch("register_proxy.fetch_source_item", return_value=broken):
+        assert run_pipeline(tmp_path, FakeTarget(), [broken["id"]], collection=NEW) == 1
+    assert "failed=1 refused_version=0" in caplog.text
+
+
+def test_a_refusal_does_not_reset_the_failures_in_a_row(source, tmp_path):
+    """A refused id never reached the target: it is no sign the target answers (review 4)."""
+    failing = [f"F{n:02d}" for n in range(11)]
+    ids = failing[:5] + ["R"] + failing[5:]
+    target = FakeTarget(fail=dict.fromkeys(failing, 503))
+    with window(source, {**dict.fromkeys(failing, "0.13.1"), "R": None}):
+        assert run_pipeline(tmp_path, target, ids, collection=NEW) == 1
+    assert target.session.post.call_count == 10, "stopped at 10 failures in a row"
+
+
 def test_the_generation_marker_is_raster_scale_or_offset_on_sr(source, old_source):
     assert is_old_generation(old_source)
     assert not is_old_generation(source)
@@ -835,7 +919,7 @@ def test_the_pipeline_takes_the_new_layout_and_still_refuses_the_old_generation(
     proxy writes cannot let an old-generation item through."""
     caplog.set_level("INFO", logger="register_proxy")
     target = FakeTarget()
-    sources = {item["id"]: item for item in (new_source, old_source)}
+    sources = {item["id"]: item for item in (stamped(new_source), old_source)}
     with patch("register_proxy.fetch_source_item", side_effect=lambda _a, _c, i: sources[i]):
         assert run_pipeline(tmp_path, target, list(sources), collection=NEW) == 0
     assert "created=1 exists=0 refused_generation=1 failed=0" in caplog.text
@@ -848,7 +932,7 @@ def test_the_pipeline_posts_the_scaling_next_to_statistics(statistics_source, tm
     """End to end: an rc2 item is created with its statistics and the pair that converts them."""
     caplog.set_level("INFO", logger="register_proxy")
     target = FakeTarget()
-    with patch("register_proxy.fetch_source_item", return_value=statistics_source):
+    with patch("register_proxy.fetch_source_item", return_value=stamped(statistics_source)):
         assert run_pipeline(tmp_path, target, [statistics_source["id"]], collection=NEW) == 0
     assert "created=1 exists=0 refused_generation=0 failed=0" in caplog.text
     reflectance = target.session.post.call_args.kwargs["json"]["assets"]["reflectance"]
@@ -860,7 +944,7 @@ def test_a_transition_item_has_no_expires_even_if_its_source_had_one(source, tmp
     """D2/R3: the user-facing scenes must never expire."""
     source["properties"]["expires"] = "2026-10-15T00:00:00Z"
     out = tmp_path / "out"
-    with patch("register_proxy.fetch_source_item", return_value=source):
+    with patch("register_proxy.fetch_source_item", return_value=stamped(source)):
         rc = pipeline_cli(tmp_path, [source["id"]], "--dry-run", str(out), collection=NEW)
     assert rc == 0
     written = json.loads((out / f"{source['id']}.json").read_text())
@@ -874,10 +958,11 @@ def test_the_transition_pipeline_keeps_running_after_the_proxy_expiry(
 ):
     monkeypatch.setattr(register_proxy, "PROXY_EXPIRES", datetime(2026, 9, 1, tzinfo=UTC))
     out = tmp_path / "out"
-    with patch("register_proxy.fetch_source_item", return_value=source):
+    with patch("register_proxy.fetch_source_item", return_value=stamped(source)):
         new = pipeline_cli(tmp_path, [source["id"]], "--dry-run", str(out), collection=NEW)
         proxy = pipeline_cli(tmp_path, [source["id"]], "--dry-run", str(out))
     assert (new, proxy) == (0, 1)
+    assert (out / f"{source['id']}.json").exists(), "the -new run wrote its item"
 
 
 @pytest.mark.parametrize(
