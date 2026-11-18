@@ -290,13 +290,15 @@ from Loki (31 days; a port-forward to `svc/mon-loki` in `core`, `LOKI_ADDR=http:
 `❌ create` is marked uncertain: it may have committed, and the rollback re-checks content anyway. The
 replace pre-images are lost.
 ```bash
-logcli query --since=30d --limit=200000 --output=raw \
+logcli query --since=30d --limit=200000 --batch=5000 --output=raw \
   '{namespace="devseed", pod=~"<workflow-name>.*", container="main"} |~ "✅ Created|❌ create|🔁 Replaced|❌ replace"' > run.log
 grep -oE '(✅ Created|❌ create) [A-Za-z0-9_]+' run.log | awk '{printf "{\"id\": \"%s\", \"collection\": \"sentinel-2-l2a-new\"%s}\n", $3, ($2 == "create" ? ", \"uncertain\": true" : "")}' | sort -u > created-ids.jsonl
 grep -oE '(🔁 Replaced|❌ replace) [A-Za-z0-9_]+' run.log | awk '{print $3}' | sort -u > replaced-ids.txt
 ```
-`--limit` truncates silently: check the line count against `sum(count_over_time(...[30d]))` with the same
-selector. (awk compares on `$2`, not the emoji: macOS awk treats the two emojis as equal.)
+`--limit` truncates silently, and without `--batch=5000` logcli drops entries at its page boundaries (18 Nov:
+490 of a pod's 500 lines; `--batch=20000` returned none): check the line count against
+`sum(count_over_time(...[30d]))` with the same selector. (awk compares on `$2`, not the emoji: macOS awk
+treats the two emojis as equal.)
 
 ## Verification (2026-11-17)
 
