@@ -524,6 +524,7 @@ def test_keep_software_min_dry_run_prints_the_count_per_value_and_deletes_nothin
         + [_sw(i, _geozarr("0.13.1")) for i in range(3, 5)]
         + [_sw(5, _geozarr("0.12.0"))]
         + [_sw(i, {"EOPF_CPM": "3.0.0"}) for i in range(6, 10)]
+        + [_sw(10, _geozarr("0.13"))]  # equal to 0.13.0 as a Version: its own row all the same
     )
     mgr = _manager(items)
     assert _keep(mgr, dry_run=True, max_items=4) == 0
@@ -535,8 +536,9 @@ def test_keep_software_min_dry_run_prints_the_count_per_value_and_deletes_nothin
         "    keep   '0.13.0': 3\n"
         "    keep   '0.13.1': 2\n"
         "    delete '0.12.0': 1\n"
+        "    keep   '0.13': 1\n"
         "    unreadable: 0\n"
-        "    total: keep 5, delete 5\n"
+        "    total: keep 6, delete 5\n"
     ) in out
     assert "Bounded run: 4 of 5 items" in out
     assert "Would delete 4 STAC items" in out

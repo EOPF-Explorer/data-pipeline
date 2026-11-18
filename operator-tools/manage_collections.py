@@ -140,7 +140,7 @@ def _split_by_software(
     So a dry run always shows the whole census, even one that is refused.
     """
     candidates: list[dict[str, Any]] = []
-    found: Counter[Version | None] = Counter()
+    found: Counter[str | None] = Counter()  # by stamp: "0.13" and "0.13.0" are equal Versions
     unreadable: list[str] = []
     for item in items:
         try:
@@ -148,15 +148,16 @@ def _split_by_software(
         except ValueError as exc:  # InvalidVersion is a ValueError
             unreadable.append(f"{item['id']} ({exc})")
             continue
-        found[version] += 1
+        found[None if version is None else str(version)] += 1
         if not _kept(version, floor):
             candidates.append(item)
 
     n_kept = len(items) - len(candidates) - len(unreadable)
     click.echo(f"\n🔎 processing:software[{key!r}] per item (keeping >= {floor}):")
-    for version, n in found.most_common():
-        label = "(missing)" if version is None else repr(str(version))
-        click.echo(f"    {'keep  ' if _kept(version, floor) else 'delete'} {label}: {n:,}")
+    for stamp, n in found.most_common():
+        kept = _kept(None if stamp is None else Version(stamp), floor)
+        label = "(missing)" if stamp is None else repr(stamp)
+        click.echo(f"    {'keep  ' if kept else 'delete'} {label}: {n:,}")
     click.echo(f"    unreadable: {len(unreadable):,}")
     click.echo(f"    total: keep {n_kept:,}, delete {len(candidates):,}")
     if unreadable:
