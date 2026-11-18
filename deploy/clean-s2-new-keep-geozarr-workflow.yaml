@@ -42,9 +42,8 @@
 # (hourly) creates new EODC items, today 0.13.1, which the filter keeps. An item created after a
 # run's walk is not seen by that run at all. A deleted item comes back only if EODC re-stamps its
 # `updated` inside a register window (1 h; 72 h for the catch-up cron, suspended) AND it was
-# acquired in the last 14 days (max_acquisition_age_days). It then comes back with whatever
-# EOPF_GEOZARR EODC serves at that moment: >= 0.13.0 stays, older is deleted again by the next
-# batch. The no-key items (acquired 29 Sep-1 Nov) are past the 14 days: no cron brings them back.
+# acquired in the last 14 days (max_acquisition_age_days), and only if EODC then serves it as a
+# final EOPF_GEOZARR >= 0.13.0: the register refuses anything else into -new (18 Nov 2026). The no-key items (acquired 29 Sep-1 Nov) are past the 14 days: no cron brings them back.
 # A walk is a snapshot and a batch deletes for hours, while a register mode that replaces an item
 # in place when EODC re-processes it (--update-if-newer) is in review. The re-check above is what
 # stops this run deleting an item upgraded after its walk; finish the clean before that mode goes

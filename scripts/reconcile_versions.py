@@ -75,11 +75,14 @@ from pystac_client.stac_api_io import StacApiIO
 from register_proxy import (  # also configures logging, as the register does
     DEFAULT_SOURCE_COLLECTION,
     DEFAULT_SOURCE_STAC_API,
+    FLOOR,
     MAX_CONSECUTIVE_FAILURES,
+    SOFTWARE_KEY,
     TRANSITION_COLLECTION,
     CreatedIdsError,
     assert_no_s3_urls,
     build_proxy_item,
+    check_version,
     create_item,
     fetch_source_item,
     is_old_generation,
@@ -89,10 +92,8 @@ from register_proxy import (  # also configures logging, as the register does
 
 logger = logging.getLogger(__name__)
 
-# The policy for TRANSITION_COLLECTION, the one target: no flag sets any of it.
-SOFTWARE_KEY = "EOPF_GEOZARR"
-# Loïc, 2026-11-17: the collection keeps EOPF_GEOZARR >= 0.13.0, the #519 clean's floor.
-FLOOR = Version("0.13.0")
+# The policy for TRANSITION_COLLECTION, the one target: no flag sets any of it. Its key and
+# floor are register_proxy's, shared with the hourly register.
 # The target's earliest acquisition is 2026-09-29T08:26Z (census, 17 Nov 2026).
 ACQUIRED_FROM = datetime(2026, 9, 29, tzinfo=UTC)
 EXCLUDE_COLLECTION = "sentinel-2-l2a"
@@ -164,16 +165,10 @@ def classify(source: dict, target: dict | None) -> str:
         return "skipped_cloud_cover"
     if not cloud < MAX_CLOUD_COVER:
         return "skipped_cloud_cover"
-    try:
-        version = read_version(source, SOFTWARE_KEY)
-    except ValueError:
-        return "skipped_unreadable"
-    if version is None:
-        return "skipped_no_key"
-    if version < FLOOR:
-        return "skipped_below_floor"
-    if not is_final(version):
-        return "skipped_prerelease"
+    version, why = check_version(source)  # the register's check: one rule for both writers
+    if why:
+        return f"skipped_{why}"
+    assert version is not None  # noqa: S101  # nosec B101 -- check_version sets it when why is None
     if target is None:
         return "create"
     if not isinstance(target, dict):

@@ -19,7 +19,7 @@ inside the tool, never by a timeout or a kill; target fixed in the manifest
 | Image containing the flag | Not yet: CI's pull_request build publishes `sha-<merge-sha>` |
 | Dry run, canary, batches against production | Not run |
 | Register `--update-if-newer` (branch `feat/register-reprocessed-items`) | In review; must not go live before Task 5 is done |
-| Recovery path: re-register deleted items from EODC with `register_proxy.py` | Not exercised |
+| Recovery path: re-register deleted items from EODC with `register_proxy.py` | Exercised 17 Nov (O3). Since 18 Nov the register refuses into `-new` anything but a final `EOPF_GEOZARR` >= 0.13.0, so only an item EODC serves at such a version can come back |
 
 Census, 2026-11-17 ~13:45Z, read-only `POST /stac/search` over all 34,672 items:
 
@@ -105,8 +105,9 @@ this clean deleting an item upgraded after its walk; finishing first keeps the t
 - **Tag expiry.** Harbor deletes `sha-*` tags after 7 days. A drain outliving that needs a new dry run
   on `<release tag>@sha256:<digest>`.
 - **Memory.** The walk holds every item (about 44 KB each): requests 3Gi, limit 6Gi.
-- **Recovery.** Re-register from EODC with `register_proxy.py`, only while EODC still serves the item.
-  No cron re-registers items acquired more than 14 days ago. Not exercised.
+- **Recovery.** Re-register from EODC with `register_proxy.py`, only while EODC serves the item as a final
+  `EOPF_GEOZARR` >= 0.13.0 (the register refuses anything else into `-new` since 18 Nov). No cron
+  re-registers items acquired more than 14 days ago; the reconcile does, from a final release.
 
 ## Open questions
 1. Must the recovery path be exercised (re-register one canary-deleted item from EODC) before

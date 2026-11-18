@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from register_proxy import FLOOR, SOFTWARE_KEY
 
 MANIFEST = Path(__file__).parents[2] / "deploy" / "clean-s2-new-keep-geozarr-workflow.yaml"
 
@@ -66,7 +67,7 @@ def test_defaults_are_a_bounded_dry_run_keeping_geozarr_0_13_0(tmp_path: Path) -
         "clean",
         "sentinel-2-l2a-new",
         "--keep-software-min",
-        "EOPF_GEOZARR=0.13.0",
+        f"{SOFTWARE_KEY}={FLOOR}",  # the writers' floor: the clean keeps what they may write
         "--max-items",
         "10",
         "--dry-run",
@@ -119,7 +120,7 @@ def test_the_collection_api_and_floor_are_fixed_not_parameters(tmp_path: Path) -
     assert params == {"pipeline_image_version", "max_items", "dry_run"}
     result = _run(tmp_path, KEEP_SOFTWARE_MIN="EOPF_GEOZARR=0.13.1", DRY_RUN="false")
     assert result.returncode == 0, result.stderr
-    assert "--keep-software-min EOPF_GEOZARR=0.13.0 " in result.stdout
+    assert f"--keep-software-min {SOFTWARE_KEY}={FLOOR} " in result.stdout
 
 
 def test_the_image_is_pulled_every_time() -> None:

@@ -11,7 +11,10 @@ without copying it.
 ``--items-json`` is the **pipeline mode** that publishes new Sentinel-2 scenes into
 ``sentinel-2-l2a-new`` once our conversion stops (plan rev 3, 2026-09-30): it registers the ids
 ``query_stac.py discover`` wrote, **create-only** (a 409 is ``exists``, never a PUT), appends each
-201 to ``--created-ids`` (the rollback input), and refuses old-generation sources. What a
+201 to ``--created-ids`` (the rollback input), and refuses old-generation sources and, into
+``sentinel-2-l2a-new``, any source that is not a final EOPF_GEOZARR release >= 0.13.0
+(``check_version``): a window where every id is refused that way, or any stamp that cannot
+be read, fails the run, as a renamed key or a new stamp format would look. What a
 run may do is decided by the target collection, never by a flag (see ``TARGET_RUNS``):
 into ``sentinel-2-l2a-new`` only this mode may write, and without an ``expires``; our
 converted archive, ``sentinel-2-l2a``, takes no run at all.
@@ -63,6 +66,8 @@ from urllib.parse import urlparse
 import httpx
 import requests
 import stac_auth
+from packaging.version import Version
+from processing_software import is_final, read_version
 from pystac import Asset, Item, Link
 from pystac_client import Client
 from register_v1 import (
@@ -89,6 +94,10 @@ DEFAULT_SOURCE_COLLECTION = "sentinel-2-l2a-zarr3"
 # The user-facing, temporary collection the pipeline publishes EODC-hosted scenes into
 # (plan rev 3). Its items carry no ``expires`` (see ``PROXY_EXPIRES``).
 TRANSITION_COLLECTION = "sentinel-2-l2a-new"
+# What may be written into it, by every writer (this pipeline and reconcile_versions.py): a final
+# EOPF_GEOZARR release >= FLOOR (Loïc, 17-18 Nov 2026; the #519 clean keeps the same floor).
+SOFTWARE_KEY = "EOPF_GEOZARR"
+FLOOR = Version("0.13.0")
 
 # Target collection -> the kinds of run allowed to write it (``kind`` in ``main``). Exact ids, not
 # a marker substring: every item written here reuses a prod ``sentinel-2-l2a`` id, and a
@@ -109,6 +118,9 @@ TARGET_RUNS = {
 # ids it did not attempt are counted as failed, so the run exits 1 and a later window
 # (the daily catch-up) registers them.
 MAX_CONSECUTIVE_FAILURES = 10
+# Content-based outcomes: the same on every retry, and never a write, so they neither fail an id
+# nor reset that count.
+REFUSALS = ("refused_generation", "refused_version", "refused_unreadable")
 
 # --time-budget ceiling: the register step's 14400 s pod backstop (platform-deploy
 # templates/eopf-eodc-register-job.yaml) minus 30 min for pod start and the id in flight.
@@ -782,6 +794,15 @@ def register_one(
         source, args.collection, args.raster_api_url, args.stac_api_url, expires=expires
     )
     assert_no_s3_urls(item)
+    # After the build, so an EODC schema change still fails the id; before any write.
+    if args.collection == TRANSITION_COLLECTION:
+        version, why = check_version(source.get("properties") or {})
+        if why:
+            # Content-based: counted, not failed (main fails a window with nothing usable). The
+            # next window re-creates it if EODC re-publishes it as a final >= FLOOR within 14
+            # days of acquisition; past that, only a reconcile run does.
+            logger.warning("   ⚠️  %s: %s %s, refused (%s)", item_id, SOFTWARE_KEY, version, why)
+            return "refused_unreadable" if why == "unreadable" else "refused_version"
     if client is None:
         # A plain name (refused otherwise in main), and fetch_source_item has already made
         # sure the source did not substitute another id.
@@ -795,9 +816,30 @@ def register_one(
     return create_item(client, args.collection, item, args.created_ids)
 
 
+def check_version(properties: dict) -> tuple[Version | None, str | None]:
+    """The ``SOFTWARE_KEY`` in ``properties``, and why it may not be written, or None if it may.
+
+    Into ``TRANSITION_COLLECTION`` only a final release >= ``FLOOR`` may, whoever writes it. The
+    reasons, checked in this order: ``unreadable``, ``no_key``, ``below_floor`` (0.13.0rc1 is
+    below 0.13.0) and ``prerelease`` (a pre-release, dev or local version above the floor).
+    """
+    try:
+        version = read_version(properties, SOFTWARE_KEY)
+    except ValueError:
+        return None, "unreadable"
+    if version is None:
+        return None, "no_key"
+    if version < FLOOR:
+        return version, "below_floor"
+    if not is_final(version):
+        return version, "prerelease"
+    return version, None
+
+
 def log_summary(collection: str, counts: Counter[str]) -> None:
     """The pipeline's one-line result: fixed keys, for the logs and the alerts to read."""
-    keys = ("created", "exists", "refused_generation", "failed")
+    keys = ("created", "exists", "refused_generation", "failed", "refused_version",
+            "refused_unreadable")  # fmt: skip
     summary = " ".join(f"{key}={counts[key]}" for key in keys)
     logger.info("Summary for %s: %s", collection, summary)
 
@@ -921,8 +963,10 @@ def main(argv: list[str] | None = None) -> int:
             failed += item_ids[n:]
             break
         try:
-            counts[register_one(args, client, expires, item_id)] += 1
-            streak = 0
+            outcome = register_one(args, client, expires, item_id)
+            counts[outcome] += 1
+            if outcome not in REFUSALS:  # a refusal never reached the target: no sign it is up
+                streak = 0
         except CreatedIdsError as exc:
             # Every later create would go unrecorded too: stop, and say which id may exist.
             logger.error("Stopping: %s. %d id(s) not attempted", exc, len(item_ids) - n - 1)
@@ -936,9 +980,9 @@ def main(argv: list[str] | None = None) -> int:
 
     # Without this, a mid-run failure leaves a partially populated collection and no
     # record of which ids landed — the operator cannot tell a clean run from a torn one.
-    if args.items_json and not args.dry_run:
+    if args.items_json:
         log_summary(args.collection, counts)
-    else:
+    if not args.items_json or args.dry_run:
         logger.info(
             "%s %d/%d item(s) for %s",
             "Wrote" if args.dry_run else "Registered",
@@ -948,6 +992,17 @@ def main(argv: list[str] | None = None) -> int:
         )
     if failed:
         logger.error("Failed (%d): %s", len(failed), ", ".join(failed))
+        return 1
+    refused = counts["refused_version"] + counts["refused_unreadable"]
+    if counts["refused_unreadable"] or refused == len(item_ids):
+        logger.error(
+            "%d of %d id(s) refused for their %s (%d unreadable): a renamed key or a new stamp "
+            "format must not pass for a quiet window",
+            refused,
+            len(item_ids),
+            SOFTWARE_KEY,
+            counts["refused_unreadable"],
+        )
         return 1
     return 0
 
