@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.24.0 (2026-11-18)
+
+## What's Changed
+* build(deps): require tornado>=6.6.1 for CVE-2026-126347 by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/523
+* feat(stac): a rollback tool for the EODC registration's created items by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/445
+* build(deps-dev): bump types-requests from 2.33.0.20261006 to 2.33.0.20261030 by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/516
+* docs(plans): page the Loki rebuild of a stopped reconcile with --batch=5000 by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/525
+* feat(scripts): hold the register's -new runs to the reconcile's version rule by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/526
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.23.0...v1.24.0
+
 ## 1.23.0 (2026-11-18)
 
 ## What's Changed
