@@ -185,6 +185,7 @@ class FakeTarget:
 
     def post(self, url, json, **kwargs):
         assert url == f"{STAC_API}/collections/{NEW}/items" and kwargs["timeout"]
+        assert kwargs["allow_redirects"] is False
         status = self._override("POST", json["id"])
         if status:
             return answer(status)
@@ -636,8 +637,9 @@ def test_a_create_is_recorded_as_the_register_records_it(tmp_path):
 
 
 def test_create_answers_follow_the_registers_rules(tmp_path, caplog):
-    fail = {("POST", "C"): 502, ("POST", "D"): requests.ReadTimeout("slow"), ("POST", "E"): 400}
-    world = World(source=dict.fromkeys("ABCDE", "0.13.1"), overrides=fail)
+    fail = {("POST", "C"): 502, ("POST", "D"): requests.ReadTimeout("slow"), ("POST", "E"): 400,
+            ("POST", "F"): 302}  # fmt: skip
+    world = World(source=dict.fromkeys("ABCDEF", "0.13.1"), overrides=fail)
     # B is created by someone else after the diff: its POST answers 409.
     world.after_the_diff(lambda: world.target.items.setdefault("B", {"properties": {}}))
     assert world.run(tmp_path) == 1
@@ -646,7 +648,7 @@ def test_create_answers_follow_the_registers_rules(tmp_path, caplog):
     ]
     assert recorded == [("D", True), ("C", True), ("A", False)]
     counts = summary(caplog)
-    assert (counts["created"], counts["exists"], counts["failed"]) == (1, 1, 3)
+    assert (counts["created"], counts["exists"], counts["failed"]) == (1, 1, 4)
     world.target.session.put.assert_not_called()
 
 

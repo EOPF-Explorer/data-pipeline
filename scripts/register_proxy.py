@@ -559,11 +559,16 @@ def create_item(
             json=item.to_dict(transform_hrefs=False),
             headers={"Content-Type": "application/json"},
             timeout=30,
+            allow_redirects=False,  # followed, a 301-303 comes back as a GET that "succeeds"
         )
         if resp.status_code == 409:
             logger.info(f"   ⏭️  {item.id} exists (HTTP 409), left unchanged")
             return "exists"
         resp.raise_for_status()
+        if not 200 <= resp.status_code < 300:  # raise_for_status lets a 3xx through
+            raise requests.HTTPError(
+                f"the POST answered {resp.status_code}: nothing created", response=resp
+            )
     except requests.RequestException as exc:
         # A timeout, a reset or a 5xx can arrive after the server committed the item, and the
         # next run's 409 would then hide it from every list. Record it as uncertain. A line

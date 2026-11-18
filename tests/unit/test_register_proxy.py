@@ -684,6 +684,7 @@ class FakeTarget:
 
     def post(self, url, json, **kwargs):
         assert url == f"{STAC_API}/collections/{json['collection']}/items"
+        assert kwargs["allow_redirects"] is False
         answer = self.fail.get(json["id"])
         if isinstance(answer, Exception):
             raise answer
@@ -773,15 +774,16 @@ def test_pipeline_rerun_of_the_same_list_is_all_exists(eodc, tmp_path, caplog):
 
 def test_pipeline_list_has_the_201s_and_the_creates_that_may_have_committed(eodc, tmp_path, caplog):
     """A 5xx, a timeout or a reset can come after the server committed the item; the next
-    run's 409 would then hide it from every rollback list. A 4xx is a refusal: no line."""
+    run's 409 would then hide it from every rollback list. A 4xx is a refusal: no line. So is a
+    redirect (#522 xhigh review 2), which a followed POST would have turned into a "Created"."""
     caplog.set_level("INFO", logger="register_proxy")
     fail = {"C": 502, "D": requests.ReadTimeout("slow"), "E": requests.ConnectionError("reset"),
-            "F": 400}  # fmt: skip
+            "F": 400, "G": 302}  # fmt: skip
     target = FakeTarget(existing={"B"}, fail=fail)
-    assert run_pipeline(tmp_path, target, ["A", "B", "C", "D", "E", "F"]) == 1
+    assert run_pipeline(tmp_path, target, ["A", "B", "C", "D", "E", "F", "G"]) == 1
     lines = [(line["id"], line.get("uncertain", False)) for line in created_ids(tmp_path)]
     assert lines == [("A", False), ("C", True), ("D", True), ("E", True)]
-    assert "created=1 exists=1 refused_generation=0 failed=4" in caplog.text
+    assert "created=1 exists=1 refused_generation=0 failed=5" in caplog.text
     target.session.put.assert_not_called()
 
 
