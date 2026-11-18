@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.23.0 (2026-11-18)
+
+## What's Changed
+* feat(operator-tools): keep items by processing:software version in clean by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/519
+* build(deps): bump the minor-and-patch group across 1 directory with 6 updates by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/521
+* build(deps): bump soupsieve from 2.9.2 to 4.0 in the security group across 1 directory by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/517
+* build(deps): bump the all group with 2 updates by @dependabot[bot] in https://github.com/EOPF-Explorer/data-pipeline/pull/518
+* feat(scripts): reconcile sentinel-2-l2a-new with EODC re-processing by GeoZarr version by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/522
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.22.0...v1.23.0
+
 ## 1.22.0 (2026-11-11)
 
 ## What's Changed
