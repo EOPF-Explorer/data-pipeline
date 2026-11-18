@@ -24,7 +24,7 @@ so this tool cannot reach it.
 Exit 1 when anything was refused or failed, or on a refused input; 0 otherwise.
 
     uv run scripts/rollback_created_items.py --created-ids created-ids.jsonl \
-        --collection sentinel-2-l2a-samples-zarr3-rollback --max-items 10 \
+        --collection sentinel-2-l2a-new --max-items 10 \
         --stac-api-url https://api.explorer.eopf.copernicus.eu/stac [--apply]
 """
 
