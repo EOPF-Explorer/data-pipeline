@@ -5,8 +5,8 @@ branch `feat/register-reprocessed-items` (3785add), replacing that branch. The r
 reports are in `~/DevDS/EOPF/clean-s2-new-keep-geozarr_2026-11-17/REVIEWS.md`.
 **Goal**: `sentinel-2-l2a-new` holds, for every EODC scene acquired since 2026-09-29 (cloud < 90 %) and not
 in `sentinel-2-l2a`, the item built from EODC's newest final `EOPF_GEOZARR >= 0.13.0` version.
-**Constraint**: the hourly register is unchanged (create-only, no new flag, `TARGET_RUNS` behaviour
-untouched: only its comment now names this tool); every bound is enforced inside the tool, never by a
+**Constraint**: the hourly register stays create-only (no new flag, `TARGET_RUNS` behaviour untouched)
+and, since Task 9, applies the same version rule as this tool; every bound is enforced inside the tool, never by a
 timeout or a kill; no new dependency beyond the direct `packaging` pin #519 also adds.
 
 ## Current state (2026-11-17, after the /code-review high round)
@@ -16,7 +16,7 @@ timeout or a kill; no new dependency beyond the direct `packaging` pin #519 also
 | `scripts/processing_software.py`: the one `processing:software` parser (object or JSON string) | Built, unit-tested offline |
 | `scripts/reconcile_versions.py`: fixed policy, batched diff, create/replace, bound, exit code | Built, unit-tested offline; review findings #2, #3, #6, #7, #8, #10 fixed (Task 4) |
 | `deploy/reconcile-s2-new-versions-workflow.yaml`: one-off Workflow, dry run by default | Built; tests run its script with a stub `python3`; header fixed (#1, #4, run order, restore limit) |
-| `scripts/register_proxy.py` | `TARGET_RUNS` comment names this tool as the one PUT into `-new` (#5); `create_item` takes the target URL and records created-ids itself, for both tools; pipeline behaviour unchanged |
+| `scripts/register_proxy.py` | `TARGET_RUNS` comment names this tool as the one PUT into `-new` (#5); `create_item` takes the target URL and records created-ids itself, for both tools; holds `SOFTWARE_KEY`, `FLOOR` and `check_version`, and refuses into `-new` any source that is not a final release >= `FLOOR` (Task 9) |
 | `scripts/query_stac.py` | Unchanged |
 | Image containing the tool | Not yet: CI's pull_request build publishes `sha-<merge-sha>` |
 | Dry run, canary, batches against production | Dry run done 17 Nov (Task 6); canary and batches not run |
@@ -50,8 +50,9 @@ summary: one key per source-id fate, adding up to source=N; remaining = actions 
 ```
 
 Decisions:
-- **Policy fixed in code.** Constants in `reconcile_versions.py` hold, for `sentinel-2-l2a-new` only, the
-  key (`SOFTWARE_KEY = "EOPF_GEOZARR"`), the floor (0.13.0, the #519 clean's), the acquisition start
+- **Policy fixed in code.** Constants hold, for `sentinel-2-l2a-new` only, the key
+  (`SOFTWARE_KEY = "EOPF_GEOZARR"`) and the floor (0.13.0, the #519 clean's), both in `register_proxy.py`
+  and shared with the hourly register (Task 9), and in `reconcile_versions.py` the acquisition start
   (2026-09-29, the target's earliest acquisition), the exclusion collection (`sentinel-2-l2a`), the cloud
   filter (90, the register template's) and the EODC source. No flag carries any of them; any other
   `--collection` is refused before a network call.
@@ -243,6 +244,20 @@ create, with data-pipeline#445 merged (#450 xhigh review 6, cross-PR review 3).
   `refused_target_unreadable` above 0 (or each is explained). Only `failed` fails a run: read the counts
   and the `Look:` lines of each green one too
 - [ ] the last run prints `remaining=0` with no writes and exits 0
+
+### Task 9 — one version rule for both writers  ✅ DONE 18 Nov (PR pending)
+**What**: Loïc, 18 Nov: nothing in `-new` below 0.13.0, unversioned or non-final, from either writer.
+`register_proxy.check_version` (key, floor, final releases only) decides for the register's pipeline runs into
+`-new` (`refused_version`, `refused_unreadable`) and for `classify`, whose `skipped_*` names it returns.
+**Verify**: `uv run --group test pytest tests/unit/test_register_proxy.py tests/unit/test_reconcile_versions.py
+tests/unit/test_clean_s2_new_workflow_manifest.py -q`, and the mutation driver in
+`~/DevDS/EOPF/clean-s2-new-keep-geozarr_2026-11-17/mutation-runs/register-floor/`.
+**Acceptance criteria**:
+- [x] a source with no key, below 0.13.0 or non-final is refused into `-new`, counted, exit 0; its neighbour is created
+- [x] an unreadable stamp, or a window where every id is refused, fails the run
+- [x] the check runs after the build and before any write, dry run included; a refusal does not reset the
+  failures-in-a-row count; the dry run prints the summary
+- [x] the clean manifest's `--keep-software-min` is pinned to the same `SOFTWARE_KEY`/`FLOOR`
 
 ## Rollback
 
