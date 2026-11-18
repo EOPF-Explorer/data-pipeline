@@ -701,7 +701,7 @@ def fetch_source_item(source_stac_api: str, source_collection: str, item_id: str
     return source
 
 
-def _seconds(value: str) -> float:
+def time_budget_arg(value: str) -> float:
     """argparse type for --time-budget: a stop that can actually fire, and fire first.
 
     `nan` would compare False forever, and a budget within 30 min of the register step's
@@ -710,7 +710,8 @@ def _seconds(value: str) -> float:
     The range check refuses both, `nan` and `inf` included (every comparison with `nan` is
     False). Unlike cleanup_expired_items._budget_seconds, an empty value is refused, not
     read as "no budget": the template always passes one, and a run with no stop is exactly
-    what this flag exists to prevent.
+    what this flag exists to prevent. reconcile_versions.py uses it too: with no pod deadline
+    there, the ceiling bounds how long a run can hold the register's semaphore.
     """
     seconds = float(value)
     if not 0 < seconds <= MAX_TIME_BUDGET_SECONDS:
@@ -743,7 +744,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--time-budget",
-        type=_seconds,
+        type=time_budget_arg,
         metavar="SECONDS",
         help=(
             "Start no new id after this many seconds; the rest count as failed. It stops "

@@ -78,13 +78,13 @@ from register_proxy import (  # also configures logging, as the register does
     MAX_CONSECUTIVE_FAILURES,
     TRANSITION_COLLECTION,
     CreatedIdsError,
-    _seconds,
     assert_no_s3_urls,
     build_proxy_item,
     create_item,
     fetch_source_item,
     is_old_generation,
     item_url,
+    time_budget_arg,
 )
 
 logger = logging.getLogger(__name__)
@@ -419,7 +419,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--time-budget",
-        type=_seconds,  # the register's check: positive, finite, at most its ceiling
+        type=time_budget_arg,  # the register's check: positive, finite, at most its ceiling
         metavar="SECONDS",
         help="Start no new id after this many seconds since the start; the rest are remaining",
     )
