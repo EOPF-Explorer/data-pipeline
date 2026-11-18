@@ -37,7 +37,7 @@ def _run(tmp_path: Path, **env: str) -> subprocess.CompletedProcess[str]:
     stub = stub_dir / "python3"
     stub.write_text("#!/bin/sh\necho STUB PYTHON\nprintf '%s\\n' \"$@\"\n")
     stub.chmod(0o755)
-    params = {p["name"]: p["value"] for p in SPEC["arguments"]["parameters"]}
+    params = {p["name"]: p.get("value") for p in SPEC["arguments"]["parameters"]}
     full_env = {
         "PATH": f"{stub_dir}:{os.environ['PATH']}",
         "PIPELINE_IMAGE_VERSION": "sha-abc1234",
@@ -102,6 +102,13 @@ def test_a_real_run_on_a_moving_tag_is_refused(tmp_path: Path, tag: str) -> None
     assert result.returncode == 1
     assert "REFUSING" in result.stderr
     assert "STUB PYTHON" not in result.stdout, "the tool started despite the refusal"
+
+
+def test_the_image_tag_has_no_default() -> None:
+    """Without one, Argo refuses the submit before the semaphore; an empty default made the
+    image `data-pipeline:`, a pod stuck Pending while holding it (cross-PR review 2)."""
+    (param,) = [p for p in SPEC["arguments"]["parameters"] if p["name"] == "pipeline_image_version"]
+    assert "value" not in param
 
 
 def test_an_empty_image_tag_is_refused(tmp_path: Path) -> None:

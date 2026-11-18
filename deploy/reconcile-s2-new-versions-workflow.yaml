@@ -111,8 +111,7 @@ spec:
     secondsAfterFailure: 604800
   arguments:
     parameters:
-    - name: pipeline_image_version          # REQUIRED: a build containing reconcile_versions.py
-      value: ""
+    - name: pipeline_image_version          # REQUIRED, no default: Argo refuses a submit without it
     - name: max_writes                      # POSTs + PUTs per run; re-run to continue
       value: "10"
     - name: dry_run                         # SAFE DEFAULT: diff + checks, write nothing
