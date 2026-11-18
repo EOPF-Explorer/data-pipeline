@@ -7,6 +7,8 @@ no-retry property of the write session is driven over a real local socket.
 """
 
 import json
+import os
+import signal
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -493,6 +495,30 @@ def test_ids_that_end_before_their_write_never_hold_up_the_rest(tmp_path, caplog
         counts = summary(caplog)
         assert (counts[key], counts["failed"], counts["remaining"]) == (11, 0, remaining)
         assert code == 0, "#522 review 1: else the run that converges fails too"
+
+
+def test_a_sigterm_finishes_the_id_in_flight_and_starts_no_other(tmp_path, caplog):
+    """#450 xhigh review 3: argo stop/terminate and a pod deletion send SIGTERM, then SIGKILL
+    after the grace period. The PUT in flight and both its lines finish; no other id starts."""
+    world = World(source=dict.fromkeys("ABC", "0.13.1"), target=dict.fromkeys("ABC", "0.13.0"))
+    world.target.put_hook = lambda _id: os.kill(os.getpid(), signal.SIGTERM)
+    received = []
+
+    def ours(*_):  # never the default here: if the run installed no handler, it would kill pytest
+        received.append("the test's handler")
+
+    previous = signal.signal(signal.SIGTERM, ours)
+    try:
+        assert world.run(tmp_path) == 0
+        assert world.target.writes() == [("put", "C")], "C is the newest"
+        assert [(line["item_id"], line["phase"]) for line in lines(tmp_path / "replaced.jsonl")] == [
+            ("C", "before_put"), ("C", "after_put")]  # fmt: skip
+        assert summary(caplog)["remaining"] == 2
+        assert "stop_requested: SIGTERM, no new id started" in caplog.text
+        assert received == [], "the run's own handler took the signal"
+        assert signal.getsignal(signal.SIGTERM) is ours, "the run put the test's handler back"
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 def test_a_write_that_fails_counts_toward_the_bound(tmp_path, caplog):

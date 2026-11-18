@@ -37,10 +37,13 @@
 #   means EODC changed how it stamps or filters items, and a skipped_unbuildable above 0 that
 #   its item schema changed.
 #
-# A reconcile pod stuck Pending (ImagePullBackOff, unschedulable) has written nothing: delete
-# that Workflow (`argo delete -n devseed <name>`) to release `eodc-register-limit`, fix the cause,
-# then submit again. Never delete a Running REAL run: it may be between a write and its line in
-# created-ids/replaced-ids; let it end (its bound ends it). A dry run writes nothing.
+# Stopping a run: `argo stop` or `argo terminate` (or deleting its pod) sends SIGTERM, then
+# SIGKILL after the pod's 300 s grace period (podSpecPatch). On SIGTERM the tool finishes the id in
+# flight, its write and its list line, starts no other and prints the summary (`stop_requested`).
+# One id takes at most ~3 min (30 s GET, three source tries, 30 s PUT). A SIGKILL (grace exceeded,
+# a lost node) can still tear one id: a create may be missing from created-ids (the next run
+# counts it `exists`); a replace keeps its `before_put` line. A pod stuck Pending (ImagePullBackOff,
+# unschedulable) has written nothing: `argo stop` deletes it and releases `eodc-register-limit`.
 #
 # Order with the s2-new clean (deploy/clean-s2-new-keep-geozarr-workflow.yaml, data-pipeline#519):
 #   - Acquisitions 1-10 Nov 2026: run this reconcile BEFORE the clean, and clean them only once
@@ -118,6 +121,8 @@ spec:
       value: "2700"
   templates:
   - name: reconcile
+    # Time for the id in flight to finish after a SIGTERM (see the header); the default is 30 s.
+    podSpecPatch: '{"terminationGracePeriodSeconds": 300}'
     container:
       image: w9mllyot.c1.de1.container-registry.ovh.net/eopf-sentinel-zarr-explorer/data-pipeline:{{workflow.parameters.pipeline_image_version}}
       imagePullPolicy: Always

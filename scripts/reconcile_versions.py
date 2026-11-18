@@ -51,6 +51,7 @@ import argparse
 import itertools
 import json
 import logging
+import signal
 import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -568,34 +569,45 @@ def main(argv: list[str] | None = None) -> int:
         replaced_ids=args.replaced_ids,
         run_id=args.run_id,
     )
+    # argo stop/terminate and a pod deletion send SIGTERM, then SIGKILL after the pod's grace
+    # period: finish the id in flight (its write and its line), start no other.
+    stop_requested: list[int] = []
+    previous = signal.getsignal(signal.SIGTERM)
+    signal.signal(signal.SIGTERM, lambda signum, _frame: stop_requested.append(signum))
     streak = visited = 0
-    for kind, item_id in actions:
-        # Every stop falls between ids, never inside one: a write and its line finish together.
-        if run.writes == args.max_writes:
-            break
-        if args.time_budget is not None and monotonic() - started >= args.time_budget:
-            logger.warning("time_budget_reached: %g s, no new id started", args.time_budget)
-            break
-        if streak == MAX_CONSECUTIVE_FAILURES:
-            logger.error("Stopping after %d failures in a row", streak)
-            break
-        visited += 1
-        try:
-            if kind == "create":
-                outcome = run.create(item_id)
-            else:
-                outcome = run.replace(item_id, sources[item_id])
-            counts[outcome] += 1
-            fates[outcome].append(item_id)
-            streak = 0
-        except (CreatedIdsError, ReplacedIdsError) as exc:
-            logger.error("Stopping: %s", exc)
-            counts["failed"] += 1
-            break
-        except Exception as exc:  # noqa: BLE001 - one bad item must not hide the rest
-            counts["failed"] += 1
-            streak += 1
-            logger.error("   ❌ %s %s: %s", kind, item_id, exc)
+    try:
+        for kind, item_id in actions:
+            # Every stop falls between ids, never inside one: a write and its line finish together.
+            if stop_requested:
+                logger.warning("stop_requested: SIGTERM, no new id started")
+                break
+            if run.writes == args.max_writes:
+                break
+            if args.time_budget is not None and monotonic() - started >= args.time_budget:
+                logger.warning("time_budget_reached: %g s, no new id started", args.time_budget)
+                break
+            if streak == MAX_CONSECUTIVE_FAILURES:
+                logger.error("Stopping after %d failures in a row", streak)
+                break
+            visited += 1
+            try:
+                if kind == "create":
+                    outcome = run.create(item_id)
+                else:
+                    outcome = run.replace(item_id, sources[item_id])
+                counts[outcome] += 1
+                fates[outcome].append(item_id)
+                streak = 0
+            except (CreatedIdsError, ReplacedIdsError) as exc:
+                logger.error("Stopping: %s", exc)
+                counts["failed"] += 1
+                break
+            except Exception as exc:  # noqa: BLE001 - one bad item must not hide the rest
+                counts["failed"] += 1
+                streak += 1
+                logger.error("   ❌ %s %s: %s", kind, item_id, exc)
+    finally:
+        signal.signal(signal.SIGTERM, signal.SIG_DFL if previous is None else previous)
     counts["remaining"] = len(actions) - visited
     return report(args.collection, len(sources), counts, fates)
 

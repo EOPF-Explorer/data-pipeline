@@ -5,6 +5,7 @@ What it passes to the tool is the contract: the fixed collection and hosts, the 
 an image tag that names one image.
 """
 
+import json
 import os
 import subprocess  # nosec B404 -- runs bash on this repo's own manifest, fixed argv
 from pathlib import Path
@@ -138,6 +139,11 @@ def test_it_holds_the_registers_semaphore() -> None:
 def test_the_image_is_pulled_every_time() -> None:
     """A node's cached copy of the tag must not stand in for the image the dry run used."""
     assert CONTAINER["imagePullPolicy"] == "Always"
+
+
+def test_a_stop_gives_the_id_in_flight_time_to_finish() -> None:
+    """argo stop/terminate: SIGTERM, then SIGKILL after the grace period; one id takes ~3 min."""
+    assert json.loads(TEMPLATE["podSpecPatch"]) == {"terminationGracePeriodSeconds": 300}
 
 
 def test_no_deadline_kills_the_run() -> None:
