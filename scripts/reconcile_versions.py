@@ -150,8 +150,10 @@ def classify(source: dict, target: dict | None) -> str:
     before EOPF_GEOZARR was stamped have none. A target on a non-final version counts as
     older than any final one, so it is brought back to a release. A source without a numeric
     ``eo:cloud_cover`` below the maximum is skipped, as the search's filter would have
-    dropped it.
+    dropped it. Properties that are not an object are unreadable, on either side.
     """
+    if not isinstance(source, dict):
+        return "skipped_unreadable"
     cloud = source.get("eo:cloud_cover")
     if not isinstance(cloud, int | float) or isinstance(cloud, bool):  # a bool is an int
         return "skipped_cloud_cover"
@@ -169,6 +171,8 @@ def classify(source: dict, target: dict | None) -> str:
         return "skipped_prerelease"
     if target is None:
         return "create"
+    if not isinstance(target, dict):
+        return "refused_target_unreadable"
     try:
         current = read_version(target, SOFTWARE_KEY)
     except ValueError:
@@ -194,10 +198,13 @@ def present_in(client: Client, collection: str, ids: list[str]) -> set[str]:
     """
     present: set[str] = set()
     for batch in itertools.batched(ids, IDS_PER_SEARCH):  # noqa: B911 -- pre-commit's mypy rejects strict=
-        found = set(walk(client, collections=[collection], ids=batch))
-        if found - set(batch):
-            raise RuntimeError(f"{collection}: an ids= search returned ids it was not asked for")
-        present |= found
+        search = client.search(collections=[collection], ids=batch, limit=PAGE_SIZE, fields=FIELDS)
+        for found in search.items_as_dicts():  # page by page: refused on the first page
+            if found["id"] not in batch:
+                raise RuntimeError(
+                    f"{collection}: an ids= search returned ids it was not asked for"
+                )
+            present.add(found["id"])
     return present
 
 
@@ -264,22 +271,22 @@ class Run:
         failures-in-a-row stop.
         """
         source = fetch_source_item(DEFAULT_SOURCE_STAC_API, DEFAULT_SOURCE_COLLECTION, item_id)
-        if is_old_generation(source):
-            logger.warning(
-                "   ⚠️  %s: old-generation source (raster:scale on SR_*), skipped", item_id
-            )
-            return "skipped_old_generation"
-        properties = source.get("properties") or {}
-        verdict = classify(properties, target)
-        if verdict != ("create" if target is None else "replace"):
-            logger.warning("   ⚠️  %s: the source is now %s, skipped", item_id, verdict)
-            return "skipped_source_changed"
-        try:
+        try:  # an item EODC changed shape (assets: null, bands as strings) raises any of these
+            if is_old_generation(source):
+                logger.warning(
+                    "   ⚠️  %s: old-generation source (raster:scale on SR_*), skipped", item_id
+                )
+                return "skipped_old_generation"
+            properties = source.get("properties") or {}
+            verdict = classify(properties, target)
+            if verdict != ("create" if target is None else "replace"):
+                logger.warning("   ⚠️  %s: the source is now %s, skipped", item_id, verdict)
+                return "skipped_source_changed"
             item = build_proxy_item(
                 source, self.collection, self.raster_api_url, self.stac_api_url, expires=None
             )
             assert_no_s3_urls(item)
-        except ValueError as exc:
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
             logger.warning("   ⚠️  %s: cannot be built (%s), skipped", item_id, exc)
             return "skipped_unbuildable"
         version = read_version(properties, SOFTWARE_KEY)
@@ -544,11 +551,18 @@ def main(argv: list[str] | None = None) -> int:
 
     if not actions:  # converged: no write client to open
         return report(args.collection, len(sources), counts, fates)
+    try:
+        client = open_write_client(args.stac_api_url)
+    except Exception as exc:  # noqa: BLE001 - nothing written yet; say so with the counts
+        counts["remaining"] = len(actions)
+        report(args.collection, len(sources), counts, fates)
+        logger.error("Opening the write client failed, nothing written: %s", exc)
+        return 1
     run = Run(
         collection=args.collection,
         stac_api_url=args.stac_api_url,
         raster_api_url=args.raster_api_url,
-        client=open_write_client(args.stac_api_url),
+        client=client,
         dry_run=args.dry_run,
         created_ids=args.created_ids,
         replaced_ids=args.replaced_ids,

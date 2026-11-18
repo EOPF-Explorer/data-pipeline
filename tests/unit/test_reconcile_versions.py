@@ -224,19 +224,22 @@ class World:
         self.fetched = dict(source) | dict(fetched or {})
         self.base = json.loads(FIXTURE.read_text())
         self.fetch = MagicMock(side_effect=self._fetch)
+        self.open_write = MagicMock(return_value=self.target.client)
 
     def _fetch(self, api, collection, item_id):
-        """The fetched item at ``fetched[item_id]``: a version, or "old" / "unbuildable"."""
+        """The fetched item at ``fetched[item_id]``: a version, or "old" / "unbuildable" /
+        "drifted" (assets: null, which the build meets as an AttributeError)."""
         assert (api, collection) == (EODC, ZARR3)
         version = self.fetched[item_id]
         base = json.loads(OLD_GENERATION_FIXTURE.read_text()) if version == "old" else self.base
         software = {"EOPF_CPM": "3.0.0", KEY: version}
-        if version in ("old", "unbuildable"):
+        if version in ("old", "unbuildable", "drifted"):
             software[KEY] = "0.13.1"
         properties = {**base["properties"], "processing:software": software}
         if version == "unbuildable":
             del properties["proj:code"]  # build_proxy_item refuses it (ValueError)
-        return {**base, "id": item_id, "properties": properties}
+        item = {**base, "id": item_id, "properties": properties}
+        return {**item, "assets": None} if version == "drifted" else item
 
     def after_the_diff(self, change):
         """Apply ``change`` as each id is fetched: after the diff, before its write."""
@@ -261,7 +264,7 @@ class World:
         clients = {EODC: self.eodc, STAC_API: self.explorer}
         with (
             patch("reconcile_versions.stac_auth.open_resilient_client", side_effect=clients.get),
-            patch("reconcile_versions.open_write_client", return_value=self.target.client),
+            patch("reconcile_versions.open_write_client", self.open_write),
             patch("reconcile_versions.fetch_source_item", self.fetch),
         ):
             return main(args)
@@ -359,16 +362,25 @@ def test_a_source_the_cloud_filter_should_have_dropped_is_never_written(tmp_path
     assert "has a usable EOPF_GEOZARR" in caplog.text
 
 
-def test_an_ids_search_that_ignores_ids_is_refused_before_any_write(tmp_path, caplog):
+def test_an_ids_search_that_ignores_ids_is_refused_at_its_first_unasked_id(tmp_path, caplog):
+    """#522 xhigh review 5: on the first page, not after paging the whole archive."""
     world = World(source={"A": "0.13.1"})
     unfiltered = world.explorer.search
-    world.explorer.search = lambda **kw: unfiltered(
-        **({**kw, "ids": None} if kw.get("ids") else kw)
-    )
-    world.explorer.collections[ARCHIVE] = {"X": {}}
+
+    def ignoring_ids(**kw):
+        if not kw.get("ids"):
+            return unfiltered(**kw)
+
+        def the_whole_archive():
+            yield {"id": "X", "properties": {}}
+            raise AssertionError("paged on into the whole archive")
+
+        return SimpleNamespace(items_as_dicts=the_whole_archive)
+
+    world.explorer.search = ignoring_ids
     assert world.run(tmp_path) == 1
     assert world.target.writes() == []
-    assert "it was not asked for" in caplog.text
+    assert "sentinel-2-l2a: an ids= search returned ids it was not asked for" in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -414,6 +426,27 @@ def test_a_read_failure_writes_nothing(tmp_path, caplog):
     assert "nothing written" in caplog.text
 
 
+def test_properties_that_are_not_an_object_are_counted_not_fatal(tmp_path, caplog):
+    """#522 xhigh review 4: one such item, on either side, used to abort every run's diff."""
+    world = World(source={"A": "0.13.1", "B": "0.13.1", "C": "0.13.1"}, target={"B": "0.13.0"})
+    world.source["C"] = "not an object"
+    world.target.items["B"]["properties"] = ["not", "an", "object"]
+    assert world.run(tmp_path) == 0
+    assert world.target.writes() == [("post", "A")]
+    counts = summary(caplog)
+    assert (counts["skipped_unreadable"], counts["refused_target_unreadable"]) == (1, 1)
+
+
+def test_a_write_client_that_cannot_open_ends_with_the_summary(tmp_path, caplog):
+    """#522 xhigh review 3: exit 1 after the counts, not a traceback that hides them."""
+    world = World(source={"A": "0.13.1", "B": "0.13.1"})
+    world.open_write.side_effect = APIError("503 Service Unavailable")
+    assert world.run(tmp_path) == 1
+    assert summary(caplog)["remaining"] == 2
+    assert "Opening the write client failed, nothing written" in caplog.text
+    assert world.target.writes() == []
+
+
 # --- the bound ---
 
 
@@ -436,7 +469,7 @@ def test_max_writes_takes_the_newest_n_and_reports_the_rest_then_converges(tmp_p
     assert summary(caplog)["remaining"] == 0 and summary(caplog)["skipped_not_newer"] == 5
 
 
-@pytest.mark.parametrize("bad", ["unbuildable", "old", "0.12.0", "gone", "unreadable"])
+@pytest.mark.parametrize("bad", ["unbuildable", "drifted", "old", "0.12.0", "gone", "unreadable"])
 def test_ids_that_end_before_their_write_never_hold_up_the_rest(tmp_path, caplog, bad):
     """Review finding 2: such ids end the same way on every run. Eleven of them at the head
     of the order used to fill every run's bound, or trip the 10-failures stop, forever.
@@ -449,7 +482,8 @@ def test_ids_that_end_before_their_write_never_hold_up_the_rest(tmp_path, caplog
                                  else FakeTarget.item(i, props("v0.13.1-0-g1")) for i in head})  # fmt: skip
     else:
         world = World(source, fetched=dict.fromkeys(head, bad))
-    key = {"unbuildable": "skipped_unbuildable", "old": "skipped_old_generation",
+    key = {"unbuildable": "skipped_unbuildable", "drifted": "skipped_unbuildable",
+           "old": "skipped_old_generation",
            "0.12.0": "skipped_source_changed", "gone": "gone",
            "unreadable": "refused_target_unreadable"}[bad]  # fmt: skip
     for created, remaining in [(["G2"], 1), (["G2", "G1"], 0)]:  # two runs, one write each
