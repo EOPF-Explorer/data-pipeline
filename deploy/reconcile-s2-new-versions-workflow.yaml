@@ -15,21 +15,34 @@
 #                        an id that ends before its write does not count. Re-run until
 #                        `remaining=0`.
 #   time_budget_seconds  no new id starts after it (default 2700, the register's budget), so
-#                        it bounds how long the run holds the register's semaphore.
-# Exit 1 if a write or a read an id needed failed (10 in a row stop the run) or no source is
-# usable. An unbuildable source or unreadable target recurs every run: exit 0, `Look:` line.
+#                        it bounds how long the run holds the register's semaphore. It counts
+#                        from the start, the diff included (~30 s on 17 Nov 2026): a diff longer
+#                        than the budget ends with `time_budget_reached`, 0 writes, exit 0.
+# Exit 1 if a write or a read an id needed failed (10 in a row stop the run), no source is
+# usable, the write client cannot open (after the summary) or a catalogue read failed (before
+# it). Exit 2 if an argument is refused (argparse), e.g. an image without --time-budget. An
+# unbuildable source or unreadable target recurs every run: exit 0, `Look:` line.
 #
 # Usage. Use the SAME `sha-<merge-sha>` tag (see TAG GOTCHA) for the dry run and every real run,
 # so the real runs execute the code the dry run validated.
 #   0. SMOKE-CHECK the image first (the command below). A tag that cannot be pulled leaves the
 #      reconcile pod Pending (ImagePullBackOff) while the Workflow holds the register's semaphore.
 #   1. DRY RUN (default dry_run=true: diffs, prints every count with sample ids, and fetches,
-#      builds and re-checks ids until max_writes would-be writes; writes nothing):
+#      builds and re-checks ids until max_writes would-be writes; writes nothing). The tag has no
+#      default: Argo refuses a submit without it, before the semaphore.
 #        argo submit -n devseed deploy/reconcile-s2-new-versions-workflow.yaml \
 #          -p pipeline_image_version=sha-<merge-sha>
-#   2. REAL canary, 10 writes, the same ids the dry run listed. Check them against the API and
-#      read the two artifacts before scaling:
-#        ... -p pipeline_image_version=sha-<merge-sha> -p dry_run=false -p max_writes=10
+#      argo CLI v4 refuses this file (strict decoding of `synchronization.semaphore`; the cluster
+#      runs v3.7.11). Never `--strict=false`, which drops the semaphore: `kubectl create -f` a
+#      copy with the parameters filled in.
+#   1b. EXERCISE THE STOPS on dry runs, before any real write: `-p time_budget_seconds=60
+#      -p max_writes=5000` must log `time_budget_reached`; a `-p max_writes=5000` run stopped with
+#      `argo stop` after its `Diff for` line must log `stop_requested`.
+#   2. REAL canary, ONE write, straight after a dry run (ids go newest acquisition first, so a scene
+#      EODC publishes in between would come first; it publishes nothing 22:30-09:30Z). Check the
+#      item in the Explorer, restore its pre-image (claude-docs/plans/reconcile-s2-new-versions.md,
+#      Rollback), check it, then let the next run re-apply it:
+#        ... -p pipeline_image_version=sha-<merge-sha> -p dry_run=false -p max_writes=1
 #   3. BATCHES, repeated until a run prints `remaining=0`:
 #        ... -p pipeline_image_version=sha-<merge-sha> -p dry_run=false -p max_writes=500
 #   Read the counts at the top of each run and the `Look:` lines after the summary, even of a
@@ -42,8 +55,11 @@
 # flight, its write and its list line, starts no other and prints the summary (`stop_requested`).
 # One id takes at most ~3 min (30 s GET, three source tries, 30 s PUT). A SIGKILL (grace exceeded,
 # a lost node) can still tear one id: a create may be missing from created-ids (the next run
-# counts it `exists`); a replace keeps its `before_put` line. A pod stuck Pending (ImagePullBackOff,
-# unschedulable) has written nothing: `argo stop` deletes it and releases `eodc-register-limit`.
+# counts it `exists`); a replace keeps its `before_put` line. A stopped run usually archives
+# NEITHER list (Argo's wait container uploads before the tool exits): rebuild the ids from Loki
+# (`✅ Created`, `🔁 Replaced`, `❌ create`); the pre-images are lost. A pod stuck Pending
+# (ImagePullBackOff, unschedulable) has written nothing: `argo stop` deletes it and releases
+# `eodc-register-limit`. It is also how a malformed tag (a truncated digest) ends.
 #
 # Order with the s2-new clean (deploy/clean-s2-new-keep-geozarr-workflow.yaml, data-pipeline#519):
 #   - Acquisitions 1-10 Nov 2026: run this reconcile BEFORE the clean, and clean them only once
@@ -51,8 +67,9 @@
 #     ids and store paths (since 17 Nov 2026): this run replaces the old items in place, and the
 #     clean then keeps them. Cleaning first deletes them and leaves a gap until a reconcile
 #     re-creates them: the hourly register will not, past its 14-day acquisition floor.
-#   - October acquisitions: independent. EODC's October items carry no EOPF_GEOZARR (17 Nov
-#     2026), so this run skips them (skipped_no_key) and never writes them.
+#   - October acquisitions: EODC is re-processing the European ones at 0.13.1 (since 16 Nov
+#     2026); -new's unversioned October items were deleted on 17 Nov, so this run CREATEs each one
+#     EODC re-publishes, and skips the rest (skipped_no_key) until it does.
 # The clean re-reads each candidate just before its DELETE and keeps one now >= 0.13.0; an item it
 # deletes between this run's GET and PUT answers 404 (`gone`) and is created by the next run,
 # unless it is in sentinel-2-l2a: then it is skipped_in_archive, as the archive holds it.
@@ -189,7 +206,8 @@ spec:
           "${MODE[@]}"
     outputs:
       artifacts:
-      # Optional: a dry run, or a run refused before its first write, creates neither.
+      # Optional: a dry run creates neither; a real run creates both before its first read
+      # (empty if it wrote nothing); a stopped run usually archives neither (see the header).
       - name: created-ids
         path: /tmp/reconcile-out/created-ids.jsonl
         optional: true

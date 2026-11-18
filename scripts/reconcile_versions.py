@@ -35,16 +35,20 @@ SECONDS`` (optional) also stops it, between ids, once the run has lasted that lo
 before its write (an old-generation or unbuildable source, a source changed since the diff,
 a target gone, unreadable or already caught up) is counted by reason and does not use
 ``--max-writes``, so ids that end that way on every run never hold up the ones behind them.
-10 failures in a row (an outage) stop the run; skips never count toward them.
+10 failures in a row (an outage) stop the run; skips never count toward them. A SIGTERM
+(``argo stop`` or ``terminate``, a pod deletion) lets the id in flight finish, write and line,
+then starts no other: ``stop_requested``, and the rest are ``remaining``.
 A ``--replaced-ids`` line names its item ``item_id``, not ``id``, so
 ``rollback_created_items.py`` refuses that file rather than deleting the replaced items,
 which existed before the run.
 
 Exit 1, after the summary, if a write failed or was refused, if a read an id needed failed
-(the source fetch, the target GET), or if no source item in the range is usable: a renamed
-key or a new stamp format must not pass for a converged run. An unbuildable source or an
-unreadable target ends the same way on every run, so failing on it would fail the run that
-converges too: it is counted, and named on a ``Look:`` line after the summary, exit 0.
+(the source fetch, the target GET), if the write client cannot open, or if no source item in
+the range is usable: a renamed key or a new stamp format must not pass for a converged run.
+Exit 1 before any summary if a catalogue read fails; exit 2 if an argument is refused. An
+unbuildable source or an unreadable target ends the same way on every run, so failing on it
+would fail the run that converges too: it is counted, and named on a ``Look:`` line after the
+summary, exit 0.
 """
 
 import argparse

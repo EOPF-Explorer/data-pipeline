@@ -19,7 +19,7 @@ timeout or a kill; no new dependency beyond the direct `packaging` pin #519 also
 | `scripts/register_proxy.py` | `TARGET_RUNS` comment names this tool as the one PUT into `-new` (#5); `create_item` takes the target URL and records created-ids itself, for both tools; pipeline behaviour unchanged |
 | `scripts/query_stac.py` | Unchanged |
 | Image containing the tool | Not yet: CI's pull_request build publishes `sha-<merge-sha>` |
-| Dry run, canary, batches against production | Not run |
+| Dry run, canary, batches against production | Dry run done 17 Nov (Task 6); canary and batches not run |
 | s2-new clean (data-pipeline#519) | Merged (289ae5a). Dry run and 10-item canary done 17 Nov; batches ON HOLD: October kept for now, 1-10 Nov cleaned only after this reconcile and after EODC's re-publishing (see Run order) |
 | `rollback_created_items.py` (branch `feat/rollback-created-items`, #445) | Not on main; reads this tool's created-ids unchanged |
 | Restore of a replaced item from its pre-image | Steps below; not exercised; metadata only (see Rollback) |
@@ -114,14 +114,15 @@ EODC is re-publishing its 1-10 Nov 2026 acquisitions at 0.13.1 under the same id
   is over. The reconcile replaces the old items in place and the clean then keeps them; cleaning first would
   delete them and leave a gap until a reconcile re-creates them (the hourly register's 14-day acquisition
   floor will not).
-- **October: independent.** EODC's October items carry no `EOPF_GEOZARR` (17 Nov), so the reconcile skips
-  them (`skipped_no_key`) and never writes them. October stays in `-new` for now (Loïc, 17 Nov).
+- **October: re-created as EODC re-processes it.** `-new`'s unversioned October items were deleted on
+  17 Nov (Loïc); EODC is re-processing the European ones at 0.13.1 from 16 Nov, and the reconcile CREATEs
+  each one it re-publishes (until then: `skipped_no_key`).
 
 ## Dependency graph
 
 ```
 T1 parser ─► T2 tool + tests ─► T3 manifest + tests ─► T4 review fixes, push, PR ─► T5 image sha-<merge-sha>
-   ─► T6 dry run ─► T7 10-write canary + recovery exercise ─► T8 batches until remaining=0
+   ─► T6 dry run ─► T7 stops on dry runs, 1-write canary + recovery exercise ─► T8 batches until remaining=0
                     (Loïc's go for each real run, same tag throughout; for 1-10 Nov BEFORE the #519 clean)
 ```
 
@@ -204,28 +205,36 @@ ponytail-review pass, push `feat/reconcile-s2-new-versions`, PR opened by Loïc.
 **Acceptance criteria**:
 - [ ] `reconcile_versions.py --help` runs in that image and lists `--max-writes` as required
 
-### Task 6 — dry run  (blocked on Task 5)
+### Task 6 — dry run  ✅ DONE 17 Nov
+Evidence: `~/DevDS/EOPF/clean-s2-new-keep-geozarr_2026-11-17/dry-run-522_2026-11-17/RESULT.md` (workflow
+`reconcile-s2-new-versions-dccqf`, sha-925d429): target 11,819 (after the October clean), replace 1,701,
+create 0 (so `skipped_in_archive` 0), all the zero counts at 0, 10 `would replace` on 9 Nov S2C ids
+0.13.0 -> 0.13.1, Succeeded. Submitted with `kubectl create`: argo CLI v4 refuses the semaphore field.
 **What**: `argo submit -n devseed deploy/reconcile-s2-new-versions-workflow.yaml -p pipeline_image_version=sha-<merge-sha>`
 **Verify**: the `Diff for sentinel-2-l2a-new` block and the summary line in the pod log.
 **Acceptance criteria**:
-- [ ] `target` matches a fresh count of the collection (34,672 on 17 Nov before the clean; ~8.8k after it)
-- [ ] `skipped_unreadable=0`, `skipped_prerelease=0`, `skipped_cloud_cover=0`, `skipped_unbuildable=0`,
+- [x] `target` matches a fresh count of the collection (11,819 after the 17 Nov October clean)
+- [x] `skipped_unreadable=0`, `skipped_prerelease=0`, `skipped_cloud_cover=0`, `skipped_unbuildable=0`,
   `refused_target_unreadable=0`, `failed=0`
-- [ ] `skipped_in_archive` is in the expected ~800-1,000 range, or explained
-- [ ] the 10 `would create` / `would replace` lines name real ids, with plausible version changes; the
-  1-10 Nov acquisitions EODC has re-published at 0.13.1 appear as `would replace` (or `would create` for
-  ids the clean canary deleted)
-- [ ] the Workflow succeeds
+- [x] `skipped_in_archive` is in the expected ~800-1,000 range, or explained (0: no create candidates)
+- [x] the 10 `would replace` lines name real ids, with plausible version changes; the 1-10 Nov
+  acquisitions EODC has re-published at 0.13.1 appear as `would replace`
+- [x] the Workflow succeeds
 
-### Task 7 — 10-write canary and the recovery exercise  (blocked on Task 6, Loïc's go)
-**What**: the same tag, `-p dry_run=false -p max_writes=10`; then exercise both recovery paths on one item
-each (see Rollback), then let the next run re-apply them.
+### Task 7 — the stops on dry runs, a 1-write canary and the recovery exercise  (Loïc's go)
+**What**: first two dry runs that exercise the stops: `-p time_budget_seconds=60 -p max_writes=5000`
+(logs `time_budget_reached`) and `-p max_writes=5000` stopped with `argo stop` after its `Diff for` line
+(logs `stop_requested`). Then, straight after a dry run, the same tag with `-p dry_run=false
+-p max_writes=1`: with 0 creates today it is a replace, so restore that item from its pre-image (see
+Rollback), check it, and let the next run re-apply it. The created-ids rollback is exercised on the first
+create, with data-pipeline#445 merged (#450 xhigh review 6, cross-PR review 3).
 **Acceptance criteria**:
-- [ ] summary: `created + replaced + exists + gone + skipped_* (of the 10) = 10`, `failed=0`, Workflow succeeds
+- [ ] both dry runs log their stop and exit 0
+- [ ] summary: `created + replaced + exists + gone + skipped_* = 1`, `failed=0`, Workflow succeeds
 - [ ] the written ids are the ones the dry run listed; each answers 200 with the new `EOPF_GEOZARR`
 - [ ] created-ids holds one line per `created`; replaced-ids one `before_put` + one `after_put` per replace
-- [ ] one created item rolled back with `rollback_created_items.py`, one replaced item restored from its
-  pre-image, both checked, then both re-applied by the next run
+- [ ] the replaced item restored from its pre-image, checked, then re-applied by the next run; the first
+  created item rolled back with `rollback_created_items.py` once #445 is merged
 
 ### Task 8 — batches  (blocked on Task 7, Loïc's go)
 **What**: the same tag, `-p dry_run=false -p max_writes=500`, repeated.
@@ -336,8 +345,8 @@ restored to its old state. The Task 7 exercise checks the mechanism, not the dat
    the module docstring now say so (review #4).
 4. **Semaphore:** kept. No deadline on it (review #1): the image smoke check and the Pending-pod step in the
    manifest header instead.
-- **Run order:** for the 1-10 Nov acquisitions this reconcile runs BEFORE the clean; October is independent
-  (see Run order).
+- **Run order:** for the 1-10 Nov acquisitions this reconcile runs BEFORE the clean; October comes back as
+  EODC re-processes it (see Run order).
 6. **The clean's parser:** `manage_collections` reads versions with `processing_software.read_version` and
    its own parser is gone (#522 review 4). An all-digit sha, a major-only version or an epoch is now
    unreadable there too, so the clean refuses (census printed first, nothing deleted).
