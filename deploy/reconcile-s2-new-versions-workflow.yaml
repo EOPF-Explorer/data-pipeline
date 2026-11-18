@@ -1,0 +1,218 @@
+# One-off Argo Workflow: bring the PRODUCTION sentinel-2-l2a-new collection in step with EODC's
+# re-processing, by processing:software EOPF_GEOZARR (scripts/reconcile_versions.py).
+#
+# The hourly eopf-eodc-register is create-only: a scene EODC re-processes keeps its old item
+# here, and one the s2-new clean deleted never comes back. This run diffs EODC's
+# sentinel-2-l2a-zarr3 (from 2026-09-29, eo:cloud_cover < 90) against the target by id +
+# EOPF_GEOZARR and, from final releases >= 0.13.0 only, CREATEs ids absent from the target and
+# from sentinel-2-l2a (~800-1,000 such: skipped_in_archive) and REPLACEs (PUT) older ones, an id
+# also in sentinel-2-l2a included; never a downgrade of a final release. Every verdict, summary
+# key and exit code: the docstring of scripts/reconcile_versions.py at the sha you run; key,
+# floor, range and exclusion: its module constants.
+#
+# Bounds, all inside the tool, none a kill (no activeDeadlineSeconds):
+#   max_writes           POSTs + PUTs per run (dry run: would send), newest acquisition first;
+#                        an id that ends before its write does not count. Re-run until
+#                        `remaining=0`.
+#   time_budget_seconds  no new id starts after it (default 2700, the register's budget), so
+#                        it bounds how long the run holds the register's semaphore. It counts
+#                        from the start, the diff included (~30 s on 17 Nov 2026): a diff longer
+#                        than the budget ends with `time_budget_reached`, 0 writes, exit 0.
+# Exit 1 if a write or a read an id needed failed (10 in a row stop the run), no source is
+# usable, the write client cannot open (after the summary) or a catalogue read failed (before
+# it). Exit 2 if an argument is refused (argparse), e.g. an image without --time-budget. An
+# unbuildable source or unreadable target recurs every run: exit 0, `Look:` line.
+#
+# Usage. Use the SAME `sha-<merge-sha>` tag (see TAG GOTCHA) for the dry run and every real run,
+# so the real runs execute the code the dry run validated.
+#   0. SMOKE-CHECK the image first (the command below). A tag that cannot be pulled leaves the
+#      reconcile pod Pending (ImagePullBackOff) while the Workflow holds the register's semaphore.
+#   1. DRY RUN (default dry_run=true: diffs, prints every count with sample ids, and fetches,
+#      builds and re-checks ids until max_writes would-be writes; writes nothing). The tag has no
+#      default: Argo refuses a submit without it, before the semaphore.
+#        argo submit -n devseed deploy/reconcile-s2-new-versions-workflow.yaml \
+#          -p pipeline_image_version=sha-<merge-sha>
+#      argo CLI v4 refuses this file (strict decoding of `synchronization.semaphore`; the cluster
+#      runs v3.7.11). Never `--strict=false`, which drops the semaphore: `kubectl create -f` a
+#      copy with the parameters filled in.
+#   1b. EXERCISE THE STOPS on dry runs, before any real write: `-p time_budget_seconds=60
+#      -p max_writes=5000` must log `time_budget_reached`; a `-p max_writes=5000` run stopped with
+#      `argo stop` after its `Diff for` line must log `stop_requested`.
+#   2. REAL canary, ONE write, straight after a dry run (ids go newest acquisition first, so a scene
+#      EODC publishes in between would come first; it publishes nothing 22:30-09:30Z). Check the
+#      item in the Explorer, restore its pre-image (claude-docs/plans/reconcile-s2-new-versions.md,
+#      Rollback), check it, then let the next run re-apply it:
+#        ... -p pipeline_image_version=sha-<merge-sha> -p dry_run=false -p max_writes=1
+#   3. BATCHES, repeated until a run prints `remaining=0`:
+#        ... -p pipeline_image_version=sha-<merge-sha> -p dry_run=false -p max_writes=500
+#   Read the counts at the top of each run and the `Look:` lines after the summary, even of a
+#   run that succeeded: a skipped_unreadable, skipped_prerelease or skipped_cloud_cover above 0
+#   means EODC changed how it stamps or filters items, and a skipped_unbuildable above 0 that
+#   its item schema changed.
+#
+# Stopping a run: `argo stop` or `argo terminate` (or deleting its pod) sends SIGTERM, then
+# SIGKILL after the pod's 300 s grace period (podSpecPatch). On SIGTERM the tool finishes the id in
+# flight (one id takes at most ~3 min), starts no other and prints the summary (`stop_requested`).
+# But a stopped run archives NEITHER list: Argo saves the outputs before the tool has written them
+# (tested 18 Nov 2026). Rebuild the ids from Loki as in claude-docs/plans/reconcile-s2-new-versions.md
+# (Rollback, "A stopped run"); the pre-images are lost. So let the bounds end a run. A pod stuck
+# Pending (ImagePullBackOff, unschedulable) has written nothing: `argo stop` deletes it and releases
+# `eodc-register-limit`. It is also how a malformed tag (a truncated digest) ends.
+#
+# Order with the s2-new clean (deploy/clean-s2-new-keep-geozarr-workflow.yaml, data-pipeline#519):
+#   - Acquisitions 1-10 Nov 2026: run this reconcile BEFORE the clean, and clean them only once
+#     EODC's re-publishing is over. EODC is re-publishing those scenes at 0.13.1 under the same
+#     ids and store paths (since 17 Nov 2026): this run replaces the old items in place, and the
+#     clean then keeps them. Cleaning first deletes them and leaves a gap until a reconcile
+#     re-creates them: the hourly register will not, past its 14-day acquisition floor.
+#   - October acquisitions: EODC is re-processing the European ones at 0.13.1 (since 16 Nov
+#     2026); -new's unversioned October items were deleted on 17 Nov, so this run CREATEs each one
+#     EODC re-publishes, and skips the rest (skipped_no_key) until it does.
+# The clean re-reads each candidate just before its DELETE and keeps one now >= 0.13.0; an item it
+# deletes between this run's GET and PUT answers 404 (`gone`) and is created by the next run,
+# unless it is in sentinel-2-l2a: then it is skipped_in_archive, as the archive holds it.
+#
+# Artifacts (archived to the Argo artifact bucket, kept on exit 1 too):
+#   created-ids   one JSON line per created item, as the register writes it: the input of
+#                 scripts/rollback_created_items.py (branch feat/rollback-created-items).
+#   replaced-ids  per replaced item, a `before_put` line (item_id, run_id, old_version,
+#                 new_version, pre_image) and an `after_put` line (outcome). Lines name the item
+#                 `item_id`, not `id`, so the rollback tool refuses this file. Restoring a
+#                 pre-image (METADATA only: useless once EODC re-wrote the store at the same
+#                 path, as for 1-10 Nov) is in claude-docs/plans/reconcile-s2-new-versions.md.
+#
+# A REAL run is refused unless the tag names one image: `sha-*` or `<tag>@sha256:<digest>`.
+#
+# TAG GOTCHA: a push to a non-main branch BUILDS but does not PUSH (build.yml gates the push step
+# on main/tags/PR). Only the pull_request run publishes, and it tags with the PR MERGE commit, so
+# the pullable tags are `pr-<N>` and `sha-<merge-sha>`, never the branch-head sha you just pushed.
+# The Harbor cleanup deletes `sha-*` tags after 7 days; past that, dry-run and run again on
+# `<release tag>@sha256:<digest>`.
+#
+# Smoke check: verify the tool is really in the image before pointing it at data (step 0):
+#   kubectl -n devseed run reconcile-tool-smoke --restart=Never \
+#     --image=<registry>/data-pipeline:<tag> \
+#     --overrides='{"spec":{"serviceAccountName":"operate-workflow-sa"}}' \
+#     --command -- python3 /app/scripts/reconcile_versions.py --help
+#   kubectl -n devseed logs reconcile-tool-smoke     # the --help text, or the pod never started
+#   kubectl -n devseed delete pod reconcile-tool-smoke
+#
+# A one-off on purpose: a CronWorkflow that keeps the collection reconciled is out of scope here.
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: reconcile-s2-new-versions-
+  namespace: devseed
+  labels:
+    app: data-pipeline
+    component: s2-new-reconcile
+spec:
+  serviceAccountName: operate-workflow-sa
+  entrypoint: reconcile
+  # The register's one-slot semaphore: no register run creates an id while this one may (which
+  # created-ids `uncertain` lines rely on); hourly register runs queue and keep their windows.
+  synchronization:
+    semaphore:
+      configMapKeyRef:
+        name: eopf-workflow-concurrency
+        key: eodc-register-limit
+  podGC:
+    # Keep the pod past the controller's success bookkeeping so the audit output is still
+    # retrievable from Loki.
+    strategy: OnPodCompletion
+    deleteDelayDuration: 1800s
+  ttlStrategy:
+    secondsAfterSuccess: 604800
+    secondsAfterFailure: 604800
+  arguments:
+    parameters:
+    - name: pipeline_image_version          # REQUIRED, no default: Argo refuses a submit without it
+    - name: max_writes                      # POSTs + PUTs per run; re-run to continue
+      value: "10"
+    - name: dry_run                         # SAFE DEFAULT: diff + checks, write nothing
+      value: "true"
+    - name: time_budget_seconds             # no new id after this; re-run to continue
+      value: "2700"
+  templates:
+  - name: reconcile
+    # Time for the id in flight to finish after a SIGTERM (see the header); the default is 30 s.
+    podSpecPatch: '{"terminationGracePeriodSeconds": 300}'
+    container:
+      image: w9mllyot.c1.de1.container-registry.ovh.net/eopf-sentinel-zarr-explorer/data-pipeline:{{workflow.parameters.pipeline_image_version}}
+      imagePullPolicy: Always
+      resources:
+        requests:
+          # The diff holds id + version for every source and target item (~35k each today),
+          # and each replace holds one pre-image.
+          memory: 1Gi
+          cpu: 250m
+        limits:
+          memory: 2Gi
+      env:
+      - name: PYTHONUNBUFFERED
+        value: "1"
+      # Parameters reach the script as env, never interpolated into it: no injection.
+      - name: PIPELINE_IMAGE_VERSION
+        value: "{{workflow.parameters.pipeline_image_version}}"
+      - name: MAX_WRITES
+        value: "{{workflow.parameters.max_writes}}"
+      - name: DRY_RUN
+        value: "{{workflow.parameters.dry_run}}"
+      - name: TIME_BUDGET_SECONDS
+        value: "{{workflow.parameters.time_budget_seconds}}"
+      - name: RUN_ID
+        value: "{{workflow.name}}"
+      # STAC write enforcement is live: without these every POST and PUT returns 401.
+      - name: OIDC_TOKEN_URL
+        valueFrom:
+          secretKeyRef: { name: stac-auth-oidc, key: OIDC_TOKEN_URL }
+      - name: OIDC_CLIENT_ID
+        valueFrom:
+          secretKeyRef: { name: stac-auth-oidc, key: OIDC_CLIENT_ID }
+      - name: OIDC_CLIENT_SECRET
+        valueFrom:
+          secretKeyRef: { name: stac-auth-oidc, key: OIDC_CLIENT_SECRET }
+      command: [bash, -c]
+      args:
+      - |
+        set -euo pipefail
+        if [ -z "$PIPELINE_IMAGE_VERSION" ]; then
+          echo "pipeline_image_version is required" >&2; exit 2
+        fi
+        # Only the exact string "false" writes; any other value is a dry run.
+        MODE=(--dry-run)
+        if [ "$DRY_RUN" = "false" ]; then
+          # A real run must use the image the dry run validated: a tag that names one image.
+          case "$PIPELINE_IMAGE_VERSION" in
+            sha-*|*@sha256:*) ;;
+            *)
+              echo "REFUSING: image tag '$PIPELINE_IMAGE_VERSION' can move and dry_run=false." >&2
+              echo "Use the dry run's sha-<merge-sha> tag or <tag>@sha256:<digest> (see the manifest header)." >&2
+              exit 1
+              ;;
+          esac
+          MODE=(--created-ids /tmp/reconcile-out/created-ids.jsonl
+                --replaced-ids /tmp/reconcile-out/replaced-ids.jsonl
+                --run-id "$RUN_ID")
+        fi
+        exec python3 /app/scripts/reconcile_versions.py \
+          --collection sentinel-2-l2a-new \
+          --stac-api-url https://api.explorer.eopf.copernicus.eu/stac \
+          --raster-api-url https://api.explorer.eopf.copernicus.eu/raster \
+          --max-writes "$MAX_WRITES" \
+          --time-budget "$TIME_BUDGET_SECONDS" \
+          "${MODE[@]}"
+    outputs:
+      artifacts:
+      # Optional: a dry run creates neither; a real run creates both before its first read
+      # (empty if it wrote nothing); a stopped run usually archives neither (see the header).
+      - name: created-ids
+        path: /tmp/reconcile-out/created-ids.jsonl
+        optional: true
+        archive:
+          none: {}
+      - name: replaced-ids
+        path: /tmp/reconcile-out/replaced-ids.jsonl
+        optional: true
+        archive:
+          none: {}

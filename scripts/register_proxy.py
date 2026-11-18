@@ -95,7 +95,9 @@ TRANSITION_COLLECTION = "sentinel-2-l2a-new"
 # near miss (``sentinel-2-l2a-staging``, ``…-samples-zarr3x``) would pass a substring check.
 # ``sentinel-2-l2a`` itself, our converted archive, is absent: no run may write it (plan
 # rev 3, R1). Into ``TRANSITION_COLLECTION`` only the pipeline may write, because it is the
-# one that never PUTs (``upsert_item`` replaces an existing id). ``-rollback`` is the
+# one that never PUTs (``upsert_item`` replaces an existing id). The one PUT into it comes from
+# outside this script: ``reconcile_versions.py``, an operator run with its own per-target
+# policy, replaces an item when EODC publishes a newer EOPF_GEOZARR. ``-rollback`` is the
 # scratch collection the pipeline's rollback is exercised in (plan rev 2, T10).
 TARGET_RUNS = {
     TRANSITION_COLLECTION: {"pipeline"},
@@ -531,27 +533,53 @@ def is_old_generation(source_item: dict) -> bool:
     )
 
 
-def create_item(client: Client, collection_id: str, item: Item) -> str:
+def create_item(
+    client: Client,
+    collection_id: str,
+    item: Item,
+    created_ids: Path,
+    stac_api_url: str | None = None,
+) -> str:
     """POST one item: ``created``, or ``exists`` on a 409. Never a PUT, unlike ``upsert_item``.
 
     A PUT on 409 would replace whatever the target already holds under that id: an item an
     earlier run registered, or the test collection's comparison items. An existing item is
     left exactly as it is. ``transform_hrefs=False`` for the reason ``upsert_item``
-    gives.
+    gives. The POST goes under ``stac_api_url``, or the landing page's self href when None.
+
+    A created item is recorded in ``created_ids`` (``record_created``): that list, not the
+    item's own ``created`` (EODC's timestamp, copied from the source), is what tells a
+    rollback which items this run created.
     """
     io = client._stac_io
     assert io is not None  # noqa: S101  # nosec B101 -- pystac-client always sets this after open()
-    resp = io.session.post(
-        f"{str(client.self_href).rstrip('/')}/collections/{collection_id}/items",
-        json=item.to_dict(transform_hrefs=False),
-        headers={"Content-Type": "application/json"},
-        timeout=30,
-    )
-    if resp.status_code == 409:
-        logger.info(f"   ⏭️  {item.id} exists (HTTP 409), left unchanged")
-        return "exists"
-    resp.raise_for_status()
+    try:
+        resp = io.session.post(
+            f"{(stac_api_url or str(client.self_href)).rstrip('/')}/collections/{collection_id}/items",
+            json=item.to_dict(transform_hrefs=False),
+            headers={"Content-Type": "application/json"},
+            timeout=30,
+            allow_redirects=False,  # followed, a 301-303 comes back as a GET that "succeeds"
+        )
+        if resp.status_code == 409:
+            logger.info(f"   ⏭️  {item.id} exists (HTTP 409), left unchanged")
+            return "exists"
+        resp.raise_for_status()
+        if not 200 <= resp.status_code < 300:  # raise_for_status lets a 3xx through
+            raise requests.HTTPError(
+                f"the POST answered {resp.status_code}: nothing created", response=resp
+            )
+    except requests.RequestException as exc:
+        # A timeout, a reset or a 5xx can arrive after the server committed the item, and the
+        # next run's 409 would then hide it from every list. Record it as uncertain. A line
+        # can be false (an error before anything was sent), and its id may name an item this
+        # run did not create, so a rollback must re-check each item's CONTENT before deleting
+        # it (EODC data hrefs, no alternate.s3), never just that it exists.
+        if exc.response is None or exc.response.status_code >= 500:
+            record_created(created_ids, collection_id, item.id, uncertain=True)
+        raise
     logger.info(f"✅ Created {item.id} (HTTP {resp.status_code})")
+    record_created(created_ids, collection_id, item.id)
     return "created"
 
 
@@ -562,17 +590,17 @@ def read_item_ids(path: Path) -> list[str]:
     ]
 
 
-def source_item_url(source_stac_api: str, source_collection: str, item_id: str) -> str:
-    """Where one source item is fetched, and so where discover must have found it.
+def item_url(stac_api: str, collection: str, item_id: str) -> str:
+    """One item's URL on ``stac_api``, both path components percent-encoded.
 
-    Both path components are percent-encoded: ``--item-ids-file`` is operator-edited and
-    httpx normalises RFC 3986 dot-segments, so an unquoted id of ``../../<other>/items/X``
-    would silently retarget the GET at another collection — making ``--source-collection``
-    no bound at all. ``quote(safe="")`` also stops ``#`` from truncating the URL.
+    ``--item-ids-file`` is operator-edited and httpx normalises RFC 3986 dot-segments, so an
+    unquoted id of ``../../<other>/items/X`` would silently retarget the request at another
+    collection, making ``--source-collection`` no bound at all. ``quote(safe="")`` also stops
+    ``#`` from truncating the URL.
     """
     return (
-        f"{source_stac_api.rstrip('/')}"
-        f"/collections/{urllib.parse.quote(source_collection, safe='')}"
+        f"{stac_api.rstrip('/')}"
+        f"/collections/{urllib.parse.quote(collection, safe='')}"
         f"/items/{urllib.parse.quote(item_id, safe='')}"
     )
 
@@ -584,7 +612,7 @@ def read_items_json(
 
     Each row names the collection discover deduplicated against, and the ``source_url`` it
     found the item at. A row for another collection means the list was made for a different
-    target, and its dedup proves nothing here. A row found anywhere but ``source_item_url``
+    target, and its dedup proves nothing here. A row found anywhere but ``item_url``
     was discovered on another source than the one each id is fetched from. Exact equality
     with EODC's self links: if they ever change form, every run is refused, loudly.
     """
@@ -599,13 +627,12 @@ def read_items_json(
     elsewhere = [
         (row["item_id"], row.get("source_url"))
         for row in rows
-        if row.get("source_url")
-        != source_item_url(source_stac_api, source_collection, row["item_id"])
+        if row.get("source_url") != item_url(source_stac_api, source_collection, row["item_id"])
     ]
     if elsewhere:
         raise ValueError(
             f"{path}: {len(elsewhere)} row(s) not found at "
-            f"{source_item_url(source_stac_api, source_collection, '<id>')}, e.g. {elsewhere[0]}"
+            f"{item_url(source_stac_api, source_collection, '<id>')}, e.g. {elsewhere[0]}"
         )
     return [row["item_id"] for row in rows]
 
@@ -653,7 +680,7 @@ def _is_transient(exc: BaseException) -> bool:
 def fetch_source_item(source_stac_api: str, source_collection: str, item_id: str) -> dict:
     """GET one source item. A direct GET avoids depending on the source's conformance.
 
-    The URL is ``source_item_url``'s, percent-encoded. Redirects are NOT followed: the HTTPS
+    The URL is ``item_url``'s, percent-encoded. Redirects are NOT followed: the HTTPS
     check in ``main`` validates the URL the operator typed, and a 3xx could downgrade it to
     http or move it to another host, after which whatever came back would be registered as
     if it had been asked for.
@@ -661,7 +688,7 @@ def fetch_source_item(source_stac_api: str, source_collection: str, item_id: str
     Up to three attempts on a transient error (``_is_transient``): EODC does return 502s
     (see ``upsert_item``), and one must not turn an hourly run red.
     """
-    url = source_item_url(source_stac_api, source_collection, item_id)
+    url = item_url(source_stac_api, source_collection, item_id)
     with httpx.Client(timeout=30.0, follow_redirects=False) as http:
         resp = http.get(url)
         resp.raise_for_status()
@@ -674,7 +701,7 @@ def fetch_source_item(source_stac_api: str, source_collection: str, item_id: str
     return source
 
 
-def _seconds(value: str) -> float:
+def time_budget_arg(value: str) -> float:
     """argparse type for --time-budget: a stop that can actually fire, and fire first.
 
     `nan` would compare False forever, and a budget within 30 min of the register step's
@@ -683,7 +710,8 @@ def _seconds(value: str) -> float:
     The range check refuses both, `nan` and `inf` included (every comparison with `nan` is
     False). Unlike cleanup_expired_items._budget_seconds, an empty value is refused, not
     read as "no budget": the template always passes one, and a run with no stop is exactly
-    what this flag exists to prevent.
+    what this flag exists to prevent. reconcile_versions.py uses it too: with no pod deadline
+    there, the ceiling bounds how long a run can hold the register's semaphore.
     """
     seconds = float(value)
     if not 0 < seconds <= MAX_TIME_BUDGET_SECONDS:
@@ -716,7 +744,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--time-budget",
-        type=_seconds,
+        type=time_budget_arg,
         metavar="SECONDS",
         help=(
             "Start no new id after this many seconds; the rest count as failed. It stops "
@@ -764,22 +792,7 @@ def register_one(
     if not args.items_json:
         upsert_item(client, args.collection, item)
         return "registered"
-    # The created-ids list, not the item's own `created` (EODC's timestamp, copied from the
-    # source), is what tells a rollback which items this run created.
-    try:
-        outcome = create_item(client, args.collection, item)
-    except requests.RequestException as exc:
-        # A timeout, a reset or a 5xx can arrive after the server committed the item, and the
-        # next run's 409 would then hide it from every list. Record it as uncertain. A line
-        # can be false (an error before anything was sent), and its id may name an item this
-        # run did not create, so a rollback must re-check each item's CONTENT before deleting
-        # it (EODC data hrefs, no alternate.s3), never just that it exists.
-        if exc.response is None or exc.response.status_code >= 500:
-            record_created(args.created_ids, args.collection, item.id, uncertain=True)
-        raise
-    if outcome == "created":
-        record_created(args.created_ids, args.collection, item.id)
-    return outcome
+    return create_item(client, args.collection, item, args.created_ids)
 
 
 def log_summary(collection: str, counts: Counter[str]) -> None:
