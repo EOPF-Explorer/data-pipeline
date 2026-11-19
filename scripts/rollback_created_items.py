@@ -193,6 +193,8 @@ def main(argv: list[str] | None = None) -> int:
     session = requests.Session()
     session.auth = stac_auth.bearer_auth
     eodc = requests.Session() if args.gone_ids else None  # never our token
+    if eodc is not None:
+        eodc.trust_env = False  # nor ~/.netrc credentials
     counts = roll_back(session, args.stac_api_url, args.collection, ids, args.apply, eodc)
     logger.info("Summary for %s: %s", args.collection, dict(sorted(counts.items())))
     return 1 if counts["refused"] or counts["failed"] else 0

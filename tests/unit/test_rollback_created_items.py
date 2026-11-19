@@ -261,6 +261,7 @@ class TestMain:
             assert main([*argv, "--stac-api-url", API, "--apply"]) == 1
         assert session.deleted == ["a"]
         assert not hasattr(eodc, "auth")
+        assert eodc.trust_env is False
 
     def test_the_target_host_has_no_default(self, tmp_path: Path) -> None:
         path = _write(tmp_path, _line("a"))
