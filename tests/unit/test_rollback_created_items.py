@@ -79,9 +79,11 @@ class _Session:
         self.delete_status = delete_status
         self.delete_keeps = delete_keeps
         self.deleted: list[str] = []
+        self.urls: list[str] = []
 
     def get(self, url: str, timeout: float, allow_redirects: bool = True) -> _Resp:
         assert allow_redirects is False
+        self.urls.append(url)
         item_id = url.rsplit("/", 1)[1]
         return _Resp(200, self.items[item_id]) if item_id in self.items else _Resp(404)
 
@@ -197,6 +199,26 @@ class TestRollBack:
         assert roll_back(session, API, C, ["a", "b"], apply=True) == {"failed": 1, "deleted": 1}
         assert session.deleted == ["b"]
 
+    def test_with_eodc_an_id_eodc_still_has_is_refused(self) -> None:
+        session = _Session({"a": _eodc_item("a"), "b": _eodc_item("b")})
+        eodc = _Session({"b": {"id": "b"}})
+        counts = roll_back(session, API, C, ["a", "b"], apply=True, eodc=eodc)
+        assert session.deleted == ["a"]
+        assert counts == {"deleted": 1, "refused": 1}
+        assert eodc.urls == [EODC_SOURCE_ITEMS + "a", EODC_SOURCE_ITEMS + "b"]
+
+    def test_with_eodc_an_error_there_is_a_refusal_not_a_404(self) -> None:
+        session = _Session({"a": _eodc_item("a")})
+        eodc = _Session({})
+
+        def unavailable(url: str, timeout: float, allow_redirects: bool = True) -> _Resp:
+            assert allow_redirects is False
+            return _Resp(503)
+
+        eodc.get = unavailable  # type: ignore[method-assign]
+        assert roll_back(session, API, C, ["a"], apply=True, eodc=eodc) == {"refused": 1}
+        assert session.deleted == []
+
 
 class TestMain:
     def _run(self, tmp_path: Path, session: _Session, *extra: str, typed: str = C) -> int:
@@ -231,6 +253,50 @@ class TestMain:
         session = _Session({"a": _eodc_item("a"), "b": _converted_item("b")})
         assert self._run(tmp_path, session, "--max-items", "2", "--apply") == 1
         assert session.deleted == ["a"]
+
+    def test_gone_ids_are_deduplicated_and_checked_at_eodc_without_our_token(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "gone.txt"
+        path.write_text("a\n\nb\na\n")
+        session = _Session({"a": _eodc_item("a"), "b": _eodc_item("b")})
+        eodc = _Session({"sentinel-2-l2a-zarr3": {}, "b": {"id": "b"}})
+        argv = ["--gone-ids", str(path), "--collection", C, "--max-items", "2"]
+        with (
+            patch("rollback_created_items.requests.Session", side_effect=[session, eodc]),
+            patch("builtins.input", return_value=C),
+        ):
+            assert main([*argv, "--stac-api-url", API, "--apply"]) == 1
+        assert session.deleted == ["a"]
+        assert not hasattr(eodc, "auth")
+        assert eodc.trust_env is False
+
+    def test_gone_ids_refuse_the_run_when_eodc_has_no_such_collection(self, tmp_path: Path) -> None:
+        """Every id answers 404 when the collection is gone: no id is touched."""
+        path = tmp_path / "gone.txt"
+        path.write_text("a\n")
+        session = _Session({"a": _eodc_item("a")})
+        eodc = _Session({})
+        argv = ["--gone-ids", str(path), "--collection", C, "--max-items", "1"]
+        with (
+            patch("rollback_created_items.requests.Session", side_effect=[session, eodc]),
+            patch("builtins.input", return_value=C),
+        ):
+            assert main([*argv, "--stac-api-url", API, "--apply"]) == 1
+        assert eodc.urls == [EODC_SOURCE_ITEMS.removesuffix("/items/")]
+        assert session.urls == []
+        assert session.deleted == []
+
+    @pytest.mark.parametrize(
+        "text", ["", "\n\n", '{"id": "a", "collection": "c"}\n', "https://x/items/a\n", "a,b\n"]
+    )
+    def test_gone_ids_refuse_a_list_that_is_not_plain_ids(self, tmp_path: Path, text: str) -> None:
+        path = tmp_path / "gone.txt"
+        path.write_text(text)
+        argv = ["--gone-ids", str(path), "--collection", C, "--max-items", "9"]
+        with patch("rollback_created_items.requests.Session") as session:
+            assert main([*argv, "--stac-api-url", API]) == 1
+        session.assert_not_called()
 
     def test_the_target_host_has_no_default(self, tmp_path: Path) -> None:
         path = _write(tmp_path, _line("a"))
