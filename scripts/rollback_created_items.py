@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Roll back items the EODC registration created: DELETE each one, after re-checking it.
 
-The input is a ``--created-ids`` JSONL written by ``register_proxy.py``'s pipeline mode, and
-nothing else. Its ``"uncertain": true`` lines (a create that errored and may have committed)
-are included: one that never committed answers 404 and is counted as ``absent``. Only the last
-line may be torn (the append that failed; the run's "cannot record" error names that id).
+The input is a ``--created-ids`` JSONL written by ``register_proxy.py``'s pipeline mode, or a
+``--gone-ids`` list (below), and nothing else. A created-ids file's ``"uncertain": true`` lines
+(a create that errored and may have committed) are included: one that never committed answers
+404 and is counted as ``absent``. Only its last line may be torn (the append that failed; the
+run's "cannot record" error names that id).
 
 A dry run by default. ``--apply`` deletes, after the operator types the collection id. Before
 each DELETE the item is fetched again, and it is deleted only if it is exactly what the
@@ -21,9 +22,11 @@ Two things the check cannot see, so the run relies on them:
 An item created with no line (a pod killed between the create and the append) is not listed,
 so this tool cannot reach it.
 
-``--gone-ids`` instead takes a plain list of ids (one per line) of items EODC has removed: the
-same checks, plus EODC must answer 404 for the id, asked without our token; anything else is
-refused. For items whose EODC store is gone with them, so they no longer render.
+``--gone-ids ids.txt`` (in place of ``--created-ids``) takes plain ids, one per line, of items
+EODC no longer catalogues: the same checks, plus EODC's collection must answer 200 and the id
+404, asked without our credentials; anything else is refused. It checks EODC's STAC records,
+not the stores: check those before. The register and the reconcile write only ids EODC
+serves, so they cannot race it; stop any other writer to the collection.
 
 Exit 1 when anything was refused or failed, or on a refused input; 0 otherwise.
 
@@ -35,6 +38,7 @@ Exit 1 when anything was refused or failed, or on a refused input; 0 otherwise.
 import argparse
 import json
 import logging
+import re
 import sys
 from collections import Counter
 from pathlib import Path
@@ -46,7 +50,8 @@ import stac_auth
 logger = logging.getLogger(__name__)
 
 EODC_DATA_HOST = "data.eodc.eu"
-EODC_SOURCE_ITEMS = "https://stac.core.eopf.eodc.eu/collections/sentinel-2-l2a-zarr3/items/"
+EODC_SOURCE_COLLECTION = "https://stac.core.eopf.eodc.eu/collections/sentinel-2-l2a-zarr3"
+EODC_SOURCE_ITEMS = EODC_SOURCE_COLLECTION + "/items/"
 
 
 def read_created_ids(path: Path, collection: str) -> list[str]:
@@ -176,6 +181,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.gone_ids:
         lines = args.gone_ids.read_text().splitlines()
         ids = list(dict.fromkeys(line.strip() for line in lines if line.strip()))
+        bad = [i for i in ids if not re.fullmatch(r"[\w.-]+", i)]
+        if bad or not ids:
+            logger.error("Refusing %s: no ids, or not plain ids: %r", args.gone_ids, bad[:3])
+            return 1
     else:
         ids = read_created_ids(args.created_ids, args.collection)
     if len(ids) > args.max_items:
@@ -195,6 +204,13 @@ def main(argv: list[str] | None = None) -> int:
     eodc = requests.Session() if args.gone_ids else None  # never our token
     if eodc is not None:
         eodc.trust_env = False  # nor ~/.netrc credentials
+        # An id's 404 proves nothing if the whole collection is gone or renamed.
+        found = eodc.get(EODC_SOURCE_COLLECTION, timeout=30, allow_redirects=False)
+        if found.status_code != 200:
+            logger.error(
+                "Refusing: EODC answered %d for %s", found.status_code, EODC_SOURCE_COLLECTION
+            )
+            return 1
     counts = roll_back(session, args.stac_api_url, args.collection, ids, args.apply, eodc)
     logger.info("Summary for %s: %s", args.collection, dict(sorted(counts.items())))
     return 1 if counts["refused"] or counts["failed"] else 0
