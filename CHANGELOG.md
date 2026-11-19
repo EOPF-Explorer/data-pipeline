@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.25.0 (2026-11-19)
+
+## What's Changed
+* feat(scripts): let the rollback delete items EODC has removed by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/527
+* docs: correct stale comments on how items reach sentinel-2-l2a-new by @lhoupert in https://github.com/EOPF-Explorer/data-pipeline/pull/529
+
+
+**Full Changelog**: https://github.com/EOPF-Explorer/data-pipeline/compare/v1.24.0...v1.25.0
+
 ## 1.24.0 (2026-11-18)
 
 ## What's Changed
