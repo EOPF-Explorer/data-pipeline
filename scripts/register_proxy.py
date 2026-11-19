@@ -787,7 +787,7 @@ def register_one(
     """Fetch, build and write one id. Returns its outcome, a key of ``main``'s counts."""
     source = fetch_source_item(args.source_stac_api, args.source_collection, item_id)
     if args.items_json and is_old_generation(source):
-        # Content-based, so a retry cannot succeed: counted, not failed (T18 alerts on it).
+        # Content-based, so a retry cannot succeed: counted, not failed (no alert watches it yet).
         logger.warning("   ⚠️  %s: old-generation source (raster:scale on SR_*), refused", item_id)
         return "refused_generation"
     item = build_proxy_item(
