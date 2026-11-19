@@ -40,14 +40,15 @@
 #
 # The register cron keeps writing to this collection during the drain: eopf-eodc-register
 # (hourly) creates new EODC items, today 0.13.1, which the filter keeps. An item created after a
-# run's walk is not seen by that run at all. A deleted item comes back only if EODC re-stamps its
-# `updated` inside a register window (1 h; 72 h for the catch-up cron, suspended) AND it was
-# acquired in the last 14 days (max_acquisition_age_days), and only if EODC then serves it as a
-# final EOPF_GEOZARR >= 0.13.0: the register refuses anything else into -new (18 Nov 2026). The no-key items (acquired 29 Sep-1 Nov) are past the 14 days: no cron brings them back.
-# A walk is a snapshot and a batch deletes for hours, while a register mode that replaces an item
-# in place when EODC re-processes it (--update-if-newer) is in review. The re-check above is what
-# stops this run deleting an item upgraded after its walk; finish the clean before that mode goes
-# live all the same.
+# run's walk is not seen by that run at all. A deleted item comes back once EODC serves it as a
+# final EOPF_GEOZARR >= 0.13.0 (nothing else may enter -new, 18 Nov 2026): through the hourly
+# register if EODC re-stamps its `updated` inside a window (1 h; 72 h for the daily catch-up cron)
+# and it was acquired in the last 14 days (max_acquisition_age_days), and through the daily
+# reconcile (eopf-s2-new-reconcile, 03:00Z) for anything acquired from 29 Sep 2026 with
+# eo:cloud_cover < 90.
+# A walk is a snapshot and a batch deletes for hours, while that reconcile also replaces an item
+# in place when EODC re-processes it. The re-check above is what stops this run deleting an item
+# upgraded after its walk.
 #
 # pipeline_image_version must contain --keep-software-min and its re-check. A REAL run is refused
 # unless the tag names one image: `sha-*` or `<tag>@sha256:<digest>` (pr-<N>, v*, latest and main
