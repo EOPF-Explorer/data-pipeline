@@ -197,6 +197,20 @@ class TestRollBack:
         assert roll_back(session, API, C, ["a", "b"], apply=True) == {"failed": 1, "deleted": 1}
         assert session.deleted == ["b"]
 
+    def test_with_eodc_an_id_eodc_still_has_is_refused(self) -> None:
+        session = _Session({"a": _eodc_item("a"), "b": _eodc_item("b")})
+        eodc = _Session({"b": {"id": "b"}})
+        counts = roll_back(session, API, C, ["a", "b"], apply=True, eodc=eodc)
+        assert session.deleted == ["a"]
+        assert counts == {"deleted": 1, "refused": 1}
+
+    def test_with_eodc_an_error_there_is_a_refusal_not_a_404(self) -> None:
+        session = _Session({"a": _eodc_item("a")})
+        eodc = _Session({})
+        eodc.get = lambda url, timeout, allow_redirects=True: _Resp(503)  # type: ignore[method-assign]
+        assert roll_back(session, API, C, ["a"], apply=True, eodc=eodc) == {"refused": 1}
+        assert session.deleted == []
+
 
 class TestMain:
     def _run(self, tmp_path: Path, session: _Session, *extra: str, typed: str = C) -> int:
@@ -231,6 +245,22 @@ class TestMain:
         session = _Session({"a": _eodc_item("a"), "b": _converted_item("b")})
         assert self._run(tmp_path, session, "--max-items", "2", "--apply") == 1
         assert session.deleted == ["a"]
+
+    def test_gone_ids_are_deduplicated_and_checked_at_eodc_without_our_token(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "gone.txt"
+        path.write_text("a\n\nb\na\n")
+        session = _Session({"a": _eodc_item("a"), "b": _eodc_item("b")})
+        eodc = _Session({"b": {"id": "b"}})
+        argv = ["--gone-ids", str(path), "--collection", C, "--max-items", "2"]
+        with (
+            patch("rollback_created_items.requests.Session", side_effect=[session, eodc]),
+            patch("builtins.input", return_value=C),
+        ):
+            assert main([*argv, "--stac-api-url", API, "--apply"]) == 1
+        assert session.deleted == ["a"]
+        assert not hasattr(eodc, "auth")
 
     def test_the_target_host_has_no_default(self, tmp_path: Path) -> None:
         path = _write(tmp_path, _line("a"))

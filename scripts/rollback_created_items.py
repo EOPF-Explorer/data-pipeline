@@ -21,6 +21,10 @@ Two things the check cannot see, so the run relies on them:
 An item created with no line (a pod killed between the create and the append) is not listed,
 so this tool cannot reach it.
 
+``--gone-ids`` instead takes a plain list of ids (one per line) of items EODC has removed: the
+same checks, plus EODC must answer 404 for the id, asked without our token; anything else is
+refused. For items whose EODC store is gone with them, so they no longer render.
+
 Exit 1 when anything was refused or failed, or on a refused input; 0 otherwise.
 
     uv run scripts/rollback_created_items.py --created-ids created-ids.jsonl \
@@ -91,10 +95,17 @@ def not_ours(item: dict, item_id: str) -> str | None:
     return None
 
 
-def _roll_back_one(session: requests.Session, url: str, item_id: str, apply: bool) -> str:
+def _roll_back_one(
+    session: requests.Session,
+    url: str,
+    item_id: str,
+    apply: bool,
+    eodc: requests.Session | None = None,
+) -> str:
     """One id's outcome: absent, refused, would_delete, deleted or failed.
 
     No redirects: `requests` turns a DELETE into a GET on a 302/303, which answers 200.
+    With `eodc`, the id must also answer 404 at EODC.
     """
     got = session.get(url, timeout=30, allow_redirects=False)
     if got.status_code == 404:
@@ -106,6 +117,13 @@ def _roll_back_one(session: requests.Session, url: str, item_id: str, apply: boo
     if why:
         logger.error("REFUSED %s: %s", item_id, why)
         return "refused"
+    if eodc is not None:
+        at_eodc = eodc.get(
+            EODC_SOURCE_ITEMS + quote(item_id, safe=""), timeout=30, allow_redirects=False
+        )
+        if at_eodc.status_code != 404:
+            logger.error("REFUSED %s: EODC answered %d, not 404", item_id, at_eodc.status_code)
+            return "refused"
     if not apply:
         return "would_delete"
     deleted = session.delete(url, timeout=30, allow_redirects=False)
@@ -122,13 +140,18 @@ def _roll_back_one(session: requests.Session, url: str, item_id: str, apply: boo
 
 
 def roll_back(
-    session: requests.Session, stac_api_url: str, collection: str, ids: list[str], apply: bool
+    session: requests.Session,
+    stac_api_url: str,
+    collection: str,
+    ids: list[str],
+    apply: bool,
+    eodc: requests.Session | None = None,
 ) -> Counter[str]:
     counts: Counter[str] = Counter()
     base = f"{stac_api_url.rstrip('/')}/collections/{quote(collection, safe='')}/items/"
     for item_id in ids:
         try:
-            outcome = _roll_back_one(session, base + quote(item_id, safe=""), item_id, apply)
+            outcome = _roll_back_one(session, base + quote(item_id, safe=""), item_id, apply, eodc)
         except (requests.RequestException, RuntimeError) as exc:
             # RuntimeError: stac_auth.bearer_auth's token fetch failing inside the request.
             logger.error("FAILED %s: %s", item_id, exc)
@@ -140,15 +163,21 @@ def roll_back(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("--created-ids", type=Path, required=True)
-    parser.add_argument("--collection", required=True, help="must match every line")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--created-ids", type=Path)
+    source.add_argument("--gone-ids", type=Path, help="one id per line, each 404 at EODC")
+    parser.add_argument("--collection", required=True, help="must match every created-ids line")
     parser.add_argument("--max-items", type=int, required=True, help="refuse a longer list whole")
     parser.add_argument("--stac-api-url", required=True, help="named every time: no default host")
     parser.add_argument("--apply", action="store_true", help="delete (default: dry run)")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-    ids = read_created_ids(args.created_ids, args.collection)
+    if args.gone_ids:
+        lines = args.gone_ids.read_text().splitlines()
+        ids = list(dict.fromkeys(line.strip() for line in lines if line.strip()))
+    else:
+        ids = read_created_ids(args.created_ids, args.collection)
     if len(ids) > args.max_items:
         logger.error("Refusing: %d ids exceed --max-items %d", len(ids), args.max_items)
         return 1
@@ -163,7 +192,8 @@ def main(argv: list[str] | None = None) -> int:
 
     session = requests.Session()
     session.auth = stac_auth.bearer_auth
-    counts = roll_back(session, args.stac_api_url, args.collection, ids, args.apply)
+    eodc = requests.Session() if args.gone_ids else None  # never our token
+    counts = roll_back(session, args.stac_api_url, args.collection, ids, args.apply, eodc)
     logger.info("Summary for %s: %s", args.collection, dict(sorted(counts.items())))
     return 1 if counts["refused"] or counts["failed"] else 0
 
